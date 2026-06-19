@@ -154,6 +154,38 @@ function buildMasterArgs(conn, connectTimeoutMs) {
   ]
 }
 
+// Interactive `ssh -tt` for the INTERIM remote terminal (component 5, SSH mode
+// only). Reuses the existing ControlMaster socket so NO new auth handshake
+// happens — the master is already open, so this attaches instantly and never
+// prompts (BatchMode stays safe here for that reason). `-tt` forces a PTY even
+// though our stdio is a node-pty, so the remote sees a real terminal.
+//
+// When a remoteCwd is given we cd into it (best-effort) then exec the user's
+// login shell so the prompt/rc files load; an unreadable cwd falls back to
+// $HOME rather than failing the session.
+//
+// NOTE (tracked): this is the interim path until the dashboard /api/terminal
+// WebSocket lands (specs/desktop-remote-terminal.md). Once that ships, the
+// terminal rides the tunnel like every other socket and cwd-follows-session
+// behavior becomes uniform; delete this path then.
+function buildInteractiveSshArgs(conn, remoteCwd, connectTimeoutMs) {
+  const args = [
+    '-tt',
+    ...baseSshOptions(conn.controlPath, connectTimeoutMs),
+    ...hostArgs(conn),
+    target(conn.user, conn.host)
+  ]
+  const cwd = String(remoteCwd || '').trim()
+  if (cwd) {
+    // cd then exec a login shell; quote the path; tolerate a missing dir.
+    const q = `'${cwd.replace(/'/g, `'\\''`)}'`
+    args.push(`cd ${q} 2>/dev/null; exec "$SHELL" -l`)
+  } else {
+    args.push('exec "$SHELL" -l')
+  }
+  return args
+}
+
 // Local forward spec for `-O forward -L <local>:<remoteHost>:<remotePort>`.
 // Bind the local end to 127.0.0.1 ONLY — never 0.0.0.0 — so the tunnel does
 // not re-expose the remote dashboard to the client's LAN.
@@ -438,6 +470,7 @@ module.exports = {
   baseSshOptions,
   buildControlArgs,
   buildExecArgs,
+  buildInteractiveSshArgs,
   buildMasterArgs,
   classifySshError,
   controlSocketPath,

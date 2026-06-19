@@ -19,6 +19,7 @@ const {
   baseSshOptions,
   buildControlArgs,
   buildExecArgs,
+  buildInteractiveSshArgs,
   buildMasterArgs,
   classifySshError,
   controlSocketPath,
@@ -128,6 +129,30 @@ test('forwardSpec binds the local end to 127.0.0.1 only', () => {
   assert.equal(forwardSpec(5000, 6000), '127.0.0.1:5000:127.0.0.1:6000')
   assert.ok(forwardSpec(5000, 6000).startsWith('127.0.0.1:'))
   assert.ok(!forwardSpec(5000, 6000).startsWith('0.0.0.0'))
+})
+
+test('buildInteractiveSshArgs requests a PTY, reuses the control master, execs a login shell', () => {
+  const conn = { user: 'me', host: 'box', port: 22, keyPath: '', controlPath: '/tmp/x.sock' }
+  const args = buildInteractiveSshArgs(conn, '', 15000)
+  assert.equal(args[0], '-tt', 'forces a PTY so the remote sees a real terminal')
+  assert.ok(args.join(' ').includes('ControlPath=/tmp/x.sock'), 'reuses the existing master (no new auth)')
+  assert.equal(args[args.length - 2], 'me@box')
+  assert.equal(args[args.length - 1], 'exec "$SHELL" -l')
+})
+
+test('buildInteractiveSshArgs cds into the remote cwd (best-effort) before the shell', () => {
+  const conn = { user: 'me', host: 'box', port: 22, keyPath: '', controlPath: '/tmp/x.sock' }
+  const args = buildInteractiveSshArgs(conn, '/home/me/project', 15000)
+  const remoteCmd = args[args.length - 1]
+  assert.match(remoteCmd, /^cd '\/home\/me\/project' 2>\/dev\/null; exec "\$SHELL" -l$/)
+})
+
+test('buildInteractiveSshArgs single-quotes a cwd with quotes safely', () => {
+  const conn = { user: 'me', host: 'box', port: 22, keyPath: '', controlPath: '/tmp/x.sock' }
+  const args = buildInteractiveSshArgs(conn, "/tmp/a'b", 15000)
+  // the embedded quote must be escaped, not break out of the quoting
+  assert.ok(args[args.length - 1].startsWith("cd '/tmp/a'"))
+  assert.ok(args[args.length - 1].includes('exec "$SHELL" -l'))
 })
 
 // --- error classification ---------------------------------------------------

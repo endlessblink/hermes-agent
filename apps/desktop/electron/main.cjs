@@ -37,7 +37,7 @@ const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPort } = require('./backend-ready.cjs')
-const { SSH_ERROR, SshConnection, pickLocalPort, redactSecrets } = require('./ssh-connection.cjs')
+const { SSH_ERROR, SshConnection, buildInteractiveSshArgs, pickLocalPort, redactSecrets } = require('./ssh-connection.cjs')
 const remoteLifecycle = require('./remote-lifecycle.cjs')
 const { collectSshConfigHosts, parseSshGOutput } = require('./ssh-config.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
@@ -4485,6 +4485,22 @@ async function teardownSshConnection(profile) {
   }
 }
 
+// Resolve the live SSH connection backing the window's PRIMARY backend, or
+// null when the active connection is not SSH. Used by the interim ssh -tt
+// terminal so a remote terminal lands on the SSH host — and ONLY in SSH mode
+// (it must never leak into token/oauth remotes, whose trust boundary is a
+// token/cookie, not a shell credential).
+function activeSshTerminalTarget() {
+  const scope = sshScopeKey(primaryProfileKey())
+  // Try the primary scope first, then the global scope (one of them backs the
+  // window depending on whether a per-profile SSH override is in play).
+  const state = sshConnections.get(scope) || sshConnections.get('')
+  if (!state || !state.ssh) {
+    return null
+  }
+  return state.ssh
+}
+
 // Bring up (or reuse) the SSH-tunneled dashboard for one scope and return a
 // token-remote connection descriptor. `sshConfig` is the normalized
 // { host, user?, port?, keyPath?, remoteHermesPath? }; `reuseToken` is the
@@ -6404,10 +6420,54 @@ ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   ensureSpawnHelperExecutable()
 
   const id = crypto.randomUUID()
-  const { args, command, name } = terminalShellCommand()
-  const cwd = safeTerminalCwd(payload?.cwd)
   const cols = Math.max(2, Number.parseInt(String(payload?.cols || 80), 10) || 80)
   const rows = Math.max(2, Number.parseInt(String(payload?.rows || 24), 10) || 24)
+
+  // INTERIM SSH-mode remote terminal (component 5; SSH mode ONLY). When the
+  // window's primary backend is an SSH connection, spawn node-pty wrapping
+  // `ssh -tt` over the EXISTING control master so the terminal lands on the
+  // remote host. node-pty's resize() sends SIGWINCH to the local ssh client,
+  // which forwards it to the remote PTY — so resize propagates end to end.
+  // The remote cwd is the (remote) session cwd; we do NOT run it through
+  // safeTerminalCwd (that stats the LOCAL fs). This never engages for
+  // token/oauth remotes (activeSshTerminalTarget returns null) — their trust
+  // boundary is a token, not a shell credential.
+  // TODO(remote-terminal): replace with the dashboard /api/terminal WebSocket
+  // once specs/desktop-remote-terminal.md lands; then the terminal rides the
+  // tunnel like every other socket and cwd-follows-session becomes uniform.
+  const sshTarget = activeSshTerminalTarget()
+  if (sshTarget) {
+    const remoteCwd = String(payload?.cwd || '').trim()
+    const sshArgs = buildInteractiveSshArgs(sshTarget, remoteCwd)
+    const sshPty = nodePty.spawn('ssh', sshArgs, {
+      cols,
+      cwd: app.getPath('home'),
+      env: terminalShellEnv(),
+      name: 'xterm-256color',
+      rows
+    })
+
+    terminalSessions.set(id, { pty: sshPty, webContentsId: event.sender.id })
+
+    const sshSend = (suffix, data) => {
+      if (event.sender.isDestroyed()) {
+        return
+      }
+      event.sender.send(terminalChannel(id, suffix), data)
+    }
+
+    sshPty.onData(data => sshSend('data', data))
+    sshPty.onExit(({ exitCode, signal }) => {
+      terminalSessions.delete(id)
+      sshSend('exit', { code: exitCode, signal: signal || null })
+    })
+    event.sender.once('destroyed', () => disposeTerminalSession(id))
+
+    return { cwd: remoteCwd, id, shell: 'ssh' }
+  }
+
+  const { args, command, name } = terminalShellCommand()
+  const cwd = safeTerminalCwd(payload?.cwd)
   const ptyProcess = nodePty.spawn(command, args, {
     cols,
     cwd,
