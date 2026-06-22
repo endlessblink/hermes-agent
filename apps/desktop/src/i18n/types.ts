@@ -1044,6 +1044,11 @@ export interface Translations {
     colorFor: (name: string) => string
     setColor: (color: string) => string
     autoColor: string
+    icon: string
+    chooseIconFor: (name: string) => string
+    searchEmoji: string
+    noEmoji: string
+    clearIcon: string
     noProfiles: string
     selectPrompt: string
     refresh: string
