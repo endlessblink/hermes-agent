@@ -9,6 +9,12 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
 import { KbdGroup } from '@/components/ui/kbd'
 import { SearchField } from '@/components/ui/search-field'
 import { Tip } from '@/components/ui/tooltip'
@@ -106,7 +112,8 @@ import {
   reorderFolders,
   reorderFolderSessions,
   type SidebarFolder,
-  toggleFolderOpen
+  toggleFolderOpen,
+  toggleFolderPinned
 } from '@/store/sidebar-folders'
 
 import { type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE } from '../../routes'
@@ -115,7 +122,7 @@ import type { SidebarNavItem } from '../../types'
 import { countLabel } from './chrome'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { FolderNameDialog } from './folder-dialogs'
-import { filterUnfiledSessions, resolveFolderSessions } from './folders'
+import { filterUnfiledSessions, resolveFolderSessions, visibleFoldersForScope } from './folders'
 import { SidebarLoadMoreRow } from './load-more-row'
 import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
 import { ProfileRail } from './profile-switcher'
@@ -922,8 +929,12 @@ export function ChatSidebar({
     [agentSessions, folderedKeys, showAllProfiles]
   )
   const folderSections = useMemo(
-    () => folders.map(folder => ({ folder, sessions: resolveFolderSessions(folder, sessionByAnyId) })),
-    [folders, sessionByAnyId]
+    () =>
+      visibleFoldersForScope(folders, profileScope).map(folder => ({
+        folder,
+        sessions: resolveFolderSessions(folder, sessionByAnyId)
+      })),
+    [folders, profileScope, sessionByAnyId]
   )
   const [folderNameDialog, setFolderNameDialog] = useState<{
     id?: string
@@ -938,7 +949,7 @@ export function ChatSidebar({
     }
 
     if (folderNameDialog.mode === 'create') {
-      createFolder(name)
+      createFolder(name, showAllProfiles ? undefined : profileScope)
       notify({ durationMs: 2_000, kind: 'success', message: s.folderCreated })
     } else if (folderNameDialog.id) {
       renameFolder(folderNameDialog.id, name)
@@ -1236,7 +1247,11 @@ export function ChatSidebar({
             )}
 
             {!trimmedQuery && !showAllProfiles && folderSections.length > 0 && (
-              <ReorderableList ids={folders.map(folder => folder.id)} onReorder={reorderFolders} sensors={dndSensors}>
+              <ReorderableList
+                ids={folderSections.map(({ folder }) => folder.id)}
+                onReorder={reorderFolders}
+                sensors={dndSensors}
+              >
                 {folderSections.map(({ folder, sessions: folderSessions }) => (
                   <FolderSection
                     activeSessionId={activeSidebarSessionId}
@@ -1249,6 +1264,7 @@ export function ChatSidebar({
                     onRenameFolder={f => setFolderNameDialog({ id: f.id, mode: 'rename', name: f.name })}
                     onReorderSessions={reorderFolderRows}
                     onResumeSession={onResumeSession}
+                    onTogglePinned={toggleFolderPinned}
                     reorderable={folderSections.length > 1}
                     sessions={folderSessions}
                     workingSessionIdSet={workingSessionIdSet}
@@ -1550,8 +1566,13 @@ interface FolderSectionProps {
   onReorderSessions: (folderId: string, ids: string[]) => void
   onRenameFolder: (folder: SidebarFolder) => void
   onDeleteFolder: (folder: SidebarFolder) => void
+  onTogglePinned: (id: string) => void
 }
 
+// One custom folder, rendered as a collapsible SidebarSessionsSection. Wrapped in
+// useSortableBindings so the parent ReorderableList can drag folders up/down. The
+// header carries a ⋯ menu (rename / pin to all profiles / delete) and the drag
+// grab handle.
 function FolderSection({
   folder,
   sessions,
@@ -1564,7 +1585,8 @@ function FolderSection({
   onBranchSession,
   onReorderSessions,
   onRenameFolder,
-  onDeleteFolder
+  onDeleteFolder,
+  onTogglePinned
 }: FolderSectionProps) {
   const { t } = useI18n()
   const s = t.sidebar
@@ -1585,37 +1607,42 @@ function FolderSection({
         }
         headerAction={
           <div className="flex items-center gap-0.5">
-            <Tip label={s.renameFolderAction}>
-              <Button
-                aria-label={s.renameFolderAction}
-                className={headerButtonClass}
-                onClick={event => {
-                  event.stopPropagation()
-                  onRenameFolder(folder)
-                }}
-                size="icon-xs"
-                variant="ghost"
-              >
-                <Codicon name="edit" size="0.75rem" />
-              </Button>
-            </Tip>
-            <Tip label={s.deleteFolderAction}>
-              <Button
-                aria-label={s.deleteFolderAction}
-                className={headerButtonClass}
-                onClick={event => {
-                  event.stopPropagation()
-                  onDeleteFolder(folder)
-                }}
-                size="icon-xs"
-                variant="ghost"
-              >
-                <Codicon name="trash" size="0.75rem" />
-              </Button>
-            </Tip>
+            <DropdownMenu>
+              <Tip label={s.folderActionsFor(folder.name)}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label={s.folderActionsFor(folder.name)}
+                    className={headerButtonClass}
+                    onClick={event => event.stopPropagation()}
+                    size="icon-xs"
+                    variant="ghost"
+                  >
+                    <Codicon name="ellipsis" size="0.75rem" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </Tip>
+              <DropdownMenuContent align="end" className="w-44" sideOffset={6}>
+                <DropdownMenuItem onSelect={() => onRenameFolder(folder)}>
+                  <Codicon name="edit" size="0.875rem" />
+                  <span>{s.renameFolderAction}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onTogglePinned(folder.id)}>
+                  <Codicon name={folder.pinned ? 'pinned-dirty' : 'pin'} size="0.875rem" />
+                  <span>{folder.pinned ? s.unpinFolder : s.pinFolder}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onSelect={() => onDeleteFolder(folder)}
+                  variant="destructive"
+                >
+                  <Codicon name="trash" size="0.875rem" />
+                  <span>{s.deleteFolderAction}</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             {reorderable && (
               <Button
-                aria-label={s.folderActionsFor(folder.name)}
+                aria-label={s.reorderFolder(folder.name)}
                 className={cn(headerButtonClass, 'cursor-grab active:cursor-grabbing')}
                 size="icon-xs"
                 variant="ghost"
@@ -1634,7 +1661,16 @@ function FolderSection({
             size="0.75rem"
           />
         }
-        labelMeta={String(sessions.length)}
+        labelMeta={
+          <span className="inline-flex items-center gap-1">
+            {folder.pinned && (
+              <Tip label={s.folderPinnedBadge}>
+                <Codicon className="text-(--ui-text-tertiary)" name="pinned" size="0.625rem" />
+              </Tip>
+            )}
+            {String(sessions.length)}
+          </span>
+        }
         onArchiveSession={onArchiveSession}
         onBranchSession={onBranchSession}
         onDeleteSession={onDeleteSession}
