@@ -41,6 +41,7 @@ import {
   $activeGatewayProfile,
   $profileColors,
   $profileCreateRequest,
+  $profileIcons,
   $profileOrder,
   $profiles,
   $profileScope,
@@ -49,6 +50,7 @@ import {
   refreshActiveProfile,
   selectProfile,
   setProfileColor,
+  setProfileIcon,
   setProfileOrder,
   setShowAllProfiles,
   sortByProfileOrder
@@ -59,6 +61,8 @@ import { CreateProfileDialog } from '../../profiles/create-profile-dialog'
 import { DeleteProfileDialog } from '../../profiles/delete-profile-dialog'
 import { RenameProfileDialog } from '../../profiles/rename-profile-dialog'
 import { PROFILES_ROUTE } from '../../routes'
+
+import { ProfileIconDialog } from './profile-icon-dialog'
 
 const RAIL_GAP = 4 // px — matches gap-1 between squares.
 
@@ -105,6 +109,7 @@ export function ProfileRail() {
   const gatewayProfile = useStore($activeGatewayProfile)
   const order = useStore($profileOrder)
   const colors = useStore($profileColors)
+  const icons = useStore($profileIcons)
   const navigate = useNavigate()
 
   const [createOpen, setCreateOpen] = useState(false)
@@ -252,6 +257,7 @@ export function ProfileRail() {
           <ProfileDropdown
             activeKey={isAll ? null : activeKey}
             colors={colors}
+            icons={icons}
             onSelect={selectProfile}
             profiles={named}
           />
@@ -279,6 +285,7 @@ export function ProfileRail() {
                     <ProfileSquare
                       active={!isAll && normalizeProfileKey(profile.name) === activeKey}
                       color={resolveProfileColor(profile.name, colors)}
+                      icon={icons[normalizeProfileKey(profile.name)] ?? null}
                       key={profile.name}
                       label={profile.name}
                       onDelete={() => setPendingDelete(profile)}
@@ -286,6 +293,7 @@ export function ProfileRail() {
                       onRecolor={color => setProfileColor(profile.name, color)}
                       onRename={() => setPendingRename(profile)}
                       onSelect={() => selectProfile(profile.name)}
+                      onSetIcon={icon => setProfileIcon(profile.name, icon)}
                     />
                   ))}
                 </div>
@@ -433,11 +441,13 @@ function AddProfileButton({ label, onClick }: { label: string; onClick: () => vo
 function ProfileDropdown({
   activeKey,
   colors,
+  icons,
   onSelect,
   profiles
 }: {
   activeKey: null | string
   colors: Record<string, string>
+  icons: Record<string, string>
   onSelect: (name: string) => void
   profiles: ProfileInfo[]
 }) {
@@ -453,8 +463,10 @@ function ProfileDropdown({
       </SelectTrigger>
       <SelectContent collisionPadding={{ bottom: 44, left: 8, right: 8, top: 8 }} side="top">
         {profiles.map(profile => {
+          const key = normalizeProfileKey(profile.name)
           const color = resolveProfileColor(profile.name, colors)
           const hue = color ?? 'var(--ui-text-quaternary)'
+          const icon = icons[key]
 
           return (
             <SelectItem key={profile.name} value={profile.name}>
@@ -464,7 +476,7 @@ function ProfileDropdown({
                   className="grid size-4 shrink-0 place-items-center rounded-[3px] text-[0.5rem] font-semibold uppercase leading-none"
                   style={{ backgroundColor: profileColorSoft(hue, 22), color: color ?? undefined }}
                 >
-                  {profile.name.replace(/[^a-z0-9]/gi, '').charAt(0) || '?'}
+                  {icon || profile.name.replace(/[^a-z0-9]/gi, '').charAt(0) || '?'}
                 </span>
                 <span className="truncate">{profile.name}</span>
               </span>
@@ -508,9 +520,11 @@ function ProfilePill({ active, glyph, label, onSelect }: ProfilePillProps) {
 interface ProfileSquareProps {
   active: boolean
   color: null | string
+  icon: null | string
   label: string
   onSelect: () => void
   onRecolor: (color: null | string) => void
+  onSetIcon: (icon: null | string) => void
   onRename: () => void
   onEditSoul: () => void
   onDelete: () => void
@@ -530,17 +544,20 @@ const LONG_PRESS_MS = 450
 function ProfileSquare({
   active,
   color,
+  icon,
   label,
   onDelete,
   onEditSoul,
   onRecolor,
   onRename,
-  onSelect
+  onSelect,
+  onSetIcon
 }: ProfileSquareProps) {
   const { t } = useI18n()
   const p = t.profiles
   const hue = color ?? 'var(--ui-text-quaternary)'
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [iconOpen, setIconOpen] = useState(false)
   const pressTimer = useRef<null | number>(null)
   const suppressClick = useRef(false)
 
@@ -576,73 +593,74 @@ function ProfileSquare({
   }
 
   return (
-    <Popover onOpenChange={setPickerOpen} open={pickerOpen}>
-      <ContextMenu>
-        <TooltipProvider delayDuration={0}>
-          <Tooltip>
-            <PopoverAnchor asChild>
-              <ContextMenuTrigger asChild>
-                <TooltipTrigger asChild>
-                  <button
-                    className={cn(
-                      'grid size-5 shrink-0 cursor-grab touch-none select-none place-items-center rounded-[3px] text-[0.5625rem] font-semibold uppercase leading-none transition-opacity hover:opacity-100',
-                      active ? 'opacity-100' : 'opacity-55',
-                      isDragging && 'z-10 cursor-grabbing opacity-100'
-                    )}
-                    ref={setNodeRef}
-                    style={{
-                      backgroundColor: profileColorSoft(hue, active ? 30 : 22),
-                      boxShadow: [ring, lift].filter(Boolean).join(', ') || undefined,
-                      color: color ?? undefined,
-                      // Glide the dragged square between snapped cells with a little
-                      // overshoot (no scale — the overflow-x strip would clip it).
-                      transform: base,
-                      transition: isDragging ? DRAG_TRANSITION : transition
-                    }}
-                    type="button"
-                    {...attributes}
-                    {...listeners}
-                    aria-label={label}
-                    aria-pressed={active}
-                    // Hold-to-recolor rides alongside the dnd pointer listener (call
-                    // it first so drag tracking still arms), then a timer opens the
-                    // picker and flags the trailing click so it doesn't also select.
-                    onClick={() => {
-                      if (suppressClick.current) {
+    <>
+      <Popover onOpenChange={setPickerOpen} open={pickerOpen}>
+        <ContextMenu>
+          <TooltipProvider delayDuration={0}>
+            <Tooltip>
+              <PopoverAnchor asChild>
+                <ContextMenuTrigger asChild>
+                  <TooltipTrigger asChild>
+                    <button
+                      className={cn(
+                        'grid size-5 shrink-0 cursor-grab touch-none select-none place-items-center rounded-[3px] text-[0.5625rem] font-semibold uppercase leading-none transition-opacity hover:opacity-100',
+                        active ? 'opacity-100' : 'opacity-55',
+                        isDragging && 'z-10 cursor-grabbing opacity-100'
+                      )}
+                      ref={setNodeRef}
+                      style={{
+                        backgroundColor: profileColorSoft(hue, active ? 30 : 22),
+                        boxShadow: [ring, lift].filter(Boolean).join(', ') || undefined,
+                        color: color ?? undefined,
+                        // Glide the dragged square between snapped cells with a little
+                        // overshoot (no scale — the overflow-x strip would clip it).
+                        transform: base,
+                        transition: isDragging ? DRAG_TRANSITION : transition
+                      }}
+                      type="button"
+                      {...attributes}
+                      {...listeners}
+                      aria-label={label}
+                      aria-pressed={active}
+                      // Hold-to-recolor rides alongside the dnd pointer listener (call
+                      // it first so drag tracking still arms), then a timer opens the
+                      // picker and flags the trailing click so it doesn't also select.
+                      onClick={() => {
+                        if (suppressClick.current) {
+                          suppressClick.current = false
+
+                          return
+                        }
+
+                        onSelect()
+                      }}
+                      onPointerCancel={clearPress}
+                      onPointerDown={event => {
+                        listeners?.onPointerDown?.(event)
+
+                        if (event.button !== 0) {
+                          return
+                        }
+
                         suppressClick.current = false
-
-                        return
-                      }
-
-                      onSelect()
-                    }}
-                    onPointerCancel={clearPress}
-                    onPointerDown={event => {
-                      listeners?.onPointerDown?.(event)
-
-                      if (event.button !== 0) {
-                        return
-                      }
-
-                      suppressClick.current = false
-                      clearPress()
-                      pressTimer.current = window.setTimeout(() => {
-                        suppressClick.current = true
-                        triggerHaptic('success')
-                        setPickerOpen(true)
-                      }, LONG_PRESS_MS)
-                    }}
-                    onPointerLeave={clearPress}
-                    onPointerUp={clearPress}
-                  >
-                    {label.replace(/[^a-z0-9]/gi, '').charAt(0) || '?'}
-                  </button>
-                </TooltipTrigger>
-              </ContextMenuTrigger>
-            </PopoverAnchor>
-            <TooltipContent>{label}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+                        clearPress()
+                        pressTimer.current = window.setTimeout(() => {
+                          suppressClick.current = true
+                          triggerHaptic('success')
+                          setPickerOpen(true)
+                        }, LONG_PRESS_MS)
+                      }}
+                      onPointerLeave={clearPress}
+                      onPointerUp={clearPress}
+                    >
+                      {icon || label.replace(/[^a-z0-9]/gi, '').charAt(0) || '?'}
+                    </button>
+                  </TooltipTrigger>
+                </ContextMenuTrigger>
+              </PopoverAnchor>
+              <TooltipContent>{label}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
 
         {/* The rail sits at the very bottom, so pad off the chrome (esp. the
             statusbar) — Radix then flips the menu up instead of squishing it. */}
@@ -658,6 +676,10 @@ function ProfileSquare({
           <ContextMenuItem onSelect={() => setPickerOpen(true)}>
             <Codicon name="symbol-color" size="0.875rem" />
             <span>{p.color}</span>
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={() => setIconOpen(true)}>
+            <Codicon name="symbol-misc" size="0.875rem" />
+            <span>{p.icon}</span>
           </ContextMenuItem>
           <ContextMenuItem onSelect={onRename}>
             <Codicon name="text-size" size="0.875rem" />
@@ -694,5 +716,17 @@ function ProfileSquare({
         />
       </PopoverContent>
     </Popover>
+    <ProfileIconDialog
+      hasIcon={Boolean(icon)}
+      label={label}
+      onClear={() => {
+        onSetIcon(null)
+        setIconOpen(false)
+      }}
+      onOpenChange={setIconOpen}
+      onSelect={emoji => onSetIcon(emoji)}
+      open={iconOpen}
+    />
+    </>
   )
 }
