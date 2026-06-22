@@ -870,6 +870,33 @@ def create_job(
 
     prompt_text = _coerce_job_text(prompt)
     label_source = (prompt_text or (normalized_skills[0] if normalized_skills else None) or (normalized_script if normalized_no_agent else None)) or "cron job"
+
+    # Provider-drift guard (#44585). When the caller does NOT pin a provider,
+    # the job follows the global default — model.default in config.yaml and
+    # whatever resolve_runtime_provider() picks at fire time. That global state
+    # can change (e.g. a temporary switch to a paid provider), and an unpinned
+    # job would then silently inherit it and spend real money. To detect that,
+    # snapshot the provider resolution WOULD pick *right now*, at creation, and
+    # store it. The fire-time guard (run_job) fails closed when an unpinned
+    # job's currently-resolved provider differs from this snapshot.
+    #
+    # Only captured for unpinned, agent-backed jobs. Pinned jobs (explicit
+    # provider) and no_agent script jobs (no paid inference) don't need it.
+    # Fail-open to None on any resolution error so job creation never breaks —
+    # a missing snapshot simply preserves the legacy no-guard behaviour.
+    provider_snapshot: Optional[str] = None
+    if normalized_provider is None and not normalized_no_agent:
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            _runtime_kwargs = {"requested": None}
+            if normalized_base_url:
+                _runtime_kwargs["explicit_base_url"] = normalized_base_url
+            _snap = resolve_runtime_provider(**_runtime_kwargs)
+            _snap_provider = str(_snap.get("provider") or "").strip().lower()
+            provider_snapshot = _snap_provider or None
+        except Exception:
+            provider_snapshot = None
+
     job = {
         "id": job_id,
         "name": name or label_source[:50].strip(),
@@ -878,6 +905,10 @@ def create_job(
         "skill": normalized_skills[0] if normalized_skills else None,
         "model": normalized_model,
         "provider": normalized_provider,
+        # Provider resolution captured at creation for unpinned jobs (#44585).
+        # None for pinned jobs, no_agent jobs, resolution failures, and any
+        # pre-existing job written before this field existed (back-compat).
+        "provider_snapshot": provider_snapshot,
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,

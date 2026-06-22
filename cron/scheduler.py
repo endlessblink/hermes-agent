@@ -2016,6 +2016,53 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             message = format_runtime_provider_error(exc)
             raise RuntimeError(message) from exc
 
+        # Provider-drift fail-closed guard (#44585).
+        #
+        # An UNPINNED job (no explicit job["provider"]) follows the global
+        # default provider, which can change after the job was created (e.g. a
+        # temporary switch to a paid provider like nous/claude-fable-5). Without
+        # a guard the job would silently inherit that change and spend real
+        # money on every tick — the $7.73 incident.
+        #
+        # create_job() snapshots the provider that resolution WOULD have picked
+        # at creation into job["provider_snapshot"]. Here, if that snapshot
+        # exists AND the job is unpinned AND the currently-resolved provider
+        # DIFFERS from the snapshot, we fail closed: skip this run, make NO paid
+        # call, and deliver a loud, actionable alert telling the user to pin the
+        # provider explicitly to proceed.
+        #
+        # Back-compat: jobs with no snapshot (pre-existing, no_agent, or any job
+        # whose creation-time resolution failed) behave exactly as before — the
+        # guard never engages. Pinned jobs (explicit provider) are unaffected
+        # because they don't drift with global state in the first place.
+        _provider_snapshot = (job.get("provider_snapshot") or "").strip().lower()
+        _job_pinned_provider = (job.get("provider") or "").strip()
+        if _provider_snapshot and not _job_pinned_provider:
+            _current_provider = str(runtime.get("provider") or "").strip().lower()
+            if _current_provider and _current_provider != _provider_snapshot:
+                logger.warning(
+                    "Job '%s': SKIPPED — global inference provider changed from %r "
+                    "(captured when the job was created) to %r, and this job is "
+                    "unpinned. Skipped to prevent unintended spend. To proceed, "
+                    "pin the provider explicitly: "
+                    "`cronjob action=update job_id=%s provider=%s`.",
+                    job_id,
+                    _provider_snapshot,
+                    _current_provider,
+                    job_id,
+                    _current_provider,
+                )
+                raise RuntimeError(
+                    f"Skipped to prevent unintended spend: the global inference "
+                    f"provider changed from '{_provider_snapshot}' (captured when "
+                    f"this job was created) to '{_current_provider}', and this job "
+                    f"is unpinned. No inference call was made. To run on the new "
+                    f"provider, pin it explicitly with "
+                    f"`cronjob action=update job_id={job_id} provider={_current_provider}` "
+                    f"(or set provider={_provider_snapshot} to keep the original). "
+                    f"See #44585."
+                )
+
         fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
         credential_pool = None
         runtime_provider = str(runtime.get("provider") or "").strip().lower()
