@@ -2045,11 +2045,16 @@ export interface Translations {
     sessionExported: string
     sessionExportFailed: string
     imageSaved: string
+    imageCopied: string
     downloadStarted: string
     restartToUseSaveImage: string
     restartToSaveImages: string
+    restartToCopyImages: string
     imageDownloadFailed: string
+    imageCopyFailed: string
     openImage: string
+    copyImage: string
+    copyingImage: string
     downloadImage: string
     savingImage: string
     imagePreviewFailed: string
