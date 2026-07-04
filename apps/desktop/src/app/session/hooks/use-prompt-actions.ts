@@ -46,12 +46,12 @@ import {
   $messages,
   $sessions,
   $yoloActive,
+  clearSessionReplyReady,
   setAwaitingResponse,
   setBusy,
   setMessages,
   setModelPickerOpen,
   setSessionPickerOpen,
-  setSessionReplyReady,
   setSessions,
   setYoloActive
 } from '@/store/session'
@@ -680,7 +680,7 @@ export function usePromptActions({
       setMutableRef(busyRef, true)
       setBusy(true)
       setAwaitingResponse(true)
-      setSessionReplyReady(selectedStoredSessionIdRef.current ?? activeSessionIdRef.current, false)
+      clearSessionReplyReady(selectedStoredSessionIdRef.current ?? activeSessionIdRef.current)
       clearNotifications()
 
       let sessionId: null | string = activeSessionId
@@ -1551,7 +1551,7 @@ export function usePromptActions({
           await withSessionBusyRetry(() => requestGateway('prompt.submit', { session_id: recoveredId, text }))
         }
 
-        setSessionReplyReady(storedSessionId, false)
+        clearSessionReplyReady(storedSessionId)
 
         return true
       } catch (err) {
