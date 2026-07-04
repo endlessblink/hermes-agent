@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages, listAllProfileSessions, listSessions } from './hermes'
+import {
+  getCronJobs,
+  getGlobalModelOptions,
+  getProfiles,
+  getSessionMessages,
+  listAllProfileSessions,
+  listSessions
+} from './hermes'
 
 const emptySessionsResponse = {
   limit: 0,
@@ -45,6 +52,31 @@ describe('Hermes REST session helpers', () => {
         timeoutMs: 60_000
       })
     )
+  })
+
+  it('uses a longer timeout for the profile list', async () => {
+    api.mockResolvedValue({ profiles: [] })
+
+    await getProfiles()
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/profiles',
+      timeoutMs: 60_000
+    })
+  })
+
+  it('uses a longer timeout for boot aggregate calls', async () => {
+    await getCronJobs()
+    await getGlobalModelOptions()
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/cron/jobs',
+      timeoutMs: 60_000
+    })
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/model/options',
+      timeoutMs: 60_000
+    })
   })
 
   it('tags cross-profile message reads for Electron routing and backend lookup', async () => {

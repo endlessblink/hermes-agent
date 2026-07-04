@@ -45,6 +45,8 @@ import type {
 
 const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
+const PROFILE_LIST_REQUEST_TIMEOUT_MS = 60_000
+const BOOT_AGGREGATE_REQUEST_TIMEOUT_MS = 60_000
 
 export type {
   ActionResponse,
@@ -542,7 +544,8 @@ export function testMessagingPlatform(platformId: string): Promise<MessagingPlat
 
 export function getCronJobs(): Promise<CronJob[]> {
   return window.hermesDesktop.api<CronJob[]>({
-    path: '/api/cron/jobs'
+    path: '/api/cron/jobs',
+    timeoutMs: BOOT_AGGREGATE_REQUEST_TIMEOUT_MS
   })
 }
 
@@ -606,7 +609,8 @@ export function deleteCronJob(jobId: string): Promise<{ ok: boolean }> {
 
 export function getProfiles(): Promise<ProfilesResponse> {
   return window.hermesDesktop.api<ProfilesResponse>({
-    path: '/api/profiles'
+    path: '/api/profiles',
+    timeoutMs: PROFILE_LIST_REQUEST_TIMEOUT_MS
   })
 }
 
@@ -663,7 +667,8 @@ export function getUsageAnalytics(days = 30): Promise<AnalyticsResponse> {
 export function getGlobalModelOptions(opts?: { refresh?: boolean }): Promise<ModelOptionsResponse> {
   return window.hermesDesktop.api<ModelOptionsResponse>({
     ...profileScoped(),
-    path: opts?.refresh ? '/api/model/options?refresh=1' : '/api/model/options'
+    path: opts?.refresh ? '/api/model/options?refresh=1' : '/api/model/options',
+    timeoutMs: BOOT_AGGREGATE_REQUEST_TIMEOUT_MS
   })
 }
 

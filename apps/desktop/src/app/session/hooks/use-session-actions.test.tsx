@@ -5,7 +5,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getSessionMessages } from '@/hermes'
 import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
-import { $currentCwd, $messages, $resumeFailedSessionId, setMessages, setResumeFailedSessionId } from '@/store/session'
+import {
+  $currentCwd,
+  $messages,
+  $replyReadySessionIds,
+  $replyReadySessionProfiles,
+  $resumeFailedSessionId,
+  $sessions,
+  setMessages,
+  setResumeFailedSessionId
+} from '@/store/session'
+import type { SessionInfo } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../types'
 
@@ -14,6 +24,7 @@ import { useSessionActions } from './use-session-actions'
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   deleteSession: vi.fn(),
+  getSession: vi.fn(),
   getSessionMessages: vi.fn(),
   listAllProfileSessions: vi.fn(),
   setApiRequestProfile: vi.fn(),
@@ -162,16 +173,20 @@ describe('resumeSession failure recovery', () => {
     cleanup()
     setResumeFailedSessionId(null)
     setMessages([])
+    $sessions.set([])
+    $replyReadySessionIds.set([])
+    $replyReadySessionProfiles.set({})
     vi.restoreAllMocks()
   })
 
   async function runResume(
-    requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+    requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>,
+    storedSessionId = 'stored-1'
   ): Promise<void> {
     let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
     render(<ResumeHarness onReady={r => (resume = r)} requestGateway={requestGateway} />)
     await waitFor(() => expect(resume).not.toBeNull())
-    await resume!('stored-1', true)
+    await resume!(storedSessionId, true)
   }
 
   it('arms $resumeFailedSessionId when resume RPC and REST fallback both fail', async () => {
@@ -255,5 +270,41 @@ describe('resumeSession failure recovery', () => {
     await runResume(requestGateway)
 
     expect($resumeFailedSessionId.get()).toBeNull()
+  })
+
+  it('clears reply-ready markers stored under the compression lineage when opening the tip session', async () => {
+    $sessions.set([
+      {
+        _lineage_root_id: 'root-1',
+        ended_at: null,
+        id: 'tip-1',
+        input_tokens: 0,
+        is_active: false,
+        last_active: 10,
+        message_count: 3,
+        model: null,
+        output_tokens: 0,
+        preview: null,
+        source: null,
+        started_at: 1,
+        title: 'Needs review',
+        tool_call_count: 0
+      } as SessionInfo
+    ])
+    $replyReadySessionIds.set(['root-1'])
+    $replyReadySessionProfiles.set({ 'root-1': 'hermes-dev' })
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        return { session_id: 'runtime-1', resumed: params?.session_id, messages: [], info: {} } as never
+      }
+
+      return {} as never
+    })
+
+    await runResume(requestGateway, 'tip-1')
+
+    expect($replyReadySessionIds.get()).toEqual([])
+    expect($replyReadySessionProfiles.get()).toEqual({})
   })
 })

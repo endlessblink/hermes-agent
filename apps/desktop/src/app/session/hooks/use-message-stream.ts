@@ -34,8 +34,10 @@ import { $gateway } from '@/store/gateway'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { notify } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
+import { $activeGatewayProfile } from '@/store/profile'
 import { clearAllPrompts, setApprovalRequest, setSecretRequest, setSudoRequest } from '@/store/prompts'
 import {
+  $sessions,
   setCurrentBranch,
   setCurrentCwd,
   setCurrentFastMode,
@@ -45,6 +47,7 @@ import {
   setCurrentReasoningEffort,
   setCurrentServiceTier,
   setCurrentUsage,
+  setSessionReplyReady,
   setTurnStartedAt,
   setYoloActive
 } from '@/store/session'
@@ -661,6 +664,16 @@ export function useMessageStream({
         sessionId,
         title: translateNow('notifications.native.turnDoneTitle')
       })
+
+      const replyReadyId = completedState.storedSessionId ?? sessionId
+
+      const replyReadyProfile =
+        $sessions
+          .get()
+          .find(session => session.id === replyReadyId || session._lineage_root_id === replyReadyId || session.id === sessionId)
+          ?.profile ?? $activeGatewayProfile.get()
+
+      setSessionReplyReady(replyReadyId, true, replyReadyProfile)
     },
     [hydrateFromStoredSession, refreshSessions, updateSessionState]
   )

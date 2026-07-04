@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -28,6 +29,7 @@ import { useI18n } from '@/i18n'
 import { AlertTriangle, Pencil, Save, Terminal, Trash2, Users } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
+import { $profiles as $cachedProfiles } from '@/store/profile'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { OverlayMain, OverlayNewButton, OverlaySidebar, OverlaySplitLayout } from '../overlays/overlay-split-layout'
@@ -46,8 +48,16 @@ interface ProfilesViewProps {
 export function ProfilesView({ onClose }: ProfilesViewProps) {
   const { t } = useI18n()
   const p = t.profiles
-  const [profiles, setProfiles] = useState<null | ProfileInfo[]>(null)
-  const [selectedName, setSelectedName] = useState<null | string>(null)
+  const cachedProfiles = useStore($cachedProfiles)
+
+  const [profiles, setProfiles] = useState<null | ProfileInfo[]>(() =>
+    cachedProfiles.length > 0 ? cachedProfiles : null
+  )
+
+  const [selectedName, setSelectedName] = useState<null | string>(() =>
+    cachedProfiles.find(p => p.is_default)?.name ?? cachedProfiles[0]?.name ?? null
+  )
+
   const [createOpen, setCreateOpen] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<null | ProfileInfo>(null)
   const [deleting, setDeleting] = useState(false)
@@ -64,9 +74,13 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
         return list.find(p => p.is_default)?.name ?? list[0]?.name ?? null
       })
     } catch (err) {
-      notifyError(err, p.failedLoad)
+      setProfiles(current => current ?? (cachedProfiles.length > 0 ? cachedProfiles : null))
+
+      if (cachedProfiles.length === 0) {
+        notifyError(err, p.failedLoad)
+      }
     }
-  }, [p])
+  }, [cachedProfiles, p])
 
   useRefreshHotkey(refresh)
 

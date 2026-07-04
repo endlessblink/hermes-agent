@@ -15,12 +15,28 @@ vi.mock('@/lib/storage', () => ({
       storage.set(key, value)
     }
   },
+  persistStringArray: (key: string, value: string[]) => {
+    storage.set(key, JSON.stringify(value))
+  },
+  persistStringRecord: (key: string, value: Record<string, string>) => {
+    storage.set(key, JSON.stringify(value))
+  },
   storedBoolean: (key: string, fallback: boolean) => {
     const value = storage.get(key)
 
     return value === undefined ? fallback : value === 'true'
   },
-  storedString: (key: string) => storage.get(key) ?? null
+  storedString: (key: string) => storage.get(key) ?? null,
+  storedStringArray: (key: string) => {
+    const value = storage.get(key)
+
+    return value ? JSON.parse(value) : []
+  },
+  storedStringRecord: (key: string) => {
+    const value = storage.get(key)
+
+    return value ? JSON.parse(value) : {}
+  }
 }))
 
 const notifySpy = vi.fn()
@@ -297,6 +313,25 @@ describe('applyUpdates terminal state', () => {
     expect(notifySpy).not.toHaveBeenCalled()
   })
 
+  it('lands on a closeable dirty state when local checkout changes would be overwritten by update', async () => {
+    applyMock.mockResolvedValue({
+      ok: false,
+      dirty: true,
+      error: 'dirty-working-tree',
+      message: 'Commit or stash local changes first.'
+    })
+
+    const result = await applyUpdates()
+
+    expect(result.dirty).toBe(true)
+    expect($updateApply.get().applying).toBe(false)
+    expect($updateApply.get().stage).toBe('dirty')
+    expect($updateApply.get().error).toBe('dirty-working-tree')
+    expect($updateApply.get().message).toMatch(/Commit or stash/)
+    expect($updateOverlayOpen.get()).toBe(true)
+    expect(notifySpy).not.toHaveBeenCalled()
+  })
+
   it('lands on the guiSkew terminal state for a GUI/backend skew (AppImage/.deb/.rpm), without claiming a GUI update', async () => {
     // Linux: backend updated, but the running desktop package was NOT replaced.
     // Must NOT toast "loads next launch" — that's the dishonest message #45205
@@ -384,4 +419,3 @@ describe('applyBackendUpdate recovery', () => {
     expect($backendUpdateApply.get().stage).toBe('error')
   })
 })
-
