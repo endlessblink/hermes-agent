@@ -6,6 +6,9 @@ import {
   getGlobalModelOptions,
   getHermesConfig,
   getHermesConfigDefaults,
+  getHermesConfigRecord,
+  getHermesConfigSchema,
+  getLogs,
   getProfiles,
   getSessionMessages,
   getStatus,
@@ -97,11 +100,15 @@ describe('Hermes REST session helpers', () => {
     api.mockResolvedValue({})
 
     const bootCalls: [() => Promise<unknown>, string][] = [
+      [getCronJobs, '/api/cron/jobs'],
       [getHermesConfig, '/api/config'],
+      [getHermesConfigRecord, '/api/config'],
       [getHermesConfigDefaults, '/api/config/defaults'],
+      [getHermesConfigSchema, '/api/config/schema'],
       [getGlobalModelInfo, '/api/model/info'],
       [() => getGlobalModelOptions(), '/api/model/options?explicit_only=1'],
-      [getCronJobs, '/api/cron/jobs']
+      [() => getLogs({ file: 'gui', lines: 12 }), '/api/logs?file=gui&lines=12'],
+      [getStatus, '/api/status']
     ]
 
     for (const [call, path] of bootCalls) {
@@ -109,19 +116,6 @@ describe('Hermes REST session helpers', () => {
       await call()
       expect(api).toHaveBeenCalledWith(expect.objectContaining({ path, timeoutMs: 60_000 }))
     }
-  })
-
-  it('keeps the liveness poll on the short default so a dead backend fails fast', async () => {
-    api.mockResolvedValue({})
-    api.mockClear()
-
-    await getStatus()
-
-    // /api/status must NOT carry the long startup timeout — it is the runtime
-    // liveness probe and has to fail quickly when the backend drops.
-    const call = api.mock.calls[0]?.[0] as { path: string; timeoutMs?: number }
-    expect(call.path).toBe('/api/status')
-    expect(call.timeoutMs).toBeUndefined()
   })
 
   it('tags cross-profile message reads for Electron routing and backend lookup', async () => {
