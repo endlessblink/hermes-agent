@@ -57,6 +57,7 @@ interface GatewayEventDeps {
   appendAssistantDelta: (sessionId: string, delta: string) => void
   appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean) => void
   completeAssistantMessage: (sessionId: string, text: string) => void
+  continueFromCompressionExhausted?: (sessionId: string, errorMessage: string) => Promise<void> | void
   failAssistantMessage: (sessionId: string, errorMessage: string) => void
   flushQueuedDeltas: (sessionId?: string) => void
   queryClient: QueryClient
@@ -85,6 +86,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
     lastCwdInfoSessionRef,
     nativeSubagentSessionsRef,
     completeAssistantMessage,
+    continueFromCompressionExhausted,
     failAssistantMessage,
     flushQueuedDeltas,
     queryClient,
@@ -331,6 +333,10 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           const errorMessage = finalText || payload?.message || 'Hermes reported an error'
 
           failAssistantMessage(sessionId, errorMessage)
+
+          if (payload?.compression_exhausted) {
+            void continueFromCompressionExhausted?.(sessionId, errorMessage)
+          }
 
           if (isActiveEvent) {
             setTurnStartedAt(null)
@@ -698,6 +704,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       activeSessionIdRef,
       compactedTurnRef,
       completeAssistantMessage,
+      continueFromCompressionExhausted,
       failAssistantMessage,
       flushQueuedDeltas,
       lastCwdInfoSessionRef,
