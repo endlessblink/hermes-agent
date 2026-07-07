@@ -6440,6 +6440,24 @@ def test_status_update_emits_compression_diagnostic(monkeypatch):
     assert session.get("compression_started_at")
 
 
+def test_compression_watchdog_default_is_desktop_bounded(monkeypatch):
+    monkeypatch.delenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", raising=False)
+
+    assert server._compression_watchdog_timeout_seconds() == 45.0
+
+
+def test_compression_watchdog_env_override(monkeypatch):
+    monkeypatch.setenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", "12.5")
+
+    assert server._compression_watchdog_timeout_seconds() == 12.5
+
+
+def test_compression_watchdog_bad_env_uses_desktop_default(monkeypatch):
+    monkeypatch.setenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", "not-a-number")
+
+    assert server._compression_watchdog_timeout_seconds() == 45.0
+
+
 def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):
     calls = {"interrupted": False}
     agent = types.SimpleNamespace(

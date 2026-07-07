@@ -9161,11 +9161,15 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
 
 
 def _compression_watchdog_timeout_seconds() -> float:
-    raw = os.environ.get("HERMES_COMPRESSION_WATCHDOG_SECONDS", "240")
+    # Desktop users experience auto-compaction as a blocking "Summarizing
+    # thread" turn. If the auxiliary compression call has not completed quickly,
+    # continuity recovery is more reliable than making the user stare at a
+    # non-terminal busy state for minutes.
+    raw = os.environ.get("HERMES_COMPRESSION_WATCHDOG_SECONDS", "45")
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 240.0
+        return 45.0
 
 
 def _turn_terminal_emitted(session: dict) -> bool:
