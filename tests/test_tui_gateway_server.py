@@ -6571,6 +6571,29 @@ def test_turn_progress_ignores_diagnostics_and_terminal(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_emit_writes_turn_watchdog_ledger(monkeypatch, tmp_path):
+    session = _session(running=True, cwd="/tmp/project")
+    session["session_key"] = "key-123"
+    session["turn_started_at"] = 10.0
+    session["turn_last_progress_at"] = 10.0
+    session["turn_last_progress_event"] = "prompt.submit"
+    server._sessions["sid"] = session
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+
+    try:
+        server._emit("message.start", "sid")
+    finally:
+        server._sessions.pop("sid", None)
+
+    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["event"] == "message.start"
+    assert rows[-1]["session_id"] == "sid"
+    assert rows[-1]["session_key"] == "key-123"
+    assert rows[-1]["cwd"] == "/tmp/project"
+
+
 def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     """An empty final_response with NO backend error must stay empty — do not
     synthesize an error string. Preserves the existing None/empty-sentinel
