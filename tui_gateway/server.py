@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,6 +55,9 @@ load_hermes_dotenv(
 # Activity — exactly what was missing when the voice-mode turns started
 # exiting the gateway mid-TTS.
 _CRASH_LOG = os.path.join(_hermes_home, "logs", "tui_gateway_crash.log")
+_TURN_WATCHDOG_LOG = os.path.join(_hermes_home, "logs", "turn-watchdog.jsonl")
+_TURN_WATCHDOG_LOG_LOCK = threading.Lock()
+_TURN_WATCHDOG_DELTA_LAST: dict[str, float] = {}
 
 
 def _panic_hook(exc_type, exc_value, exc_tb):
@@ -1055,6 +1058,7 @@ def write_json(obj: dict) -> bool:
 
 
 def _emit(event: str, sid: str, payload: dict | None = None):
+    _record_turn_watchdog_event(sid, event, payload)
     _mark_turn_progress(sid, event)
     params = {"type": event, "session_id": sid}
     if payload is not None:
@@ -8860,6 +8864,78 @@ def _turn_idle_watchdog_timeout_seconds() -> float:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
         return 120.0
+
+
+def _record_turn_watchdog_event(
+    sid: str, event: str, payload: dict | None = None
+) -> None:
+    if not sid:
+        return
+    now = time.time()
+    if event == "message.delta":
+        last = _TURN_WATCHDOG_DELTA_LAST.get(sid, 0.0)
+        if now - last < 5.0:
+            return
+        _TURN_WATCHDOG_DELTA_LAST[sid] = now
+    elif event not in {
+        "message.start",
+        "message.complete",
+        "status.update",
+        "diagnostic.event",
+        "error",
+        "approval.request",
+        "tool.start",
+        "tool.complete",
+        "tool.error",
+        "review.summary",
+    } and not event.startswith(("tool.", "session.")):
+        return
+
+    session = _sessions.get(sid) or {}
+    safe_payload: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        for key in ("kind", "status", "component", "event", "message", "idle_timeout", "compression_exhausted"):
+            value = payload.get(key)
+            if value is not None:
+                safe_payload[key] = value
+        details = payload.get("details")
+        if isinstance(details, dict):
+            safe_payload["details"] = {
+                key: details.get(key)
+                for key in (
+                    "elapsed_seconds",
+                    "idle_seconds",
+                    "timeout_seconds",
+                    "last_progress_event",
+                    "profile",
+                    "mode",
+                )
+                if details.get(key) is not None
+            }
+
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "monotonic": round(now, 3),
+        "event": event,
+        "session_id": sid,
+        "session_key": session.get("session_key") or "",
+        "cwd": session.get("cwd") or "",
+        "running": bool(session.get("running")),
+        "terminal_emitted": bool(session.get("_turn_terminal_emitted")),
+        "turn_started_at": session.get("turn_started_at"),
+        "turn_last_progress_at": session.get("turn_last_progress_at"),
+        "turn_last_progress_event": session.get("turn_last_progress_event") or "",
+        "compression_started_at": session.get("compression_started_at"),
+        "payload": safe_payload,
+    }
+    try:
+        os.makedirs(os.path.dirname(_TURN_WATCHDOG_LOG), exist_ok=True)
+        line = json.dumps(row, ensure_ascii=False, sort_keys=True)
+        with _TURN_WATCHDOG_LOG_LOCK:
+            with open(_TURN_WATCHDOG_LOG, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def _mark_turn_progress(sid: str, event: str) -> None:
