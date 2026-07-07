@@ -1751,6 +1751,16 @@ function getVenvPython(venvRoot) {
   return path.join(venvRoot, IS_WINDOWS ? path.join('Scripts', 'python.exe') : path.join('bin', 'python'))
 }
 
+function inferVenvRootForPython(root, python) {
+  const normalizedPython = normalizeExecutablePathForCompare(python)
+  for (const candidate of [path.join(root, '.venv'), path.join(root, 'venv')]) {
+    if (normalizedPython === normalizeExecutablePathForCompare(getVenvPython(candidate))) {
+      return candidate
+    }
+  }
+  return path.join(root, 'venv')
+}
+
 // Windows console-window flashes are governed by the *parent's* console, not by
 // each child spawn. A GUI-subsystem parent (pythonw.exe) has no console, so every
 // console-subsystem child it spawns (git, gh, cmd, ...) must allocate its own —
@@ -3056,9 +3066,10 @@ function createPythonBackend(root, label, backendArgs, options = {}) {
   const python = findPythonForRoot(root)
   if (!python) return null
 
-  const venvRoot = path.join(root, 'venv')
-  const venvPython = getVenvPython(venvRoot)
-  const command = IS_WINDOWS && fileExists(venvPython) ? venvPython : python
+  const legacyVenvRoot = path.join(root, 'venv')
+  const legacyVenvPython = getVenvPython(legacyVenvRoot)
+  const command = IS_WINDOWS && fileExists(legacyVenvPython) ? legacyVenvPython : python
+  const venvRoot = inferVenvRootForPython(root, command)
 
   return {
     kind: 'python',
