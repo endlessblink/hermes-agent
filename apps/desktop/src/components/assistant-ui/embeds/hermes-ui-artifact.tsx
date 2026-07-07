@@ -1,6 +1,6 @@
 'use client'
 
-import { useId, useMemo, useState } from 'react'
+import { type CSSProperties, useId, useMemo, useState } from 'react'
 
 import {
   type HermesUiChecklistArtifact,
@@ -59,6 +59,35 @@ function checklistDirection(artifact: HermesUiChecklistArtifact): 'ltr' | 'rtl' 
   return hasRtlText(sample) ? 'rtl' : 'ltr'
 }
 
+function splitTextBlocks(value: string): string[] {
+  return value
+    .split(/\n{2,}/)
+    .map(part => part.trim())
+    .filter(Boolean)
+}
+
+function PlainTextBlocks({ className, text }: { className?: string; text: string }) {
+  const blocks = splitTextBlocks(text)
+
+  if (blocks.length <= 1) {
+    return (
+      <span className={className} dir="auto">
+        {text}
+      </span>
+    )
+  }
+
+  return (
+    <span className={cn('block space-y-1.5', className)} dir="auto">
+      {blocks.map((block, index) => (
+        <span className="block" key={`${index}:${block.slice(0, 16)}`}>
+          {block}
+        </span>
+      ))}
+    </span>
+  )
+}
+
 export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklistArtifact }) {
   const reactId = useId()
   const itemIds = useMemo(() => artifact.items.map(item => item.id), [artifact.items])
@@ -69,6 +98,7 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
   const percent = itemIds.length === 0 ? 0 : (checkedCount / itemIds.length) * 100
   const direction = checklistDirection(artifact)
   const isRtl = direction === 'rtl'
+  const directionalStyle = { direction, textAlign: isRtl ? 'right' : 'left' } satisfies CSSProperties
 
   const updateChecked = (next: Record<string, boolean>) => {
     setChecked(next)
@@ -84,18 +114,19 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
       )}
       data-hermes-ui-artifact="checklist"
       dir={direction}
+      style={directionalStyle}
     >
       <div className="border-b border-border/65 px-3 py-2.5">
-        <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className={cn('flex min-w-0 items-start justify-between gap-3', isRtl && 'flex-row-reverse')}>
           <div className="min-w-0">
             {artifact.title && (
-              <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir="auto">
+              <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
                 {artifact.title}
               </h3>
             )}
             {artifact.description && (
-              <p className="m-0 mt-1 whitespace-pre-wrap text-[0.75rem] leading-snug text-muted-foreground" dir="auto">
-                {artifact.description}
+              <p className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+                <PlainTextBlocks text={artifact.description} />
               </p>
             )}
           </div>
@@ -119,7 +150,12 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
           const inputId = `${reactId}-${item.id}`
 
           return (
-            <div className="flex gap-2.5 px-3 py-2.5" dir={direction} key={item.id}>
+            <div
+              className={cn('flex gap-2.5 px-3 py-2.5', isRtl && 'flex-row-reverse')}
+              dir={direction}
+              key={item.id}
+              style={directionalStyle}
+            >
               <input
                 checked={Boolean(checked[item.id])}
                 className="mt-0.5 size-4 shrink-0 accent-foreground"
@@ -133,14 +169,19 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
                     'block cursor-pointer whitespace-pre-wrap text-[0.8125rem] leading-relaxed text-foreground wrap-anywhere',
                     checked[item.id] && 'text-muted-foreground line-through decoration-muted-foreground/50'
                   )}
-                  dir="auto"
+                  dir={direction}
                   htmlFor={inputId}
+                  style={directionalStyle}
                 >
-                  {item.label}
+                  <PlainTextBlocks text={item.label} />
                 </label>
                 {item.description && (
-                  <p className="m-0 mt-1 whitespace-pre-wrap text-[0.75rem] leading-relaxed text-muted-foreground wrap-anywhere" dir="auto">
-                    {item.description}
+                  <p
+                    className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground wrap-anywhere"
+                    dir={direction}
+                    style={directionalStyle}
+                  >
+                    <PlainTextBlocks text={item.description} />
                   </p>
                 )}
               </div>
@@ -148,7 +189,7 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
           )
         })}
       </div>
-      <div className="flex items-center gap-2 border-t border-border/65 px-3 py-2">
+      <div className={cn('flex items-center gap-2 border-t border-border/65 px-3 py-2', isRtl && 'justify-end')}>
         <button
           className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.75rem] font-medium text-foreground hover:bg-muted/70"
           onClick={() => updateChecked(Object.fromEntries(itemIds.map(id => [id, true] as const)))}
