@@ -66,6 +66,7 @@ interface HarnessHandle {
 
 function Harness({
   activeSessionId = RUNTIME_SESSION_ID,
+  activeSessionIdRefValue,
   busyRef,
   createBackendSessionForSend,
   onReady,
@@ -78,6 +79,7 @@ function Harness({
   storedSessionId
 }: {
   activeSessionId?: null | string
+  activeSessionIdRefValue?: null | string
   busyRef?: MutableRefObject<boolean>
   createBackendSessionForSend?: (preview?: string | null) => Promise<string | null>
   onReady: (handle: HarnessHandle) => void
@@ -90,7 +92,12 @@ function Harness({
   storedSessionId?: null | string
 }) {
   const activeSessionIdRef: MutableRefObject<string | null> = {
-    current: activeSessionId === undefined ? RUNTIME_SESSION_ID : activeSessionId
+    current:
+      activeSessionIdRefValue === undefined
+        ? activeSessionId === undefined
+          ? RUNTIME_SESSION_ID
+          : activeSessionId
+        : activeSessionIdRefValue
   }
 
   const selectedStoredSessionIdRef: MutableRefObject<string | null> = {
@@ -559,6 +566,7 @@ describe('usePromptActions submit / queue drain semantics', () => {
     render(
       <Harness
         activeSessionId={null}
+        activeSessionIdRefValue={RUNTIME_SESSION_ID}
         createBackendSessionForSend={createBackendSessionForSend}
         onReady={h => (handle = h)}
         onSeedState={(state, sessionId) => seeds.push({ sessionId, state })}
@@ -1376,7 +1384,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(await handle!.submitText('message')).toBe(true)
     expect(createBackendSessionForSend).toHaveBeenCalledWith('message')
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: RUNTIME_SESSION_ID })
+    expect(calls[1]?.params).toEqual({ session_id: RUNTIME_SESSION_ID, source: 'desktop' })
     expect(calls[2]?.params).toEqual({ session_id: 'rt-replacement-stale-selected', text: 'message' })
   })
 
@@ -1422,7 +1430,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
 
     expect(ok).toBe(true)
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID })
+    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop' })
     expect(calls[2]?.params).toEqual({
       session_id: RECOVERED_SESSION_ID,
       text: 'message during starved loop'

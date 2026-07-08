@@ -54,11 +54,11 @@ import {
 } from '../store/pet-overlay'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '../store/preview'
 import {
-  ALL_PROFILES,
   $activeGatewayProfile,
   $freshSessionRequest,
   $profileScope,
   $profileSessionRestoreRequest,
+  ALL_PROFILES,
   refreshActiveProfile
 } from '../store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '../store/projects'
@@ -112,7 +112,6 @@ import { ChatSidebar } from './chat/sidebar'
 import { CommandPalette } from './command-palette'
 import {
   continueFromDropoffWithStaleRuntimeRecovery,
-  profileRestoreSessionId,
   resolveProfileRestoreSessionId,
   storedSessionIdForCompressionContinuation
 } from './desktop-controller-utils'
