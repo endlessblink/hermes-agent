@@ -15,13 +15,16 @@ import {
   $sessions,
   $workingSessionIds,
   applyConfiguredDefaultProjectDir,
+  clearRememberedProfileSessionId,
   clearSessionNotifications,
   clearSessionReplyReady,
   getRecentlySettledSessionIds,
+  getRememberedProfileSessionId,
   isOpenableSessionListRow,
   mergeSessionPage,
   sessionPinId,
   setCurrentCwd,
+  setRememberedProfileSessionId,
   setSessionAttention,
   setSessionReplyReady,
   setSessionWorking,
@@ -45,6 +48,32 @@ const session = (over: Partial<SessionInfo>): SessionInfo => ({
   title: null,
   tool_call_count: 0,
   ...over
+})
+
+describe('remembered profile sessions', () => {
+  afterEach(() => {
+    localStorage.removeItem('hermes.desktop.lastSessionIdByProfile')
+  })
+
+  it('stores the last opened session per normalized profile', () => {
+    setRememberedProfileSessionId('film-maker', 'session-1')
+    setRememberedProfileSessionId('', 'default-session')
+
+    expect(getRememberedProfileSessionId('film-maker')).toBe('session-1')
+    expect(getRememberedProfileSessionId('default')).toBe('default-session')
+  })
+
+  it('clears stale session ids from every profile slot', () => {
+    setRememberedProfileSessionId('film-maker', 'stale-session')
+    setRememberedProfileSessionId('office-work', 'stale-session')
+    setRememberedProfileSessionId('default', 'safe-session')
+
+    clearRememberedProfileSessionId('stale-session')
+
+    expect(getRememberedProfileSessionId('film-maker')).toBeNull()
+    expect(getRememberedProfileSessionId('office-work')).toBeNull()
+    expect(getRememberedProfileSessionId('default')).toBe('safe-session')
+  })
 })
 
 describe('setSessionAttention', () => {

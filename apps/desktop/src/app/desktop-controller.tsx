@@ -18,7 +18,6 @@ import { formatRefValue } from '../components/assistant-ui/directive-text'
 import {
   getSessionMessages,
   PROMPT_SUBMIT_REQUEST_TIMEOUT_MS,
-  type SessionCreateResponse,
   type SessionMessage,
   triggerCronJob
 } from '../hermes'
@@ -53,7 +52,14 @@ import {
   setPetOverlaySubmitHandler
 } from '../store/pet-overlay'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '../store/preview'
-import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '../store/profile'
+import {
+  ALL_PROFILES,
+  $activeGatewayProfile,
+  $freshSessionRequest,
+  $profileScope,
+  $profileSessionRestoreRequest,
+  refreshActiveProfile
+} from '../store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '../store/projects'
 import { $reviewOpen, REVIEW_PANE_ID } from '../store/review'
 import {
@@ -68,7 +74,10 @@ import {
   $resumeFailedSessionId,
   $selectedStoredSessionId,
   $sessions,
+  clearRememberedProfileSessionId,
+  getRememberedProfileSessionId,
   getRememberedSessionId,
+  normalizeSessionProfileKey,
   sessionPinId,
   setActiveSessionId,
   setAwaitingResponse,
@@ -79,6 +88,7 @@ import {
   setCurrentProvider,
   setFreshDraftReady,
   setMessages,
+  setRememberedProfileSessionId,
   setRememberedSessionId,
   setSelectedStoredSessionId,
   setSessionStartedAt
@@ -99,7 +109,11 @@ import {
 } from './chat/right-rail'
 import { ChatSidebar } from './chat/sidebar'
 import { CommandPalette } from './command-palette'
-import { storedSessionIdForCompressionContinuation } from './desktop-controller-utils'
+import {
+  continueFromDropoffWithStaleRuntimeRecovery,
+  profileRestoreSessionId,
+  storedSessionIdForCompressionContinuation
+} from './desktop-controller-utils'
 import { useGatewayBoot } from './gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from './gateway/hooks/use-gateway-request'
 import { useKeybinds } from './hooks/use-keybinds'
@@ -209,6 +223,7 @@ export function DesktopController() {
   const filePreviewTarget = useStore($filePreviewTarget)
   const previewTarget = useStore($previewTarget)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
+  const sessions = useStore($sessions)
   const messagingSessions = useStore($messagingSessions)
   const terminalTakeover = useStore($terminalTakeover)
   const reviewOpen = useStore($reviewOpen)
@@ -285,11 +300,19 @@ export function DesktopController() {
   }, [])
 
   // Remember the open chat so a relaunch reopens it instead of an empty new-chat.
+  // Also remember the last open chat per profile so the rail can behave like a
+  // workspace switcher instead of dropping every profile switch onto a blank draft.
   useEffect(() => {
     if (routedSessionId) {
       setRememberedSessionId(routedSessionId)
+
+      const session = [...sessions, ...messagingSessions].find(item => sessionMatchesStoredId(item, routedSessionId))
+
+      if (session) {
+        setRememberedProfileSessionId(normalizeSessionProfileKey(session.profile), routedSessionId)
+      }
     }
-  }, [routedSessionId])
+  }, [messagingSessions, routedSessionId, sessions])
 
   // Restore that chat once, on cold start only (we're at the new-chat route and
   // haven't navigated yet). A dead/deleted id self-clears via the exhausted latch
@@ -301,17 +324,30 @@ export function DesktopController() {
     }
 
     restoredLastSessionRef.current = true
-    const last = getRememberedSessionId()
 
-    if (last && location.pathname === NEW_CHAT_ROUTE) {
-      navigate(sessionRoute(last), { replace: true })
+    if (location.pathname !== NEW_CHAT_ROUTE) {
+      return
     }
-  }, [location.pathname, navigate])
+
+    const rememberedSessionId =
+      profileScope === ALL_PROFILES
+        ? getRememberedSessionId()
+        : profileRestoreSessionId(profileScope, getRememberedProfileSessionId(profileScope), [
+            ...sessions,
+            ...messagingSessions
+          ])
+
+    if (rememberedSessionId) {
+      navigate(sessionRoute(rememberedSessionId), { replace: true })
+    }
+  }, [location.pathname, messagingSessions, navigate, profileScope, sessions])
 
   useEffect(() => {
     if (resumeExhaustedSessionId && getRememberedSessionId() === resumeExhaustedSessionId) {
       setRememberedSessionId(null)
     }
+
+    clearRememberedProfileSessionId(resumeExhaustedSessionId)
   }, [resumeExhaustedSessionId])
 
   // Notification click: the main process already focused the window; jump to its
@@ -572,15 +608,13 @@ export function DesktopController() {
       let nextStoredId: string | null = null
 
       try {
-        const continued = await requestGateway<
-          SessionCreateResponse & { continued_from_session_id?: string; dropoff_message_count?: number }
-        >('session.continue_from_dropoff', {
+        const continued = await continueFromDropoffWithStaleRuntimeRecovery(requestGateway, {
           cwd: $currentCwd.get().trim() || undefined,
           error: errorMessage,
-          parent_session_id: parentStoredSessionId,
-          pending_prompt: prompt,
+          parentSessionId: parentStoredSessionId,
+          pendingPrompt: prompt,
           profile: $activeGatewayProfile.get() || undefined,
-          session_id: failedRuntimeSessionId
+          runtimeSessionId: failedRuntimeSessionId
         })
 
         nextRuntimeId = continued.session_id
@@ -765,6 +799,29 @@ export function DesktopController() {
     lastFreshRef.current = freshSessionRequest
     startFreshSessionDraft()
   }, [freshSessionRequest, startFreshSessionDraft])
+
+  const profileSessionRestoreRequest = useStore($profileSessionRestoreRequest)
+  const lastProfileRestoreNonceRef = useRef(profileSessionRestoreRequest?.nonce ?? 0)
+
+  useEffect(() => {
+    if (!profileSessionRestoreRequest || profileSessionRestoreRequest.nonce === lastProfileRestoreNonceRef.current) {
+      return
+    }
+
+    lastProfileRestoreNonceRef.current = profileSessionRestoreRequest.nonce
+
+    const profile = normalizeSessionProfileKey(profileSessionRestoreRequest.profile)
+    const targetSessionId = profileRestoreSessionId(profile, getRememberedProfileSessionId(profile), [
+      ...$sessions.get(),
+      ...$messagingSessions.get()
+    ])
+
+    startFreshSessionDraft(true)
+
+    if (targetSessionId) {
+      navigate(sessionRoute(targetSessionId), { replace: true })
+    }
+  }, [navigate, profileSessionRestoreRequest, startFreshSessionDraft])
 
   // Swapping the live gateway to another profile must re-pull that profile's
   // global model + active-profile pill. Both are nanostores, so the blanket

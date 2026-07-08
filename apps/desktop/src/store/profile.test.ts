@@ -20,8 +20,10 @@ vi.mock('@/store/starmap', () => ({ resetStarmapGraph }))
 
 const {
   $activeGatewayProfile,
+  $freshSessionRequest,
   $profileIcons,
   $profileScope,
+  $profileSessionRestoreRequest,
   $profiles,
   $selectedProfileScope,
   $showAllProfiles,
@@ -30,6 +32,7 @@ const {
   selectProfile,
   setProfileIcon
 } = await import('./profile')
+
 const { $connection } = await import('./session')
 const { queryClient } = await import('@/lib/query-client')
 const { getProfiles } = await import('@/hermes')
@@ -58,6 +61,8 @@ beforeEach(() => {
   ensureGatewayForProfile.mockImplementation(async () => undefined)
   $gateway.set({ id: 'live-socket' })
   $activeGatewayProfile.set('default')
+  $freshSessionRequest.set(0)
+  $profileSessionRestoreRequest.set(null)
   $selectedProfileScope.set('default')
   $showAllProfiles.set(false)
   $connection.set(localConn())
@@ -193,6 +198,18 @@ describe('selectProfile', () => {
     resolveGateway()
     await gatewayReady
     await vi.waitFor(() => expect($activeGatewayProfile.get()).toBe('content-creator'))
+  })
+
+  it('requests the selected profile last-session restore instead of a fresh draft', () => {
+    const beforeFresh = $freshSessionRequest.get()
+
+    selectProfile('content-creator')
+
+    expect($profileSessionRestoreRequest.get()).toMatchObject({
+      nonce: 1,
+      profile: 'content-creator'
+    })
+    expect($freshSessionRequest.get()).toBe(beforeFresh)
   })
 
   it('does not let a slower previous gateway activation override a newer selected scope', async () => {

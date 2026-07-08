@@ -57,6 +57,7 @@ function persistSelectedProfileScope(name: string): void {
   }
 
   persistString(SELECTED_PROFILE_SCOPE_STORAGE_KEY, key)
+
   if (typeof window !== 'undefined') {
     void window.hermesDesktop?.profile?.setScope?.(key).catch(() => undefined)
   }
@@ -295,6 +296,15 @@ export function requestFreshSession(): void {
   $freshSessionRequest.set($freshSessionRequest.get() + 1)
 }
 
+export const $profileSessionRestoreRequest = atom<{ nonce: number; profile: string } | null>(null)
+
+function requestProfileSessionRestore(profile: string): void {
+  $profileSessionRestoreRequest.set({
+    nonce: ($profileSessionRestoreRequest.get()?.nonce ?? 0) + 1,
+    profile: normalizeProfileKey(profile)
+  })
+}
+
 // Route profile-scoped REST settings (config/env/skills/tools/model/…) to the
 // profile the live gateway is currently on, and drop cached settings from the
 // previous profile so pages refetch against the right backend. Fires once
@@ -442,8 +452,9 @@ export const $profileScope = computed([$showAllProfiles, $selectedProfileScope],
 // gateway onto its backend in the background.
 export function selectProfile(name: string): void {
   const target = normalizeProfileKey(name)
-  // Switching profiles (or coming back from the all-profiles browse view) starts
-  // fresh; re-tapping the profile you're already in leaves your session be.
+  // Switching profiles (or coming back from the all-profiles browse view)
+  // restores that profile's last chat; re-tapping the profile you're already in
+  // leaves your current session alone.
   const switching = $showAllProfiles.get() || target !== normalizeProfileKey($selectedProfileScope.get())
   preferredProfileScope = target
   $selectedProfileScope.set(target)
@@ -452,7 +463,7 @@ export function selectProfile(name: string): void {
   $newChatProfile.set(target)
 
   if (switching) {
-    requestFreshSession()
+    requestProfileSessionRestore(target)
   }
 
   void ensureGatewayProfile(target)

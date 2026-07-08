@@ -1,4 +1,58 @@
 import type { SessionInfo } from '@/hermes'
+import type { SessionCreateResponse } from '@/types/hermes'
+
+type GatewayRequest = <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
+
+export type CompressionContinuationResponse = SessionCreateResponse & {
+  continued_from_session_id?: string
+  dropoff_message_count?: number
+}
+
+interface ContinueFromDropoffParams {
+  cwd?: string
+  error: string
+  parentSessionId: string
+  pendingPrompt: string
+  profile?: string
+  runtimeSessionId: string
+}
+
+function normalizeSessionProfileKey(name: string | null | undefined): string {
+  const value = (name ?? '').trim()
+
+  return value || 'default'
+}
+
+function sessionRecency(session: SessionInfo): number {
+  return session.last_active || session.started_at || 0
+}
+
+export function profileRestoreSessionId(
+  profile: string | null | undefined,
+  rememberedSessionId: null | string,
+  sessions: SessionInfo[]
+): null | string {
+  const remembered = rememberedSessionId?.trim()
+  const profileKey = normalizeSessionProfileKey(profile)
+
+  if (remembered) {
+    const rememberedSession = sessions.find(
+      session => session.id === remembered || session._lineage_root_id === remembered
+    )
+
+    if (!rememberedSession || normalizeSessionProfileKey(rememberedSession.profile) === profileKey) {
+      return remembered
+    }
+  }
+
+  const newest = sessions
+    .filter(
+      session => normalizeSessionProfileKey(session.profile) === profileKey && session.end_reason !== 'compression'
+    )
+    .sort((a, b) => sessionRecency(b) - sessionRecency(a))[0]
+
+  return newest?.id ?? null
+}
 
 // Cheap signature compare so a poll only swaps the atom (and re-renders the
 // sidebar) when the visible rows actually changed.
@@ -27,4 +81,52 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
 
 export function storedSessionIdForCompressionContinuation(parentStoredSessionId: string): string {
   return parentStoredSessionId
+}
+
+function isSessionNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+
+  return /session not found/i.test(message)
+}
+
+function dropoffRequestParams(params: ContinueFromDropoffParams, runtimeSessionId: string): Record<string, unknown> {
+  return {
+    cwd: params.cwd,
+    error: params.error,
+    parent_session_id: params.parentSessionId,
+    pending_prompt: params.pendingPrompt,
+    profile: params.profile,
+    session_id: runtimeSessionId
+  }
+}
+
+export async function continueFromDropoffWithStaleRuntimeRecovery(
+  requestGateway: GatewayRequest,
+  params: ContinueFromDropoffParams
+): Promise<CompressionContinuationResponse> {
+  try {
+    return await requestGateway<CompressionContinuationResponse>(
+      'session.continue_from_dropoff',
+      dropoffRequestParams(params, params.runtimeSessionId)
+    )
+  } catch (err) {
+    if (!isSessionNotFoundError(err)) {
+      throw err
+    }
+
+    const resumed = await requestGateway<{ session_id?: string }>('session.resume', {
+      session_id: params.parentSessionId
+    })
+
+    const recoveredRuntimeId = resumed.session_id?.trim()
+
+    if (!recoveredRuntimeId) {
+      throw err
+    }
+
+    return await requestGateway<CompressionContinuationResponse>(
+      'session.continue_from_dropoff',
+      dropoffRequestParams(params, recoveredRuntimeId)
+    )
+  }
 }

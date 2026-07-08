@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
 
-import { sameCronSignature, storedSessionIdForCompressionContinuation } from './desktop-controller-utils'
+import {
+  continueFromDropoffWithStaleRuntimeRecovery,
+  profileRestoreSessionId,
+  sameCronSignature,
+  storedSessionIdForCompressionContinuation
+} from './desktop-controller-utils'
 
 const session = (id: string, title: string | null): SessionInfo => ({ id, title }) as SessionInfo
 
@@ -33,5 +38,115 @@ describe('sameCronSignature', () => {
 describe('storedSessionIdForCompressionContinuation', () => {
   it('keeps the visible conversation anchored to the parent stored session', () => {
     expect(storedSessionIdForCompressionContinuation('parent-stored')).toBe('parent-stored')
+  })
+})
+
+describe('profileRestoreSessionId', () => {
+  it('prefers the remembered session id for the profile', () => {
+    expect(profileRestoreSessionId('film-maker', 'remembered-session', [session('newest-loaded', 'New')])).toBe(
+      'remembered-session'
+    )
+  })
+
+  it('does not restore a remembered session when the loaded row belongs to another profile', () => {
+    const sessions = [
+      { ...session('film-last', 'Film'), last_active: 300, profile: 'film-maker' },
+      { ...session('office-new', 'Office'), last_active: 200, profile: 'office-work' }
+    ] as SessionInfo[]
+
+    expect(profileRestoreSessionId('office-work', 'film-last', sessions)).toBe('office-new')
+  })
+
+  it('keeps an unloaded remembered session id because profile-scoped storage produced it', () => {
+    const sessions = [{ ...session('film-loaded', 'Film'), last_active: 300, profile: 'film-maker' }] as SessionInfo[]
+
+    expect(profileRestoreSessionId('office-work', 'office-remembered', sessions)).toBe('office-remembered')
+  })
+
+  it('falls back to the newest loaded session in that profile', () => {
+    const sessions = [
+      { ...session('default-newest', 'Default'), last_active: 300, profile: 'default' },
+      { ...session('film-old', 'Old'), last_active: 100, profile: 'film-maker' },
+      { ...session('film-new', 'New'), last_active: 200, profile: 'film-maker' }
+    ] as SessionInfo[]
+
+    expect(profileRestoreSessionId('film-maker', null, sessions)).toBe('film-new')
+  })
+
+  it('ignores compression ancestors and other profiles', () => {
+    const sessions = [
+      { ...session('compressed', 'Compressed'), end_reason: 'compression', last_active: 300, profile: 'film-maker' },
+      { ...session('other-profile', 'Other'), last_active: 200, profile: 'office-work' }
+    ] as SessionInfo[]
+
+    expect(profileRestoreSessionId('film-maker', null, sessions)).toBeNull()
+  })
+})
+
+describe('continueFromDropoffWithStaleRuntimeRecovery', () => {
+  const params = {
+    cwd: '/work',
+    error: 'Context length exceeded',
+    parentSessionId: 'parent-stored',
+    pendingPrompt: 'continue',
+    profile: 'bina',
+    runtimeSessionId: 'stale-runtime'
+  }
+
+  it('resumes the stored parent and retries once when the runtime session is gone', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    let continueAttempts = 0
+
+    const requestGateway = async <T,>(method: string, requestParams?: Record<string, unknown>): Promise<T> => {
+      calls.push({ method, params: requestParams })
+
+      if (method === 'session.continue_from_dropoff') {
+        continueAttempts += 1
+
+        if (continueAttempts === 1) {
+          throw new Error('session not found')
+        }
+
+        return { session_id: 'child-runtime', stored_session_id: 'child-stored' } as T
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: 'recovered-runtime' } as T
+      }
+
+      return {} as T
+    }
+
+    const continued = await continueFromDropoffWithStaleRuntimeRecovery(requestGateway, params)
+
+    expect(continued.session_id).toBe('child-runtime')
+    expect(calls.map(call => call.method)).toEqual([
+      'session.continue_from_dropoff',
+      'session.resume',
+      'session.continue_from_dropoff'
+    ])
+    expect(calls[0]?.params).toMatchObject({
+      parent_session_id: 'parent-stored',
+      pending_prompt: 'continue',
+      session_id: 'stale-runtime'
+    })
+    expect(calls[1]?.params).toEqual({ session_id: 'parent-stored' })
+    expect(calls[2]?.params).toMatchObject({
+      parent_session_id: 'parent-stored',
+      pending_prompt: 'continue',
+      session_id: 'recovered-runtime'
+    })
+  })
+
+  it('does not retry non-stale continuation failures', async () => {
+    const requestGateway = async <T,>(method: string): Promise<T> => {
+      if (method === 'session.continue_from_dropoff') {
+        throw new Error('provider failed')
+      }
+
+      return {} as T
+    }
+
+    await expect(continueFromDropoffWithStaleRuntimeRecovery(requestGateway, params)).rejects.toThrow('provider failed')
   })
 })

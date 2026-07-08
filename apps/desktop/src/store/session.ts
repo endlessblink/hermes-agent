@@ -8,8 +8,10 @@ import { emitDesktopDiagnostic } from '@/lib/desktop-diagnostics'
 import {
   persistBoolean,
   persistString,
+  persistStringRecord,
   storedBoolean,
-  storedString
+  storedString,
+  storedStringRecord
 } from '@/lib/storage'
 import type { SessionInfo, UsageStats } from '@/types/hermes'
 
@@ -28,6 +30,7 @@ const COMPOSER_EFFORT_KEY = 'hermes.desktop.composer.reasoning-effort'
 const COMPOSER_FAST_KEY = 'hermes.desktop.composer.fast'
 const REPLY_READY_SESSION_IDS_KEY = 'hermes.desktop.replyReadySessionIds'
 const REPLY_READY_SESSION_PROFILES_KEY = 'hermes.desktop.replyReadySessionProfiles'
+const LAST_SESSION_BY_PROFILE_KEY = 'hermes.desktop.lastSessionIdByProfile'
 
 // The last chat the user had open, so a relaunch lands back on it instead of an
 // empty new-chat. Stored (not runtime) id — the route is keyed by stored id.
@@ -35,6 +38,39 @@ const LAST_SESSION_KEY = 'hermes.desktop.lastSessionId'
 
 export const getRememberedSessionId = (): null | string => storedString(LAST_SESSION_KEY)
 export const setRememberedSessionId = (id: null | string) => persistString(LAST_SESSION_KEY, id)
+
+function rememberedProfileSessions(): Record<string, string> {
+  return storedStringRecord(LAST_SESSION_BY_PROFILE_KEY)
+}
+
+export function getRememberedProfileSessionId(profile: string | null | undefined): null | string {
+  return rememberedProfileSessions()[normalizeSessionProfileKey(profile)] ?? null
+}
+
+export function setRememberedProfileSessionId(profile: string | null | undefined, id: null | string): void {
+  const key = normalizeSessionProfileKey(profile)
+  const next = { ...rememberedProfileSessions() }
+
+  if (id?.trim()) {
+    next[key] = id.trim()
+  } else {
+    delete next[key]
+  }
+
+  persistStringRecord(LAST_SESSION_BY_PROFILE_KEY, next)
+}
+
+export function clearRememberedProfileSessionId(sessionId: string | null | undefined): void {
+  if (!sessionId) {
+    return
+  }
+
+  const next = Object.fromEntries(
+    Object.entries(rememberedProfileSessions()).filter(([, rememberedSessionId]) => rememberedSessionId !== sessionId)
+  )
+
+  persistStringRecord(LAST_SESSION_BY_PROFILE_KEY, next)
+}
 
 try {
   localStorage.removeItem(REPLY_READY_SESSION_IDS_KEY)
@@ -606,7 +642,7 @@ export const setAttentionSessionIds = (next: Updater<string[]>) => updateAtom($a
 
 let lastAttentionProfileCounts: Record<string, number> = {}
 
-function normalizeSessionProfileKey(name: string | null | undefined): string {
+export function normalizeSessionProfileKey(name: string | null | undefined): string {
   const value = (name ?? '').trim()
 
   return value || 'default'
