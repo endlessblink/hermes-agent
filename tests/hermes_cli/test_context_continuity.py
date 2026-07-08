@@ -73,4 +73,3 @@ def test_obsidian_disabled_does_not_index(tmp_path):
     result = store.index_obsidian(ContinuitySettings(obsidian_read_enabled=False, obsidian_vault_path=str(Path("/tmp"))))
 
     assert result == {"enabled": False, "indexed": 0, "skipped": 0}
-
