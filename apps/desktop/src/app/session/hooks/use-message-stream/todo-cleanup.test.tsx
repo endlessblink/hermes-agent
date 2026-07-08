@@ -161,6 +161,28 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(stateByRuntimeId.get(SID)?.needsInput).toBe(false)
   })
 
+  it('settles a running turn when session.info reports the backend is no longer running', async () => {
+    await mountStream()
+
+    act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
+    expect(stateByRuntimeId.get(SID)?.busy).toBe(true)
+    expect(stateByRuntimeId.get(SID)?.awaitingResponse).toBe(true)
+
+    act(() =>
+      handleEvent!({
+        payload: { running: false },
+        session_id: SID,
+        type: 'session.info'
+      })
+    )
+
+    const state = stateByRuntimeId.get(SID)
+
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(state?.turnStartedAt).toBeNull()
+  })
+
   it('treats message.complete with error status as a failed turn', async () => {
     await mountStream()
 

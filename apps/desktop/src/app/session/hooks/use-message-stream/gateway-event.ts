@@ -198,10 +198,6 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
                 }
               }
 
-              if (state.awaitingResponse && !state.sawAssistantPayload) {
-                return state
-              }
-
               return {
                 ...state,
                 awaitingResponse: false,
