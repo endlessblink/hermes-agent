@@ -23,8 +23,101 @@ keep the exact logger name (``"agent.conversation_loop"``).
 from __future__ import annotations
 
 import os
+import re
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+
+
+_SUPERSESSION_RE = re.compile(
+    r"\b(stop|undo|rollback|roll back|never mind|nevermind|new topic|change topic|just verify|don't do that anymore)\b",
+    re.I,
+)
+_PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\|\.{1,2}/)[^\s`'\")\]}<>]+")
+
+
+def _state_text(value, limit=1200):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        text = "\n".join(part for part in parts if part)
+    elif isinstance(value, dict):
+        text = str(value.get("text") or value.get("content") or value)
+    else:
+        text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 15].rstrip() + " ...[truncated]"
+
+
+def _state_relevant_files(messages, limit=12):
+    seen = {}
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        chunks = [_state_text(msg.get("content"), 2000), str(msg.get("tool_calls") or "")]
+        for chunk in chunks:
+            for match in _PATH_MENTION_RE.findall(chunk):
+                candidate = match.rstrip(".,:;")
+                if candidate and candidate not in seen:
+                    seen[candidate] = None
+                    if len(seen) >= limit:
+                        return list(seen)
+    return list(seen)
+
+
+def _patch_completed_turn_working_state(
+    agent,
+    *,
+    original_user_message,
+    final_response,
+    messages,
+    interrupted,
+    failed,
+):
+    db = getattr(agent, "_session_db", None)
+    session_id = getattr(agent, "session_id", "") or ""
+    if db is None or not session_id:
+        return
+    user_text = _state_text(original_user_message, 800)
+    try:
+        if user_text and _SUPERSESSION_RE.search(user_text):
+            db.patch_working_state(
+                session_id,
+                {
+                    "active_task": "",
+                    "status": "superseded",
+                    "superseded_reason": user_text,
+                },
+                source="turn_supersession",
+            )
+            return
+        if not final_response or interrupted or failed:
+            return
+        db.patch_working_state(
+            session_id,
+            {
+                "active_task": user_text,
+                "status": "answered",
+                "phase": "ready for next user turn",
+                "relevant_files": _state_relevant_files(messages),
+                "completed_actions": [_state_text(final_response, 800)],
+                "last_verified_state": "Last completed assistant response was persisted to the session transcript.",
+            },
+            source="turn_finalizer",
+        )
+    except Exception as exc:
+        try:
+            from agent.conversation_loop import logger
+            logger.debug("working-state turn update failed: %s", exc)
+        except Exception:
+            pass
 
 
 def finalize_turn(
@@ -205,6 +298,14 @@ def finalize_turn(
                 messages.append({"role": "assistant", "content": final_response})
 
         agent._persist_session(messages, conversation_history)
+        _patch_completed_turn_working_state(
+            agent,
+            original_user_message=original_user_message,
+            final_response=final_response,
+            messages=messages,
+            interrupted=interrupted,
+            failed=failed,
+        )
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
         logger.error("finalize_turn: _persist_session failed: %s", _persist_err, exc_info=True)

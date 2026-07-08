@@ -772,6 +772,14 @@ CREATE TABLE IF NOT EXISTS state_meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS session_working_state (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    state_json TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL,
+    source TEXT
+);
+
 CREATE TABLE IF NOT EXISTS gateway_routing (
     scope TEXT NOT NULL DEFAULT '',
     session_key TEXT NOT NULL,
@@ -2359,6 +2367,194 @@ class SessionDB:
                 (system_prompt, session_id),
             )
         self._execute_write(_do)
+
+    def get_working_state(self, session_id: str) -> Dict[str, Any]:
+        """Return the session-local structured working state.
+
+        This is operational continuity for one conversation, not long-term
+        memory.  Missing/corrupt rows degrade to an empty state so a bad state
+        blob can never break session resume or a turn start.
+        """
+        if not session_id:
+            return {}
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state_json FROM session_working_state WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return {}
+        raw = row["state_json"] if isinstance(row, sqlite3.Row) else row[0]
+        try:
+            value = json.loads(raw or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _normalize_working_state_value(value: Any) -> Any:
+        """Keep working-state JSON bounded to simple JSON-compatible values."""
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, list):
+            normalized = [
+                SessionDB._normalize_working_state_value(item)
+                for item in value[:50]
+            ]
+            return [item for item in normalized if item is not None]
+        if isinstance(value, dict):
+            normalized: Dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str) or not key:
+                    continue
+                normalized_value = SessionDB._normalize_working_state_value(item)
+                if normalized_value is not None:
+                    normalized[key] = normalized_value
+            return normalized
+        return str(value)
+
+    @classmethod
+    def _normalize_working_state(cls, state: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(state, dict):
+            return {}
+        normalized = cls._normalize_working_state_value(state)
+        return normalized if isinstance(normalized, dict) else {}
+
+    @staticmethod
+    def _merge_working_state(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(base)
+        for key, value in patch.items():
+            if value is None:
+                merged.pop(key, None)
+                continue
+            if (
+                isinstance(value, dict)
+                and isinstance(merged.get(key), dict)
+            ):
+                merged[key] = SessionDB._merge_working_state(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    def set_working_state(
+        self,
+        session_id: str,
+        state: Dict[str, Any],
+        source: str = "",
+    ) -> Dict[str, Any]:
+        """Replace the session working state and increment its revision."""
+        if not session_id:
+            return {}
+        normalized = self._normalize_working_state(state)
+        payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO session_working_state
+                   (session_id, state_json, revision, updated_at, source)
+                   VALUES (?, ?, 1, ?, ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                     state_json = excluded.state_json,
+                     revision = session_working_state.revision + 1,
+                     updated_at = excluded.updated_at,
+                     source = excluded.source""",
+                (session_id, payload, now, source or ""),
+            )
+
+        self._execute_write(_do)
+        return normalized
+
+    def patch_working_state(
+        self,
+        session_id: str,
+        patch: Dict[str, Any],
+        source: str = "",
+    ) -> Dict[str, Any]:
+        """Merge a patch into the session working state and persist it."""
+        if not session_id or not isinstance(patch, dict) or not patch:
+            return self.get_working_state(session_id)
+        current = self.get_working_state(session_id)
+        normalized_patch: Dict[str, Any] = {}
+        for key, value in patch.items():
+            if not isinstance(key, str) or not key:
+                continue
+            if value is None:
+                normalized_patch[key] = None
+                continue
+            normalized_value = self._normalize_working_state_value(value)
+            if normalized_value is not None:
+                normalized_patch[key] = normalized_value
+        merged = self._merge_working_state(current, normalized_patch)
+        return self.set_working_state(session_id, merged, source=source)
+
+    def clear_working_state(self, session_id: str, reason: str = "") -> Dict[str, Any]:
+        """Clear stale operational state for a session.
+
+        A small supersession marker is kept so diagnostics can explain why a
+        previously active task disappeared without preserving the stale task as
+        active context.
+        """
+        state = {
+            "status": "superseded" if reason else "cleared",
+            "superseded_reason": reason,
+            "active_task": "",
+        }
+        return self.set_working_state(session_id, state, source="clear")
+
+    def render_working_state_context(
+        self,
+        session_id: str,
+        max_chars: int = 2500,
+    ) -> str:
+        """Render a bounded API-only context block for the current turn."""
+        state = self.get_working_state(session_id)
+        if not state:
+            return ""
+        try:
+            max_chars = max(500, min(int(max_chars), 10_000))
+        except (TypeError, ValueError):
+            max_chars = 2500
+
+        def _line(label: str, value: Any) -> str:
+            if value in (None, "", [], {}):
+                return ""
+            if isinstance(value, list):
+                text = "; ".join(str(item) for item in value[:8] if item)
+            elif isinstance(value, dict):
+                parts = []
+                for key, item in list(value.items())[:8]:
+                    if item not in (None, "", [], {}):
+                        parts.append(f"{key}: {item}")
+                text = "; ".join(parts)
+            else:
+                text = str(value)
+            text = re.sub(r"\s+", " ", text).strip()
+            return f"- {label}: {text}" if text else ""
+
+        lines = [
+            "<working-state>",
+            "[System note: Session-local working state. Use this as continuity context, but the latest user message still controls the active request.]",
+            _line("Active task", state.get("active_task")),
+            _line("Status", state.get("status")),
+            _line("Current phase", state.get("phase")),
+            _line("Open decisions", state.get("open_decisions")),
+            _line("Constraints", state.get("constraints")),
+            _line("Relevant files", state.get("relevant_files")),
+            _line("Completed actions", state.get("completed_actions")),
+            _line("Blockers", state.get("blockers")),
+            _line("Last verified state", state.get("last_verified_state")),
+            _line("Superseded reason", state.get("superseded_reason")),
+            "</working-state>",
+        ]
+        rendered = "\n".join(line for line in lines if line)
+        if rendered in {"<working-state>\n</working-state>", ""}:
+            return ""
+        if len(rendered) > max_chars:
+            rendered = rendered[: max_chars - 38].rstrip() + "\n...[working state truncated]"
+        return rendered
 
     def update_session_model(self, session_id: str, model: str) -> None:
         """Update the model for a session after a mid-session switch.

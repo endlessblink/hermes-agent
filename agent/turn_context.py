@@ -115,6 +115,8 @@ class TurnContext:
     plugin_user_context: str = ""
     # External-memory prefetch result, reused across loop iterations.
     ext_prefetch_cache: str = ""
+    # Session-local working state rendered for API-call-time injection only.
+    working_state_context: str = ""
 
 
 def build_turn_context(
@@ -560,6 +562,15 @@ def build_turn_context(
         except Exception:
             pass
 
+    working_state_context = ""
+    try:
+        if agent._session_db and getattr(agent, "session_id", None):
+            working_state_context = agent._session_db.render_working_state_context(
+                agent.session_id
+            )
+    except Exception:
+        working_state_context = ""
+
     return TurnContext(
         user_message=user_message,
         original_user_message=original_user_message,
@@ -572,4 +583,5 @@ def build_turn_context(
         should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context,
         ext_prefetch_cache=ext_prefetch_cache,
+        working_state_context=working_state_context,
     )

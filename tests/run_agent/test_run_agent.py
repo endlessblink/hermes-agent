@@ -95,6 +95,34 @@ def test_run_conversation_dict_returns_include_final_response():
     )
 
 
+def test_working_state_context_is_api_only(agent, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("s1", source="cli", model="test/model")
+    db.set_working_state(
+        "s1",
+        {
+            "active_task": "continue the continuity fix",
+            "relevant_files": ["agent/turn_context.py"],
+        },
+        source="test",
+    )
+    agent._session_db = db
+    agent.session_id = "s1"
+    agent._cached_system_prompt = "You are helpful."
+    agent.client.chat.completions.create.return_value = _mock_response("done")
+
+    result = agent.run_conversation("what next?")
+
+    sent = agent.client.chat.completions.create.call_args.kwargs["messages"]
+    user_msg = next(msg for msg in sent if msg.get("role") == "user")
+    assert "<working-state>" in user_msg["content"]
+    assert "continue the continuity fix" in user_msg["content"]
+    assert result["messages"][-2]["content"] == "what next?"
+    assert "<working-state>" not in result["messages"][-2]["content"]
+
+
 @pytest.fixture()
 def agent():
     """Minimal AIAgent with mocked OpenAI client and tool loading."""

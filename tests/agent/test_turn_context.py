@@ -222,6 +222,28 @@ def test_no_review_when_memory_disabled():
     assert ctx.should_review_memory is False
 
 
+def test_session_working_state_is_rendered_for_api_injection(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("sess-1", source="cli")
+    db.set_working_state(
+        "sess-1",
+        {
+            "active_task": "finish session continuity",
+            "status": "answered",
+            "relevant_files": ["agent/turn_context.py"],
+        },
+        source="test",
+    )
+    agent = _FakeAgent()
+    agent._session_db = db
+
+    ctx = _build(agent)
+
+    assert "<working-state>" in ctx.working_state_context
+    assert "Active task: finish session continuity" in ctx.working_state_context
+    assert "agent/turn_context.py" in ctx.working_state_context
+
+
 def test_ensure_db_session_runs_after_system_prompt_restore():
     """Regression for #45499.
 
@@ -363,4 +385,3 @@ def test_expired_cooldown_allows_preflight(tmp_path):
     assert isinstance(ctx, TurnContext)
     agent._emit_status.assert_called_once()
     agent._compress_context.assert_called()
-

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import uuid
 import threading
@@ -50,6 +51,86 @@ COMPACTION_STATUS_MARKER = "Compacting context"
 COMPACTION_STATUS = (
     f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier conversation so I can continue..."
 )
+
+_PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\|\.{1,2}/)[^\s`'\")\]}<>]+")
+
+
+def _working_state_text(value: Any, limit: int = 1200) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        text = "\n".join(part for part in parts if part)
+    elif isinstance(value, dict):
+        text = str(value.get("text") or value.get("content") or value)
+    else:
+        text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 15].rstrip() + " ...[truncated]"
+
+
+def _latest_user_text(messages: list[dict[str, Any]]) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            text = _working_state_text(msg.get("content"), 500)
+            if text:
+                return text
+    return ""
+
+
+def _summary_text_from_compacted(compressed: list[dict[str, Any]]) -> str:
+    try:
+        from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY
+    except Exception:
+        COMPRESSED_SUMMARY_METADATA_KEY = "_compressed_summary"
+    for msg in compressed:
+        if not isinstance(msg, dict):
+            continue
+        content = _working_state_text(msg.get("content"), 4000)
+        if msg.get(COMPRESSED_SUMMARY_METADATA_KEY) or "[CONTEXT COMPACTION" in content:
+            return content
+    return ""
+
+
+def _relevant_files_from_messages(messages: list[dict[str, Any]], limit: int = 12) -> list[str]:
+    seen: dict[str, None] = {}
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for text in (_working_state_text(msg.get("content"), 2000), str(msg.get("tool_calls") or "")):
+            for match in _PATH_MENTION_RE.findall(text):
+                candidate = match.rstrip(".,:;")
+                if candidate and candidate not in seen:
+                    seen[candidate] = None
+                    if len(seen) >= limit:
+                        return list(seen)
+    return list(seen)
+
+
+def _record_compaction_working_state(agent: Any, messages: list, compressed: list) -> None:
+    db = getattr(agent, "_session_db", None)
+    session_id = getattr(agent, "session_id", "") or ""
+    if db is None or not session_id:
+        return
+    try:
+        patch = {
+            "active_task": _latest_user_text(messages),
+            "status": "compacted",
+            "phase": "continuing after context compaction",
+            "relevant_files": _relevant_files_from_messages(messages),
+            "last_verified_state": "Earlier transcript was compacted; archived rows remain searchable in state.db.",
+            "compaction_summary": _summary_text_from_compacted(compressed),
+        }
+        db.patch_working_state(session_id, patch, source="compaction")
+    except Exception as exc:
+        logger.debug("working-state compaction update failed: %s", exc)
 
 
 def _compression_lock_holder(agent: Any) -> str:
@@ -854,6 +935,7 @@ def compress_context(
                 # refresh the stored system prompt and reset the flush cursor so the
                 # next turn re-bases its append diff.
                 agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
+                _record_compaction_working_state(agent, messages, compressed)
                 agent._last_flushed_db_idx = 0
             except Exception as e:
                 # If the rotation rolled back to the parent (orphan-avoidance
