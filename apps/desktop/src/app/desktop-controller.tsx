@@ -16,6 +16,7 @@ import { useSkinCommand } from '@/themes/use-skin-command'
 
 import { formatRefValue } from '../components/assistant-ui/directive-text'
 import {
+  getSession,
   getSessionMessages,
   PROMPT_SUBMIT_REQUEST_TIMEOUT_MS,
   type SessionMessage,
@@ -112,6 +113,7 @@ import { CommandPalette } from './command-palette'
 import {
   continueFromDropoffWithStaleRuntimeRecovery,
   profileRestoreSessionId,
+  resolveProfileRestoreSessionId,
   storedSessionIdForCompressionContinuation
 } from './desktop-controller-utils'
 import { useGatewayBoot } from './gateway/hooks/use-gateway-boot'
@@ -329,16 +331,40 @@ export function DesktopController() {
       return
     }
 
-    const rememberedSessionId =
-      profileScope === ALL_PROFILES
-        ? getRememberedSessionId()
-        : profileRestoreSessionId(profileScope, getRememberedProfileSessionId(profileScope), [
-            ...sessions,
-            ...messagingSessions
-          ])
+    if (profileScope === ALL_PROFILES) {
+      const rememberedSessionId = getRememberedSessionId()
 
-    if (rememberedSessionId) {
-      navigate(sessionRoute(rememberedSessionId), { replace: true })
+      if (rememberedSessionId) {
+        navigate(sessionRoute(rememberedSessionId), { replace: true })
+      }
+
+      return
+    }
+
+    let cancelled = false
+    const rememberedSessionId = getRememberedProfileSessionId(profileScope)
+
+    void resolveProfileRestoreSessionId(
+      profileScope,
+      rememberedSessionId,
+      [...sessions, ...messagingSessions],
+      getSession
+    ).then(restoredSessionId => {
+      if (cancelled) {
+        return
+      }
+
+      if (rememberedSessionId && restoredSessionId !== rememberedSessionId) {
+        clearRememberedProfileSessionId(rememberedSessionId)
+      }
+
+      if (restoredSessionId) {
+        navigate(sessionRoute(restoredSessionId), { replace: true })
+      }
+    })
+
+    return () => {
+      cancelled = true
     }
   }, [location.pathname, messagingSessions, navigate, profileScope, sessions])
 
@@ -811,15 +837,33 @@ export function DesktopController() {
     lastProfileRestoreNonceRef.current = profileSessionRestoreRequest.nonce
 
     const profile = normalizeSessionProfileKey(profileSessionRestoreRequest.profile)
-    const targetSessionId = profileRestoreSessionId(profile, getRememberedProfileSessionId(profile), [
-      ...$sessions.get(),
-      ...$messagingSessions.get()
-    ])
+    const rememberedSessionId = getRememberedProfileSessionId(profile)
 
     startFreshSessionDraft(true)
 
-    if (targetSessionId) {
-      navigate(sessionRoute(targetSessionId), { replace: true })
+    let cancelled = false
+
+    void resolveProfileRestoreSessionId(
+      profile,
+      rememberedSessionId,
+      [...$sessions.get(), ...$messagingSessions.get()],
+      getSession
+    ).then(targetSessionId => {
+      if (cancelled) {
+        return
+      }
+
+      if (rememberedSessionId && targetSessionId !== rememberedSessionId) {
+        clearRememberedProfileSessionId(rememberedSessionId)
+      }
+
+      if (targetSessionId) {
+        navigate(sessionRoute(targetSessionId), { replace: true })
+      }
+    })
+
+    return () => {
+      cancelled = true
     }
   }, [navigate, profileSessionRestoreRequest, startFreshSessionDraft])
 
