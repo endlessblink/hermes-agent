@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { clearClarifyRequest, setClarifyRequest } from './clarify'
+import { $clarifyRequest, clearClarifyRequest, setClarifyRequest } from './clarify'
 import {
   $activeSessionAwaitingInput,
   $approvalRequest,
@@ -112,25 +112,40 @@ describe('secret prompt store', () => {
 
 describe('clearAllPrompts', () => {
   it('drops every kind for one session at once (turn end / interrupt)', () => {
+    setClarifyRequest({ choices: null, question: 'q', requestId: 'c1', sessionId: 's1' })
     setApprovalRequest({ command: 'x', description: 'd', sessionId: 's1' })
     setSudoRequest({ requestId: 'abc', sessionId: 's1' })
     setSecretRequest({ requestId: 'r1', envVar: 'E', prompt: 'p', sessionId: 's1' })
 
     clearAllPrompts('s1')
 
+    expect($clarifyRequest.get()).toBeNull()
     expect($approvalRequest.get()).toBeNull()
     expect($sudoRequest.get()).toBeNull()
     expect($secretRequest.get()).toBeNull()
   })
 
   it('leaves other sessions parked prompts intact', () => {
+    setClarifyRequest({ choices: null, question: 'q', requestId: 'c1', sessionId: 's1' })
+    setClarifyRequest({ choices: null, question: 'q2', requestId: 'c2', sessionId: 's2' })
     setApprovalRequest({ command: 'x', description: 'd', sessionId: 's1' })
     setApprovalRequest({ command: 'y', description: 'e', sessionId: 's2' })
 
     clearAllPrompts('s1')
 
     $activeSessionId.set('s2')
+    expect($clarifyRequest.get()?.requestId).toBe('c2')
     expect($approvalRequest.get()?.command).toBe('y')
+  })
+
+  it('global reset drops clarify together with every other prompt kind', () => {
+    setClarifyRequest({ choices: null, question: 'q', requestId: 'c1', sessionId: 's1' })
+    setApprovalRequest({ command: 'x', description: 'd', sessionId: 's1' })
+
+    clearAllPrompts()
+
+    expect($clarifyRequest.get()).toBeNull()
+    expect($approvalRequest.get()).toBeNull()
   })
 })
 

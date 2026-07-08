@@ -7,6 +7,8 @@ import type { ClientSessionState } from '@/app/types'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { emitDesktopDiagnostic } from '@/lib/desktop-diagnostics'
 import type { TodoItem } from '@/lib/todos'
+import { $clarifyRequest, clearClarifyRequest } from '@/store/clarify'
+import { $activeSessionId } from '@/store/session'
 import { $todosBySession, clearSessionTodos, setSessionTodos } from '@/store/todos'
 import type { RpcEvent } from '@/types/hermes'
 
@@ -65,12 +67,16 @@ describe('useMessageStream turn-end todo cleanup', () => {
     handleEvent = null
     continueFromCompressionExhausted = vi.fn(async () => undefined)
     stateByRuntimeId = new Map()
+    $activeSessionId.set(SID)
     clearSessionTodos(SID)
+    clearClarifyRequest()
   })
 
   afterEach(() => {
     cleanup()
+    $activeSessionId.set(null)
     clearSessionTodos(SID)
+    clearClarifyRequest()
     vi.restoreAllMocks()
   })
 
@@ -100,6 +106,59 @@ describe('useMessageStream turn-end todo cleanup', () => {
     act(() => handleEvent!({ payload: { message: 'boom' }, session_id: SID, type: 'error' }))
 
     expect($todosBySession.get()[SID]).toBeUndefined()
+  })
+
+  it('keeps needsInput set when an unrelated tool completes after clarify.request', async () => {
+    await mountStream()
+
+    act(() =>
+      handleEvent!({
+        payload: { choices: ['A', 'B'], question: 'Pick one', request_id: 'clarify-1' },
+        session_id: SID,
+        type: 'clarify.request'
+      })
+    )
+    expect(stateByRuntimeId.get(SID)?.needsInput).toBe(true)
+    expect($clarifyRequest.get()?.requestId).toBe('clarify-1')
+
+    act(() =>
+      handleEvent!({
+        payload: { args: { query: 'profile' }, name: 'memory', result: { nodes: 1 }, tool_id: 'memory-1' },
+        session_id: SID,
+        type: 'tool.complete'
+      })
+    )
+
+    expect(stateByRuntimeId.get(SID)?.needsInput).toBe(true)
+    expect($clarifyRequest.get()?.requestId).toBe('clarify-1')
+  })
+
+  it('clears needsInput when the clarify tool completes after the request resolves', async () => {
+    await mountStream()
+
+    act(() =>
+      handleEvent!({
+        payload: { choices: ['A', 'B'], question: 'Pick one', request_id: 'clarify-1' },
+        session_id: SID,
+        type: 'clarify.request'
+      })
+    )
+    expect(stateByRuntimeId.get(SID)?.needsInput).toBe(true)
+
+    act(() =>
+      handleEvent!({
+        payload: {
+          args: { choices: ['A', 'B'], question: 'Pick one' },
+          name: 'clarify',
+          result: { question: 'Pick one', user_response: 'A' },
+          tool_id: 'clarify-1'
+        },
+        session_id: SID,
+        type: 'tool.complete'
+      })
+    )
+
+    expect(stateByRuntimeId.get(SID)?.needsInput).toBe(false)
   })
 
   it('treats message.complete with error status as a failed turn', async () => {

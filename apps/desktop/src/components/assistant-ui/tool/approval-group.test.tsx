@@ -2,7 +2,9 @@ import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime }
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setClarifyRequest } from '@/store/clarify'
+import type { HermesGateway } from '@/hermes'
+import { $clarifyRequest, setClarifyRequest } from '@/store/clarify'
+import { $gateway } from '@/store/gateway'
 import { clearAllPrompts, setApprovalRequest } from '@/store/prompts'
 import { $activeSessionId } from '@/store/session'
 import { clearDismissedToolRows } from '@/store/tool-dismiss'
@@ -147,6 +149,39 @@ function groupedPendingClarifyMessage(): ThreadMessage {
   } as ThreadMessage
 }
 
+function completedClarifyWithPendingRequestMessage(): ThreadMessage {
+  return {
+    id: 'assistant-completed-clarify',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool-call',
+        toolCallId: 'clarify-1',
+        toolName: 'clarify',
+        args: { choices: ['Use FlowState', 'Use plain plan'], question: 'Choose the planning surface' },
+        argsText: JSON.stringify({
+          choices: ['Use FlowState', 'Use plain plan'],
+          question: 'Choose the planning surface'
+        }),
+        result: {
+          choices_offered: ['Use FlowState', 'Use plain plan'],
+          question: 'Choose the planning surface',
+          user_response: ''
+        }
+      }
+    ],
+    status: { type: 'complete', reason: 'stop' },
+    createdAt,
+    metadata: {
+      unstable_state: null,
+      unstable_annotations: [],
+      unstable_data: [],
+      steps: [],
+      custom: {}
+    }
+  } as ThreadMessage
+}
+
 function pendingOnlyMessage(): ThreadMessage {
   return {
     id: 'assistant-pending-only',
@@ -250,6 +285,7 @@ afterEach(() => {
   cleanup()
   clearAllPrompts()
   $activeSessionId.set(null)
+  $gateway.set(null)
   clearDismissedToolRows()
 })
 
@@ -294,6 +330,75 @@ describe('flat tool list approval surfacing', () => {
     })
 
     expect(container.querySelector('.tool-group-scroll')).toBeNull()
+  })
+
+  it('keeps a pending clarify card visible even if the tool row completed first', async () => {
+    setClarifyRequest({
+      choices: ['Use FlowState', 'Use plain plan'],
+      question: 'Choose the planning surface',
+      requestId: 'clarify-request-completed-row',
+      sessionId: 'sess-1'
+    })
+
+    const { container } = render(<GroupHarness message={completedClarifyWithPendingRequestMessage()} />)
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-slot="clarify-inline"]')).not.toBeNull()
+    })
+
+    expect(screen.getByText('Choose the planning surface')).toBeTruthy()
+    expect(screen.getByText('Use FlowState')).toBeTruthy()
+    expect(screen.queryByText('Asked a question')).toBeNull()
+  })
+
+  it('sends an empty clarify answer when Skip is clicked', async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true })
+    $gateway.set({ request } as unknown as HermesGateway)
+    setClarifyRequest({
+      choices: ['One', 'Two'],
+      question: 'Pick one',
+      requestId: 'clarify-request-skip',
+      sessionId: 'sess-1'
+    })
+
+    render(<GroupHarness message={groupedPendingClarifyMessage()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Skip' }))
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('clarify.respond', {
+        answer: '',
+        request_id: 'clarify-request-skip'
+      })
+    })
+    expect($clarifyRequest.get()).toBeNull()
+  })
+
+  it('keeps the clarify card visible when sending the answer fails', async () => {
+    const request = vi.fn().mockRejectedValue(new Error('backend offline'))
+    $gateway.set({ request } as unknown as HermesGateway)
+    setClarifyRequest({
+      choices: ['One', 'Two'],
+      question: 'Pick one',
+      requestId: 'clarify-request-fail',
+      sessionId: 'sess-1'
+    })
+
+    const { container } = render(<GroupHarness message={groupedPendingClarifyMessage()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /One/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Continue/ }))
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('clarify.respond', {
+        answer: 'One',
+        request_id: 'clarify-request-fail'
+      })
+    })
+    await waitFor(() => {
+      expect(container.querySelector('[data-slot="clarify-inline"]')).not.toBeNull()
+    })
+    expect($clarifyRequest.get()?.requestId).toBe('clarify-request-fail')
   })
 
   it('lets completed tool rows be dismissed', async () => {

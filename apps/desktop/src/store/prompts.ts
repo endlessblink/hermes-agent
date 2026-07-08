@@ -1,6 +1,6 @@
 import { atom, computed, type ReadableAtom } from 'nanostores'
 
-import { $clarifyRequest } from './clarify'
+import { $clarifyRequest, clearClarifyRequest } from './clarify'
 import { $activeSessionId } from './session'
 
 // Blocking interactive prompts the gateway raises mid-turn. Each maps to a
@@ -121,10 +121,11 @@ export const $activeSessionAwaitingInput = computed(
   (clarify, approval, sudo, secret) => Boolean(clarify || approval || sudo || secret)
 )
 
-// Drop in-flight prompts for `sessionId` (a turn ended) across all three kinds —
+// Drop in-flight prompts for `sessionId` (a turn ended) across all prompt kinds —
 // or every parked prompt when no session is given (global reset / tests).
 export function clearAllPrompts(sessionId?: string | null): void {
   if (sessionId === undefined) {
+    clearClarifyRequest()
     approval.reset()
     sudo.reset()
     secret.reset()
@@ -133,6 +134,7 @@ export function clearAllPrompts(sessionId?: string | null): void {
     return
   }
 
+  clearClarifyRequest(undefined, sessionId)
   approval.clear(sessionId)
   sudo.clear(sessionId)
   secret.clear(sessionId)

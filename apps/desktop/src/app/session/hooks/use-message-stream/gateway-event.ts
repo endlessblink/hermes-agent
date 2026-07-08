@@ -442,11 +442,13 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             setPetActivity({ toolRunning: false })
           }
 
-          // A pending clarify blocks the turn, so the first tool.complete after
-          // one is the clarify resolving — drop the "needs input" flag here so
-          // the sidebar indicator clears as soon as it's answered, not only at
-          // message.complete.
-          updateSessionState(sessionId, state => (state.needsInput ? { ...state, needsInput: false } : state))
+          // Only the blocking prompt's own completion resolves the "needs
+          // input" state. Other tools can complete while a prompt remains
+          // parked, and clearing here would hide the sidebar input indicator
+          // even though the backend is still waiting on the user.
+          if (payload?.name === 'clarify') {
+            updateSessionState(sessionId, state => (state.needsInput ? { ...state, needsInput: false } : state))
+          }
 
           // terminal/process tool calls are the only things that spawn or reap
           // background processes — sync the composer status stack right after.

@@ -96,12 +96,18 @@ function KeyBadge({ char, preview, selected }: { char: string; preview?: boolean
 
 export const ClarifyTool = (props: ToolCallMessagePartProps) => {
   const messageRunning = useAuiState(selectMessageRunning)
+  const request = useStore($clarifyRequest)
+  const fromArgs = useMemo(() => readClarifyArgs(props.args), [props.args])
 
-  // Only the live, still-blocked turn shows the interactive panel. Once the
-  // message stops running — answered, the turn ended, or the user hit Stop —
-  // fall back to the standard tool block so the Q/A settles like every other
-  // row instead of stranding a dead prompt the gateway no longer waits on.
-  const isPending = messageRunning && props.result === undefined
+  // The gateway can emit tool.complete before the renderer has received or
+  // reconciled the matching clarify.request. A pending request in the store is
+  // the source of truth for "the agent is blocked on user input"; keep the
+  // interactive panel visible until that request is answered or cleared.
+  const hasLiveMatchingRequest = Boolean(
+    request && (!fromArgs.question || !request.question || fromArgs.question === request.question)
+  )
+
+  const isPending = (messageRunning && props.result === undefined) || hasLiveMatchingRequest
 
   if (!isPending) {
     return <ToolFallback {...props} />
@@ -152,8 +158,9 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   const loading = !ready && !submitting
 
   const respond = useCallback(
-    async (answer: string) => {
+    async (answer: string, options?: { allowEmpty?: boolean }) => {
       await respondToClarifyRequest({
+        allowEmpty: options?.allowEmpty,
         answer,
         copy,
         gateway,
@@ -352,7 +359,13 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         )}
 
         <div className="flex items-center justify-end gap-1">
-          <Button disabled={submitting} onClick={() => void respond('')} size="xs" type="button" variant="text">
+          <Button
+            disabled={submitting}
+            onClick={() => void respond('', { allowEmpty: true })}
+            size="xs"
+            type="button"
+            variant="text"
+          >
             {copy.skip}
           </Button>
           <Button disabled={submitting || !pendingAnswer} size="xs" type="submit">

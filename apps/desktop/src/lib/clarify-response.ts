@@ -7,6 +7,7 @@ import { notifyError } from '@/store/notifications'
 type ClarifyCopy = Translations['assistant']['clarify']
 
 export async function respondToClarifyRequest({
+  allowEmpty = false,
   answer,
   copy,
   gateway,
@@ -14,6 +15,7 @@ export async function respondToClarifyRequest({
   onError,
   request
 }: {
+  allowEmpty?: boolean
   answer: string
   copy: ClarifyCopy
   gateway: HermesGateway | null | undefined
@@ -23,7 +25,7 @@ export async function respondToClarifyRequest({
 }): Promise<boolean> {
   const trimmed = answer.trim()
 
-  if (!trimmed) {
+  if (!trimmed && !allowEmpty) {
     return false
   }
 
