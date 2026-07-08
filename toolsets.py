@@ -260,12 +260,15 @@ TOOLSETS = {
     "flowstate": {
         "description": "Flow State personal task and timer tools over the local API",
         "tools": [
+            "flowstate_get_assistant_context",
             "flowstate_health",
             "flowstate_list_tasks",
             "flowstate_create_task",
             "flowstate_update_task",
             "flowstate_delete_task",
             "flowstate_get_current_timer",
+            "flowstate_list_task_instances",
+            "flowstate_schedule_task_instance",
         ],
         "includes": []
     },

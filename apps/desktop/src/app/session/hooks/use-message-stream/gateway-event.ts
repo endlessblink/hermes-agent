@@ -333,11 +333,32 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         if (completionStatus === MESSAGE_COMPLETE_ERROR_STATUS) {
           const errorMessage = finalText || payload?.message || 'Hermes reported an error'
 
-          failAssistantMessage(sessionId, errorMessage)
-
           if (payload?.compression_exhausted) {
             void continueFromCompressionExhausted?.(sessionId, errorMessage)
+
+            updateSessionState(sessionId, state => ({
+              ...state,
+              awaitingResponse: false,
+              busy: false,
+              needsInput: false,
+              pendingBranchGroup: null,
+              streamId: null,
+              turnStartedAt: null
+            }))
+
+            if (isActiveEvent) {
+              setTurnStartedAt(null)
+              setPetActivity({ reasoning: false, toolRunning: false })
+            }
+
+            if (payload?.usage) {
+              setCurrentUsage(current => ({ ...current, ...payload.usage }))
+            }
+
+            return
           }
+
+          failAssistantMessage(sessionId, errorMessage)
 
           if (isActiveEvent) {
             setTurnStartedAt(null)

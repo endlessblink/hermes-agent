@@ -328,6 +328,29 @@ TASK_COMPLETION_GUIDANCE = (
     "is always better than inventing a result."
 )
 
+FLOWSTATE_TOOL_USE_GUIDANCE = (
+    "# FlowState tool-use requirements\n"
+    "When FlowState tools are available and the user asks to create, save, add, "
+    "update, delete, list, check, or schedule tasks in FlowState, you MUST use "
+    "the matching `flowstate_*` tool. Do not answer with Markdown, JSON, a "
+    "`hermes-ui` artifact, or a `task-triage` preview as a substitute for the "
+    "requested FlowState action. If the connector is unavailable or lacks the "
+    "needed project/task id, say that directly and report the tool result or "
+    "the specific missing field."
+)
+
+DESKTOP_QUESTIONNAIRE_GUIDANCE = (
+    "# Hermes Desktop interactive questions\n"
+    "When you need to ask the user a structured set of clarification questions "
+    "in Hermes Desktop, render them as a `hermes-ui` fenced artifact with "
+    '`type: "questionnaire"` instead of a plain Markdown list, raw JSON, or a '
+    "code block. Keep the JSON small and safe: `type`, optional `direction`, "
+    "`id`, `title`, `description`, and `questions` with `id`, `prompt`, and "
+    "`helpText`. For Hebrew or mixed Hebrew text, set `direction` to `rtl` or "
+    "`auto`. Do not use this artifact as a substitute for tool calls when the "
+    "user asked you to take an action."
+)
+
 # Universal parallel-tool-call guidance — applied to ALL models.
 #
 # Why this matters for cost: every assistant turn resends the entire

@@ -19,6 +19,7 @@ _DEFAULT_BASE_URL = "http://127.0.0.1:5577"
 _FLOW_STATE_API_URL: str = ""
 _FLOW_STATE_API_TOKEN: str = ""
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_ONLY_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _VALID_STATUS_FILTERS = {"todo", "open", "done"}
 _VALID_DUE_FILTERS = {"today", "overdue", "open"}
 _VALID_TASK_STATUSES = {"todo", "done"}
@@ -124,7 +125,14 @@ def _check_flowstate_available() -> bool:
     base_url, token = _get_config()
     if base_url != _DEFAULT_BASE_URL:
         return True
-    return bool(token)
+    if token:
+        return True
+    try:
+        req = urllib.request.Request(f"{base_url}/api/health", method="GET")
+        with urllib.request.urlopen(req, timeout=1):
+            return True
+    except Exception:
+        return False
 
 
 def _handle_health(args: dict, **kw) -> str:
@@ -132,6 +140,14 @@ def _handle_health(args: dict, **kw) -> str:
         return _tool_result(_request("GET", "/api/health"))
     except Exception as exc:
         logger.error("flowstate_health error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_assistant_context(args: dict, **kw) -> str:
+    try:
+        return _tool_result(_request("GET", "/api/assistant/context"))
+    except Exception as exc:
+        logger.error("flowstate_get_assistant_context error: %s", exc)
         return _tool_error(str(exc))
 
 
@@ -277,9 +293,68 @@ def _handle_current_timer(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+def _handle_list_task_instances(args: dict, **kw) -> str:
+    task_id = str(args.get("id") or "").strip()
+    if not task_id:
+        return _tool_error("id is required")
+
+    try:
+        return _tool_result(_request("GET", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances"))
+    except Exception as exc:
+        logger.error("flowstate_list_task_instances error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_schedule_task_instance(args: dict, **kw) -> str:
+    task_id = str(args.get("id") or "").strip()
+    if not task_id:
+        return _tool_error("id is required")
+
+    scheduled_date = str(args.get("scheduledDate") or "").strip()
+    if not _DATE_ONLY_RE.match(scheduled_date):
+        return _tool_error("scheduledDate must be YYYY-MM-DD")
+
+    scheduled_time = str(args.get("scheduledTime") or "").strip()
+    if not _TIME_ONLY_RE.match(scheduled_time):
+        return _tool_error("scheduledTime must be HH:mm")
+
+    try:
+        duration = int(args.get("duration"))
+    except (TypeError, ValueError):
+        return _tool_error("duration must be an integer from 1 to 1440")
+    if duration < 1 or duration > 1440:
+        return _tool_error("duration must be an integer from 1 to 1440")
+
+    body = {
+        "scheduledDate": scheduled_date,
+        "scheduledTime": scheduled_time,
+        "duration": duration,
+        "preview": False if args.get("preview") is False else True,
+    }
+
+    try:
+        return _tool_result(_request("POST", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances", body))
+    except Exception as exc:
+        logger.error("flowstate_schedule_task_instance error: %s", exc)
+        return _tool_error(str(exc))
+
+
+FLOWSTATE_ASSISTANT_CONTEXT_SCHEMA = {
+    "name": "flowstate_get_assistant_context",
+    "description": (
+        "Read FlowState's local personal-assistant context summary. This is a "
+        "bearer-protected, user-scoped, read-only endpoint for task pressure, "
+        "focus patterns, project signals, and assistant memory aggregates."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
 FLOWSTATE_HEALTH_SCHEMA = {
     "name": "flowstate_health",
-    "description": "Check whether the local Flow State API sidecar is reachable.",
+    "description": (
+        "Check whether the local Flow State API sidecar is reachable. Use this "
+        "when a user asks to work with FlowState and connector availability is uncertain."
+    ),
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
@@ -287,7 +362,9 @@ FLOWSTATE_LIST_TASKS_SCHEMA = {
     "name": "flowstate_list_tasks",
     "description": (
         "List Flow State tasks. Flow State is the user's personal task app; "
-        "it is not a project name. Use returned task ids for later updates."
+        "it is not a project name. Use returned task ids for later updates. "
+        "Do not answer FlowState list/check requests with Markdown, JSON, or "
+        "a hermes-ui/task-triage artifact instead of this tool."
     ),
     "parameters": {
         "type": "object",
@@ -304,7 +381,9 @@ FLOWSTATE_CREATE_TASK_SCHEMA = {
     "name": "flowstate_create_task",
     "description": (
         "Create a personal task in Flow State. Omit projectId unless the user "
-        "explicitly provided a known Flow State project id."
+        "explicitly provided a known Flow State project id. When the user asks "
+        "to create, save, add, or schedule a task in FlowState, call this tool; "
+        "do not substitute Markdown, JSON, or a hermes-ui/task-triage artifact."
     ),
     "parameters": {
         "type": "object",
@@ -321,7 +400,11 @@ FLOWSTATE_CREATE_TASK_SCHEMA = {
 
 FLOWSTATE_UPDATE_TASK_SCHEMA = {
     "name": "flowstate_update_task",
-    "description": "Update an existing Flow State task by exact task id.",
+    "description": (
+        "Update an existing Flow State task by exact task id. When the user asks "
+        "to change, complete, reprioritize, or reschedule a FlowState task, call "
+        "this tool instead of returning a passive preview."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -352,16 +435,56 @@ FLOWSTATE_CURRENT_TIMER_SCHEMA = {
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
+FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA = {
+    "name": "flowstate_list_task_instances",
+    "description": (
+        "Read calendar/time-block instances for one exact FlowState task id. "
+        "This is read-only and never returns the full task body."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"id": {"type": "string", "description": "Exact Flow State task id."}},
+        "required": ["id"],
+    },
+}
+
+FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA = {
+    "name": "flowstate_schedule_task_instance",
+    "description": (
+        "Preview or apply a FlowState task time block using POST /api/tasks/:id/instances. "
+        "Defaults to preview=true and is non-mutating unless preview is explicitly false after "
+        "the user approves the exact task id, date, time, and duration. This tool never changes "
+        "task status, title, priority, or due date, and never deletes tasks."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Exact Flow State task id."},
+            "scheduledDate": {"type": "string", "description": "YYYY-MM-DD scheduled date."},
+            "scheduledTime": {"type": "string", "description": "HH:mm 24-hour scheduled time."},
+            "duration": {"type": "integer", "description": "Duration in minutes, 1-1440."},
+            "preview": {
+                "type": "boolean",
+                "description": "Omit or set true for a non-mutating preview; set false only after explicit approval.",
+            },
+        },
+        "required": ["id", "scheduledDate", "scheduledTime", "duration"],
+    },
+}
+
 
 from tools.registry import registry
 
 for _name, _schema, _handler in [
+    ("flowstate_get_assistant_context", FLOWSTATE_ASSISTANT_CONTEXT_SCHEMA, _handle_assistant_context),
     ("flowstate_health", FLOWSTATE_HEALTH_SCHEMA, _handle_health),
     ("flowstate_list_tasks", FLOWSTATE_LIST_TASKS_SCHEMA, _handle_list_tasks),
     ("flowstate_create_task", FLOWSTATE_CREATE_TASK_SCHEMA, _handle_create_task),
     ("flowstate_update_task", FLOWSTATE_UPDATE_TASK_SCHEMA, _handle_update_task),
     ("flowstate_delete_task", FLOWSTATE_DELETE_TASK_SCHEMA, _handle_delete_task),
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
+    ("flowstate_list_task_instances", FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA, _handle_list_task_instances),
+    ("flowstate_schedule_task_instance", FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA, _handle_schedule_task_instance),
 ]:
     registry.register(
         name=_name,

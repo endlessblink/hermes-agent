@@ -829,6 +829,20 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     return False
 
 
+def _codex_native_vision_tool_results_enabled() -> bool:
+    """Return True when the risky Codex native-vision tool path is opted in.
+
+    ``openai-codex`` can serialize image parts in function-call outputs, but
+    the Desktop agent keeps tool-result messages in the active turn until the
+    model stops. A base64 image payload therefore gets resent on every follow-up
+    API/tool loop in that same turn. In real sessions this grew requests into
+    million-token estimates and made the app look stuck. Keep Codex on the
+    text-description path by default; allow explicit opt-in for experiments.
+    """
+    raw = os.getenv("HERMES_CODEX_NATIVE_VISION_TOOL_RESULTS", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _should_use_native_vision_fast_path() -> bool:
     """Whether vision tools should attach the image to the main model directly
     instead of routing through the auxiliary vision LLM.
@@ -849,6 +863,17 @@ def _should_use_native_vision_fast_path() -> bool:
         model = _read_main_model()
         cfg = load_config()
         if decide_image_input_mode(provider, model, cfg) != "native":
+            return False
+        provider_key = (provider or "").strip().lower()
+        if (
+            provider_key == "openai-codex"
+            and not _codex_native_vision_tool_results_enabled()
+        ):
+            logger.info(
+                "vision_analyze: using auxiliary text path for openai-codex; "
+                "set HERMES_CODEX_NATIVE_VISION_TOOL_RESULTS=1 to opt into "
+                "native image tool-result payloads"
+            )
             return False
         return (
             _supports_media_in_tool_results(provider, model)

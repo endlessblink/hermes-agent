@@ -103,6 +103,41 @@ class TestMemoryPromptCompatibility:
         assert "legacy user block" in volatile
 
 
+class TestFlowStateGuidance:
+    def test_injected_when_flowstate_tools_are_available(self):
+        stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_create_task"]))
+
+        assert "FlowState tool-use requirements" in stable
+        assert "`flowstate_*` tool" in stable
+        assert "`task-triage` preview" in stable
+
+    def test_absent_without_flowstate_tools(self):
+        stable = _stable_prompt(_make_agent(valid_tool_names=["read_file"]))
+
+        assert "FlowState tool-use requirements" not in stable
+
+
+class TestDesktopQuestionnaireGuidance:
+    def test_injected_for_desktop_platform(self):
+        stable = _stable_prompt(_make_agent(platform="desktop"))
+
+        assert "Hermes Desktop interactive questions" in stable
+        assert '`type: "questionnaire"`' in stable
+        assert "plain Markdown list" in stable
+
+    def test_injected_for_desktop_env(self, monkeypatch):
+        monkeypatch.setenv("HERMES_DESKTOP", "1")
+        stable = _stable_prompt(_make_agent())
+
+        assert "Hermes Desktop interactive questions" in stable
+
+    def test_absent_for_non_desktop_sessions(self, monkeypatch):
+        monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+        stable = _stable_prompt(_make_agent(platform="telegram"))
+
+        assert "Hermes Desktop interactive questions" not in stable
+
+
 class TestCodingContextBlock:
     def test_injected_when_active(self, monkeypatch, tmp_path):
         _init_code_repo(tmp_path)

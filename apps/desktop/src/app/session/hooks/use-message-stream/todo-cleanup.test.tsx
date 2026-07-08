@@ -143,6 +143,13 @@ describe('useMessageStream turn-end todo cleanup', () => {
       SID,
       'Context length exceeded (358,245 tokens). Cannot compress further.'
     )
+
+    const state = stateByRuntimeId.get(SID)
+
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(state?.turnStartedAt).toBeNull()
+    expect(state?.messages.at(-1)?.error).toBeUndefined()
   })
 
   it('forwards gateway diagnostic events to desktop diagnostics', async () => {

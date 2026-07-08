@@ -80,12 +80,15 @@ class TestResolveToolset:
     def test_flowstate_toolset(self):
         tools = set(resolve_toolset("flowstate"))
         assert tools == {
+            "flowstate_get_assistant_context",
             "flowstate_health",
             "flowstate_list_tasks",
             "flowstate_create_task",
             "flowstate_update_task",
             "flowstate_delete_task",
             "flowstate_get_current_timer",
+            "flowstate_list_task_instances",
+            "flowstate_schedule_task_instance",
         }
 
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):

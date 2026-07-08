@@ -26,7 +26,11 @@ interface RichCodeBlockProps extends RichFenceProps {
 }
 
 export function RichCodeBlock({ code, fallback, language, streaming }: RichCodeBlockProps) {
-  const normalizedLanguage = language?.toLowerCase()
+  const normalizedLanguage = language
+    ?.trim()
+    .toLowerCase()
+    .replace(/^language-/, '')
+
   const Renderer = normalizedLanguage ? LAZY_FENCE[normalizedLanguage] : undefined
 
   if (!Renderer) {

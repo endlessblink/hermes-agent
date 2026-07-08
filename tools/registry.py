@@ -40,6 +40,21 @@ def _is_registry_register_call(node: ast.AST) -> bool:
     )
 
 
+def _top_level_stmt_registers_tools(node: ast.AST) -> bool:
+    """Return True when a module-level statement registers tools.
+
+    Registration is often inside simple module-level loops to avoid repeating
+    near-identical ``registry.register(...)`` calls. Descend through module-level
+    control-flow blocks, but do not inspect function or class bodies; helper
+    functions that register tools at call time should not trigger discovery.
+    """
+    if _is_registry_register_call(node):
+        return True
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return False
+    return any(_top_level_stmt_registers_tools(child) for child in ast.iter_child_nodes(node))
+
+
 def _module_registers_tools(module_path: Path) -> bool:
     """Return True when the module contains a top-level ``registry.register(...)`` call.
 
@@ -52,7 +67,7 @@ def _module_registers_tools(module_path: Path) -> bool:
     except (OSError, SyntaxError):
         return False
 
-    return any(_is_registry_register_call(stmt) for stmt in tree.body)
+    return any(_top_level_stmt_registers_tools(stmt) for stmt in tree.body)
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
