@@ -2,6 +2,7 @@ import type { SessionInfo } from '@/hermes'
 import type { SessionCreateResponse } from '@/types/hermes'
 
 type GatewayRequest = <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
+type ProfileSessionProbe = (sessionId: string, profile: string) => Promise<SessionInfo>
 
 export type CompressionContinuationResponse = SessionCreateResponse & {
   continued_from_session_id?: string
@@ -35,11 +36,11 @@ export function profileRestoreSessionId(
   const remembered = rememberedSessionId?.trim()
   const profileKey = normalizeSessionProfileKey(profile)
 
-  if (remembered) {
-    const rememberedSession = sessions.find(
-      session => session.id === remembered || session._lineage_root_id === remembered
-    )
+  const rememberedSession = remembered
+    ? sessions.find(session => session.id === remembered || session._lineage_root_id === remembered)
+    : undefined
 
+  if (remembered && rememberedSession) {
     if (!rememberedSession || normalizeSessionProfileKey(rememberedSession.profile) === profileKey) {
       return remembered
     }
@@ -52,6 +53,40 @@ export function profileRestoreSessionId(
     .sort((a, b) => sessionRecency(b) - sessionRecency(a))[0]
 
   return newest?.id ?? null
+}
+
+export async function resolveProfileRestoreSessionId(
+  profile: string | null | undefined,
+  rememberedSessionId: null | string,
+  sessions: SessionInfo[],
+  probeSession: ProfileSessionProbe
+): Promise<null | string> {
+  const remembered = rememberedSessionId?.trim()
+  const loadedTarget = profileRestoreSessionId(profile, remembered ?? null, sessions)
+
+  if (!remembered || loadedTarget === remembered) {
+    return loadedTarget
+  }
+
+  const profileKey = normalizeSessionProfileKey(profile)
+  const knownRememberedSession = sessions.find(
+    session => session.id === remembered || session._lineage_root_id === remembered
+  )
+
+  if (!knownRememberedSession) {
+    try {
+      const resolved = await probeSession(remembered, profileKey)
+
+      if (normalizeSessionProfileKey(resolved.profile) === profileKey) {
+        return remembered
+      }
+    } catch {
+      // Local remembered state can be stale or contaminated; fail closed to
+      // the newest loaded row in the selected profile instead of cross-opening.
+    }
+  }
+
+  return loadedTarget
 }
 
 // Cheap signature compare so a poll only swaps the atom (and re-renders the

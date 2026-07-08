@@ -5,6 +5,7 @@ import type { SessionInfo } from '@/hermes'
 import {
   continueFromDropoffWithStaleRuntimeRecovery,
   profileRestoreSessionId,
+  resolveProfileRestoreSessionId,
   sameCronSignature,
   storedSessionIdForCompressionContinuation
 } from './desktop-controller-utils'
@@ -43,9 +44,12 @@ describe('storedSessionIdForCompressionContinuation', () => {
 
 describe('profileRestoreSessionId', () => {
   it('prefers the remembered session id for the profile', () => {
-    expect(profileRestoreSessionId('film-maker', 'remembered-session', [session('newest-loaded', 'New')])).toBe(
-      'remembered-session'
-    )
+    const sessions = [
+      { ...session('remembered-session', 'Remembered'), last_active: 100, profile: 'film-maker' },
+      { ...session('newest-loaded', 'New'), last_active: 200, profile: 'film-maker' }
+    ] as SessionInfo[]
+
+    expect(profileRestoreSessionId('film-maker', 'remembered-session', sessions)).toBe('remembered-session')
   })
 
   it('does not restore a remembered session when the loaded row belongs to another profile', () => {
@@ -57,10 +61,10 @@ describe('profileRestoreSessionId', () => {
     expect(profileRestoreSessionId('office-work', 'film-last', sessions)).toBe('office-new')
   })
 
-  it('keeps an unloaded remembered session id because profile-scoped storage produced it', () => {
+  it('does not trust an unloaded remembered session id without profile validation', () => {
     const sessions = [{ ...session('film-loaded', 'Film'), last_active: 300, profile: 'film-maker' }] as SessionInfo[]
 
-    expect(profileRestoreSessionId('office-work', 'office-remembered', sessions)).toBe('office-remembered')
+    expect(profileRestoreSessionId('office-work', 'office-remembered', sessions)).toBeNull()
   })
 
   it('falls back to the newest loaded session in that profile', () => {
@@ -80,6 +84,47 @@ describe('profileRestoreSessionId', () => {
     ] as SessionInfo[]
 
     expect(profileRestoreSessionId('film-maker', null, sessions)).toBeNull()
+  })
+})
+
+describe('resolveProfileRestoreSessionId', () => {
+  it('validates an unloaded remembered session id against the target profile before restoring it', async () => {
+    const probe = async (sessionId: string, profile: string): Promise<SessionInfo> =>
+      ({ ...session(sessionId, 'Office'), profile }) as SessionInfo
+
+    await expect(resolveProfileRestoreSessionId('office-work', 'office-remembered', [], probe)).resolves.toBe(
+      'office-remembered'
+    )
+  })
+
+  it('fails closed to a loaded target-profile session when remembered validation misses', async () => {
+    const sessions = [
+      { ...session('office-loaded', 'Office'), last_active: 100, profile: 'office-work' }
+    ] as SessionInfo[]
+    const probe = async (): Promise<SessionInfo> => {
+      throw new Error('session not found')
+    }
+
+    await expect(resolveProfileRestoreSessionId('office-work', 'bad-remembered', sessions, probe)).resolves.toBe(
+      'office-loaded'
+    )
+  })
+
+  it('does not probe a remembered id that is already known to belong to another profile', async () => {
+    const sessions = [
+      { ...session('film-last', 'Film'), last_active: 300, profile: 'film-maker' },
+      { ...session('office-loaded', 'Office'), last_active: 100, profile: 'office-work' }
+    ] as SessionInfo[]
+    let probes = 0
+    const probe = async (): Promise<SessionInfo> => {
+      probes += 1
+      throw new Error('should not probe')
+    }
+
+    await expect(resolveProfileRestoreSessionId('office-work', 'film-last', sessions, probe)).resolves.toBe(
+      'office-loaded'
+    )
+    expect(probes).toBe(0)
   })
 })
 
