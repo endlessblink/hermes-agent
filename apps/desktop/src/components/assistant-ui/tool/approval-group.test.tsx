@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { clearAllPrompts, setApprovalRequest } from '@/store/prompts'
+import { setClarifyRequest } from '@/store/clarify'
 import { $activeSessionId } from '@/store/session'
 import { clearDismissedToolRows } from '@/store/tool-dismiss'
 import { $toolDisclosureStates } from '@/store/tool-view'
@@ -91,6 +92,47 @@ function groupedPendingMessage(): ThreadMessage {
         toolName: 'terminal',
         args: { command: 'rm -rf /tmp/x' },
         argsText: JSON.stringify({ command: 'rm -rf /tmp/x' })
+      }
+    ],
+    status: { type: 'running' },
+    createdAt,
+    metadata: {
+      unstable_state: null,
+      unstable_annotations: [],
+      unstable_data: [],
+      steps: [],
+      custom: {}
+    }
+  } as ThreadMessage
+}
+
+function groupedPendingClarifyMessage(): ThreadMessage {
+  return {
+    id: 'assistant-group-clarify',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool-call',
+        toolCallId: 'memory-1',
+        toolName: 'memory',
+        args: { query: 'profile' },
+        argsText: JSON.stringify({ query: 'profile' }),
+        result: { nodes: 25 }
+      },
+      {
+        type: 'tool-call',
+        toolCallId: 'read-1',
+        toolName: 'read_file',
+        args: { path: '/tmp/a' },
+        argsText: JSON.stringify({ path: '/tmp/a' }),
+        result: { content: 'ok' }
+      },
+      {
+        type: 'tool-call',
+        toolCallId: 'clarify-1',
+        toolName: 'clarify',
+        args: { choices: ['One', 'Two'], question: 'Pick one' },
+        argsText: JSON.stringify({ choices: ['One', 'Two'], question: 'Pick one' })
       }
     ],
     status: { type: 'running' },
@@ -235,6 +277,23 @@ describe('flat tool list approval surfacing', () => {
       // in a `hidden` subtree.
       expect(bar?.closest('[hidden]')).toBeNull()
     })
+  })
+
+  it('does not trap a live clarify question inside the compact tool scroller', async () => {
+    setClarifyRequest({
+      choices: ['One', 'Two'],
+      question: 'Pick one',
+      requestId: 'clarify-request-1',
+      sessionId: 'sess-1'
+    })
+
+    const { container } = render(<GroupHarness message={groupedPendingClarifyMessage()} />)
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-slot="clarify-inline"]')).not.toBeNull()
+    })
+
+    expect(container.querySelector('.tool-group-scroll')).toBeNull()
   })
 
   it('lets completed tool rows be dismissed', async () => {
