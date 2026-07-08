@@ -38,6 +38,7 @@ import { normalize } from '@/lib/text'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { recordPreviewArtifact } from '@/store/preview-status'
+import { $clarifyRequest } from '@/store/clarify'
 import { $activeSessionId, $currentCwd } from '@/store/session'
 import { $toolInlineDiffs } from '@/store/tool-diffs'
 import { $toolRowDismissed, dismissToolRow } from '@/store/tool-dismiss'
@@ -683,9 +684,10 @@ export const ToolGroupSlot: FC<PropsWithChildren<{ endIndex: number; startIndex:
 }) => {
   const messageId = useAuiState(s => s.message.id)
   const messageRunning = useAuiState(selectMessageRunning)
+  const clarifyRequest = useStore($clarifyRequest)
   const enterRef = useEnterAnimation(messageRunning, `tool-group:${messageId}:${startIndex}`)
 
-  const bounded = Children.count(children) >= TOOL_GROUP_SCROLL_THRESHOLD
+  const bounded = !clarifyRequest && Children.count(children) >= TOOL_GROUP_SCROLL_THRESHOLD
   const { contentRef, faded, onScroll, scrollRef } = useToolWindow(bounded)
 
   return (
