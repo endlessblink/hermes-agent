@@ -5100,20 +5100,56 @@ def _build_dropoff_seed(
         f"Model: {model or _resolve_model()}",
         f"Recovery reason: {_clip_dropoff_text(error_message, 500) or 'context compression exhausted'}",
         pending_note,
+        # The lane goes above the transcript, as structure. Buried in the prose
+        # below, a `codex exec --cd <repo>` command cannot outrank a `glob` of
+        # the home directory -- which is how this session once ended up in the
+        # wrong repository.
+        _render_active_lane(session),
         "Recent transcript context:",
         "\n".join(recent_lines) if recent_lines else "- No recent transcript text was available.",
     ]
-    if recall_hits:
-        recall_lines = []
-        for hit in recall_hits[:3]:
-            source = hit.get("source_path") or hit.get("id") or "continuity"
-            snippet = _clip_dropoff_text(hit.get("snippet"), 500)
-            if snippet:
-                recall_lines.append(f"- [{hit.get('id')}] {source}: {snippet}")
-        if recall_lines:
-            sections.extend(["Retrieved continuity context:", "\n".join(recall_lines)])
+    from agent.lane_resolver import echoes_recovery_reason
+
+    recall_lines = []
+    for hit in (recall_hits or [])[:3]:
+        snippet = _clip_dropoff_text(hit.get("snippet"), 500)
+        # Continuity is searched with the recovery reason as its query, so it
+        # readily retrieves prior dropoff notices -- the model gets its own
+        # error message back, three times, in place of the work.
+        if not snippet or echoes_recovery_reason(snippet, error_message):
+            continue
+        source = hit.get("source_path") or hit.get("id") or "continuity"
+        recall_lines.append(f"- [{hit.get('id')}] {source}: {snippet}")
+    if recall_lines:
+        sections.extend(["Retrieved continuity context:", "\n".join(recall_lines)])
 
     return [{"role": "system", "content": "\n\n".join(part for part in sections if part)}]
+
+
+def _render_active_lane(session: dict) -> str:
+    """Resolve the parent session's work lane and render it for the child."""
+    from agent.lane_resolver import render_lane_block, resolve_lane
+
+    try:
+        with session["history_lock"]:
+            history = [dict(msg) for msg in (session.get("history") or [])]
+        try:
+            from tools.process_registry import process_registry
+
+            processes = process_registry.list_sessions()
+        except Exception:
+            processes = []
+        lane = resolve_lane(
+            history,
+            session_cwd=str(session.get("cwd") or ""),
+            process_sessions=processes,
+            is_repo=lambda path: bool(git_probe.repo_root(path)),
+            branch_probe=lambda path: _git_branch_for_cwd(path) or None,
+        )
+        return render_lane_block(lane)
+    except Exception:
+        logger.exception("lane resolution failed; continuing without a lane block")
+        return render_lane_block(None)
 
 
 def _continuity_store():
