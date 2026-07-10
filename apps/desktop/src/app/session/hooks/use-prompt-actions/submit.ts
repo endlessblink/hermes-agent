@@ -13,7 +13,8 @@ import {
 } from '@/store/composer'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
-import { clearSessionReplyReady, setAwaitingResponse, setBusy, setMessages } from '@/store/session'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
+import { $sessions, clearSessionReplyReady, setAwaitingResponse, setBusy, setMessages } from '@/store/session'
 
 import type { ClientSessionState } from '../../../types'
 
@@ -202,6 +203,23 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         )
       }
 
+      const resumeParamsForSelectedSession = (
+        storedSessionId: string,
+        extra?: Record<string, unknown>
+      ): Record<string, unknown> => {
+        const stored = $sessions.get().find(session => {
+          return session.id === storedSessionId || session._lineage_root_id === storedSessionId
+        })
+
+        const profile = normalizeProfileKey(stored?.profile ?? $activeGatewayProfile.get())
+
+        return {
+          session_id: storedSessionId,
+          profile,
+          ...extra
+        }
+      }
+
       setMutableRef(busyRef, true)
       setBusy(true)
       setAwaitingResponse(true)
@@ -225,18 +243,24 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // to session creation when NO stored session is selected (a genuine
         // new-chat draft).
         try {
-          const resumed = await requestGateway<{ session_id: string }>('session.resume', {
-            session_id: selectedStoredSessionIdRef.current
-          })
+          const resumed = await requestGateway<{ session_id: string }>(
+            'session.resume',
+            resumeParamsForSelectedSession(selectedStoredSessionIdRef.current)
+          )
 
           if (resumed?.session_id) {
             sessionId = resumed.session_id
             activeSessionIdRef.current = sessionId
           }
-        } catch {
-          // Resume failed (session gone from state.db, gateway hiccup) —
-          // fall through to creating a fresh session rather than dead-ending
-          // the user's message.
+        } catch (err) {
+          // A selected stored session is a continuity contract. If the durable
+          // conversation cannot be resumed, do not mint a fresh chat under the
+          // same submit action; that silently splits the user's context.
+          dropOptimistic(null)
+          releaseBusy()
+          notifyError(err, copy.sessionUnavailable)
+
+          return false
         }
 
         if (sessionId) {
@@ -302,16 +326,17 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 // backend loop (#55578 symptom d) rejects the submit even though
                 // the stored session is fine — resume + retry instead of erroring
                 // out and losing the session binding.
-                const resumed = await requestGateway<{ session_id: string }>('session.resume', {
-                  session_id: storedSessionId,
-                  source: 'desktop'
-                })
+                const resumed = await requestGateway<{ session_id: string }>(
+                  'session.resume',
+                  resumeParamsForSelectedSession(storedSessionId, { source: 'desktop' })
+                )
 
                 recoveredId = resumed?.session_id || null
               } catch (resumeErr) {
-                if (!isSessionNotFoundError(resumeErr) || options?.fromQueue) {
-                  submitErr = resumeErr
-                }
+                // A selected stored session must either resume or fail visibly.
+                // Creating a fresh replacement here makes the UI look like the
+                // same chat while the backend has no prior context.
+                submitErr = resumeErr
               }
 
               if (!recoveredId && submitErr === null && !options?.fromQueue) {

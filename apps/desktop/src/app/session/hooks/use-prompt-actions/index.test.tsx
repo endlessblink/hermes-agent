@@ -1232,7 +1232,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(ok).toBe(true)
     // First submit (stale id) → session.resume (stored id) → retry submit (fresh id).
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop' })
+    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, profile: 'default', source: 'desktop' })
     expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after wake' })
   })
 
@@ -1347,7 +1347,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(calls[1]?.params).toEqual({ session_id: 'rt-replacement-new-draft', text: 'message' })
   })
 
-  it('creates a replacement runtime session when the selected stored id is also stale', async () => {
+  it('does not create a replacement runtime session when the selected stored id cannot resume', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
     const createBackendSessionForSend = vi.fn(async () => 'rt-replacement-stale-selected')
     let submitAttempts = 0
@@ -1381,11 +1381,10 @@ describe('usePromptActions sleep/wake session recovery', () => {
       />
     )
 
-    expect(await handle!.submitText('message')).toBe(true)
-    expect(createBackendSessionForSend).toHaveBeenCalledWith('message')
-    expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: RUNTIME_SESSION_ID, source: 'desktop' })
-    expect(calls[2]?.params).toEqual({ session_id: 'rt-replacement-stale-selected', text: 'message' })
+    expect(await handle!.submitText('message')).toBe(false)
+    expect(createBackendSessionForSend).not.toHaveBeenCalled()
+    expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume'])
+    expect(calls[1]?.params).toEqual({ session_id: RUNTIME_SESSION_ID, profile: 'default', source: 'desktop' })
   })
 
   it('recovers via session.resume when prompt.submit TIMES OUT and a stored session is selected (#55578)', async () => {
@@ -1430,7 +1429,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
 
     expect(ok).toBe(true)
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop' })
+    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, profile: 'default', source: 'desktop' })
     expect(calls[2]?.params).toEqual({
       session_id: RECOVERED_SESSION_ID,
       text: 'message during starved loop'
@@ -1473,8 +1472,52 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(ok).toBe(true)
     expect(createBackendSessionForSend).not.toHaveBeenCalled()
     expect(calls.map(c => c.method)).toEqual(['session.resume', 'prompt.submit'])
-    expect(calls[0]?.params).toEqual({ session_id: STORED_SESSION_ID })
+    expect(calls[0]?.params).toEqual({ session_id: STORED_SESSION_ID, profile: 'default' })
     expect(calls[1]?.params).toMatchObject({ session_id: RECOVERED_SESSION_ID })
+  })
+
+  it('passes the selected stored session profile when recovering a stale runtime id', async () => {
+    setSessions(() => [sessionInfo({ id: STORED_SESSION_ID, profile: 'film-maker' })])
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    let submitAttempts = 0
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+
+        if (submitAttempts === 1) {
+          throw new Error('session not found')
+        }
+
+        return {} as never
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: RECOVERED_SESSION_ID } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    const ok = await handle!.submitText('message after profile switch')
+
+    expect(ok).toBe(true)
+    expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
+    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, profile: 'film-maker', source: 'desktop' })
+    expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after profile switch' })
   })
 
   it('still creates a new session for a genuine new-chat draft (no stored session selected)', async () => {
