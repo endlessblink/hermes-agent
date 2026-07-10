@@ -2504,6 +2504,48 @@ class SessionDB:
         }
         return self.set_working_state(session_id, state, source="clear")
 
+    def get_recent_lane(
+        self,
+        exclude_session_id: str = "",
+        max_age_hours: float = 24 * 7,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the newest ``lane`` recorded by some *other* recent session.
+
+        Working state is session-local, so a fresh chat starts blind: the user
+        says "continue" and the model has nothing but a filesystem probe to go
+        on. The lane the last session was working in is already on disk here;
+        this reads it across the session boundary.
+
+        Automation sessions are skipped -- a cron job's workspace is not the
+        user's. The result is a *hint*: the caller must present it as
+        unconfirmed, never act on it silently.
+        """
+        cutoff = time.time() - max(0.0, float(max_age_hours)) * 3600.0
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT w.state_json
+                     FROM session_working_state AS w
+                     JOIN sessions AS s ON s.id = w.session_id
+                    WHERE w.session_id != ?
+                      AND w.updated_at >= ?
+                      AND COALESCE(s.source, '') NOT IN ('subagent', 'tool', 'cron')
+                      AND COALESCE(s.archived, 0) = 0
+                 ORDER BY w.updated_at DESC
+                    LIMIT 20""",
+                (exclude_session_id or "", cutoff),
+            ).fetchall()
+
+        for row in rows:
+            raw = row["state_json"] if isinstance(row, sqlite3.Row) else row[0]
+            try:
+                state = json.loads(raw or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            lane = state.get("lane") if isinstance(state, dict) else None
+            if isinstance(lane, dict) and lane.get("repo_path"):
+                return lane
+        return None
+
     def render_working_state_context(
         self,
         session_id: str,

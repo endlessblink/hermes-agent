@@ -568,6 +568,21 @@ def build_turn_context(
             working_state_context = agent._session_db.render_working_state_context(
                 agent.session_id
             )
+            # A fresh session has no working state of its own, so it starts with
+            # no workspace and reconstructs one by guessing. The previous
+            # session's lane is already on disk; surface it as an unconfirmed
+            # hint rather than let the model probe the filesystem for a repo.
+            if not agent._session_db.get_working_state(agent.session_id).get("lane"):
+                from agent.lane_recall import render_recent_lane_block
+
+                recalled = agent._session_db.get_recent_lane(
+                    exclude_session_id=agent.session_id
+                )
+                block = render_recent_lane_block(recalled)
+                if block:
+                    working_state_context = (
+                        f"{working_state_context}\n\n{block}" if working_state_context else block
+                    )
     except Exception:
         working_state_context = ""
 

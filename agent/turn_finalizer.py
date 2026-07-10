@@ -72,6 +72,60 @@ def _state_relevant_files(messages, limit=12):
     return list(seen)
 
 
+def _lane_for_turn(agent, messages):
+    """Best-effort workspace record for this turn: repo, branch, agent jobs.
+
+    Derived from git and from the arguments of commands actually run, never
+    from a regex over prose. Returns ``None`` when nothing is identifiable, so
+    a chatty turn cannot erase a lane an earlier turn established.
+    """
+    try:
+        from agent.lane_resolver import resolve_lane
+        from agent.runtime_cwd import resolve_context_cwd
+
+        cwd = resolve_context_cwd() or ""
+        try:
+            from tools.process_registry import process_registry
+
+            processes = process_registry.list_sessions()
+        except Exception:
+            processes = []
+
+        def _is_repo(path):
+            try:
+                from tui_gateway import git_probe
+
+                return bool(git_probe.repo_root(path))
+            except Exception:
+                return False
+
+        def _branch(path):
+            try:
+                from tui_gateway import git_probe
+
+                return git_probe.branch(path) or None
+            except Exception:
+                return None
+
+        lane = resolve_lane(
+            messages or [],
+            session_cwd=cwd,
+            process_sessions=processes,
+            is_repo=_is_repo,
+            branch_probe=_branch,
+        )
+        if lane is None:
+            return None
+        record = {"repo_path": lane.repo_path, "source": lane.source}
+        for key in ("branch", "external_job", "prompt_file"):
+            value = getattr(lane, key, None)
+            if value:
+                record[key] = value
+        return record
+    except Exception:
+        return None
+
+
 def _patch_completed_turn_working_state(
     agent,
     *,
@@ -100,18 +154,21 @@ def _patch_completed_turn_working_state(
             return
         if not final_response or interrupted or failed:
             return
-        db.patch_working_state(
-            session_id,
-            {
-                "active_task": user_text,
-                "status": "answered",
-                "phase": "ready for next user turn",
-                "relevant_files": _state_relevant_files(messages),
-                "completed_actions": [_state_text(final_response, 800)],
-                "last_verified_state": "Last completed assistant response was persisted to the session transcript.",
-            },
-            source="turn_finalizer",
-        )
+        patch = {
+            "active_task": user_text,
+            "status": "answered",
+            "phase": "ready for next user turn",
+            "relevant_files": _state_relevant_files(messages),
+            "completed_actions": [_state_text(final_response, 800)],
+            "last_verified_state": "Last completed assistant response was persisted to the session transcript.",
+        }
+        lane = _lane_for_turn(agent, messages)
+        if lane is not None:
+            # Only ever *set* a lane, never clear one: a turn that mentions no
+            # workspace does not mean the workspace changed. The next session
+            # reads this back (agent/lane_recall.py) instead of guessing.
+            patch["lane"] = lane
+        db.patch_working_state(session_id, patch, source="turn_finalizer")
     except Exception as exc:
         try:
             from agent.conversation_loop import logger
