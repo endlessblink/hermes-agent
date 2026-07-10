@@ -180,3 +180,34 @@ class TestCompressionReasoningEffortWiring:
         with patch("agent.auxiliary_client._get_auxiliary_task_config", return_value=cfg):
             eb = _get_task_extra_body("compression")
         assert eb.get("reasoning", {}).get("effort") == "low"
+
+
+class TestGateEndToEndContract:
+    """The full pre-action gate flow: a vague-continuation turn arms the gate,
+    repo-touching tools are refused, calling clarify satisfies it, and then the
+    same tools are allowed — so it protects without ever looping."""
+
+    def _agent(self, armed):
+        import types
+        return types.SimpleNamespace(_lane_gate_armed=armed, _lane_gate_satisfied=False)
+
+    def test_arming_decision_matches_message_and_lane(self):
+        from agent.lane_gate import should_arm
+        # vague continuation + no known project -> arm
+        assert should_arm("let's continue where we left off", has_confirmed_lane=False)
+        # same message but the project is already known this session -> don't arm
+        assert not should_arm("let's continue where we left off", has_confirmed_lane=True)
+        # a specific instruction -> never arm
+        assert not should_arm("add a caption to shot 18", has_confirmed_lane=False)
+
+    def test_block_then_clarify_then_allow(self):
+        from agent import lane_gate
+        agent = self._agent(armed=True)
+        # 1. write refused while unconfirmed
+        assert lane_gate.gate_block_message(agent, "write_file", {"path": "x"}) is not None
+        # 2. clarify is always allowed (the escape)
+        assert lane_gate.gate_block_message(agent, "clarify", {}) is None
+        # 3. the executor sets satisfied when clarify runs
+        agent._lane_gate_satisfied = True
+        # 4. now the write proceeds
+        assert lane_gate.gate_block_message(agent, "write_file", {"path": "x"}) is None

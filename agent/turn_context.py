@@ -586,6 +586,25 @@ def build_turn_context(
     except Exception:
         working_state_context = ""
 
+    # Arm the pre-action gate: on a vague continuation with no confirmed project
+    # this session, refuse repo-touching tools until the model confirms which
+    # project (via clarify) instead of presuming one. Fail-open: any error
+    # leaves the gate disarmed so it can never brick tool execution.
+    agent._lane_gate_armed = False
+    agent._lane_gate_satisfied = False
+    try:
+        from agent.lane_gate import should_arm
+
+        _has_lane = False
+        if agent._session_db and getattr(agent, "session_id", None):
+            _has_lane = bool(
+                agent._session_db.get_working_state(agent.session_id).get("lane")
+            )
+        _msg = original_user_message if isinstance(original_user_message, str) else user_message
+        agent._lane_gate_armed = should_arm(_msg if isinstance(_msg, str) else "", _has_lane)
+    except Exception:
+        agent._lane_gate_armed = False
+
     return TurnContext(
         user_message=user_message,
         original_user_message=original_user_message,

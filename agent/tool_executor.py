@@ -458,6 +458,20 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             except Exception:
                 block_message = None
 
+            # Pre-action gate (concurrent path): refuse repo-touching tools on a
+            # vague continuation until the project is confirmed. Fail-open.
+            if block_message is None:
+                try:
+                    from agent import lane_gate
+                    _gate_msg = lane_gate.gate_block_message(agent, function_name, function_args)
+                    if _gate_msg:
+                        block_message = _gate_msg
+                except Exception:
+                    pass
+
+            if function_name == "clarify":
+                agent._lane_gate_satisfied = True
+
             if block_message is not None:
                 block_result = json.dumps({"error": block_message}, ensure_ascii=False)
                 _emit_terminal_post_tool_call(
@@ -1088,6 +1102,19 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             except Exception:
                 pass
 
+        # Pre-action gate: on a vague continuation with no confirmed project,
+        # refuse repo-touching tools until the model confirms which project
+        # (via clarify). Feeds the existing block path. Fail-open by contract.
+        if _block_msg is None:
+            try:
+                from agent import lane_gate
+                _gate_msg = lane_gate.gate_block_message(agent, function_name, function_args)
+                if _gate_msg:
+                    _block_msg = _gate_msg
+                    _block_error_type = "lane_gate_block"
+            except Exception:
+                pass
+
         _guardrail_block_decision: ToolGuardrailDecision | None = None
         if _block_msg is None:
             guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
@@ -1290,6 +1317,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
         elif function_name == "clarify":
+            # The model is asking the user to disambiguate — that satisfies the
+            # pre-action gate for the rest of the turn, so it can never loop.
+            agent._lane_gate_satisfied = True
             def _execute(next_args: dict) -> Any:
                 from tools.clarify_tool import clarify_tool as _clarify_tool
                 return _clarify_tool(
