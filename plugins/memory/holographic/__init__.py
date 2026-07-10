@@ -207,11 +207,25 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._retriever or not query:
             return ""
         try:
+            # Keyword/semantic hits for the specific query...
             results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
-            if not results:
+            # ...merged with the most-recent facts, so a continuation question
+            # ("what were we working on") surfaces the recent subject/task even
+            # when it shares no words with them. Dedup by fact_id; keyword hits
+            # first, then recents to fill.
+            seen = {r.get("fact_id") for r in results}
+            merged = list(results)
+            try:
+                for r in (self._store.recent_facts(limit=5, min_trust=self._min_trust) if self._store else []):
+                    if r.get("fact_id") not in seen and len(merged) < 8:
+                        seen.add(r.get("fact_id"))
+                        merged.append(r)
+            except Exception as e:
+                logger.debug("recency merge failed: %s", e)
+            if not merged:
                 return ""
             lines = []
-            for r in results:
+            for r in merged:
                 trust = r.get("trust_score", r.get("trust", 0))
                 lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
             return "## Holographic Memory\n" + "\n".join(lines)

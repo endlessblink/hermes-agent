@@ -258,6 +258,26 @@ class MemoryStore:
 
             return fact_id
 
+    def recent_facts(self, limit: int = 5, min_trust: float = 0.3) -> list[dict]:
+        """Return the most recently updated live facts, newest first.
+
+        Recall gap fix: a continuation question ("what were we working on") is
+        about recency, not keyword overlap — the answer is the recent subject/
+        task facts, which a word-match search misses. This surfaces them.
+        Superseded facts are excluded.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT fact_id, content, category, tags, trust_score,
+                          retrieval_count, helpful_count, created_at, updated_at
+                     FROM facts
+                    WHERE superseded_by IS NULL AND trust_score >= ?
+                 ORDER BY updated_at DESC, fact_id DESC
+                    LIMIT ?""",
+                (min_trust, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def supersede_fact(self, fact_id: int, superseded_by: int) -> None:
         """Mark ``fact_id`` as retired in favour of ``superseded_by``.
 
