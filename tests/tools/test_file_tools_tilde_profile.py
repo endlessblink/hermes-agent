@@ -69,11 +69,26 @@ class TestExpandTilde:
 
 # ---------------------------------------------------------------------------
 # Integration: _resolve_path_for_task uses profile home
+#
+# LOCAL DIVERGENCE FROM UPSTREAM. ``_expand_tilde`` still resolves ``~`` to the
+# profile home (the unit tests above), but ``_resolve_path_for_task`` expands
+# with ``_expand_user_path`` — the real OS home — because a user writing
+# ``~/.life-os/...`` means their account home, not Hermes' sandbox. See
+# ``tests/tools/test_resolve_path.py::test_tilde_uses_real_home_when_profile_home_is_process_home``,
+# which encodes the opposite expectation and is the behaviour we keep.
+#
+# Do not "fix" these two tests by reverting ``_resolve_path_for_task``; that
+# reintroduces the bug where profile-scoped turns could not find ``~/.life-os``.
 # ---------------------------------------------------------------------------
 
 class TestResolvePathUsesProfileHome:
     """Verify _resolve_path_for_task resolves ~ to the profile home."""
 
+    @pytest.mark.xfail(
+        reason="Local divergence: _resolve_path_for_task expands ~ to the real OS home "
+               "(see tests/tools/test_resolve_path.py). _expand_tilde itself is unchanged.",
+        strict=True,
+    )
     def test_relative_tilde_resolves_to_profile_home(self, tmp_path, monkeypatch):
         """A ~/path argument resolves under the profile home, not process HOME."""
         profile_home = tmp_path / "profile_home"
@@ -90,6 +105,11 @@ class TestResolvePathUsesProfileHome:
         assert str(resolved).startswith(str(profile_home))
         assert "process_home" not in str(resolved)
 
+    @pytest.mark.xfail(
+        reason="Local divergence: _resolve_path_for_task expands ~ to the real OS home "
+               "(see tests/tools/test_resolve_path.py). _expand_tilde itself is unchanged.",
+        strict=True,
+    )
     def test_absolute_tilde_in_workspace_root(self, tmp_path, monkeypatch):
         """A workspace root specified with ~ resolves to profile home."""
         profile_home = tmp_path / "profile_home"
