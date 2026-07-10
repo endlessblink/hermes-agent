@@ -269,6 +269,7 @@ class HolographicMemoryProvider(MemoryProvider):
             logger.debug("memory_extraction import failed: %s", e)
             return
         stored = 0
+        durable = []
         for fact in extract_inferred_facts(messages):
             try:
                 self._store.add_fact(
@@ -278,10 +279,57 @@ class HolographicMemoryProvider(MemoryProvider):
                     source_session=self._session_id or "",
                 )
                 stored += 1
+                durable.append(fact)
             except Exception as e:
                 logger.debug("inferred fact store failed: %s", e)
         if stored:
             logger.info("Captured %d inferred facts", stored)
+        # Mirror durable facts into the human-editable Obsidian vault. Off by
+        # default (writes to the real vault); enable with mirror_to_obsidian.
+        if durable and self._config.get("mirror_to_obsidian", False):
+            self._mirror_to_obsidian(durable)
+
+    # Durable categories worth a human-editable note (not high-volume mechanical
+    # facts like every command run — those stay in SQLite).
+    _MIRROR_CATEGORIES = frozenset({"subject", "lesson", "change", "decision",
+                                    "rejected", "preference", "open_thread", "project"})
+
+    def _mirror_to_obsidian(self, facts: list) -> None:
+        """Append durable facts to a per-profile, human-editable vault note.
+
+        Reuses the raw-append pattern of the obsidian-source-of-truth plugin.
+        A human/Obsidian edit to the note always wins over the SQLite copy.
+        """
+        try:
+            import os
+            from datetime import datetime
+            from pathlib import Path
+
+            vault = Path(os.environ.get("OBSIDIAN_VAULT_PATH")
+                         or "/media/endlessblink/data/app-data/sync/Dropbox/OBSIDIAN_SYNCED")
+            profile = self._config.get("profile") or "default"
+            note_dir = vault / "MAIN VULT" / "_System" / "Hermes Knowledge Graph" / "Memory"
+            note_dir.mkdir(parents=True, exist_ok=True)
+            note = note_dir / f"{profile} - Memory Facts.md"
+            if not note.exists():
+                note.write_text(
+                    f"---\ntype: memory\nowner_profile: {profile}\n"
+                    "tags: [hermes, memory]\n---\n\n"
+                    "# Hermes Memory Facts\n\n"
+                    "Editable durable facts Hermes captured. Your edits here win "
+                    "over its internal store.\n\n",
+                    encoding="utf-8",
+                )
+            day = datetime.now().strftime("%Y-%m-%d")
+            body = [f"\n## Update - {day}\n"]
+            for f in facts:
+                if getattr(f, "category", "") in self._MIRROR_CATEGORIES:
+                    body.append(f"- **{f.category}**: {f.content}")
+            if len(body) > 1:
+                with note.open("a", encoding="utf-8") as fh:
+                    fh.write("\n".join(body) + "\n")
+        except Exception as e:
+            logger.debug("Obsidian mirror failed: %s", e)
 
     def _capture_mechanical(self, messages: list) -> None:
         """Store deterministic facts from the conversation at the top trust tier."""
