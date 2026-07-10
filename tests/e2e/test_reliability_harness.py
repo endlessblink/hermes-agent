@@ -165,3 +165,18 @@ class TestMeasuredCompressionEvidence:
             pytest.skip("no compression elapsed_seconds recorded")
         # The root-cause claim: summaries routinely blow past the 12s watchdog.
         assert max(elapsed) > 30, "expected minutes-long summaries in the evidence"
+
+
+class TestCompressionReasoningEffortWiring:
+    """The Phase-1 fix: compression summarizes at LOW reasoning effort via the
+    codex auth (reasoning time, not the model, was the 45-241s bottleneck). Pin
+    that the config path actually carries the effort to the summary call."""
+
+    def test_configured_reasoning_effort_reaches_the_call(self):
+        from unittest.mock import patch
+        from agent.auxiliary_client import _get_task_extra_body
+
+        cfg = {"extra_body": {"reasoning": {"effort": "low"}}}
+        with patch("agent.auxiliary_client._get_auxiliary_task_config", return_value=cfg):
+            eb = _get_task_extra_body("compression")
+        assert eb.get("reasoning", {}).get("effort") == "low"
