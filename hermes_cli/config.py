@@ -978,6 +978,16 @@ DEFAULT_CONFIG = {
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},
+    "obsidian_vault": {
+        "enabled": True,
+        "canonical_vault_root": "/media/endlessblink/data/app-data/sync/Dropbox/OBSIDIAN_SYNCED",
+        "visible_workspace": "/media/endlessblink/data/app-data/sync/Dropbox/OBSIDIAN_SYNCED/MAIN VULT",
+        # Hidden dot-directories are blocked by default. _System is not hidden
+        # and remains readable because it is the Hermes governance route.
+        "allow_hidden_system_paths": False,
+        "max_read_chars": 100000,
+        "max_search_results": 20,
+    },
     "toolsets": ["hermes-cli"],
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.
@@ -1642,6 +1652,20 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 30,
+            "extra_body": {},
+        },
+        # Memory extraction — at session end, pull durable facts (what we're
+        # working on, lessons to remember, requested changes, decisions,
+        # rejected approaches, preferences, open threads) from the transcript
+        # into the holographic fact store. Off the turn's critical path, so a
+        # capable model is worth it; no watchdog kills it. Enabled per-store
+        # via ``infer_facts``.
+        "memory_extraction": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 120,
             "extra_body": {},
         },
         # Triage specifier — flesh out a rough one-liner in the Kanban

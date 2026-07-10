@@ -239,11 +239,35 @@ class HolographicMemoryProvider(MemoryProvider):
             return
         # Mechanical capture always runs -- it's deterministic ground truth
         # (repo, commands, explicit user statements), not model inference, so
-        # there's nothing to gate. Model-inferred extraction (Slice 3) stays
-        # behind the auto_extract flag.
+        # there's nothing to gate.
         self._capture_mechanical(messages)
-        if self._config.get("auto_extract", False):
-            self._auto_extract_facts(messages)
+        # Model-inferred capture (the substance: what we're working on, lessons
+        # to remember, requested changes, decisions, rejected approaches,
+        # preferences, open threads). Costs a model call, so it's opt-in.
+        if self._config.get("infer_facts", self._config.get("auto_extract", False)):
+            self._capture_inferred(messages)
+
+    def _capture_inferred(self, messages: list) -> None:
+        """Extract substantive facts with the model; store at the inferred tier."""
+        try:
+            from agent.memory_extraction import extract_inferred_facts
+        except Exception as e:
+            logger.debug("memory_extraction import failed: %s", e)
+            return
+        stored = 0
+        for fact in extract_inferred_facts(messages):
+            try:
+                self._store.add_fact(
+                    fact.content,
+                    category=fact.category,
+                    origin="inferred",
+                    source_session=self._session_id or "",
+                )
+                stored += 1
+            except Exception as e:
+                logger.debug("inferred fact store failed: %s", e)
+        if stored:
+            logger.info("Captured %d inferred facts", stored)
 
     def _capture_mechanical(self, messages: list) -> None:
         """Store deterministic facts from the conversation at the top trust tier."""
