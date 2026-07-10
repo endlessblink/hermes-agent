@@ -1,5 +1,12 @@
 {
   "compilerOptions": {
+    // Local divergence from upstream: the root project must not emit.
+    // Without this, `tsc -b` (run by `npm run build`) writes ~723 compiled
+    // .js files next to the .tsx sources, leaving the checkout permanently
+    // dirty. A dirty checkout makes dirtyUpdateGuard refuse the in-app
+    // update, which is what drove development into a second worktree.
+    // vite does the bundling; the electron project emits via its own outDir.
+    "noEmit": true,
     "target": "ES2023",
     "useDefineForClassFields": true,
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
