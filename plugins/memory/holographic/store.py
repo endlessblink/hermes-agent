@@ -175,10 +175,23 @@ class MemoryStore:
         from hermes_state import apply_wal_with_fallback
         apply_wal_with_fallback(self._conn, db_label="memory_store.db (holographic)")
         self._conn.executescript(_SCHEMA)
-        # Migrate: add hrr_vector column if missing (safe for existing databases)
+        # Migrate: add columns if missing (safe for existing databases).
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
+        # Provenance + supersede (memory Slice 1). Every fact records where it
+        # came from so a recalled claim is checkable; a contradicted fact is
+        # flagged superseded rather than deleted, so history survives and stale
+        # facts stop surfacing. `content` is UNIQUE, so retirement must be a
+        # flag, not a rewrite.
+        for col, decl in (
+            ("origin", "TEXT DEFAULT 'inferred'"),
+            ("source_session", "TEXT DEFAULT ''"),
+            ("source_message_id", "INTEGER"),
+            ("superseded_by", "INTEGER"),
+        ):
+            if col not in columns:
+                self._conn.execute(f"ALTER TABLE facts ADD COLUMN {col} {decl}")
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -190,12 +203,22 @@ class MemoryStore:
         content: str,
         category: str = "general",
         tags: str = "",
+        *,
+        origin: str = "inferred",
+        source_session: str = "",
+        source_message_id: int | None = None,
     ) -> int:
         """Insert a fact and return its fact_id.
 
         Deduplicates by content (UNIQUE constraint). On duplicate, returns
         the existing fact_id without modifying the row. Extracts entities from
         the content and links them to the fact.
+
+        ``origin`` records how the fact was captured -- ``mechanical`` (from git
+        or a command's arguments, ground truth), ``inferred`` (model-extracted,
+        the least-trusted default), or ``obsidian`` (mirrored from a
+        human-curated note). ``source_session`` / ``source_message_id`` link the
+        fact back to where it came from so any claim is checkable.
         """
         with self._lock:
             content = content.strip()
@@ -205,10 +228,15 @@ class MemoryStore:
             try:
                 cur = self._conn.execute(
                     """
-                    INSERT INTO facts (content, category, tags, trust_score)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO facts
+                        (content, category, tags, trust_score,
+                         origin, source_session, source_message_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (content, category, tags, self.default_trust),
+                    (
+                        content, category, tags, self.default_trust,
+                        origin, source_session, source_message_id,
+                    ),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -230,17 +258,34 @@ class MemoryStore:
 
             return fact_id
 
+    def supersede_fact(self, fact_id: int, superseded_by: int) -> None:
+        """Mark ``fact_id`` as retired in favour of ``superseded_by``.
+
+        The row is kept (for point-in-time / history queries) but drops out of
+        default search results. This is the staleness fix: a fact that was once
+        true is retained, not deleted, and stops being recalled as current.
+        A missing ``fact_id`` is a no-op.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE facts SET superseded_by = ?, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                (superseded_by, fact_id),
+            )
+            self._conn.commit()
+
     def search_facts(
         self,
         query: str,
         category: str | None = None,
         min_trust: float = 0.3,
         limit: int = 10,
+        include_superseded: bool = False,
     ) -> list[dict]:
         """Full-text search over facts using FTS5.
 
         Returns a list of fact dicts ordered by FTS5 rank, then trust_score
         descending. Also increments retrieval_count for matched facts.
+        Superseded (retired) facts are excluded unless ``include_superseded``.
         """
         with self._lock:
             query = query.strip()
@@ -259,6 +304,7 @@ class MemoryStore:
             if category is not None:
                 category_clause = "AND f.category = ?"
                 params.append(category)
+            superseded_clause = "" if include_superseded else "AND f.superseded_by IS NULL"
             params.append(limit)
 
             sql = f"""
@@ -270,6 +316,7 @@ class MemoryStore:
                 WHERE facts_fts MATCH ?
                   AND f.trust_score >= ?
                   {category_clause}
+                  {superseded_clause}
                 ORDER BY fts.rank, f.trust_score DESC
                 LIMIT ?
             """

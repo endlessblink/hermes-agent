@@ -235,11 +235,38 @@ class HolographicMemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        if not self._config.get("auto_extract", False):
-            return
         if not self._store or not messages:
             return
-        self._auto_extract_facts(messages)
+        # Mechanical capture always runs -- it's deterministic ground truth
+        # (repo, commands, explicit user statements), not model inference, so
+        # there's nothing to gate. Model-inferred extraction (Slice 3) stays
+        # behind the auto_extract flag.
+        self._capture_mechanical(messages)
+        if self._config.get("auto_extract", False):
+            self._auto_extract_facts(messages)
+
+    def _capture_mechanical(self, messages: list) -> None:
+        """Store deterministic facts from the conversation at the top trust tier."""
+        try:
+            from agent.memory_capture import mechanical_facts
+        except Exception as e:
+            logger.debug("memory_capture import failed: %s", e)
+            return
+        stored = 0
+        for fact in mechanical_facts(messages):
+            try:
+                self._store.add_fact(
+                    fact.content,
+                    category=fact.category,
+                    origin="mechanical",
+                    source_session=self._session_id or "",
+                    source_message_id=fact.source_message_id,
+                )
+                stored += 1
+            except Exception as e:
+                logger.debug("mechanical fact store failed: %s", e)
+        if stored:
+            logger.info("Captured %d mechanical facts", stored)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """Mirror built-in memory writes as facts."""

@@ -19,6 +19,16 @@ except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
 
 
+# Recall-time provenance weighting. A ground-truth (mechanical) or human-curated
+# (obsidian) fact outranks a model-inferred one on the same query. Inferred
+# facts keep weight 1.0 so they still surface when nothing better matches.
+_ORIGIN_WEIGHT = {
+    "obsidian": 1.5,
+    "mechanical": 1.3,
+    "inferred": 1.0,
+}
+
+
 class FactRetriever:
     """Multi-strategy fact retrieval with trust-weighted scoring."""
 
@@ -93,8 +103,15 @@ class FactRetriever:
                         + self.jaccard_weight * jaccard
                         + self.hrr_weight * hrr_sim)
 
-            # Trust weighting
-            score = relevance * fact["trust_score"]
+            # Trust weighting, then provenance weighting. A ground-truth fact
+            # (mechanical: from git/commands) or a human-curated one (obsidian)
+            # should outrank a model-inferred fact on the same query, even when
+            # their text similarity is equal -- provenance, not just cosine,
+            # decides. Inferred facts recall at full weight only when nothing
+            # more authoritative matches.
+            score = relevance * fact["trust_score"] * _ORIGIN_WEIGHT.get(
+                fact.get("origin") or "inferred", 1.0
+            )
 
             # Optional temporal decay
             if self.half_life > 0:
@@ -508,6 +525,10 @@ class FactRetriever:
 
         where_clauses.append("f.trust_score >= ?")
         params.append(min_trust)
+
+        # Retired facts (a newer fact superseded them) stay in the table for
+        # history but must not surface as current recall.
+        where_clauses.append("f.superseded_by IS NULL")
 
         where_sql = " AND ".join(where_clauses)
 
