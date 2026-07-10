@@ -130,6 +130,32 @@ const {
   resolveTimeoutMs
 } = require('./hardening.cjs')
 
+function guardStandardStream(stream, name) {
+  if (!stream || typeof stream.on !== 'function') return
+
+  stream.on('error', error => {
+    if (error && error.code === 'EPIPE') {
+      return
+    }
+
+    try {
+      recordDiagnosticEvent({
+        component: 'electron-main',
+        event: `${name}.error`,
+        message: error?.message || String(error),
+        severity: 'error',
+        details: { code: error?.code }
+      })
+    } catch {
+      // Diagnostics may not be initialized during early startup. The stream
+      // error handler itself must never become another startup crash.
+    }
+  })
+}
+
+guardStandardStream(process.stdout, 'stdout')
+guardStandardStream(process.stderr, 'stderr')
+
 let nodePty = null
 let nodePtyDir = null
 

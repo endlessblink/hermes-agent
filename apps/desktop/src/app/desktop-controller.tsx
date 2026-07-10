@@ -66,6 +66,7 @@ import { $reviewOpen, REVIEW_PANE_ID } from '../store/review'
 import {
   $activeSessionId,
   $attentionSessionIds,
+  $busy,
   $currentCwd,
   $freshDraftReady,
   $gatewayState,
@@ -111,8 +112,10 @@ import {
 import { ChatSidebar } from './chat/sidebar'
 import { CommandPalette } from './command-palette'
 import {
+  activeRuntimeSessionStatus,
   continueFromDropoffWithStaleRuntimeRecovery,
   resolveProfileRestoreSessionId,
+  shouldSettleBusyFromLiveStatus,
   storedSessionIdForCompressionContinuation
 } from './desktop-controller-utils'
 import { useGatewayBoot } from './gateway/hooks/use-gateway-boot'
@@ -206,6 +209,9 @@ function sessionMessagesSignature(messages: SessionMessage[]): string {
   return `${messages.length}:${hash}`
 }
 
+const LIVE_BUSY_RECONCILE_INTERVAL_MS = 5_000
+const LIVE_BUSY_RECONCILE_TIMEOUT_MS = 5_000
+
 export function DesktopController() {
   const queryClient = useQueryClient()
   const location = useLocation()
@@ -217,6 +223,7 @@ export function DesktopController() {
 
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
+  const busy = useStore($busy)
   const currentCwd = useStore($currentCwd)
   const freshDraftReady = useStore($freshDraftReady)
   const resumeFailedSessionId = useStore($resumeFailedSessionId)
@@ -285,6 +292,79 @@ export function DesktopController() {
   })
 
   const { connectionRef, gatewayRef, requestGateway } = useGatewayRequest()
+
+  const reconcileActiveBusyFromLiveStatus = useCallback(async () => {
+    const runtimeSessionId = activeSessionIdRef.current
+
+    if (!runtimeSessionId || !busyRef.current || gatewayRef.current?.connectionState !== 'open') {
+      return
+    }
+
+    try {
+      const result = await requestGateway<{ sessions?: Array<{ id?: string; session_key?: string; status?: string }> }>(
+        'session.active_list',
+        { current_session_id: runtimeSessionId },
+        LIVE_BUSY_RECONCILE_TIMEOUT_MS
+      )
+
+      const status = activeRuntimeSessionStatus(result?.sessions, runtimeSessionId)
+
+      if (!shouldSettleBusyFromLiveStatus(status)) {
+        return
+      }
+
+      updateSessionState(runtimeSessionId, state =>
+        state.busy
+          ? {
+              ...state,
+              awaitingResponse: false,
+              busy: false,
+              needsInput: false,
+              pendingBranchGroup: null,
+              streamId: null,
+              turnStartedAt: null
+            }
+          : state
+      )
+    } catch {
+      // Best-effort recovery. Normal stream/session.info events remain the
+      // primary lifecycle path; failures here must never create user-facing
+      // noise or interfere with an in-flight turn.
+    }
+  }, [activeSessionIdRef, busyRef, gatewayRef, requestGateway, updateSessionState])
+
+  useEffect(() => {
+    if (!busy) {
+      return
+    }
+
+    let cancelled = false
+
+    const tick = () => {
+      if (!cancelled) {
+        void reconcileActiveBusyFromLiveStatus()
+      }
+    }
+
+    tick()
+    const interval = window.setInterval(tick, LIVE_BUSY_RECONCILE_INTERVAL_MS)
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        tick()
+      }
+    }
+
+    window.addEventListener('focus', tick)
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      window.removeEventListener('focus', tick)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [activeSessionId, busy, reconcileActiveBusyFromLiveStatus])
 
   useEffect(() => {
     window.hermesDesktop?.setPreviewShortcutActive?.(Boolean(chatOpen && (filePreviewTarget || previewTarget)))

@@ -204,6 +204,38 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.messages.at(-1)?.error).toBe('Context length exceeded and cannot compress further.')
   })
 
+  it('ignores recoverable Codex OAuth refresh errors while the turn is retrying', async () => {
+    await mountStream()
+
+    act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
+    act(() =>
+      handleEvent!({
+        payload: { message: 'HTTP 401: Encountered invalidated oauth token for user, failing request' },
+        session_id: SID,
+        type: 'error'
+      })
+    )
+
+    let state = stateByRuntimeId.get(SID)
+    expect(state?.busy).toBe(true)
+    expect(state?.awaitingResponse).toBe(true)
+    expect(state?.messages.some(message => message.error?.includes('invalidated oauth token'))).toBe(false)
+
+    act(() =>
+      handleEvent!({
+        payload: { text: 'Recovered after refreshing auth.' },
+        session_id: SID,
+        type: 'message.complete'
+      })
+    )
+
+    state = stateByRuntimeId.get(SID)
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(state?.messages.at(-1)?.error).toBeUndefined()
+    expect(state?.messages.at(-1)?.parts.at(-1)).toMatchObject({ type: 'text', text: 'Recovered after refreshing auth.' })
+  })
+
   it('requests automatic continuation when compression is exhausted', async () => {
     await mountStream()
 

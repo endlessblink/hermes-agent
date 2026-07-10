@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest'
 import type { SessionInfo } from '@/hermes'
 
 import {
+  activeRuntimeSessionStatus,
   continueFromDropoffWithStaleRuntimeRecovery,
   profileRestoreSessionId,
   resolveProfileRestoreSessionId,
   sameCronSignature,
+  shouldSettleBusyFromLiveStatus,
   storedSessionIdForCompressionContinuation
 } from './desktop-controller-utils'
 
@@ -39,6 +41,31 @@ describe('sameCronSignature', () => {
 describe('storedSessionIdForCompressionContinuation', () => {
   it('keeps the visible conversation anchored to the parent stored session', () => {
     expect(storedSessionIdForCompressionContinuation('parent-stored')).toBe('parent-stored')
+  })
+})
+
+describe('live session status reconciliation', () => {
+  it('finds the active runtime session status by live id', () => {
+    expect(
+      activeRuntimeSessionStatus(
+        [
+          { id: 'other-runtime', status: 'working' },
+          { id: 'active-runtime', session_key: 'stored-session', status: 'idle' }
+        ],
+        'active-runtime'
+      )
+    ).toBe('idle')
+  })
+
+  it('does not match stored session keys when reconciling runtime state', () => {
+    expect(activeRuntimeSessionStatus([{ id: 'runtime-id', session_key: 'stored-id', status: 'idle' }], 'stored-id')).toBe('')
+  })
+
+  it('settles only on explicit idle live status', () => {
+    expect(shouldSettleBusyFromLiveStatus('idle')).toBe(true)
+    expect(shouldSettleBusyFromLiveStatus('working')).toBe(false)
+    expect(shouldSettleBusyFromLiveStatus('waiting')).toBe(false)
+    expect(shouldSettleBusyFromLiveStatus('')).toBe(false)
   })
 })
 
@@ -101,6 +128,7 @@ describe('resolveProfileRestoreSessionId', () => {
     const sessions = [
       { ...session('office-loaded', 'Office'), last_active: 100, profile: 'office-work' }
     ] as SessionInfo[]
+
     const probe = async (): Promise<SessionInfo> => {
       throw new Error('session not found')
     }
@@ -115,7 +143,9 @@ describe('resolveProfileRestoreSessionId', () => {
       { ...session('film-last', 'Film'), last_active: 300, profile: 'film-maker' },
       { ...session('office-loaded', 'Office'), last_active: 100, profile: 'office-work' }
     ] as SessionInfo[]
+
     let probes = 0
+
     const probe = async (): Promise<SessionInfo> => {
       probes += 1
       throw new Error('should not probe')

@@ -46,7 +46,13 @@ import type { RpcEvent } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../../types'
 
-import { hasSessionInfoStatePatch, sessionInfoStatePatch, SUBAGENT_EVENT_TYPES, toTodoPayload } from './utils'
+import {
+  hasSessionInfoStatePatch,
+  isRecoverableCodexOauthRefreshText,
+  sessionInfoStatePatch,
+  SUBAGENT_EVENT_TYPES,
+  toTodoPayload
+} from './utils'
 
 const MESSAGE_COMPLETE_ERROR_STATUS = 'error'
 
@@ -667,6 +673,11 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
       } else if (event.type === 'error') {
         const errorMessage = payload?.message || 'Hermes reported an error'
+
+        if (isRecoverableCodexOauthRefreshText(errorMessage)) {
+          return
+        }
+
         const isBusyBounce = isSessionBusyMessage(errorMessage)
         const looksLikeProviderSetup = isProviderSetupErrorMessage(errorMessage)
 

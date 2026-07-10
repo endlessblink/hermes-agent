@@ -18,6 +18,12 @@ interface ContinueFromDropoffParams {
   runtimeSessionId: string
 }
 
+export interface LiveSessionStatusRow {
+  id?: string
+  session_key?: string
+  status?: string
+}
+
 function normalizeSessionProfileKey(name: string | null | undefined): string {
   const value = (name ?? '').trim()
 
@@ -69,6 +75,7 @@ export async function resolveProfileRestoreSessionId(
   }
 
   const profileKey = normalizeSessionProfileKey(profile)
+
   const knownRememberedSession = sessions.find(
     session => session.id === remembered || session._lineage_root_id === remembered
   )
@@ -116,6 +123,25 @@ export function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
 
 export function storedSessionIdForCompressionContinuation(parentStoredSessionId: string): string {
   return parentStoredSessionId
+}
+
+export function activeRuntimeSessionStatus(
+  rows: LiveSessionStatusRow[] | null | undefined,
+  runtimeSessionId: string | null | undefined
+): string {
+  const id = runtimeSessionId?.trim()
+
+  if (!id) {
+    return ''
+  }
+
+  const row = rows?.find(item => item?.id === id)
+
+  return typeof row?.status === 'string' ? row.status : ''
+}
+
+export function shouldSettleBusyFromLiveStatus(status: string | null | undefined): boolean {
+  return status === 'idle'
 }
 
 function isSessionNotFoundError(error: unknown): boolean {

@@ -75,8 +75,22 @@ const COMPLETION_ERROR_PATTERNS = [
   /^(Provider|Gateway)\s+error:/i
 ]
 
+export function isRecoverableCodexOauthRefreshText(text: string): boolean {
+  const normalized = text.trim().toLowerCase()
+
+  return (
+    normalized.includes('http 401') &&
+    normalized.includes('invalidated oauth token') &&
+    normalized.includes('failing request')
+  )
+}
+
 export function completionErrorText(finalText: string): string | null {
   const text = finalText.trim()
+
+  if (isRecoverableCodexOauthRefreshText(text)) {
+    return null
+  }
 
   return text && COMPLETION_ERROR_PATTERNS.some(re => re.test(text)) ? text : null
 }

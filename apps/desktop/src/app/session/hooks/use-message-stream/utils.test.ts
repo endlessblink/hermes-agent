@@ -16,7 +16,9 @@ describe('completionErrorText', () => {
   it('flags provider/HTTP/retry failures, ignores normal text', () => {
     expect(completionErrorText('API call failed after 3 retries: boom')).toMatch(/^API call failed/)
     expect(completionErrorText('HTTP 500 upstream')).toMatch(/^HTTP 500/)
+    expect(completionErrorText('HTTP 401 Unauthorized')).toMatch(/^HTTP 401/)
     expect(completionErrorText('Gateway error: nope')).toMatch(/^Gateway error/)
+    expect(completionErrorText('HTTP 401: Encountered invalidated oauth token for user, failing request')).toBeNull()
     expect(completionErrorText('here is your answer')).toBeNull()
     expect(completionErrorText('   ')).toBeNull()
   })
