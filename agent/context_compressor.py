@@ -1044,6 +1044,7 @@ class ContextCompressor(ContextEngine):
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
         max_tokens: int | None = None,
+        summary_mode: str = "llm",
     ):
         self.model = model
         self.base_url = base_url
@@ -1123,6 +1124,12 @@ class ContextCompressor(ContextEngine):
         self.awaiting_real_usage_after_compression = False
 
         self.summary_model = summary_model_override or ""
+        # "llm" = summarize old turns with the model (slow; can time out).
+        # "drop" = the memory-backed path: don't call the model at all. Old turns
+        # are dropped from the active window but stay on disk (searchable with
+        # session_search) and their facts are in memory, so compaction is
+        # instant and the watchdog can never fire.
+        self.summary_mode = summary_mode or "llm"
         self._session_db: Any = None
         self._session_id: str = ""
 
@@ -1766,6 +1773,18 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         the middle turns without a summary rather than inject a useless
         placeholder.
         """
+        # Memory-backed drop: skip the model entirely. Old turns stay on disk
+        # (session_search can pull any of them back) and their facts are in
+        # memory, so a deterministic marker is all the active window needs.
+        # Instant, and the watchdog can never fire.
+        if self.summary_mode == "drop":
+            return self._build_static_fallback_summary(
+                turns_to_summarize,
+                reason="memory-backed drop: earlier turns were compacted out of the "
+                       "active window; they remain searchable with session_search and "
+                       "their key facts are in memory.",
+            )
+
         now = time.monotonic()
         if now < self._summary_failure_cooldown_until:
             logger.debug(

@@ -1564,6 +1564,15 @@ def init_agent(
     compression_abort_on_summary_failure = str(
         _compression_cfg.get("abort_on_summary_failure", False)
     ).lower() in {"true", "1", "yes"}
+    # "llm" (default) summarizes old turns with the model; "drop" is the
+    # memory-backed path — no model call, old turns dropped from the active
+    # window but kept on disk (searchable) with facts in memory. Instant, and
+    # the compression watchdog can never fire.
+    compression_summary_mode = str(
+        _compression_cfg.get("summary_mode", "llm") or "llm"
+    ).strip().lower()
+    if compression_summary_mode not in {"llm", "drop"}:
+        compression_summary_mode = "llm"
     # In-place compaction: when True, compress_context() rewrites the message
     # list + rebuilds the system prompt WITHOUT rotating the session id (no
     # parent_session_id chain, no `name #N` renumber). See #38763 and
@@ -1827,6 +1836,7 @@ def init_agent(
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
             max_tokens=agent.max_tokens,
+            summary_mode=compression_summary_mode,
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):
