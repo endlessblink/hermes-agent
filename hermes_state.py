@@ -3519,6 +3519,13 @@ class SessionDB:
                 ):
                     if key in tip_row:
                         merged[key] = tip_row[key]
+                # The continuation tip is often untitled (a fresh dropoff/rotation
+                # child), which would erase the conversation's real title and make
+                # it look missing in the sidebar. Keep the best non-empty title/
+                # preview from the root when the tip has none.
+                for key in ("title", "preview"):
+                    if not (merged.get(key) or "").strip() and (s.get(key) or "").strip():
+                        merged[key] = s[key]
                 merged["_lineage_root_id"] = s["id"]
                 projected.append(merged)
             sessions = projected
