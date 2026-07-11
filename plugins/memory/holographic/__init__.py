@@ -299,9 +299,43 @@ class HolographicMemoryProvider(MemoryProvider):
             return ""
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        # Holographic memory stores explicit facts via tools, not auto-sync.
-        # The on_session_end hook handles auto-extraction if configured.
-        pass
+        # Capture high-signal user statements (corrections, preferences,
+        # decisions) AS THEY HAPPEN, so a long creative session accumulates
+        # memory mid-conversation instead of only at session end (on_session_end
+        # never fires for a session that stays open). Deterministic — regex, no
+        # model call, so it's cheap and fits the no-cloud / low-VRAM rules — and
+        # the manager already runs sync_turn off the main loop. Scoped to the
+        # active project so projects don't cross-contaminate.
+        if not self._store or not isinstance(user_content, str) or not user_content.strip():
+            return
+        try:
+            from agent.memory_capture import mechanical_facts
+        except Exception as e:
+            logger.debug("memory_capture import failed in sync_turn: %s", e)
+            return
+        # Only the user's own words this turn; workspace/command facts belong to
+        # the session-end pass (they need the full transcript).
+        facts = [
+            f for f in mechanical_facts([{"role": "user", "content": user_content}])
+            if f.category in ("correction", "user_pref", "project")
+        ]
+        stored = 0
+        for fact in facts:
+            try:
+                self._store.add_fact(
+                    fact.content,
+                    category=fact.category,
+                    origin="mechanical",
+                    source_session=self._session_id or "",
+                    trust=0.8,  # explicit user statement — authoritative
+                    projects=[self._active_project] if self._active_project else None,
+                )
+                stored += 1
+            except Exception as e:
+                logger.debug("sync_turn fact store failed: %s", e)
+        if stored:
+            logger.info("[MEM] sync_turn captured %d live fact(s): %s",
+                        stored, [f.content[:60] for f in facts[:3]])
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]

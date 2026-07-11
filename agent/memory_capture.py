@@ -30,6 +30,23 @@ _DECISION_RE = [
     re.compile(r"\bthe\s+project\s+(?:uses|needs|requires)\s+(.+)", re.I),
 ]
 
+# Corrections the user gives mid-conversation ("don't do X", "this is wrong",
+# "these errors should not repeat"). High-signal: they must be remembered so the
+# mistake isn't repeated. Bilingual (English + Hebrew). Narrow on purpose.
+_CORRECTION_RE = [
+    re.compile(r"\b(?:don'?t|do\s+not|please\s+don'?t)\s+(.+)", re.I),
+    re.compile(r"\b(?:should\s*n'?t|shouldn'?t|must\s*n'?t|mustn'?t|should\s+not|must\s+not)\s+(.+)", re.I),
+    re.compile(r"\b(?:stop|avoid|no\s+more|no\s+longer)\s+(.+)", re.I),
+    re.compile(r"\b(?:instead\s+of|rather\s+than)\s+(.+)", re.I),
+    re.compile(r"\b(?:should\s+not\s+repeat|do\s*n'?t\s+repeat|never\s+again|not\s+again)\b", re.I),
+    re.compile(r"\b(?:this|that|it)\s+(?:is|'?s|was)\s+wrong\b", re.I),
+    re.compile(
+        r"(?:אל\s+ת\w*|לא\s+ל\w+|אף\s+פעם|במקום|תפסיק|תפסיקי|לא\s+לחזור|"
+        r"שוב\s+נתקעת|זו?\s+טעות|לא\s+רוצה|לא\s+נכון|תפסיק\s+ל)",
+        re.UNICODE,
+    ),
+]
+
 _MIN_STATEMENT_LEN = 10
 _MAX_CONTENT = 400
 
@@ -84,7 +101,11 @@ def _statement_facts(messages) -> list[MechanicalFact]:
         if not isinstance(content, str) or len(content) < _MIN_STATEMENT_LEN:
             continue
         mid = _msg_id(msg)
-        if any(p.search(content) for p in _PREFERENCE_RE):
+        # Corrections first — highest signal, must not be missed even if the
+        # sentence also happens to match a preference pattern.
+        if any(p.search(content) for p in _CORRECTION_RE):
+            facts.append(MechanicalFact(content[:_MAX_CONTENT], "correction", mid))
+        elif any(p.search(content) for p in _PREFERENCE_RE):
             facts.append(MechanicalFact(content[:_MAX_CONTENT], "user_pref", mid))
         elif any(p.search(content) for p in _DECISION_RE):
             facts.append(MechanicalFact(content[:_MAX_CONTENT], "project", mid))
