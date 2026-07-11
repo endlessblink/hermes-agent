@@ -67,6 +67,32 @@ def test_none_project_disables_filter(retriever):
     assert any("seedance" in c for c in hits)
 
 
+def test_model_declared_project_sticks_and_wins(tmp_path):
+    provider = HolographicMemoryProvider(config={"db_path": str(tmp_path / "mem.db")})
+    provider.initialize(session_id="s")
+    try:
+        # Model declares the project (note-based work: no lane resolved).
+        res = json.loads(provider._handle_fact_store(
+            {"action": "set_project", "project": "too-much-video-art"}))
+        assert res["active_project"] == "too-much-video-art"
+        assert provider._active_project == "too-much-video-art"
+
+        # A per-turn lane resolution of None must NOT wipe the declaration.
+        provider.set_active_project(None)
+        assert provider._active_project == "too-much-video-art"
+
+        # Captured facts get tagged with the declared project.
+        fid = json.loads(provider._handle_fact_store(
+            {"action": "add", "content": "hand piece uses seedance"}))["fact_id"]
+        assert provider._store.fact_projects(fid) == ["too-much-video-art"]
+
+        # Declaration wins over a later lane resolution too.
+        provider.set_active_project("some-repo-project")
+        assert provider._active_project == "too-much-video-art"
+    finally:
+        provider.shutdown()
+
+
 def test_provider_scopes_recall_and_tags_capture(tmp_path):
     provider = HolographicMemoryProvider(config={"db_path": str(tmp_path / "mem.db")})
     provider.initialize(session_id="s")

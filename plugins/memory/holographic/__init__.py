@@ -47,6 +47,11 @@ FACT_STORE_SCHEMA = {
         "• probe — Entity recall: ALL facts about a person/thing.\n"
         "• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
+        "• set_project — Declare which project this conversation is about (a short "
+        "stable id/slug, e.g. 'too-much-video-art'). Do this once you know the project "
+        "(infer it from the conversation or the note you're working in; if genuinely "
+        "unsure between projects, ASK the user via clarify first — don't guess). It scopes "
+        "recall and tags what you save to that project, so separate projects stop merging.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n"
         "• supersede — Retire a stale fact in favour of a newer one. When the user states a "
         "decision that contradicts a fact you already stored, add the new fact, then "
@@ -60,10 +65,11 @@ FACT_STORE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "probe", "related", "reason", "contradict", "supersede", "update", "remove", "list"],
+                "enum": ["add", "search", "probe", "related", "reason", "set_project", "contradict", "supersede", "update", "remove", "list"],
             },
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
             "projects": {"type": "array", "items": {"type": "string"}, "description": "Project id(s) this fact belongs to (for 'add'). Omit to use the current project; pass [] to make it global/shared across all projects; pass multiple ids for a technique shared by specific projects."},
+            "project": {"type": "string", "description": "Project id/slug to make active (for 'set_project')."},
             "query": {"type": "string", "description": "Search query (required for 'search')."},
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
@@ -132,14 +138,27 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
-        # The project this conversation is scoped to (resolved per turn by the
-        # memory manager). None = unscoped: recall isn't filtered and captures
-        # aren't tagged, so behaviour matches the pre-scoping default.
-        self._active_project: str | None = None
+        # Two sources for "which project is this conversation":
+        #  * _resolved_project — derived per turn from the code lane (repo →
+        #    projects.db). Empty for note-based creative work.
+        #  * _declared_project — set by the model via the fact_store 'set_project'
+        #    action when it infers the project from the conversation. Sticky for
+        #    the life of this (cached) provider instance, so it survives across
+        #    turns and is NOT wiped by the per-turn lane resolution.
+        # The declared project wins; effective project = declared or resolved.
+        # None = unscoped (recall unfiltered, captures untagged) = old behaviour.
+        self._resolved_project: str | None = None
+        self._declared_project: str | None = None
 
     def set_active_project(self, project_id: str | None) -> None:
-        """Set the active project for recall scoping + capture tagging (per turn)."""
-        self._active_project = (project_id or None)
+        """Set the lane-resolved project for this turn (does not clear a model
+        declaration — a None from an unresolved lane must never wipe it)."""
+        self._resolved_project = (project_id or None)
+
+    @property
+    def _active_project(self) -> "str | None":
+        """Effective project: an explicit model declaration wins over the lane."""
+        return self._declared_project or self._resolved_project
 
     @property
     def name(self) -> str:
@@ -222,9 +241,20 @@ class HolographicMemoryProvider(MemoryProvider):
                 "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
                 "Use fact_feedback to rate facts after using them (trains trust scores)."
             )
+        if self._active_project:
+            project_line = (
+                f"Active project: {self._active_project} — recall and new facts are scoped to it.\n"
+            )
+        else:
+            project_line = (
+                "No active project set. If this conversation is about a specific project, "
+                "declare it with fact_store(action='set_project', project='<slug>') so memory "
+                "doesn't mix separate projects (ask the user which project if unsure).\n"
+            )
         return (
             f"# Holographic Memory\n"
             f"Active. {total} facts stored with entity resolution and trust scoring.\n"
+            f"{project_line}"
             f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
             f"Use fact_feedback to rate facts after using them (trains trust scores)."
         )
@@ -488,6 +518,15 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args.get("limit", 10)),
                 )
                 return json.dumps({"results": results, "count": len(results)})
+
+            elif action == "set_project":
+                # The model declares which project this conversation is about
+                # (infer from context; ask the user via clarify when unsure).
+                # Scopes recall + tags captures for the rest of the session.
+                proj = (args.get("project") or "").strip()
+                self._declared_project = proj or None
+                logger.info("[MEM] set_project -> %r", self._declared_project)
+                return json.dumps({"active_project": self._declared_project, "status": "set"})
 
             elif action == "supersede":
                 old_id = int(args["fact_id"])
