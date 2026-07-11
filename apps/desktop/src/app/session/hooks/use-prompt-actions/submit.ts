@@ -13,6 +13,7 @@ import {
 } from '@/store/composer'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
+import { $filePreviewTarget } from '@/store/preview'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $sessions, clearSessionReplyReady, setAwaitingResponse, setBusy, setMessages } from '@/store/session'
 
@@ -308,10 +309,25 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // session when the user is composing from a new draft.
         let submitErr: unknown = null
 
+        // The artifact currently shown in the active preview tab. Sent each turn
+        // so the backend can bind deictic references ("animate this") to it
+        // instead of the model guessing from history/memory. `source` lets the
+        // backend distrust a preview that auto-followed a generation result.
+        const previewTarget = $filePreviewTarget.get()
+        const activeTarget = previewTarget
+          ? {
+              kind: previewTarget.kind,
+              path: previewTarget.path,
+              url: previewTarget.url,
+              label: previewTarget.label,
+              source: previewTarget.source,
+            }
+          : undefined
+
         try {
           rememberContinuationPrompt(sessionId, text)
           await withSessionBusyRetry(() =>
-            requestGateway('prompt.submit', { session_id: sessionId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+            requestGateway('prompt.submit', { session_id: sessionId, text, active_target: activeTarget }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
           )
         } catch (firstErr) {
           if (isSessionNotFoundError(firstErr) || isGatewayTimeoutError(firstErr)) {
@@ -357,7 +373,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 rewriteOptimistic(recoveredId)
                 rememberContinuationPrompt(recoveredId, text)
                 await withSessionBusyRetry(() =>
-                  requestGateway('prompt.submit', { session_id: recoveredId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                  requestGateway('prompt.submit', { session_id: recoveredId, text, active_target: activeTarget }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
                 )
               } else if (submitErr === null) {
                 submitErr = firstErr
@@ -378,7 +394,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 rewriteOptimistic(recoveredId)
                 rememberContinuationPrompt(recoveredId, text)
                 await withSessionBusyRetry(() =>
-                  requestGateway('prompt.submit', { session_id: recoveredId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                  requestGateway('prompt.submit', { session_id: recoveredId, text, active_target: activeTarget }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
                 )
               } else {
                 submitErr = firstErr

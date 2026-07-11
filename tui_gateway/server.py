@@ -8753,6 +8753,17 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    # Active target: the frame/image the desktop preview is currently showing.
+    # Persisted on session working state so turn_context can bind "this/it" to it
+    # and the target gate can treat it as a confirmed referent. Best-effort:
+    # never let this block a submit.
+    _active_target = params.get("active_target")
+    if isinstance(_active_target, dict) and sid:
+        try:
+            if (db := _get_db()) is not None:
+                db.patch_working_state(sid, {"active_target": _active_target}, source="prompt.submit")
+        except Exception:
+            pass
     # Re-bind to the current client transport for this request. This keeps
     # streaming events on the active websocket even if an earlier disconnect
     # or fallback moved the session transport to stdio.

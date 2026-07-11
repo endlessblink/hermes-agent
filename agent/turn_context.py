@@ -119,6 +119,38 @@ class TurnContext:
     working_state_context: str = ""
 
 
+def _render_active_target_block(active_target: Any) -> str:
+    """Render the app-provided on-screen artifact as a deictic-binding block.
+
+    ``active_target`` is a dict the desktop sends each turn (kind/path/url/label/
+    source). Returns '' when absent/malformed. A ``tool-result`` source means the
+    preview auto-followed a generation, so it may NOT be what the user means —
+    the block says to confirm rather than trust it blindly.
+    """
+    if not isinstance(active_target, dict):
+        return ""
+    label = str(active_target.get("label") or "").strip()
+    ref = str(active_target.get("path") or active_target.get("url") or "").strip()
+    if not label and not ref:
+        return ""
+    desc = " — ".join(p for p in (label, ref) if p)
+    lines = [
+        "<active-target>",
+        f"The user is currently viewing: {desc}.",
+        "Resolve deictic references ('this', 'it', 'the frame', 'the image', "
+        "'the shot') to THIS target unless the user explicitly names another. "
+        "It outranks recalled memory and earlier generations.",
+    ]
+    if str(active_target.get("source") or "").strip() == "tool-result":
+        lines.append(
+            "NOTE: this target was auto-set from a previous generation result, so "
+            "it may not be what the user means. If their request could point "
+            "elsewhere, confirm with `clarify` before generating/animating."
+        )
+    lines.append("</active-target>")
+    return "\n".join(lines)
+
+
 def build_turn_context(
     agent,
     user_message: str,
@@ -598,6 +630,15 @@ def build_turn_context(
                     working_state_context = (
                         f"{working_state_context}\n\n{block}" if working_state_context else block
                     )
+            # Active target: the artifact the user is currently viewing (sent by
+            # the desktop each turn). Bind deictics ("this/it/the frame") to it so
+            # the model doesn't guess the referent from history or memory.
+            _at = agent._session_db.get_working_state(agent.session_id).get("active_target")
+            _at_block = _render_active_target_block(_at)
+            if _at_block:
+                working_state_context = (
+                    f"{working_state_context}\n\n{_at_block}" if working_state_context else _at_block
+                )
     except Exception:
         working_state_context = ""
 
@@ -619,6 +660,31 @@ def build_turn_context(
         agent._lane_gate_armed = should_arm(_msg if isinstance(_msg, str) else "", _has_lane)
     except Exception:
         agent._lane_gate_armed = False
+
+    # Arm the target gate: on a bare "animate/generate this" with no confirmed
+    # visual target this turn, refuse generation tools until the model confirms
+    # which frame (via clarify) or binds to a confirmed active target. Fail-open.
+    agent._target_gate_armed = False
+    agent._target_gate_satisfied = False
+    try:
+        from agent.target_gate import should_arm as _target_should_arm
+
+        # A target is "confirmed" when the app supplied one this turn that is not
+        # an auto-drifted tool-result (Part B). Absent that, arming falls back to
+        # the message alone (explicit paths/attachments already suppress arming
+        # inside is_visual_deictic).
+        _active_target = {}
+        if agent._session_db and getattr(agent, "session_id", None):
+            _active_target = (
+                agent._session_db.get_working_state(agent.session_id).get("active_target") or {}
+            )
+        _has_target = bool(_active_target) and _active_target.get("source") != "tool-result"
+        _tmsg = original_user_message if isinstance(original_user_message, str) else user_message
+        agent._target_gate_armed = _target_should_arm(
+            _tmsg if isinstance(_tmsg, str) else "", _has_target
+        )
+    except Exception:
+        agent._target_gate_armed = False
 
     return TurnContext(
         user_message=user_message,
