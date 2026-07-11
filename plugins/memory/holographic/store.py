@@ -313,7 +313,8 @@ class MemoryStore:
         return [r["project_id"] for r in rows]
 
     def recent_facts(
-        self, limit: int = 5, min_trust: float = 0.3, project_id: "str | None" = None
+        self, limit: int = 5, min_trust: float = 0.3, project_id: "str | None" = None,
+        categories: "list[str] | None" = None,
     ) -> list[dict]:
         """Return the most recently updated live facts, newest first.
 
@@ -324,6 +325,10 @@ class MemoryStore:
 
         ``project_id`` scopes to the active project (untagged/global facts stay
         eligible); ``None`` disables the filter, matching prior behaviour.
+
+        ``categories`` restricts to those fact categories (e.g. the authoritative
+        decision/correction/preference/change/rejected set) so the caller can
+        surface the latest *decisions* specifically; ``None`` = any category.
         """
         where = "superseded_by IS NULL AND trust_score >= ?"
         params: list = [min_trust]
@@ -334,6 +339,10 @@ class MemoryStore:
                 "            AND fp.project_id = ?))"
             )
             params.append(project_id)
+        cats = [c for c in (categories or []) if c]
+        if cats:
+            where += f" AND category IN ({','.join('?' for _ in cats)})"
+            params.extend(cats)
         params.append(limit)
         with self._lock:
             rows = self._conn.execute(

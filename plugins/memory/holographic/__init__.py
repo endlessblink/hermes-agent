@@ -105,7 +105,9 @@ FACT_FEEDBACK_SCHEMA = {
 # Inferred-fact categories that represent an explicit user choice and should be
 # captured at higher trust so a recent decision outranks older/generic facts.
 # Names match agent.memory_extraction.CATEGORIES.
-_AUTHORITATIVE_CATEGORIES = frozenset({"decision", "preference", "change", "rejected"})
+_AUTHORITATIVE_CATEGORIES = frozenset(
+    {"decision", "correction", "preference", "change", "rejected"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -260,40 +262,64 @@ class HolographicMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not self._retriever or not query:
+        if not self._retriever or not self._store:
             return ""
         try:
-            # Keyword/semantic hits for the specific query, scoped to the active
-            # project (untagged/global facts always remain eligible; None = no
-            # filter, so recall never blanks out when the project is unresolved).
-            results = self._retriever.search(
-                query, min_trust=self._min_trust, limit=5,
-                project_id=self._active_project,
-            )
-            # ...merged with the most-recent facts, so a continuation question
-            # ("what were we working on") surfaces the recent subject/task even
-            # when it shares no words with them. Dedup by fact_id; keyword hits
-            # first, then recents to fill.
-            seen = {r.get("fact_id") for r in results}
-            merged = list(results)
+            # 1. GUARANTEED section: the latest authoritative decisions, injected
+            #    every turn regardless of the query. A critical recent decision
+            #    (e.g. "we switched to GPT Image 2 + Magnific, not Higgsfield")
+            #    thus can't be crowded out by keyword hits, and — because the
+            #    store persists across sessions — it survives a compression
+            #    recovery instead of being dropped. Recency + supersede ordering
+            #    means this always reflects the NEWEST context. Nothing hardcoded.
             try:
-                for r in (self._store.recent_facts(limit=5, min_trust=self._min_trust, project_id=self._active_project) if self._store else []):
-                    if r.get("fact_id") not in seen and len(merged) < 8:
+                decisions = self._store.recent_facts(
+                    limit=6, min_trust=0.0, project_id=self._active_project,
+                    categories=list(_AUTHORITATIVE_CATEGORIES),
+                )
+            except Exception as e:
+                logger.debug("latest-decisions fetch failed: %s", e)
+                decisions = []
+            seen = {r.get("fact_id") for r in decisions}
+
+            # 2. Keyword/semantic hits for THIS turn's query, project-scoped.
+            results = []
+            if query:
+                results = self._retriever.search(
+                    query, min_trust=self._min_trust, limit=5,
+                    project_id=self._active_project,
+                )
+            relevant = [r for r in results if r.get("fact_id") not in seen]
+            for r in relevant:
+                seen.add(r.get("fact_id"))
+            # ...filled with general recents so a vague continuation still gets
+            # the recent subject/task facts. Capped separately from decisions.
+            try:
+                for r in self._store.recent_facts(
+                    limit=5, min_trust=self._min_trust, project_id=self._active_project
+                ):
+                    if r.get("fact_id") not in seen and len(relevant) < 6:
                         seen.add(r.get("fact_id"))
-                        merged.append(r)
+                        relevant.append(r)
             except Exception as e:
                 logger.debug("recency merge failed: %s", e)
-            if not merged:
+
+            if not decisions and not relevant:
                 logger.info("[MEM] recall query=%r -> 0 facts", (query or "")[:80])
                 return ""
-            lines = []
-            for r in merged:
-                trust = r.get("trust_score", r.get("trust", 0))
-                lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
-            logger.info("[MEM] recall query=%r -> %d facts injected: %s",
-                        (query or "")[:80], len(merged),
-                        [str(r.get("content", ""))[:50] for r in merged])
-            return "## Holographic Memory\n" + "\n".join(lines)
+
+            out: List[str] = []
+            if decisions:
+                out.append("## Current context — latest decisions (newest first)")
+                out.extend(f"- [{r.get('category', '')}] {r.get('content', '')}" for r in decisions)
+            if relevant:
+                out.append("## Relevant memory")
+                for r in relevant:
+                    trust = r.get("trust_score", r.get("trust", 0))
+                    out.append(f"- [{trust:.1f}] {r.get('content', '')}")
+            logger.info("[MEM] recall query=%r -> %d decisions + %d relevant",
+                        (query or "")[:80], len(decisions), len(relevant))
+            return "\n".join(out)
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
