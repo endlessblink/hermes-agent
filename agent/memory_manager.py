@@ -492,11 +492,16 @@ class MemoryManager:
         """
         return extract_user_instruction_from_skill_message(text)
 
-    def prefetch_all(self, query: str, *, session_id: str = "") -> str:
+    def prefetch_all(self, query: str, *, session_id: str = "", project_id: "str | None" = None) -> str:
         """Collect prefetch context from all providers.
 
         Returns merged context text labeled by provider. Empty providers
         are skipped. Failures in one provider don't block others.
+
+        ``project_id`` (when resolved by the caller) scopes recall to the active
+        project for providers that support it; it is pushed onto each provider
+        via the optional ``set_active_project`` hook so provider ``prefetch``
+        signatures stay stable across the provider ecosystem.
         """
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
@@ -504,6 +509,9 @@ class MemoryManager:
         parts = []
         for provider in self._providers:
             try:
+                _set = getattr(provider, "set_active_project", None)
+                if callable(_set):
+                    _set(project_id)
                 result = provider.prefetch(clean_query, session_id=session_id)
                 if result and result.strip():
                     parts.append(result)

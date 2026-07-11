@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS fact_entities (
     PRIMARY KEY (fact_id, entity_id)
 );
 
+-- Project scoping (N:M). A fact tagged here is recalled only for those
+-- project_ids; a fact with NO row here is unscoped/global and always eligible.
+-- Shared techniques are tagged with each project they apply to.
+CREATE TABLE IF NOT EXISTS fact_projects (
+    fact_id    INTEGER REFERENCES facts(fact_id),
+    project_id TEXT NOT NULL,
+    PRIMARY KEY (fact_id, project_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_projects_project ON fact_projects(project_id);
+
 CREATE INDEX IF NOT EXISTS idx_facts_trust    ON facts(trust_score DESC);
 CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);
 CREATE INDEX IF NOT EXISTS idx_entities_name  ON entities(name);
@@ -208,6 +219,7 @@ class MemoryStore:
         source_session: str = "",
         source_message_id: int | None = None,
         trust: float | None = None,
+        projects: "list[str] | None" = None,
     ) -> int:
         """Insert a fact and return its fact_id.
 
@@ -225,6 +237,13 @@ class MemoryStore:
         (clamped to [0.0, 1.0]); pass a higher value for authoritative captures
         like explicit user decisions so they outrank generic facts in ranking.
         ``None`` keeps the existing default behaviour.
+
+        ``projects`` scopes the fact to one or more project ids (rows in
+        ``fact_projects``); recall then surfaces it only for those projects (plus
+        globally-untagged facts). Omitting it (or ``None``) leaves the fact
+        unscoped/global. On a duplicate ``content``, the given ``projects`` are
+        merged onto the existing fact — so a shared technique already stored for
+        project A can be tagged for project B without duplication.
         """
         with self._lock:
             content = content.strip()
@@ -249,16 +268,23 @@ class MemoryStore:
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
-                # Duplicate content — return existing id
+                # Duplicate content — return existing id, merging any new project
+                # tags onto it (shared facts can gain projects over time).
                 row = self._conn.execute(
                     "SELECT fact_id FROM facts WHERE content = ?", (content,)
                 ).fetchone()
-                return int(row["fact_id"])
+                existing_id = int(row["fact_id"])
+                if projects:
+                    self._tag_projects(existing_id, projects)
+                return existing_id
 
             # Entity extraction and linking
             for name in self._extract_entities(content):
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
+
+            if projects:
+                self._tag_projects(fact_id, projects)
 
             # Compute HRR vector after entity linking
             self._compute_hrr_vector(fact_id, content)
@@ -266,23 +292,58 @@ class MemoryStore:
 
             return fact_id
 
-    def recent_facts(self, limit: int = 5, min_trust: float = 0.3) -> list[dict]:
+    def _tag_projects(self, fact_id: int, projects: "list[str]") -> None:
+        """Attach ``fact_id`` to each project id (idempotent). Caller holds lock."""
+        rows = [(fact_id, p.strip()) for p in projects if p and p.strip()]
+        if not rows:
+            return
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO fact_projects (fact_id, project_id) VALUES (?, ?)",
+            rows,
+        )
+        self._conn.commit()
+
+    def fact_projects(self, fact_id: int) -> "list[str]":
+        """Return the project ids a fact is tagged with (empty = global)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT project_id FROM fact_projects WHERE fact_id = ? ORDER BY project_id",
+                (fact_id,),
+            ).fetchall()
+        return [r["project_id"] for r in rows]
+
+    def recent_facts(
+        self, limit: int = 5, min_trust: float = 0.3, project_id: "str | None" = None
+    ) -> list[dict]:
         """Return the most recently updated live facts, newest first.
 
         Recall gap fix: a continuation question ("what were we working on") is
         about recency, not keyword overlap — the answer is the recent subject/
         task facts, which a word-match search misses. This surfaces them.
         Superseded facts are excluded.
+
+        ``project_id`` scopes to the active project (untagged/global facts stay
+        eligible); ``None`` disables the filter, matching prior behaviour.
         """
+        where = "superseded_by IS NULL AND trust_score >= ?"
+        params: list = [min_trust]
+        if project_id:
+            where += (
+                " AND (NOT EXISTS (SELECT 1 FROM fact_projects fp WHERE fp.fact_id = facts.fact_id)"
+                " OR EXISTS (SELECT 1 FROM fact_projects fp WHERE fp.fact_id = facts.fact_id"
+                "            AND fp.project_id = ?))"
+            )
+            params.append(project_id)
+        params.append(limit)
         with self._lock:
             rows = self._conn.execute(
-                """SELECT fact_id, content, category, tags, trust_score,
+                f"""SELECT fact_id, content, category, tags, trust_score,
                           retrieval_count, helpful_count, created_at, updated_at
                      FROM facts
-                    WHERE superseded_by IS NULL AND trust_score >= ?
+                    WHERE {where}
                  ORDER BY updated_at DESC, fact_id DESC
                     LIMIT ?""",
-                (min_trust, limit),
+                params,
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 

@@ -553,12 +553,27 @@ def build_turn_context(
         except Exception:
             pass
 
-    # External memory provider: prefetch once before the tool loop.
+    # External memory provider: prefetch once before the tool loop, scoped to
+    # the active project (resolved from this session's lane → projects.db).
+    # Fail-open: any error leaves project_id None, which disables scoping so
+    # recall/capture behave exactly as before.
     ext_prefetch_cache = ""
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
-            ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+            _project_id = None
+            try:
+                from agent.project_scope import project_id_for_session
+
+                _project_id = project_id_for_session(
+                    getattr(agent, "_session_db", None), getattr(agent, "session_id", None)
+                )
+            except Exception:
+                _project_id = None
+            ext_prefetch_cache = agent._memory_manager.prefetch_all(
+                _query, session_id=getattr(agent, "session_id", "") or "",
+                project_id=_project_id,
+            ) or ""
         except Exception:
             pass
 

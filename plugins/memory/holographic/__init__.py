@@ -63,6 +63,7 @@ FACT_STORE_SCHEMA = {
                 "enum": ["add", "search", "probe", "related", "reason", "contradict", "supersede", "update", "remove", "list"],
             },
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
+            "projects": {"type": "array", "items": {"type": "string"}, "description": "Project id(s) this fact belongs to (for 'add'). Omit to use the current project; pass [] to make it global/shared across all projects; pass multiple ids for a technique shared by specific projects."},
             "query": {"type": "string", "description": "Search query (required for 'search')."},
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
@@ -131,6 +132,14 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
+        # The project this conversation is scoped to (resolved per turn by the
+        # memory manager). None = unscoped: recall isn't filtered and captures
+        # aren't tagged, so behaviour matches the pre-scoping default.
+        self._active_project: str | None = None
+
+    def set_active_project(self, project_id: str | None) -> None:
+        """Set the active project for recall scoping + capture tagging (per turn)."""
+        self._active_project = (project_id or None)
 
     @property
     def name(self) -> str:
@@ -224,8 +233,13 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._retriever or not query:
             return ""
         try:
-            # Keyword/semantic hits for the specific query...
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
+            # Keyword/semantic hits for the specific query, scoped to the active
+            # project (untagged/global facts always remain eligible; None = no
+            # filter, so recall never blanks out when the project is unresolved).
+            results = self._retriever.search(
+                query, min_trust=self._min_trust, limit=5,
+                project_id=self._active_project,
+            )
             # ...merged with the most-recent facts, so a continuation question
             # ("what were we working on") surfaces the recent subject/task even
             # when it shares no words with them. Dedup by fact_id; keyword hits
@@ -233,7 +247,7 @@ class HolographicMemoryProvider(MemoryProvider):
             seen = {r.get("fact_id") for r in results}
             merged = list(results)
             try:
-                for r in (self._store.recent_facts(limit=5, min_trust=self._min_trust) if self._store else []):
+                for r in (self._store.recent_facts(limit=5, min_trust=self._min_trust, project_id=self._active_project) if self._store else []):
                     if r.get("fact_id") not in seen and len(merged) < 8:
                         seen.add(r.get("fact_id"))
                         merged.append(r)
@@ -305,6 +319,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     origin="inferred",
                     source_session=self._session_id or "",
                     trust=trust,
+                    projects=[self._active_project] if self._active_project else None,
                 )
                 stored += 1
                 durable.append(fact)
@@ -374,6 +389,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     origin="mechanical",
                     source_session=self._session_id or "",
                     source_message_id=fact.source_message_id,
+                    projects=[self._active_project] if self._active_project else None,
                 )
                 stored += 1
             except Exception as e:
@@ -413,10 +429,17 @@ class HolographicMemoryProvider(MemoryProvider):
             retriever = self._retriever
 
             if action == "add":
+                # Tag with the projects the model named, else default to the
+                # active project so decisions stated in a project stay scoped to
+                # it. An empty list (model passed []) means intentionally global.
+                _projects = args.get("projects")
+                if _projects is None and self._active_project:
+                    _projects = [self._active_project]
                 fact_id = store.add_fact(
                     args["content"],
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
+                    projects=_projects,
                 )
                 logger.info("[MEM] fact_store ADD id=%s cat=%s: %s",
                             fact_id, args.get("category", "general"),

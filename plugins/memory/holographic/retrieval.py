@@ -61,8 +61,14 @@ class FactRetriever:
         category: str | None = None,
         min_trust: float = 0.3,
         limit: int = 10,
+        project_id: str | None = None,
     ) -> list[dict]:
         """Hybrid search: FTS5 candidates → Jaccard rerank → trust weighting.
+
+        ``project_id`` scopes recall to the active project: a fact is eligible if
+        it is untagged (global) OR tagged with ``project_id``. ``None`` disables
+        the filter (recall everything) — used as a safe fallback when the active
+        project can't be resolved, so recall never blanks out.
 
         Pipeline:
         1. FTS5 search: Get limit*3 candidates from SQLite full-text search
@@ -73,7 +79,7 @@ class FactRetriever:
         Returns list of dicts with fact data + 'score' field, sorted by score desc.
         """
         # Stage 1: Get FTS5 candidates (more than limit for reranking headroom)
-        candidates = self._fts_candidates(query, category, min_trust, limit * 3)
+        candidates = self._fts_candidates(query, category, min_trust, limit * 3, project_id)
 
         if not candidates:
             return []
@@ -501,6 +507,7 @@ class FactRetriever:
         category: str | None,
         min_trust: float,
         limit: int,
+        project_id: str | None = None,
     ) -> list[dict]:
         """Get raw FTS5 candidates from the store.
 
@@ -529,6 +536,16 @@ class FactRetriever:
         # Retired facts (a newer fact superseded them) stay in the table for
         # history but must not surface as current recall.
         where_clauses.append("f.superseded_by IS NULL")
+
+        # Project scoping: eligible if the fact is untagged (global) OR tagged
+        # with the active project. NULL project_id disables the filter entirely.
+        if project_id:
+            where_clauses.append(
+                "(NOT EXISTS (SELECT 1 FROM fact_projects fp WHERE fp.fact_id = f.fact_id)"
+                " OR EXISTS (SELECT 1 FROM fact_projects fp WHERE fp.fact_id = f.fact_id"
+                "            AND fp.project_id = ?))"
+            )
+            params.append(project_id)
 
         where_sql = " AND ".join(where_clauses)
 
