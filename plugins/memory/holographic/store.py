@@ -207,6 +207,7 @@ class MemoryStore:
         origin: str = "inferred",
         source_session: str = "",
         source_message_id: int | None = None,
+        trust: float | None = None,
     ) -> int:
         """Insert a fact and return its fact_id.
 
@@ -219,11 +220,18 @@ class MemoryStore:
         the least-trusted default), or ``obsidian`` (mirrored from a
         human-curated note). ``source_session`` / ``source_message_id`` link the
         fact back to where it came from so any claim is checkable.
+
+        ``trust`` overrides the store-wide ``default_trust`` for this one fact
+        (clamped to [0.0, 1.0]); pass a higher value for authoritative captures
+        like explicit user decisions so they outrank generic facts in ranking.
+        ``None`` keeps the existing default behaviour.
         """
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
+
+            trust_score = self.default_trust if trust is None else max(0.0, min(1.0, trust))
 
             try:
                 cur = self._conn.execute(
@@ -234,7 +242,7 @@ class MemoryStore:
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        content, category, tags, self.default_trust,
+                        content, category, tags, trust_score,
                         origin, source_session, source_message_id,
                     ),
                 )

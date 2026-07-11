@@ -48,6 +48,10 @@ FACT_STORE_SCHEMA = {
         "• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n"
+        "• supersede — Retire a stale fact in favour of a newer one. When the user states a "
+        "decision that contradicts a fact you already stored, add the new fact, then "
+        "supersede the old one (fact_id = old, superseded_by = new id) so the stale fact "
+        "stops being recalled as current. This is how a newer decision wins over an older one.\n"
         "• update/remove/list — CRUD operations.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
@@ -56,13 +60,14 @@ FACT_STORE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"],
+                "enum": ["add", "search", "probe", "related", "reason", "contradict", "supersede", "update", "remove", "list"],
             },
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
             "query": {"type": "string", "description": "Search query (required for 'search')."},
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
-            "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'."},
+            "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'; the OLD (retired) fact for 'supersede'."},
+            "superseded_by": {"type": "integer", "description": "The NEW fact ID that replaces 'fact_id' (required for 'supersede')."},
             "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general"]},
             "tags": {"type": "string", "description": "Comma-separated tags."},
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
@@ -88,6 +93,12 @@ FACT_FEEDBACK_SCHEMA = {
         "required": ["action", "fact_id"],
     },
 }
+
+
+# Inferred-fact categories that represent an explicit user choice and should be
+# captured at higher trust so a recent decision outranks older/generic facts.
+# Names match agent.memory_extraction.CATEGORIES.
+_AUTHORITATIVE_CATEGORIES = frozenset({"decision", "preference", "change", "rejected"})
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +190,12 @@ class HolographicMemoryProvider(MemoryProvider):
             hrr_dim=hrr_dim,
         )
         self._session_id = session_id
+        try:
+            _n = self._store._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+        except Exception:
+            _n = "?"
+        logger.info("[MEM] holographic active: db=%s facts=%s session=%s infer_facts=%s",
+                    db_path, _n, session_id, self._config.get("infer_facts", self._config.get("auto_extract", False)))
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -223,11 +240,15 @@ class HolographicMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("recency merge failed: %s", e)
             if not merged:
+                logger.info("[MEM] recall query=%r -> 0 facts", (query or "")[:80])
                 return ""
             lines = []
             for r in merged:
                 trust = r.get("trust_score", r.get("trust", 0))
                 lines.append(f"- [{trust:.1f}] {r.get('content', '')}")
+            logger.info("[MEM] recall query=%r -> %d facts injected: %s",
+                        (query or "")[:80], len(merged),
+                        [str(r.get("content", ""))[:50] for r in merged])
             return "## Holographic Memory\n" + "\n".join(lines)
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
@@ -249,6 +270,8 @@ class HolographicMemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        logger.info("[MEM] on_session_end fired: session=%s messages=%d store=%s",
+                    self._session_id, len(messages) if messages else 0, bool(self._store))
         if not self._store or not messages:
             return
         # Mechanical capture always runs -- it's deterministic ground truth
@@ -272,18 +295,22 @@ class HolographicMemoryProvider(MemoryProvider):
         durable = []
         for fact in extract_inferred_facts(messages):
             try:
+                # Explicit user decisions carry more authority than generic
+                # inferred facts, so a recent decision outranks an older note or
+                # a stale peer fact in recall (ranking multiplies trust_score).
+                trust = 0.8 if fact.category in _AUTHORITATIVE_CATEGORIES else None
                 self._store.add_fact(
                     fact.content,
                     category=fact.category,
                     origin="inferred",
                     source_session=self._session_id or "",
+                    trust=trust,
                 )
                 stored += 1
                 durable.append(fact)
             except Exception as e:
                 logger.debug("inferred fact store failed: %s", e)
-        if stored:
-            logger.info("Captured %d inferred facts", stored)
+        logger.info("[MEM] inferred capture: stored %d facts", stored)
         # Mirror durable facts into the human-editable Obsidian vault. Off by
         # default (writes to the real vault); enable with mirror_to_obsidian.
         if durable and self._config.get("mirror_to_obsidian", False):
@@ -351,8 +378,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 stored += 1
             except Exception as e:
                 logger.debug("mechanical fact store failed: %s", e)
-        if stored:
-            logger.info("Captured %d mechanical facts", stored)
+        logger.info("[MEM] mechanical capture: stored %d facts", stored)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """Mirror built-in memory writes as facts."""
@@ -392,6 +418,9 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
                 )
+                logger.info("[MEM] fact_store ADD id=%s cat=%s: %s",
+                            fact_id, args.get("category", "general"),
+                            str(args.get("content", ""))[:100])
                 return json.dumps({"fact_id": fact_id, "status": "added"})
 
             elif action == "search":
@@ -436,6 +465,13 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args.get("limit", 10)),
                 )
                 return json.dumps({"results": results, "count": len(results)})
+
+            elif action == "supersede":
+                old_id = int(args["fact_id"])
+                new_id = int(args["superseded_by"])
+                store.supersede_fact(old_id, new_id)
+                logger.info("[MEM] supersede: fact %s retired by %s", old_id, new_id)
+                return json.dumps({"superseded": old_id, "by": new_id, "status": "retired"})
 
             elif action == "update":
                 updated = store.update_fact(
