@@ -395,9 +395,15 @@ class HolographicMemoryProvider(MemoryProvider):
         except Exception as e:
             logger.debug("memory_extraction import failed: %s", e)
             return
+        try:
+            from agent.memory_capture import looks_like_secret as _is_secret
+        except Exception:
+            _is_secret = lambda _c: False
         stored = 0
         durable = []
         for fact in extract_inferred_facts(messages):
+            if _is_secret(fact.content):
+                continue  # never persist a secret, even model-inferred
             try:
                 # Explicit user decisions carry more authority than generic
                 # inferred facts, so a recent decision outranks an older note or
@@ -519,6 +525,12 @@ class HolographicMemoryProvider(MemoryProvider):
             retriever = self._retriever
 
             if action == "add":
+                try:
+                    from agent.memory_capture import looks_like_secret as _is_secret
+                    if _is_secret(args.get("content", "")):
+                        return json.dumps({"status": "skipped", "reason": "content looks like a secret; not stored"})
+                except Exception:
+                    pass
                 # Tag with the projects the model named, else default to the
                 # active project so decisions stated in a project stay scoped to
                 # it. An empty list (model passed []) means intentionally global.

@@ -50,6 +50,27 @@ _CORRECTION_RE = [
 _MIN_STATEMENT_LEN = 10
 _MAX_CONTENT = 400
 
+# Never store secret-looking content in memory. A leaked "Supabase secret
+# exposure" fact showed why: memory must not become a place secrets live, and
+# such lines are also almost always off-topic devops noise. Mirrors the
+# obsidian-source-of-truth plugin's redaction intent.
+_SECRET_RE = re.compile(
+    # a var/field whose name ends in key/secret/token/password (incl. env-style
+    # PREFIX_SERVICE_KEY) assigned a value
+    r"\b[\w.\-]*(?:api[_-]?key|secret|token|password|passwd|bearer|[_-]key)\b\s*[:=]\s*\S{6,}"
+    r"|sk-[A-Za-z0-9_-]{12,}"
+    r"|gh[pousr]_[A-Za-z0-9_]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9-]+"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}",  # JWT
+    re.IGNORECASE,
+)
+
+
+def looks_like_secret(content: str) -> bool:
+    """True when a candidate fact contains a credential/secret and must not be
+    stored in memory. Pure and conservative — only obvious secret shapes."""
+    return bool(content) and bool(_SECRET_RE.search(content))
+
 
 @dataclass
 class MechanicalFact:
@@ -100,6 +121,8 @@ def _statement_facts(messages) -> list[MechanicalFact]:
         content = msg.get("content")
         if not isinstance(content, str) or len(content) < _MIN_STATEMENT_LEN:
             continue
+        if looks_like_secret(content):
+            continue  # never store credentials/secrets in memory
         mid = _msg_id(msg)
         # Corrections first — highest signal, must not be missed even if the
         # sentence also happens to match a preference pattern.
