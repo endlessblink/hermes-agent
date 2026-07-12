@@ -2,7 +2,18 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
-import type { HermesUiChecklistArtifact, HermesUiFlowStateNextBlockArtifact } from '@/lib/hermes-ui-artifacts'
+import type {
+  HermesUiChecklistArtifact,
+  HermesUiDayTimelineArtifact,
+  HermesUiFlowStateNextBlockArtifact,
+  HermesUiFlowStatePlanningSessionArtifact,
+  HermesUiFormArtifact,
+  HermesUiMiniKanbanArtifact,
+  HermesUiMutationPreviewArtifact,
+  HermesUiPlanningFunnelArtifact,
+  HermesUiTaskContextArtifact,
+  HermesUiTaskTableArtifact
+} from '@/lib/hermes-ui-artifacts'
 
 const requestComposerSubmit = vi.fn()
 
@@ -10,7 +21,23 @@ vi.mock('@/app/chat/composer/focus', () => ({
   requestComposerSubmit: (text: string, opts?: unknown) => requestComposerSubmit(text, opts)
 }))
 
-import { ChecklistArtifactCard, FlowStateNextBlockCard, FlowStateTaskBatchCard, TaskTriageArtifactCard } from './hermes-ui-artifact'
+import {
+  ChecklistArtifactCard,
+  DayTimelineCard,
+  FlowStateNextBlockCard,
+  FlowStatePlanningSessionCard,
+  FlowStateTaskBatchCard,
+  FormArtifactCard,
+  MiniKanbanCard,
+  MutationPreviewCard,
+  PlanningFunnelCard,
+  TaskContextCard,
+  TaskGraphCard,
+  TaskTableCard,
+  TaskTriageArtifactCard,
+  UrgencyEnergyMatrixCard,
+  WorkloadBarsCard
+} from './hermes-ui-artifact'
 import { RichCodeBlock } from './registry'
 
 const artifact: HermesUiChecklistArtifact = {
@@ -25,6 +52,23 @@ const artifact: HermesUiChecklistArtifact = {
 }
 
 const storageKey = 'hermes-ui:checklist:obsidian-source-of-truth-policy'
+
+const formArtifact: HermesUiFormArtifact = {
+  direction: 'rtl',
+  fields: [
+    { id: 'outcome', label: 'מה חשוב היום?', required: true, type: 'short-text' },
+    {
+      id: 'energy',
+      label: 'אנרגיה',
+      options: [{ label: 'גבוהה', value: 'high' }],
+      type: 'single-choice'
+    }
+  ],
+  id: 'morning-outcome',
+  submitLabel: 'שלח ל־Hermes',
+  title: 'תכנון היום',
+  type: 'form'
+}
 
 const nextBlockArtifact: HermesUiFlowStateNextBlockArtifact = {
   actions: [
@@ -59,6 +103,48 @@ const nextBlockArtifact: HermesUiFlowStateNextBlockArtifact = {
   type: 'flowstate-next-block'
 }
 
+
+const planningSessionArtifact: HermesUiFlowStatePlanningSessionArtifact = {
+  categories: [
+    {
+      count: 2,
+      examples: [
+        { dueDate: '2026-07-09', id: 'task-1', priority: 'high', title: 'להחליט מה הבלוק הבא' }
+      ],
+      id: 'work-pressure',
+      label: 'עומס עבודה',
+      recommendation: 'להוציא רק בלוק אחד לביצוע ולא לפתוח את כל הבקלוג.',
+      tone: 'work'
+    }
+  ],
+  direction: 'rtl',
+  id: 'flowstate-day-plan',
+  mode: 'day-start',
+  nextBlock: {
+    doneEnough: 'להבין מה הדבר הקטן הבא ולהתחיל אותו.',
+    durationMinutes: 25,
+    id: 'next-block',
+    rationale: 'זה מוריד עומס בלי להפוך לתכנון ארוך.',
+    taskIds: ['task-1'],
+    title: 'הבלוק הבא'
+  },
+  tasks: [
+    {
+      dueDate: '2026-07-09',
+      id: 'task-1',
+      priority: 'high',
+      rationale: 'קטן וברור מספיק להתחלה.',
+      recommendation: 'today',
+      recommendedDueDate: '2026-07-09',
+      recommendedPriority: 'high',
+      status: 'todo',
+      title: 'להחליט מה הבלוק הבא'
+    }
+  ],
+  title: 'תכנון היום',
+  type: 'flowstate-planning-session'
+}
+
 beforeEach(() => {
   window.localStorage.clear()
   requestComposerSubmit.mockClear()
@@ -67,6 +153,71 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('ChecklistArtifactCard', () => {
+
+  it('validates, persists, and submits a deterministic RTL form response', () => {
+    const { unmount } = render(<FormArtifactCard artifact={formArtifact} />)
+
+    expect(document.querySelector('[data-hermes-ui-artifact="form"]')?.getAttribute('dir')).toBe('rtl')
+    fireEvent.click(screen.getByRole('button', { name: 'שלח ל־Hermes' }))
+    expect(screen.getByText('שדה חובה')).toBeTruthy()
+    expect(requestComposerSubmit).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('מה חשוב היום?'), { target: { value: 'לסיים את המצגת' } })
+    fireEvent.click(screen.getByLabelText('גבוהה'))
+    unmount()
+
+    render(<FormArtifactCard artifact={formArtifact} />)
+    expect((screen.getByLabelText('מה חשוב היום?') as HTMLInputElement).value).toBe('לסיים את המצגת')
+    const submitButton = screen.getByRole('button', { name: 'שלח ל־Hermes' })
+    fireEvent.click(submitButton)
+    fireEvent.click(submitButton)
+
+    expect(requestComposerSubmit).toHaveBeenCalledTimes(1)
+    expect(submitButton).toHaveProperty('disabled', true)
+    const message = requestComposerSubmit.mock.calls[0]?.[0]
+    const response = JSON.parse(message.slice('Hermes UI form response:\n'.length))
+
+    expect(response).toEqual({
+      actionId: 'submit',
+      artifactId: 'morning-outcome',
+      idempotencyKey: expect.stringMatching(/^form:/),
+      schemaVersion: 1,
+      type: 'form-response',
+      values: { outcome: 'לסיים את המצגת', energy: 'high' }
+    })
+    expect(requestComposerSubmit).toHaveBeenCalledWith(expect.any(String), { target: 'main' })
+  })
+
+  it('renders FlowState planning sessions with categories, next block, task controls, and submit routing', () => {
+    render(<FlowStatePlanningSessionCard artifact={planningSessionArtifact} />)
+
+    expect(screen.getByText('תכנון היום')).toBeTruthy()
+    expect(screen.getByText('עומס עבודה')).toBeTruthy()
+    expect(screen.getAllByText('הבלוק הבא').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: 'היום' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'שלח החלטות ל־Hermes' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'היום' }))
+    fireEvent.click(screen.getByRole('button', { name: 'שלח החלטות ל־Hermes' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledWith(expect.stringContaining('FlowState'), { target: 'main' })
+    expect(requestComposerSubmit).toHaveBeenCalledWith(expect.stringContaining('task-1'), { target: 'main' })
+  })
+
+  it('renders flowstate-planning-session rich code blocks as an inline card', async () => {
+    render(
+      <RichCodeBlock
+        code={JSON.stringify(planningSessionArtifact, null, 2)}
+        fallback={<pre>fallback code block</pre>}
+        language="hermes-ui"
+      />
+    )
+
+    await waitFor(() => expect(screen.getByText('תכנון היום')).toBeTruthy())
+    expect(document.querySelector('[data-hermes-ui-artifact="flowstate-planning-session"]')).toBeTruthy()
+    expect(screen.queryByText('fallback code block')).toBeNull()
+  })
+
   it('renders title, items, checkboxes, and progress', () => {
     render(<ChecklistArtifactCard artifact={artifact} />)
 
@@ -371,5 +522,269 @@ describe('ChecklistArtifactCard', () => {
     rerender(<RichCodeBlock code="{ nope" fallback={<pre>fallback code block</pre>} language="hermes-ui" />)
 
     expect(screen.getByText('fallback code block')).toBeTruthy()
+  })
+})
+
+
+describe('Planning interview primitives', () => {
+  const planningFunnel: HermesUiPlanningFunnelArtifact = {
+    direction: 'rtl',
+    id: 'planning-funnel-test',
+    steps: [
+      { id: 'capture', label: 'לקלוט משימות', status: 'done' },
+      { id: 'context', label: 'להבין הקשר', status: 'current' },
+      { id: 'breakdown', label: 'לפרק לצעדים קטנים', status: 'pending' },
+      { id: 'schedule', label: 'לשבץ לפי זמן ואנרגיה', status: 'pending' }
+    ],
+    title: 'משפך תכנון קצר',
+    type: 'planning-funnel'
+  }
+
+  const taskContext: HermesUiTaskContextArtifact = {
+    actions: [
+      {
+        id: 'ask-context',
+        label: 'שאל שאלה אחת',
+        submitText: 'תשאל שאלה אחת קצרה על ההקשר של המשימה הזו.'
+      }
+    ],
+    connections: ['בריאות', 'הכנה לפגישה'],
+    direction: 'rtl',
+    id: 'task-context-test',
+    progress: 'לדעת אם צריך פעולה לפני הפגישה',
+    task: {
+      dueDate: '2026-07-06',
+      id: 'task-health-tests',
+      priority: 'high',
+      status: 'todo',
+      title: 'לראות שאני מקבל את הבדיקות לפני הפגישה עם הרופאה'
+    },
+    title: 'כרטיס הבנת משימה',
+    type: 'task-context',
+    unknowns: ['מתי הפגישה?', 'האם צריך להתקשר או רק לבדוק?']
+  }
+
+  it('renders a compact planning funnel', () => {
+    render(<PlanningFunnelCard artifact={planningFunnel} />)
+
+    expect(screen.getByText('משפך תכנון קצר')).toBeTruthy()
+    expect(screen.getByText('להבין הקשר')).toBeTruthy()
+    expect(screen.getByText('עכשיו')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="planning-funnel"]')).toBeTruthy()
+  })
+
+  it('renders a task context card and routes the next question to Hermes', () => {
+    render(<TaskContextCard artifact={taskContext} />)
+
+    expect(screen.getByText('כרטיס הבנת משימה')).toBeTruthy()
+    expect(screen.getByText('מה נחשב התקדמות')).toBeTruthy()
+    expect(screen.getByText('מתי הפגישה?')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'שאל שאלה אחת' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledWith('תשאל שאלה אחת קצרה על ההקשר של המשימה הזו.', { target: 'main' })
+  })
+
+  it('renders planning primitives from markdown hermes-ui fences', async () => {
+    render(
+      <MarkdownTextContent
+        isRunning={false}
+        text={[
+          '```hermes-ui',
+          JSON.stringify(planningFunnel, null, 2),
+          '```'
+        ].join('\n')}
+      />
+    )
+
+    await waitFor(() => expect(screen.getByText('משפך תכנון קצר')).toBeTruthy())
+    expect(screen.queryByText(/Code\s*·\s*hermes-ui/i)).toBeNull()
+  })
+})
+
+describe('Planning toolkit primitives', () => {
+  const taskTable: HermesUiTaskTableArtifact = {
+    columns: ['task', 'context', 'energy', 'urgency', 'nextStep', 'confidence'],
+    direction: 'rtl',
+    rows: [
+      {
+        actions: [{ id: 'ask', label: 'שאל על זה', submitText: 'שאל אותי שאלה אחת על בדיקות.' }],
+        confidence: 'low',
+        context: 'לא ברור למה זה חשוב',
+        energy: 'unknown',
+        id: 't1',
+        nextStep: 'לשאול שאלה אחת',
+        title: 'לבדוק בדיקות',
+        urgency: 'high'
+      },
+      { confidence: 'medium', context: 'לקוח', energy: 'medium', id: 't2', nextStep: 'טיוטה', title: 'מייל ללקוח', urgency: 'medium' },
+      { confidence: 'high', context: 'בית', energy: 'low', id: 't3', nextStep: '10 דקות', title: 'לסדר שולחן', urgency: 'low' }
+    ],
+    title: 'השוואת משימות',
+    type: 'task-table'
+  }
+
+  const miniKanban: HermesUiMiniKanbanArtifact = {
+    direction: 'rtl',
+    lanes: [
+      {
+        id: 'today',
+        tasks: [{ actions: [{ id: 'route', label: 'בחר להיום', submitText: 'שים את t1 ב־today preview.' }], id: 't1', title: 'טיוטה ללקוח' }],
+        title: 'היום'
+      },
+      { id: 'need-context', tasks: [{ id: 't2', note: 'צריך להבין משמעות', title: 'בדיקות' }], title: 'צריך הקשר' }
+    ],
+    title: 'מיון קצר',
+    type: 'mini-kanban'
+  }
+
+  const dayTimeline: HermesUiDayTimelineArtifact = {
+    blocks: [
+      { actions: [{ id: 'accept-block', label: 'השתמש בבלוק', submitText: 'תציג preview לבלוק הזה.' }], endTime: '10:25', id: 'b1', kind: 'focus', label: 'טיוטה ללקוח', startTime: '10:00', status: 'candidate' },
+      { durationMinutes: 15, id: 'float-1', kind: 'floating', label: 'בדיקה קצרה', status: 'planned' }
+    ],
+    currentTime: '09:45',
+    date: '2026-07-09',
+    direction: 'rtl',
+    title: 'תכנון יום אפשרי',
+    type: 'day-timeline'
+  }
+
+  const mutationPreview: HermesUiMutationPreviewArtifact = {
+    actions: [
+      { id: 'approve', label: 'מאשר את השינויים האלה', submitText: 'מאשר לבצע את preview הזה ב־FlowState.' },
+      { id: 'revise', label: 'צריך תיקון', submitText: 'תעדכן את ה־preview לפני שינוי.' },
+      { id: 'cancel', label: 'בטל', submitText: 'בטל את ה־preview ואל תשנה את FlowState.' }
+    ],
+    changes: [
+      {
+        after: { date: '2026-07-09', time: '10:00' },
+        before: { date: null, status: 'todo' },
+        operation: 'schedule-instance',
+        risk: 'low',
+        taskId: 't1',
+        title: 'טיוטה ללקוח',
+        untouched: ['priority', 'title']
+      }
+    ],
+    direction: 'rtl',
+    title: 'Preview לפני שינוי',
+    type: 'mutation-preview'
+  }
+
+  it('renders task-table with unknowns and routes row actions', () => {
+    render(<TaskTableCard artifact={taskTable} />)
+
+    expect(screen.getByText('השוואת משימות')).toBeTruthy()
+    expect(screen.getByText('לבדוק בדיקות')).toBeTruthy()
+    expect(screen.getByText('לא ידוע')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="task-table"]')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'שאל על זה' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledWith('שאל אותי שאלה אחת על בדיקות.', { target: 'main' })
+  })
+
+  it('renders mini-kanban lanes and routes task actions', () => {
+    render(<MiniKanbanCard artifact={miniKanban} />)
+
+    expect(screen.getByText('מיון קצר')).toBeTruthy()
+    expect(screen.getByText('צריך הקשר')).toBeTruthy()
+    expect(screen.getByText('צריך להבין משמעות')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="mini-kanban"]')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'בחר להיום' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledWith('שים את t1 ב־today preview.', { target: 'main' })
+  })
+
+  it('renders day-timeline with current time and routes block actions', () => {
+    render(<DayTimelineCard artifact={dayTimeline} />)
+
+    expect(screen.getByText('תכנון יום אפשרי')).toBeTruthy()
+    expect(screen.getAllByText('09:45').length).toBeGreaterThan(0)
+    expect(screen.getByText('טיוטה ללקוח')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="day-timeline"]')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'השתמש בבלוק' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledWith('תציג preview לבלוק הזה.', { target: 'main' })
+  })
+
+  it('renders mutation-preview as preview-only and routes full approval labels', () => {
+    render(<MutationPreviewCard artifact={mutationPreview} />)
+
+    expect(screen.getByText('Preview לפני שינוי')).toBeTruthy()
+    expect(screen.getByText('Preview בלבד. לא מתבצע שינוי ב־FlowState מהרכיב הזה.')).toBeTruthy()
+    expect(screen.getByText('schedule-instance')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="mutation-preview"]')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'מאשר את השינויים האלה' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledWith('מאשר לבצע את preview הזה ב־FlowState.', { target: 'main' })
+  })
+
+  it('renders matrix, workload bars, and task graph primitives', () => {
+    render(
+      <>
+        <UrgencyEnergyMatrixCard
+          artifact={{
+            cells: [{ label: 'דחוף באנרגיה נמוכה', tasks: [{ id: 't1', priority: 'high', title: 'שיחה קצרה' }], x: 'low', y: 'high' }],
+            direction: 'rtl',
+            title: 'בחירה לפי אנרגיה',
+            type: 'urgency-energy-matrix',
+            xAxis: 'energy',
+            yAxis: 'urgency'
+          }}
+        />
+        <WorkloadBarsCard
+          artifact={{
+            bars: [{ id: 'overdue', label: 'באיחור', max: 10, tone: 'warning', value: 3 }],
+            direction: 'rtl',
+            title: 'עומס כללי',
+            type: 'workload-bars'
+          }}
+        />
+        <TaskGraphCard
+          artifact={{
+            direction: 'rtl',
+            edges: [{ label: 'תלוי ב', source: 'task', target: 'person' }],
+            nodes: [
+              { id: 'task', kind: 'task', label: 'לשלוח הצעה' },
+              { id: 'person', kind: 'person', label: 'לקוח' }
+            ],
+            title: 'קשרי משימה',
+            type: 'task-graph'
+          }}
+        />
+      </>
+    )
+
+    expect(screen.getByText('בחירה לפי אנרגיה')).toBeTruthy()
+    expect(screen.getByText('דחוף באנרגיה נמוכה')).toBeTruthy()
+    expect(screen.getByText('עומס כללי')).toBeTruthy()
+    expect(screen.getByText('באיחור')).toBeTruthy()
+    expect(screen.getByText('קשרי משימה')).toBeTruthy()
+    expect(screen.getByText(/תלוי ב/)).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="urgency-energy-matrix"]')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="workload-bars"]')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="task-graph"]')).toBeTruthy()
+  })
+
+  it('renders a new primitive from markdown hermes-ui fences', async () => {
+    render(
+      <MarkdownTextContent
+        isRunning={false}
+        text={[
+          '```hermes-ui',
+          JSON.stringify(mutationPreview, null, 2),
+          '```'
+        ].join('\n')}
+      />
+    )
+
+    await waitFor(() => expect(screen.getByText('Preview לפני שינוי')).toBeTruthy())
+    expect(document.querySelector('[data-hermes-ui-artifact="mutation-preview"]')).toBeTruthy()
+    expect(screen.queryByText(/Code\s*·\s*hermes-ui/i)).toBeNull()
   })
 })

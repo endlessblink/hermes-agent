@@ -41,3 +41,19 @@ class TestStreamingConfigNested:
         })
         assert cfg.streaming.enabled is True
         assert cfg.streaming.transport == "edit"
+
+
+class TestTelegramTopicRoutingConfig:
+    def test_top_level_telegram_topic_filters_bridge_to_platform_extra(self):
+        from gateway.config import Platform
+
+        cfg = _load_with_yaml_dict({
+            "telegram": {
+                "allowed_topics": ["2"],
+                "ignored_threads": ["1", "2"],
+            }
+        })
+
+        telegram_extra = cfg.platforms[Platform.TELEGRAM].extra
+        assert telegram_extra["allowed_topics"] == ["2"]
+        assert telegram_extra["ignored_threads"] == ["1", "2"]

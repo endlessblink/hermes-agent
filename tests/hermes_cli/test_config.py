@@ -1328,6 +1328,17 @@ class TestCliRefreshIntervalConfig:
         assert DEFAULT_CONFIG["display"]["cli_refresh_interval"] == 1.0
 
 
+class TestObsidianVaultConfig:
+    def test_default_config_includes_read_only_vault_settings(self):
+        vault = DEFAULT_CONFIG["obsidian_vault"]
+        assert vault["enabled"] is True
+        assert vault["canonical_vault_root"].endswith("OBSIDIAN_SYNCED")
+        assert vault["visible_workspace"].endswith("OBSIDIAN_SYNCED/MAIN VULT")
+        assert vault["allow_hidden_system_paths"] is False
+        assert vault["max_read_chars"] == 100000
+        assert vault["max_search_results"] == 20
+
+
 class TestDiscordChannelPromptsConfig:
     def test_default_config_includes_discord_channel_prompts(self):
         assert DEFAULT_CONFIG["discord"]["channel_prompts"] == {}

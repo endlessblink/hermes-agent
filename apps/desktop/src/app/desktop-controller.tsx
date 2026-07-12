@@ -13,6 +13,7 @@ import { useMediaQuery } from '@/hooks/use-media-query'
 import { isFocusWithin } from '@/lib/keybinds/combo'
 import { cn } from '@/lib/utils'
 import { useSkinCommand } from '@/themes/use-skin-command'
+import type { RpcEvent } from '@/types/hermes'
 
 import { formatRefValue } from '../components/assistant-ui/directive-text'
 import {
@@ -27,6 +28,7 @@ import { storedSessionIdForNotification } from '../lib/session-ids'
 import { isMessagingSource } from '../lib/session-source'
 import { latestSessionTodos } from '../lib/todos'
 import { setCronFocusJobId } from '../store/cron'
+import { startDailyAssistantScheduler } from '../store/daily-assistant-scheduler'
 import {
   $fileBrowserOpen,
   $panesFlipped,
@@ -45,6 +47,16 @@ import {
 import { respondToApprovalAction } from '../store/native-notifications'
 import { notify } from '../store/notifications'
 import { $paneOpen } from '../store/panes'
+import {
+  $personalAssistantState,
+  openPersonalAssistantHome,
+  refreshPersonalAssistantState,
+  startPersonalAssistant
+} from '../store/personal-assistant'
+import {
+  handlePersonalAssistantAttention,
+  type PersonalAssistantAttentionPayload
+} from '../store/personal-assistant-attention'
 import { setPetActivity } from '../store/pet'
 import { setPetScale } from '../store/pet-gallery'
 import {
@@ -239,6 +251,7 @@ export function DesktopController() {
   const previewPaneOpen = useStore($paneOpen(PREVIEW_PANE_ID))
   const panesFlipped = useStore($panesFlipped)
   const profileScope = useStore($profileScope)
+  const personalAssistantState = useStore($personalAssistantState)
   // Below SIDEBAR_COLLAPSE_BREAKPOINT_PX there's no room for a docked rail —
   // collapse both sidebars (without touching their stored open state) so the
   // hover-reveal overlay becomes the way in. Restores once it's wide again.
@@ -856,6 +869,72 @@ export function DesktopController() {
     selectedStoredSessionId
   })
 
+  const openPersonalAssistant = useCallback(
+    async (trigger: 'manual' | 'scheduled') => {
+      try {
+        const result = await startPersonalAssistant(trigger)
+
+        if (result.sessionId) {
+          await refreshPersonalAssistantState()
+          navigate(sessionRoute(result.sessionId))
+        }
+      } catch (error) {
+        if (trigger === 'manual') {
+          notify({
+            kind: 'error',
+            title: 'Could not start personal assistant',
+            message: error instanceof Error ? error.message : 'Please try again.'
+          })
+        }
+      }
+    },
+    [navigate]
+  )
+
+  const openPersonalAssistantDestination = useCallback(async () => {
+    try {
+      navigate(sessionRoute(await openPersonalAssistantHome()))
+    } catch (error) {
+      notify({
+        kind: 'error',
+        title: 'Could not open personal assistant',
+        message: error instanceof Error ? error.message : 'Please try again.'
+      })
+    }
+  }, [navigate])
+
+  useEffect(() => {
+    const unsubscribe = window.hermesDesktop?.onNotificationAction?.(({ actionId }) => {
+      if (actionId === 'view-personal-assistant') {
+        void openPersonalAssistantDestination()
+      }
+    })
+
+    return () => unsubscribe?.()
+  }, [openPersonalAssistantDestination])
+
+  const handleAssistantAwareGatewayEvent = useCallback(
+    (event: RpcEvent) => {
+      handleDesktopGatewayEvent(event)
+
+      if (event.type === 'personal_assistant.attention') {
+        void handlePersonalAssistantAttention(
+          event.payload as PersonalAssistantAttentionPayload,
+          () => void openPersonalAssistantDestination()
+        )
+      }
+    },
+    [handleDesktopGatewayEvent, openPersonalAssistantDestination]
+  )
+
+  useEffect(
+    () =>
+      startDailyAssistantScheduler($activeGatewayProfile, async (_profile, trigger) => {
+        await openPersonalAssistant(trigger)
+      }),
+    [openPersonalAssistant]
+  )
+
   const {
     archiveSession,
     branchCurrentSession,
@@ -1174,7 +1253,7 @@ export function DesktopController() {
   }, [])
 
   useGatewayBoot({
-    handleGatewayEvent: handleDesktopGatewayEvent,
+    handleGatewayEvent: handleAssistantAwareGatewayEvent,
     onConnectionReady: c => {
       connectionRef.current = c
     },
@@ -1314,7 +1393,11 @@ export function DesktopController() {
       currentView={currentView}
       onArchiveSession={sessionId => void archiveSession(sessionId)}
       onBranchSession={sessionId => void branchStoredSession(sessionId)}
-      onDeleteSession={sessionId => void removeSession(sessionId)}
+      onDeleteSession={sessionId => {
+        if (sessionId !== personalAssistantState?.sessionId) {
+          void removeSession(sessionId)
+        }
+      }}
       onLoadMoreMessaging={loadMoreMessagingForPlatform}
       onLoadMoreProfileSessions={loadMoreSessionsForProfile}
       onLoadMoreSessions={loadMoreSessions}
@@ -1325,6 +1408,7 @@ export function DesktopController() {
       onNavigate={selectSidebarItem}
       onNewSessionInWorkspace={startSessionInWorkspace}
       onResumeSession={sessionId => navigate(sessionRoute(sessionId))}
+      onStartPersonalAssistant={() => void openPersonalAssistantDestination()}
       onTriggerCronJob={jobId => {
         void triggerCronJob(jobId)
           .then(() => refreshCronJobs())

@@ -339,6 +339,154 @@ def _handle_schedule_task_instance(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+def _subtask_path(task_id: str, subtask_id: Optional[str] = None) -> str:
+    path = f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/subtasks"
+    if subtask_id is not None:
+        path += f"/{urllib.parse.quote(subtask_id, safe='')}"
+    return path
+
+
+def _preview_metadata(args: dict) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "preview": False if args.get("preview") is False else True,
+    }
+    request_id = str(args.get("requestId") or "").strip()
+    if request_id:
+        metadata["requestId"] = request_id
+    return metadata
+
+
+def _validate_apply_request(body: Dict[str, Any]) -> Optional[str]:
+    if body["preview"] is False and not body.get("requestId"):
+        return "requestId is required when preview is false"
+    return None
+
+
+def _handle_list_subtasks(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    if not task_id:
+        return _tool_error("taskId is required")
+    try:
+        return _tool_result(_request("GET", _subtask_path(task_id)))
+    except Exception as exc:
+        logger.error("flowstate_list_subtasks error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_create_subtask(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    if not task_id:
+        return _tool_error("taskId is required")
+    title = str(args.get("title") or "").strip()
+    if not title:
+        return _tool_error("title is required")
+
+    body: Dict[str, Any] = {"title": title, **_preview_metadata(args)}
+    if "order" in args and args.get("order") is not None:
+        try:
+            order = int(args["order"])
+        except (TypeError, ValueError):
+            return _tool_error("order must be a non-negative integer")
+        if order < 0:
+            return _tool_error("order must be a non-negative integer")
+        body["order"] = order
+    error = _validate_apply_request(body)
+    if error:
+        return _tool_error(error)
+
+    try:
+        return _tool_result(_request("POST", _subtask_path(task_id), body))
+    except Exception as exc:
+        logger.error("flowstate_create_subtask error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_update_subtask(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    if not task_id:
+        return _tool_error("taskId is required")
+    subtask_id = str(args.get("subtaskId") or "").strip()
+    if not subtask_id:
+        return _tool_error("subtaskId is required")
+
+    body: Dict[str, Any] = _preview_metadata(args)
+    if "title" in args:
+        title = str(args.get("title") or "").strip()
+        if not title:
+            return _tool_error("title cannot be empty")
+        body["title"] = title
+    if "completed" in args:
+        if not isinstance(args.get("completed"), bool):
+            return _tool_error("completed must be a boolean")
+        body["completed"] = args["completed"]
+    if "order" in args:
+        try:
+            order = int(args["order"])
+        except (TypeError, ValueError):
+            return _tool_error("order must be a non-negative integer")
+        if order < 0:
+            return _tool_error("order must be a non-negative integer")
+        body["order"] = order
+    if not any(field in body for field in ("title", "completed", "order")):
+        return _tool_error("provide at least one field to update")
+    error = _validate_apply_request(body)
+    if error:
+        return _tool_error(error)
+
+    try:
+        return _tool_result(_request("PATCH", _subtask_path(task_id, subtask_id), body))
+    except Exception as exc:
+        logger.error("flowstate_update_subtask error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_delete_subtask(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    if not task_id:
+        return _tool_error("taskId is required")
+    subtask_id = str(args.get("subtaskId") or "").strip()
+    if not subtask_id:
+        return _tool_error("subtaskId is required")
+    body = _preview_metadata(args)
+    error = _validate_apply_request(body)
+    if error:
+        return _tool_error(error)
+
+    try:
+        # A POST action keeps preview payloads portable; a DELETE body is not
+        # handled consistently by all localhost proxies and HTTP clients.
+        return _tool_result(_request("POST", f"{_subtask_path(task_id, subtask_id)}/delete", body))
+    except Exception as exc:
+        logger.error("flowstate_delete_subtask error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_subtask_batch(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    if not task_id:
+        return _tool_error("taskId is required")
+    operations = args.get("operations")
+    if not isinstance(operations, list) or not operations or len(operations) > 50:
+        return _tool_error("operations must contain 1 to 50 items")
+    for operation in operations:
+        if not isinstance(operation, dict) or operation.get("action") not in {"create", "update", "delete"}:
+            return _tool_error("each operation action must be create|update|delete")
+        if operation["action"] == "create" and not str(operation.get("title") or "").strip():
+            return _tool_error("create operations require title")
+        if operation["action"] in {"update", "delete"} and not str(operation.get("subtaskId") or "").strip():
+            return _tool_error(f"{operation['action']} operations require subtaskId")
+
+    body: Dict[str, Any] = {"operations": operations, **_preview_metadata(args)}
+    error = _validate_apply_request(body)
+    if error:
+        return _tool_error(error)
+    try:
+        return _tool_result(_request("POST", f"{_subtask_path(task_id)}/batch", body))
+    except Exception as exc:
+        logger.error("flowstate_subtask_batch error: %s", exc)
+        return _tool_error(str(exc))
+
+
 FLOWSTATE_ASSISTANT_CONTEXT_SCHEMA = {
     "name": "flowstate_get_assistant_context",
     "description": (
@@ -472,6 +620,111 @@ FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA = {
     },
 }
 
+_SUBTASK_MUTATION_PROPERTIES = {
+    "preview": {
+        "type": "boolean",
+        "description": "Defaults true; set false only after the user approves the exact change.",
+    },
+    "requestId": {
+        "type": "string",
+        "description": "Stable idempotency key. Required when preview is false and echoed in the apply receipt.",
+    },
+}
+
+FLOWSTATE_LIST_SUBTASKS_SCHEMA = {
+    "name": "flowstate_list_subtasks",
+    "description": "List the ordered subtasks stored by FlowState for one exact parent task id.",
+    "parameters": {
+        "type": "object",
+        "properties": {"taskId": {"type": "string", "description": "Exact parent task id."}},
+        "required": ["taskId"],
+    },
+}
+
+FLOWSTATE_CREATE_SUBTASK_SCHEMA = {
+    "name": "flowstate_create_subtask",
+    "description": (
+        "Preview or create an ordered FlowState subtask. Defaults to non-mutating preview. "
+        "Apply responses include a stable receipt from FlowState."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "description": "Exact parent task id."},
+            "title": {"type": "string", "description": "Subtask title."},
+            "order": {"type": "integer", "description": "Optional zero-based order."},
+            **_SUBTASK_MUTATION_PROPERTIES,
+        },
+        "required": ["taskId", "title"],
+    },
+}
+
+FLOWSTATE_UPDATE_SUBTASK_SCHEMA = {
+    "name": "flowstate_update_subtask",
+    "description": (
+        "Preview or update a FlowState subtask's title, completion, or order. "
+        "Defaults to non-mutating preview."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "description": "Exact parent task id."},
+            "subtaskId": {"type": "string", "description": "Exact subtask id."},
+            "title": {"type": "string", "description": "Optional new title."},
+            "completed": {"type": "boolean", "description": "Optional completion state."},
+            "order": {"type": "integer", "description": "Optional zero-based order."},
+            **_SUBTASK_MUTATION_PROPERTIES,
+        },
+        "required": ["taskId", "subtaskId"],
+    },
+}
+
+FLOWSTATE_DELETE_SUBTASK_SCHEMA = {
+    "name": "flowstate_delete_subtask",
+    "description": "Preview or delete one exact FlowState subtask. Defaults to non-mutating preview.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "description": "Exact parent task id."},
+            "subtaskId": {"type": "string", "description": "Exact subtask id."},
+            **_SUBTASK_MUTATION_PROPERTIES,
+        },
+        "required": ["taskId", "subtaskId"],
+    },
+}
+
+FLOWSTATE_SUBTASK_BATCH_SCHEMA = {
+    "name": "flowstate_subtask_batch",
+    "description": (
+        "Preview or atomically apply 1-50 ordered subtask create, update, and delete operations. "
+        "Defaults to preview and returns one receipt for the full approved outcome."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "description": "Exact parent task id."},
+            "operations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["create", "update", "delete"]},
+                        "subtaskId": {"type": "string"},
+                        "title": {"type": "string"},
+                        "completed": {"type": "boolean"},
+                        "order": {"type": "integer"},
+                    },
+                    "required": ["action"],
+                },
+            },
+            **_SUBTASK_MUTATION_PROPERTIES,
+        },
+        "required": ["taskId", "operations"],
+    },
+}
+
 
 from tools.registry import registry
 
@@ -485,6 +738,11 @@ for _name, _schema, _handler in [
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
     ("flowstate_list_task_instances", FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA, _handle_list_task_instances),
     ("flowstate_schedule_task_instance", FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA, _handle_schedule_task_instance),
+    ("flowstate_list_subtasks", FLOWSTATE_LIST_SUBTASKS_SCHEMA, _handle_list_subtasks),
+    ("flowstate_create_subtask", FLOWSTATE_CREATE_SUBTASK_SCHEMA, _handle_create_subtask),
+    ("flowstate_update_subtask", FLOWSTATE_UPDATE_SUBTASK_SCHEMA, _handle_update_subtask),
+    ("flowstate_delete_subtask", FLOWSTATE_DELETE_SUBTASK_SCHEMA, _handle_delete_subtask),
+    ("flowstate_subtask_batch", FLOWSTATE_SUBTASK_BATCH_SCHEMA, _handle_subtask_batch),
 ]:
     registry.register(
         name=_name,

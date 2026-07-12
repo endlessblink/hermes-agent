@@ -59,6 +59,8 @@ _HERMES_CORE_TOOLS = [
     # off every CLI/messaging/cron schema (narrow waist).
     # Session history search
     "session_search",
+    # Read-only Obsidian knowledge access (gated on obsidian_vault config/path)
+    "vault_status", "list_notes", "read_note", "search_keyword",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -212,6 +214,15 @@ TOOLSETS = {
         "includes": []
     },
 
+    "obsidian_vault": {
+        "description": (
+            "Read-only Obsidian knowledge access with vault boundary checks, "
+            "source receipts, and prompt-injection flags"
+        ),
+        "tools": ["vault_status", "list_notes", "read_note", "search_keyword"],
+        "includes": []
+    },
+
     "context_engine": {
         "description": "Runtime tools exposed by the active context engine",
         "tools": [],
@@ -269,6 +280,21 @@ TOOLSETS = {
             "flowstate_get_current_timer",
             "flowstate_list_task_instances",
             "flowstate_schedule_task_instance",
+            "flowstate_list_subtasks",
+            "flowstate_create_subtask",
+            "flowstate_update_subtask",
+            "flowstate_delete_subtask",
+            "flowstate_subtask_batch",
+        ],
+        "includes": []
+    },
+
+    "personal_assistant": {
+        "description": "Persistent office-work assistant state, capture proposals, and approved state edits",
+        "tools": [
+            "personal_assistant_get_state",
+            "personal_assistant_propose_capture",
+            "personal_assistant_state_change",
         ],
         "includes": []
     },

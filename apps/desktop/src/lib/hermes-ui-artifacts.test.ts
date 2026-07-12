@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildHermesUiFormResponse,
   type HermesUiChecklistArtifact,
+  type HermesUiFormArtifact,
   parseHermesUiArtifact,
   stableArtifactStorageKey
 } from './hermes-ui-artifacts'
@@ -16,6 +18,100 @@ const validChecklist = {
   title: 'Obsidian source-of-truth policy',
   type: 'checklist'
 }
+
+const validForm: HermesUiFormArtifact = {
+  direction: 'rtl',
+  fields: [
+    { id: 'outcome', label: 'מה יהפוך את היום למוצלח?', required: true, type: 'short-text' },
+    {
+      id: 'energy',
+      label: 'כמה אנרגיה יש לך?',
+      options: [
+        { label: 'נמוכה', value: 'low' },
+        { label: 'גבוהה', value: 'high' }
+      ],
+      type: 'single-choice'
+    }
+  ],
+  id: 'morning-outcome',
+  submitLabel: 'שלח ל־Hermes',
+  title: 'תכנון היום',
+  type: 'form'
+}
+
+describe('form artifacts', () => {
+  it('builds a canonical response with a stable idempotency key', () => {
+    const first = buildHermesUiFormResponse(validForm, { outcome: 'מצגת', energy: 'high' })
+    const reordered = buildHermesUiFormResponse(validForm, { energy: 'high', outcome: 'מצגת' })
+
+    expect(first).toEqual(reordered)
+    expect(first).toEqual({
+      actionId: 'submit',
+      artifactId: 'morning-outcome',
+      idempotencyKey: expect.stringMatching(/^form:/),
+      schemaVersion: 1,
+      type: 'form-response',
+      values: { outcome: 'מצגת', energy: 'high' }
+    })
+  })
+
+  it('parses a bounded interactive form and preserves its RTL contract', () => {
+    const result = parseHermesUiArtifact(JSON.stringify(validForm))
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'form' && result.artifact.fields).toHaveLength(2)
+    expect(result.ok && result.artifact.type === 'form' && result.artifact.direction).toBe('rtl')
+  })
+
+  it('normalizes concise string options emitted by the assistant', () => {
+    const result = parseHermesUiArtifact(JSON.stringify({
+      direction: 'rtl',
+      fields: [{
+        id: 'must_happen_today',
+        label: 'התחייבויות אמיתיות להיום',
+        options: ['לקנות חלב ולחם', 'להתקדם עם סרט הרובוטים'],
+        required: true,
+        type: 'multi-choice'
+      }],
+      id: 'flowstate-today-reality-check',
+      submitLabel: 'לבנות תכנית ריאלית להיום',
+      title: 'מה באמת חייב לקרות היום?',
+      type: 'form'
+    }))
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'form' && result.artifact.fields[0]?.options).toEqual([
+      { label: 'לקנות חלב ולחם', value: 'לקנות חלב ולחם' },
+      { label: 'להתקדם עם סרט הרובוטים', value: 'להתקדם עם סרט הרובוטים' }
+    ])
+  })
+
+  it('rejects fields outside the bounded form schema', () => {
+    const result = parseHermesUiArtifact(JSON.stringify({
+      ...validForm,
+      fields: [{ ...validForm.fields[0], onClick: 'alert(1)' }]
+    }))
+
+    expect(result).toEqual({ error: 'fields[0] contains unsupported properties', ok: false })
+  })
+
+  it('adds a correction field to checkbox-only approval forms', () => {
+    const result = parseHermesUiArtifact(JSON.stringify({
+      direction: 'rtl',
+      fields: [{ id: 'approve', label: 'לאשר את התכנית', required: true, type: 'boolean' }],
+      id: 'approve-plan',
+      submitLabel: 'שלח החלטה',
+      title: 'אישור התכנית',
+      type: 'form'
+    }))
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'form' && result.artifact.fields).toEqual([
+      { description: undefined, id: 'approve', label: 'לאשר את התכנית', options: undefined, placeholder: undefined, required: true, type: 'boolean' },
+      { id: 'revision', label: 'תיקון או הקשר (אופציונלי)', required: false, type: 'long-text' }
+    ])
+  })
+})
 
 const obsidianPolicyChecklist = {
   description: 'Operational source-of-truth checklist for Obsidian-backed durable context.',
@@ -124,6 +220,148 @@ describe('parseHermesUiArtifact', () => {
     expect(result.ok && result.artifact.type === 'questionnaire' && result.artifact.items[0]?.label).toBe('מה המטרה של הבלוק הבא?')
     expect(result.ok && result.artifact.type === 'questionnaire' && result.artifact.items[0]?.description).toBe('אפשר לענות בקצרה.')
   })
+
+
+
+  it('parses a compact planning funnel artifact', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        direction: 'rtl',
+        id: 'flowstate-planning-funnel',
+        steps: [
+          { id: 'capture', label: 'לקלוט משימות', status: 'done' },
+          { id: 'context', label: 'להבין הקשר', status: 'current' },
+          { id: 'breakdown', label: 'לפרק לצעדים קטנים', status: 'pending' },
+          { id: 'schedule', label: 'לשבץ לפי זמן ואנרגיה', status: 'pending' }
+        ],
+        title: 'משפך תכנון קצר',
+        type: 'planning-funnel'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'planning-funnel' && result.artifact.steps[1]?.status).toBe('current')
+  })
+
+  it('parses a task context artifact for understanding before prioritizing', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        actions: [
+          {
+            id: 'ask-context',
+            label: 'שאל אותי על ההקשר',
+            submitText: 'תשאל אותי שאלה אחת קצרה כדי להבין את ההקשר של המשימה הזו לפני שאתה מחליט איפה לשבץ אותה.'
+          }
+        ],
+        connections: ['בריאות', 'הכנה לפגישה'],
+        direction: 'rtl',
+        id: 'task-context-health-tests',
+        progress: 'לדעת אם צריך פעולה לפני הפגישה',
+        task: {
+          dueDate: '2026-07-06',
+          id: 'af10aa8a-3391-486d-911c-599144f3ae16',
+          priority: 'high',
+          status: 'todo',
+          title: 'לראות שאני מקבל את הבדיקות לפני הפגישה עם הרופאה'
+        },
+        title: 'כרטיס הבנת משימה',
+        type: 'task-context',
+        unknowns: ['מתי הפגישה?', 'האם צריך להתקשר או רק לבדוק?']
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'task-context' && result.artifact.unknowns).toHaveLength(2)
+  })
+
+
+  it('parses the FlowState planning session artifact required by the planning surface', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        categories: [
+          {
+            count: 3,
+            examples: [
+              { dueDate: '2026-07-09', id: 'task-1', priority: 'high', title: 'להחליט מה הבלוק הבא' },
+              { dueDate: null, id: 'task-2', priority: 'medium', title: 'לנקות משימות לא רלוונטיות' }
+            ],
+            id: 'work-pressure',
+            label: 'עומס עבודה',
+            recommendation: 'להוציא רק בלוק אחד לביצוע ולא לפתוח את כל הבקלוג.',
+            tone: 'work'
+          }
+        ],
+        description: 'תכנון יום קצר בתוך Hermes, ללא שינוי ישיר ב־FlowState.',
+        direction: 'rtl',
+        id: 'flowstate-day-plan',
+        mode: 'day-start',
+        nextBlock: {
+          doneEnough: 'להבין מה הדבר הקטן הבא ולהתחיל אותו.',
+          durationMinutes: 25,
+          id: 'next-block',
+          rationale: 'זה מוריד עומס בלי להפוך לתכנון ארוך.',
+          taskIds: ['task-1'],
+          title: 'הבלוק הבא'
+        },
+        tasks: [
+          {
+            dueDate: '2026-07-09',
+            id: 'task-1',
+            priority: 'high',
+            rationale: 'קטן וברור מספיק להתחלה.',
+            recommendation: 'today',
+            recommendedDueDate: '2026-07-09',
+            recommendedPriority: 'high',
+            status: 'todo',
+            title: 'להחליט מה הבלוק הבא'
+          },
+          {
+            dueDate: null,
+            id: 'task-2',
+            priority: 'medium',
+            recommendation: 'not_today',
+            status: 'todo',
+            title: 'לנקות משימות לא רלוונטיות'
+          }
+        ],
+        title: 'תכנון היום',
+        type: 'flowstate-planning-session'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type).toBe('flowstate-planning-session')
+    expect(result.ok && result.artifact.type === 'flowstate-planning-session' && result.artifact.categories[0]?.examples).toHaveLength(2)
+    expect(result.ok && result.artifact.type === 'flowstate-planning-session' && result.artifact.nextBlock?.taskIds).toEqual(['task-1'])
+  })
+
+  it('rejects FlowState planning sessions with too many category examples', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        categories: [
+          {
+            count: 3,
+            examples: [
+              { id: 'a', title: 'A' },
+              { id: 'b', title: 'B' },
+              { id: 'c', title: 'C' }
+            ],
+            id: 'too-many',
+            label: 'יותר מדי',
+            recommendation: 'להציג עד שני פריטים לדוגמה.',
+            tone: 'work'
+          }
+        ],
+        mode: 'quick-triage',
+        tasks: [{ id: 'task-1', title: 'משימה אחת' }],
+        type: 'flowstate-planning-session'
+      })
+    )
+
+    expect(result.ok).toBe(false)
+    expect(!result.ok && result.error).toContain('examples has too many items')
+  })
+
 
   it('rejects invalid JSON', () => {
     expect(parseHermesUiArtifact('{ nope').ok).toBe(false)
@@ -391,6 +629,156 @@ describe('parseHermesUiArtifact', () => {
         JSON.stringify({ ...validChecklist, items: [{ id: 'item', label: 'x'.repeat(801) }] })
       ).ok
     ).toBe(false)
+  })
+
+  it('parses a task-table artifact with explicit unknowns', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        columns: ['task', 'context', 'timeSize', 'energy', 'urgency', 'nextStep', 'confidence'],
+        direction: 'rtl',
+        rows: [
+          { confidence: 'low', context: 'לא ברור למה זה חשוב', energy: 'unknown', id: 't1', nextStep: 'לשאול שאלה אחת', timeSize: 'unknown', title: 'לבדוק בדיקות', urgency: 'high' },
+          { confidence: 'medium', context: 'לקוח', energy: 'medium', id: 't2', nextStep: 'לכתוב טיוטה', timeSize: 'small', title: 'מייל ללקוח', urgency: 'medium' },
+          { confidence: 'high', context: 'בית', energy: 'low', id: 't3', nextStep: '10 דקות סידור', timeSize: 'tiny', title: 'לסדר שולחן', urgency: 'low' }
+        ],
+        title: 'השוואת משימות',
+        type: 'task-table'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'task-table' && result.artifact.rows).toHaveLength(3)
+  })
+
+  it('parses a mini-kanban artifact', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        lanes: [
+          { id: 'today', tasks: [{ confidence: 'medium', id: 't1', title: 'טיוטה ללקוח' }], title: 'היום' },
+          { id: 'need-context', tasks: [{ id: 't2', note: 'צריך להבין משמעות', title: 'בדיקות' }], title: 'צריך הקשר' }
+        ],
+        title: 'מיון קצר',
+        type: 'mini-kanban'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'mini-kanban' && result.artifact.lanes[1]?.id).toBe('need-context')
+  })
+
+  it('parses a day-timeline artifact', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        blocks: [
+          { endTime: '10:25', id: 'b1', kind: 'focus', label: 'טיוטה ללקוח', startTime: '10:00', status: 'candidate' },
+          { durationMinutes: 15, id: 'float-1', kind: 'floating', label: 'בדיקה קצרה', status: 'planned' }
+        ],
+        currentTime: '09:45',
+        date: '2026-07-09',
+        title: 'תכנון יום אפשרי',
+        type: 'day-timeline'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'day-timeline' && result.artifact.currentTime).toBe('09:45')
+  })
+
+  it('parses a mutation-preview artifact with approval actions', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        actions: [
+          { id: 'approve', label: 'מאשר את השינויים האלה', submitText: 'מאשר לבצע את preview הזה ב־FlowState.' },
+          { id: 'revise', label: 'צריך תיקון', submitText: 'תעדכן את ה־preview לפני שינוי.' },
+          { id: 'cancel', label: 'בטל', submitText: 'בטל את ה־preview ואל תשנה את FlowState.' }
+        ],
+        changes: [
+          {
+            after: { date: '2026-07-09', time: '10:00' },
+            before: { date: null, status: 'todo' },
+            operation: 'schedule-instance',
+            risk: 'low',
+            taskId: 't1',
+            title: 'טיוטה ללקוח',
+            untouched: ['priority', 'title']
+          }
+        ],
+        title: 'Preview לפני שינוי',
+        type: 'mutation-preview'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'mutation-preview' && result.artifact.actions).toHaveLength(3)
+  })
+
+  it('parses an urgency-energy-matrix artifact', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        cells: [
+          {
+            label: 'דחוף באנרגיה נמוכה',
+            tasks: [{ confidence: 'low', id: 't1', priority: 'high', title: 'שיחה קצרה' }],
+            x: 'low',
+            y: 'high'
+          }
+        ],
+        title: 'בחירה לפי אנרגיה',
+        type: 'urgency-energy-matrix',
+        xAxis: 'energy',
+        yAxis: 'urgency'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'urgency-energy-matrix' && result.artifact.cells[0]?.tasks[0]?.confidence).toBe('low')
+  })
+
+  it('parses workload-bars and task-graph artifacts', () => {
+    const bars = parseHermesUiArtifact(
+      JSON.stringify({
+        bars: [
+          { id: 'overdue', label: 'באיחור', max: 10, tone: 'warning', value: 3 },
+          { id: 'no-date', label: 'ללא תאריך', tone: 'neutral', value: 8 }
+        ],
+        title: 'עומס כללי',
+        type: 'workload-bars'
+      })
+    )
+
+    const graph = parseHermesUiArtifact(
+      JSON.stringify({
+        edges: [{ label: 'תלוי ב', source: 'task', target: 'person' }],
+        nodes: [
+          { id: 'task', kind: 'task', label: 'לשלוח הצעה' },
+          { id: 'person', kind: 'person', label: 'לקוח' }
+        ],
+        title: 'קשרי משימה',
+        type: 'task-graph'
+      })
+    )
+
+    expect(bars.ok && bars.artifact.type === 'workload-bars' && bars.artifact.bars[0]?.tone).toBe('warning')
+    expect(graph.ok && graph.artifact.type === 'task-graph' && graph.artifact.edges[0]?.target).toBe('person')
+  })
+
+  it('rejects malformed planning primitive payloads', () => {
+    expect(
+      parseHermesUiArtifact(
+        JSON.stringify({
+          columns: ['task'],
+          rows: [{ id: 'one', title: 'One' }, { id: 'two', title: 'Two' }],
+          type: 'task-table'
+        })
+      ).ok
+    ).toBe(false)
+
+    expect(parseHermesUiArtifact(JSON.stringify({ lanes: [{ id: 'same', tasks: [], title: 'A' }, { id: 'same', tasks: [], title: 'B' }], type: 'mini-kanban' })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ blocks: [{ id: 'b1', kind: 'deep', label: 'Bad' }], date: '2026-07-09', type: 'day-timeline' })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ actions: [{ id: 'copy', label: 'Copy', copyText: 'copy' }], changes: [], type: 'mutation-preview' })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ cells: [{ tasks: [], x: 'unknown', y: 'high' }], type: 'urgency-energy-matrix', xAxis: 'energy', yAxis: 'urgency' })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ bars: [{ id: 'b', label: 'Bad', value: -1 }], type: 'workload-bars' })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ edges: [{ source: 'a', target: 'missing' }], nodes: [{ id: 'a', label: 'A' }], type: 'task-graph' })).ok).toBe(false)
   })
 
   it('uses a stable normalized storage key when an id is present', () => {

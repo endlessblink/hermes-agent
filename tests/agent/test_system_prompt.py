@@ -117,13 +117,36 @@ class TestFlowStateGuidance:
         assert "FlowState tool-use requirements" not in stable
 
 
+class TestPersonalAssistantGuidance:
+    def test_injected_when_capture_tool_is_available(self):
+        stable = _stable_prompt(
+            _make_agent(valid_tool_names=["personal_assistant_propose_capture"])
+        )
+
+        assert "Persistent personal assistant" in stable
+        assert "queue a proposal" in stable
+        assert "Do not silently save" in stable
+        assert "smallest meaningful next step" in stable
+        assert "end-of-day boundary" in stable
+        assert "protectively defer" in stable
+        assert "matching context" in stable
+
+    def test_absent_without_personal_assistant_tools(self):
+        stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_list_tasks"]))
+
+        assert "Persistent personal assistant" not in stable
+
+
 class TestDesktopQuestionnaireGuidance:
     def test_injected_for_desktop_platform(self):
         stable = _stable_prompt(_make_agent(platform="desktop"))
 
         assert "Hermes Desktop interactive questions" in stable
-        assert '`type: "questionnaire"`' in stable
+        assert '`type: "form"`' in stable
+        assert "one question at a time" in stable
         assert "plain Markdown list" in stable
+        assert "revise" in stable
+        assert "long-text" in stable
 
     def test_injected_for_desktop_env(self, monkeypatch):
         monkeypatch.setenv("HERMES_DESKTOP", "1")

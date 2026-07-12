@@ -89,6 +89,11 @@ class TestResolveToolset:
             "flowstate_get_current_timer",
             "flowstate_list_task_instances",
             "flowstate_schedule_task_instance",
+            "flowstate_list_subtasks",
+            "flowstate_create_subtask",
+            "flowstate_update_subtask",
+            "flowstate_delete_subtask",
+            "flowstate_subtask_batch",
         }
 
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):

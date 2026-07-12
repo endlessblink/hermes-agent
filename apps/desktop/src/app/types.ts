@@ -128,6 +128,7 @@ export type SidebarNavId =
   | 'command-center'
   | 'messaging'
   | 'new-session'
+  | 'personal-assistant'
   | 'settings'
   | 'skills'
 
@@ -136,7 +137,7 @@ export interface SidebarNavItem {
   label: string
   icon: React.ComponentType<{ className?: string }>
   route?: string
-  action?: 'new-session'
+  action?: 'new-session' | 'personal-assistant'
 }
 
 export interface ClientSessionState {

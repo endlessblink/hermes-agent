@@ -267,6 +267,136 @@ def test_schedule_task_instance_validation_returns_safe_error():
     assert "token-123" not in json.dumps(result)
 
 
+def test_list_subtasks_uses_parent_task_route(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True, "subtasks": []}),
+    )
+
+    result = json.loads(fst._handle_list_subtasks({"taskId": "task/one"}))
+
+    assert result["result"]["subtasks"] == []
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fone/subtasks"
+
+
+def test_create_subtask_defaults_to_non_mutating_preview(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True, "preview": True, "receipt": {"requestId": "r-1"}}),
+    )
+
+    result = json.loads(fst._handle_create_subtask({
+        "taskId": "task-1",
+        "title": "Draft outline",
+        "order": 2,
+        "requestId": "r-1",
+    }))
+
+    assert result["result"]["preview"] is True
+    assert seen["body"] == {
+        "order": 2,
+        "preview": True,
+        "requestId": "r-1",
+        "title": "Draft outline",
+    }
+
+
+def test_update_subtask_apply_sends_explicit_request_metadata(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True, "preview": False, "receipt": {"requestId": "r-2"}}),
+    )
+
+    result = json.loads(fst._handle_update_subtask({
+        "taskId": "task-1",
+        "subtaskId": "sub/1",
+        "title": "Revised",
+        "completed": True,
+        "order": 1,
+        "preview": False,
+        "requestId": "r-2",
+    }))
+
+    assert result["result"]["receipt"]["requestId"] == "r-2"
+    assert seen["method"] == "PATCH"
+    assert seen["url"].endswith("/api/tasks/task-1/subtasks/sub%2F1")
+    assert seen["body"] == {
+        "completed": True,
+        "order": 1,
+        "preview": False,
+        "requestId": "r-2",
+        "title": "Revised",
+    }
+
+
+def test_delete_subtask_defaults_to_preview_and_uses_post_preview_route(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True, "preview": True}),
+    )
+
+    result = json.loads(fst._handle_delete_subtask({
+        "taskId": "task-1",
+        "subtaskId": "sub-1",
+        "requestId": "delete-1",
+    }))
+
+    assert result["result"]["preview"] is True
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith("/api/tasks/task-1/subtasks/sub-1/delete")
+    assert seen["body"] == {"preview": True, "requestId": "delete-1"}
+
+
+def test_subtask_batch_defaults_to_preview_and_preserves_operations(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True, "preview": True, "receipt": {"operationCount": 2}}),
+    )
+    operations = [
+        {"action": "create", "title": "First", "order": 0},
+        {"action": "update", "subtaskId": "sub-2", "completed": True},
+    ]
+
+    result = json.loads(fst._handle_subtask_batch({"taskId": "task-1", "operations": operations}))
+
+    assert result["result"]["receipt"]["operationCount"] == 2
+    assert seen["url"].endswith("/api/tasks/task-1/subtasks/batch")
+    assert seen["body"] == {"operations": operations, "preview": True}
+
+
+def test_subtask_batch_apply_requires_request_id():
+    result = json.loads(fst._handle_subtask_batch({
+        "taskId": "task-1",
+        "operations": [{"action": "delete", "subtaskId": "sub-1"}],
+        "preview": False,
+    }))
+
+    assert result["error"] == "requestId is required when preview is false"
+
+
+@pytest.mark.parametrize("handler,args,error", [
+    (fst._handle_create_subtask, {"taskId": "t"}, "title is required"),
+    (fst._handle_update_subtask, {"taskId": "t", "subtaskId": "s"}, "provide at least one field"),
+    (fst._handle_delete_subtask, {"taskId": "t"}, "subtaskId is required"),
+])
+def test_subtask_validation_is_local_and_safe(handler, args, error):
+    result = json.loads(handler(args))
+
+    assert error in result["error"]
+    assert "token-123" not in json.dumps(result)
+
+
 def test_toolset_registration_maps_all_flowstate_tools():
     from tools.registry import registry
 
@@ -280,6 +410,11 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_get_current_timer",
         "flowstate_list_task_instances",
         "flowstate_schedule_task_instance",
+        "flowstate_list_subtasks",
+        "flowstate_create_subtask",
+        "flowstate_update_subtask",
+        "flowstate_delete_subtask",
+        "flowstate_subtask_batch",
     }
 
     for tool in expected:

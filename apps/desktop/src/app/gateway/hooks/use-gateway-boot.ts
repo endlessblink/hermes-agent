@@ -333,6 +333,7 @@ export function useGatewayBoot({
 
       applyDesktopBootProgress(payload)
     })
+
     void desktop
       .getBootProgress()
       .then(snapshot => applyDesktopBootProgress(snapshot))

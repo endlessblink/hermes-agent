@@ -1544,6 +1544,7 @@ export const en: Translations = {
   sidebar: {
     nav: {
       'new-session': 'New session',
+      'personal-assistant': 'Personal assistant',
       'active-chats': 'Active chats',
       skills: 'Skills & Tools',
       messaging: 'Messaging',

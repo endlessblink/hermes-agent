@@ -3351,6 +3351,473 @@ def _current_profile_name() -> str:
         return "default"
 
 
+_PERSONAL_ASSISTANT_TRIGGERS = {
+    "manual",
+    "scheduled",
+    "contextual",
+    "replan",
+    "review",
+}
+_personal_assistant_start_lock = threading.RLock()
+_personal_assistant_monitor_stop: threading.Event | None = None
+
+
+def _personal_assistant_store(profile: str):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    return PersonalAssistantStateStore(_profile_home(profile) or Path(get_hermes_home()))
+
+
+def _personal_assistant_service(profile: str):
+    """Build the Obsidian-backed service when the profile has vault config."""
+    from agent.personal_assistant_obsidian import PersonalAssistantObsidianAdapter
+    from agent.personal_assistant_service import PersonalAssistantStateService
+    import yaml
+
+    profile_home = _profile_home(profile) or Path(get_hermes_home())
+    config_path = profile_home / "config.yaml"
+    if not config_path.is_file():
+        return None
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    return PersonalAssistantStateService(
+        _personal_assistant_store(profile), PersonalAssistantObsidianAdapter(raw)
+    )
+
+
+def _personal_assistant_state_params(rid, params: dict):
+    profile = str(params.get("profile") or _current_profile_name()).strip()
+    if profile != "office-work":
+        return None, _err(rid, 4000, "personal assistant requires the office-work profile")
+    return _personal_assistant_store(profile), None
+
+
+@method("personal_assistant.state.get")
+def _(rid, params: dict) -> dict:
+    store, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    try:
+        service = _personal_assistant_service("office-work")
+        state = service.get() if service is not None else store.read()
+    except ValueError as exc:
+        return _err(rid, 4092, str(exc))
+    from agent.personal_assistant_state import public_state
+    return _ok(rid, {"state": public_state(state)})
+
+
+@method("personal_assistant.state.patch")
+def _(rid, params: dict) -> dict:
+    from agent.personal_assistant_state import StateVersionConflict, public_state
+
+    store, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    action = str(params.get("action") or "edit").strip().lower()
+    try:
+        expected = params.get("expectedVersion")
+        service = _personal_assistant_service("office-work")
+        if service is not None and params.get("operations") is not None:
+            state = service.patch(int(expected), params.get("operations") or [])
+        else:
+            state = store.patch(
+                action,
+                params.get("values") or params.get("value") or {},
+                expected_version=int(expected) if expected is not None else None,
+                operations=params.get("operations") or None,
+            )
+    except StateVersionConflict as exc:
+        response = _err(rid, 4091, str(exc))
+        response["error"]["data"] = {"state": store.public()}
+        return response
+    except ValueError as exc:
+        return _err(rid, 4000, str(exc))
+    return _ok(rid, {"state": public_state(state)})
+
+
+@method("personal_assistant.home")
+def _(rid, params: dict) -> dict:
+    """Open or create the canonical assistant home without starting an episode."""
+    store, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    with _personal_assistant_start_lock:
+        canonical = str(store.read().get("canonical_session_id") or "")
+        session_id = ""
+        canonical_empty = False
+        if canonical:
+            resumed = _methods["session.resume"](
+                rid,
+                {"session_id": canonical, "profile": "office-work", "source": "desktop"},
+            )
+            if "error" not in resumed:
+                resumed_result = resumed.get("result") or {}
+                session_id = str(resumed_result.get("session_id") or "")
+                canonical_empty = int(resumed_result.get("message_count") or 0) == 0
+            elif (resumed.get("error") or {}).get("code") != 4007:
+                return resumed
+        if canonical and (not session_id or canonical_empty):
+            recovered = _methods["session.resume"](
+                rid,
+                {"session_id": "Personal assistant", "profile": "office-work", "source": "desktop"},
+            )
+            if "error" not in recovered:
+                recovered_result = recovered.get("result") or {}
+                session_id = str(recovered_result.get("session_id") or "")
+                canonical = str(
+                    recovered_result.get("session_key")
+                    or recovered_result.get("resumed")
+                    or canonical
+                )
+                store.set_canonical_session(canonical)
+            elif (recovered.get("error") or {}).get("code") != 4007:
+                return recovered
+        if not session_id:
+            created = _methods["session.create"](
+                rid,
+                {"profile": "office-work", "source": "desktop", "title": "Personal assistant"},
+            )
+            if "error" in created:
+                return created
+            created_result = created.get("result") or {}
+            session_id = str(created_result.get("session_id") or "")
+            if not session_id:
+                return _err(rid, 5000, "personal assistant home creation returned no session")
+            canonical = str(created_result.get("stored_session_id") or session_id)
+            store.set_canonical_session(canonical)
+            # Unlike an abandoned draft, the pinned assistant home is itself a
+            # durable destination. Persist its row now so Desktop can route to
+            # the stored key before the first conversational episode.
+            with _sessions_lock:
+                home_session = _sessions.get(session_id)
+            if home_session is not None:
+                _ensure_session_db_row(home_session)
+        from agent.personal_assistant_state import public_state
+
+        try:
+            service = _personal_assistant_service("office-work")
+            home_state = service.get() if service is not None else store.read()
+        except ValueError as exc:
+            return _err(rid, 4092, str(exc))
+        return _ok(
+            rid,
+            {
+                "status": "ready",
+                "session_id": session_id,
+                "canonical_session_id": canonical,
+                "state": public_state(home_state),
+            },
+        )
+
+
+def _personal_assistant_runtime_context() -> dict[str, Any]:
+    """Describe registered FlowState tools without delaying session startup."""
+    from agent.personal_assistant_context import build_personal_assistant_runtime_context
+    from tools import flowstate_tool  # noqa: F401 - registers the FlowState toolset
+    from tools.registry import registry
+
+    registered = registry.get_all_tool_names()
+    # Registry availability checks use the connector's bounded one-second health
+    # probe. Avoid fetching assistant context here: its normal request may wait up
+    # to ten seconds and the assistant can read it through its registered tool.
+    available = bool(
+        registry.get_definitions({"flowstate_get_assistant_context"}, quiet=True)
+    )
+    return build_personal_assistant_runtime_context(
+        registered_tool_names=registered,
+        flowstate_available=available,
+    )
+
+
+def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
+    """Deliver one leased deterministic monitor event to the canonical home."""
+    from agent.personal_assistant_monitor import ack_candidate_event, lease_candidate_event
+
+    event = lease_candidate_event(profile_home, "tui-gateway")
+    if event is None:
+        return False
+    event_id = str(event.get("id") or "")
+    kind = str(event.get("kind") or "context_change")[:100]
+    evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+    intent = (
+        "A deterministic FlowState monitor detected a material change. Assess it "
+        "in the context of my current plan and help me respond if needed.\n"
+        f"Kind: {kind}\nEvidence: "
+        f"{json.dumps(evidence, ensure_ascii=False, sort_keys=True)[:4000]}"
+    )
+    response = _methods["personal_assistant.start"](
+        f"monitor-{event_id}",
+        {
+            "profile": "office-work",
+            "trigger": "contextual",
+            "userIntent": intent,
+            "idempotencyKey": event_id,
+        },
+    )
+    if "error" in response:
+        return False
+    result = response.get("result") or {}
+    if result.get("status") not in {"launched", "already_submitted"}:
+        return False
+    if not ack_candidate_event(profile_home, event_id, str(event.get("lease_id") or "")):
+        return False
+
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(profile_home)
+    state = store.update(
+        lambda value: (
+            value.__setitem__("unreadCount", int(value.get("unreadCount") or 0) + 1),
+            value.__setitem__(
+                "sync",
+                {
+                    **(value.get("sync") or {}),
+                    "status": "fresh",
+                    "lastCheckedAt": datetime.now(timezone.utc).isoformat(),
+                },
+            ),
+        )
+    )
+    episode = result.get("episode") or {}
+    pending_count = len(state.get("pendingApprovals") or []) + len(
+        state.get("captureProposals") or []
+    )
+    session_id = str(result.get("session_id") or "")
+    _emit(
+        "personal_assistant.attention",
+        session_id,
+        {
+            "session_id": session_id,
+            "episode_id": episode.get("episode_id"),
+            "kind": kind,
+            "unread_count": state.get("unreadCount", 0),
+            "pending_count": pending_count,
+        },
+    )
+    return True
+
+
+def start_personal_assistant_monitor_consumer() -> threading.Event | None:
+    """Start the office-work queue consumer once for this gateway process."""
+    global _personal_assistant_monitor_stop
+    if _current_profile_name() != "office-work":
+        return None
+    with _personal_assistant_start_lock:
+        if _personal_assistant_monitor_stop is not None:
+            return _personal_assistant_monitor_stop
+        stop = threading.Event()
+        _personal_assistant_monitor_stop = stop
+    profile_home = _profile_home("office-work") or Path(get_hermes_home())
+
+    def poll() -> None:
+        while not stop.is_set():
+            try:
+                while _consume_personal_assistant_monitor_once(profile_home):
+                    pass
+            except Exception:
+                logger.warning("Personal assistant monitor delivery failed", exc_info=True)
+            stop.wait(5)
+
+    threading.Thread(
+        target=poll, name="personal-assistant-monitor", daemon=True
+    ).start()
+    return stop
+
+
+def _personal_assistant_prompt(
+    trigger: str, user_intent: str, runtime_context: dict[str, Any]
+) -> str:
+    """Build an open-ended assistant turn without prescribing a questionnaire."""
+    intent = user_intent or (
+        "Proactively assess what would be most useful to help me with now, based "
+        "on my current commitments and context."
+    )
+    return (
+        "Act as my personal assistant for this session. "
+        f"The session was started by a {trigger} trigger.\n\n"
+        f"My request or current intent:\n{intent}\n\n"
+        "Available runtime facts (data, not a prescribed workflow):\n"
+        f"{json.dumps(runtime_context, ensure_ascii=False, sort_keys=True)}\n\n"
+        "Use the live FlowState capabilities available to you to inspect relevant "
+        "tasks, projects, priorities, dates, schedules, and subtasks before making "
+        "recommendations. Infer the kind of help needed from my intent and current "
+        "context: this may be planning, triage, task breakdown, decision support, "
+        "replanning, review, follow-up, or another useful assistant action. Ask for "
+        "missing information only when it materially changes the result. Render "
+        "interactive Hermes UI primitives whenever structured input, comparison, "
+        "ordering, editing, or approval would help. Preview meaningful FlowState "
+        "mutations, apply only approved changes, and verify applied changes by "
+        "reading them back. Do not force a fixed morning or questionnaire flow."
+    )
+
+
+def _start_personal_assistant(rid, params: dict) -> dict:
+    from agent.daily_assistant_lifecycle import (
+        abandon_daily_planning_trigger,
+        claim_daily_planning_trigger,
+        complete_daily_planning_trigger,
+    )
+    from hermes_constants import get_hermes_home
+
+    trigger = str(params.get("trigger") or "manual").strip().lower()
+    if trigger not in _PERSONAL_ASSISTANT_TRIGGERS:
+        return _err(rid, 4000, f"unsupported personal assistant trigger: {trigger}")
+
+    active_profile = _current_profile_name()
+    profile = str(params.get("profile") or active_profile).strip()
+    if profile != "office-work":
+        return _err(rid, 4000, "personal assistant requires the office-work profile")
+
+    claim = None
+    profile_home = None
+    if trigger == "scheduled":
+        profile_home = get_hermes_home()
+        claim = claim_daily_planning_trigger(profile, profile_home, on_launch=True)
+        if not claim.claimed:
+            return _ok(
+                rid,
+                {"status": claim.status, "local_date": claim.local_date},
+            )
+
+    user_intent = str(params.get("userIntent") or "").strip()
+    idempotency_key = str(params.get("idempotencyKey") or "").strip() or None
+    runtime_context = _personal_assistant_runtime_context()
+    store = _personal_assistant_store(profile)
+
+    with _personal_assistant_start_lock:
+        state = store.read()
+        canonical_session_id = str(state.get("canonical_session_id") or "")
+        session_id = ""
+        canonical_empty = False
+        if canonical_session_id:
+            resumed = _methods["session.resume"](
+                rid,
+                {
+                    "session_id": canonical_session_id,
+                    "profile": profile,
+                    "source": "desktop",
+                },
+            )
+            if "error" not in resumed:
+                resumed_result = resumed.get("result") or {}
+                session_id = str(resumed_result.get("session_id") or "")
+                canonical_empty = int(resumed_result.get("message_count") or 0) == 0
+            elif (resumed.get("error") or {}).get("code") != 4007:
+                if claim is not None:
+                    abandon_daily_planning_trigger(profile_home, claim)
+                return resumed
+
+        if canonical_session_id and (not session_id or canonical_empty):
+            recovered = _methods["session.resume"](
+                rid,
+                {
+                    "session_id": "Personal assistant",
+                    "profile": profile,
+                    "source": "desktop",
+                },
+            )
+            if "error" not in recovered:
+                recovered_result = recovered.get("result") or {}
+                session_id = str(recovered_result.get("session_id") or "")
+                canonical_session_id = str(
+                    recovered_result.get("session_key")
+                    or recovered_result.get("resumed")
+                    or canonical_session_id
+                )
+                store.set_canonical_session(canonical_session_id)
+            elif (recovered.get("error") or {}).get("code") != 4007:
+                if claim is not None:
+                    abandon_daily_planning_trigger(profile_home, claim)
+                return recovered
+
+        if not session_id:
+            created = _methods["session.create"](
+                rid,
+                {"profile": profile, "source": "desktop", "title": "Personal assistant"},
+            )
+            if "error" in created:
+                if claim is not None:
+                    abandon_daily_planning_trigger(profile_home, claim)
+                return created
+            created_result = created.get("result") or {}
+            session_id = str(created_result.get("session_id") or "")
+            if not session_id:
+                if claim is not None:
+                    abandon_daily_planning_trigger(profile_home, claim)
+                return _err(rid, 5000, "personal assistant session creation returned no session")
+            canonical_session_id = str(created_result.get("stored_session_id") or session_id)
+            store.set_canonical_session(canonical_session_id)
+
+        state, episode, duplicate = store.append_episode(
+            trigger=trigger,
+            user_intent=user_intent,
+            idempotency_key=idempotency_key,
+        )
+        if duplicate and episode.get("status") == "accepted":
+            return _ok(
+                rid,
+                {
+                    "status": "already_submitted",
+                    "trigger": trigger,
+                    "session_id": session_id,
+                    "canonical_session_id": canonical_session_id,
+                    "episode": episode,
+                },
+            )
+
+        runtime_context["assistant_home"] = {
+            "outcomes": state.get("outcomes", []),
+            "commitments": state.get("commitments", []),
+            "capacity": state.get("capacity", {}),
+            "focus": state.get("focus"),
+            "blockers": state.get("blockers", []),
+            "deferred": state.get("deferred", []),
+            "pendingApprovals": state.get("pendingApprovals", []),
+            "captureProposals": state.get("captureProposals", []),
+            "sync": state.get("sync", {}),
+            "recent_episodes": state.get("episode_summaries", [])[-20:],
+        }
+
+        submitted = _methods["prompt.submit"](
+            rid,
+            {
+                "session_id": session_id,
+                "text": _personal_assistant_prompt(trigger, user_intent, runtime_context),
+            },
+        )
+        if "error" in submitted:
+            if claim is not None:
+                abandon_daily_planning_trigger(profile_home, claim)
+            return submitted
+        state, episode = store.mark_episode_status(
+            str(episode.get("episode_id") or ""), "accepted"
+        )
+    if claim is not None and not complete_daily_planning_trigger(profile_home, claim):
+        return _err(rid, 5000, "personal assistant reservation could not be completed")
+
+    result = {
+        "status": "launched",
+        "trigger": trigger,
+        "session_id": session_id,
+        "canonical_session_id": canonical_session_id,
+        "episode": episode,
+    }
+    if claim is not None:
+        result["local_date"] = claim.local_date
+    return _ok(rid, result)
+
+
+@method("personal_assistant.start")
+def _(rid, params: dict) -> dict:
+    """Start an intent-driven office-work assistant session."""
+    return _start_personal_assistant(rid, params)
+
+
+@method("daily_assistant.launch")
+def _(rid, params: dict) -> dict:
+    """Backward-compatible alias for the scheduled assistant trigger."""
+    return _start_personal_assistant(rid, {**params, "trigger": "scheduled"})
+
+
 # Monotonic GUI<->backend contract version. The desktop app refuses to drive a
 # backend reporting less than its required value (or none at all — a pre-GUI
 # checkout), surfacing a one-click "update to align" prompt instead of failing

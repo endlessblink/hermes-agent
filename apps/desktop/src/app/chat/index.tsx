@@ -31,6 +31,7 @@ import { cn } from '@/lib/utils'
 import { $compactionActive } from '@/store/compaction'
 import type { ComposerAttachment } from '@/store/composer'
 import { $pinnedSessionIds } from '@/store/layout'
+import { $personalAssistantState } from '@/store/personal-assistant'
 import { $gatewaySwapTarget } from '@/store/profile'
 import {
   $activeSessionId,
@@ -66,6 +67,7 @@ import { droppedFileInlineRefs, type SessionDragPayload, sessionInlineRef } from
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { useFileDropZone } from './hooks/use-file-drop-zone'
+import { PersonalAssistantSituation } from './personal-assistant-situation'
 import { ScrollToBottomButton } from './scroll-to-bottom-button'
 import { SessionActionsMenu } from './sidebar/session-actions-menu'
 import { threadLoadingState } from './thread-loading'
@@ -118,11 +120,21 @@ function ChatHeader({
 }: ChatHeaderProps) {
   const sessions = useStore($sessions)
   const pinnedSessionIds = useStore($pinnedSessionIds)
+  const assistantState = useStore($personalAssistantState)
 
   const activeStoredSession =
     sessions.find(session => session.id === selectedSessionId || session._lineage_root_id === selectedSessionId) || null
 
-  const title = activeStoredSession ? sessionTitle(activeStoredSession) : 'New session'
+  const isPersonalAssistant = Boolean(
+    assistantState?.sessionId &&
+      (assistantState.sessionId === selectedSessionId || assistantState.sessionId === activeSessionId)
+  )
+
+  const title = isPersonalAssistant
+    ? 'Personal assistant'
+    : activeStoredSession
+      ? sessionTitle(activeStoredSession)
+      : 'New session'
 
   // Pins live on the durable lineage-root id, but selectedSessionId is the live
   // (tip) id — resolve through the loaded row so the menu reflects the pin
@@ -151,7 +163,7 @@ function ChatHeader({
       >
         <SessionActionsMenu
           align="start"
-          onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
+          onDelete={selectedSessionId && !isPersonalAssistant ? onDeleteSelectedSession : undefined}
           onPin={selectedSessionId ? onToggleSelectedPin : undefined}
           pinned={selectedIsPinned}
           sessionId={selectedSessionId || activeSessionId || ''}
@@ -315,6 +327,7 @@ export function ChatView({
   const messagesEmpty = useStore($messagesEmpty)
   const lastVisibleIsUser = useStore($lastVisibleMessageIsUser)
   const selectedSessionId = useStore($selectedStoredSessionId)
+  const assistantState = useStore($personalAssistantState)
   const resumeExhaustedSessionId = useStore($resumeExhaustedSessionId)
   const routedSessionId = routeSessionId(location.pathname)
   const isRoutedSessionView = Boolean(routedSessionId)
@@ -357,6 +370,11 @@ export function ChatView({
   // subagent run driven elsewhere — no composer, transcript is read-only.
   const showChatBar = !loadingSession && !resumeExhausted && !isWatchWindow()
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
+
+  const isPersonalAssistant = Boolean(
+    assistantState?.sessionId &&
+      (assistantState.sessionId === selectedSessionId || assistantState.sessionId === activeSessionId)
+  )
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({
     queryKey: ['model-options', activeSessionId || 'global'],
@@ -452,6 +470,8 @@ export function ChatView({
       />
 
       <PromptOverlays />
+
+      {isPersonalAssistant && <PersonalAssistantSituation />}
 
       <ChatRuntimeBoundary
         busy={busy}

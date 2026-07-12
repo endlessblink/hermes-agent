@@ -23,6 +23,7 @@ import {
   SidebarGroup,
   SidebarGroupContent,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem
 } from '@/components/ui/sidebar'
@@ -68,7 +69,19 @@ import {
   unpinSession
 } from '@/store/layout'
 import { notify } from '@/store/notifications'
-import { $newChatProfile, $profiles, $profileScope, ALL_PROFILES, normalizeProfileKey } from '@/store/profile'
+import {
+  $personalAssistantPendingCount,
+  $personalAssistantState,
+  personalAssistantAvailable
+} from '@/store/personal-assistant'
+import {
+  $activeGatewayProfile,
+  $newChatProfile,
+  $profiles,
+  $profileScope,
+  ALL_PROFILES,
+  normalizeProfileKey
+} from '@/store/profile'
 import {
   $activeProjectId,
   $projects,
@@ -166,6 +179,12 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     action: 'new-session'
   },
   {
+    id: 'personal-assistant',
+    label: 'Personal assistant',
+    icon: props => <Codicon name="sparkle" {...props} />,
+    action: 'personal-assistant'
+  },
+  {
     id: 'active-chats',
     label: '',
     icon: props => <Codicon name="comment-discussion" {...props} />,
@@ -236,6 +255,7 @@ function searchResultToSession(result: SessionSearchResult): SessionInfo {
 interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   currentView: AppView
   onNavigate: (item: SidebarNavItem) => void
+  onStartPersonalAssistant: () => void
   onLoadMoreSessions: () => Promise<void> | void
   onLoadMoreProfileSessions?: (profile: string) => Promise<void> | void
   onLoadMoreMessaging?: (platform: string) => Promise<void> | void
@@ -251,6 +271,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
 export function ChatSidebar({
   currentView,
   onNavigate,
+  onStartPersonalAssistant,
   onLoadMoreSessions,
   onLoadMoreProfileSessions,
   onLoadMoreMessaging,
@@ -288,6 +309,20 @@ export function ChatSidebar({
   const folders = useStore($sidebarFolders)
   const profiles = useStore($profiles)
   const profileScope = useStore($profileScope)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
+  const assistantState = useStore($personalAssistantState)
+  const assistantPendingCount = useStore($personalAssistantPendingCount)
+
+  const personalAssistantSelected = Boolean(
+    currentView === 'chat' &&
+      assistantState?.sessionId &&
+      (selectedSessionId === assistantState.sessionId ||
+        sessions.some(
+          session =>
+            session.id === selectedSessionId && session._lineage_root_id === assistantState.sessionId
+        ))
+  )
+
   // Only surface the profile switcher when more than one profile exists, so
   // single-profile users see the unchanged sidebar.
   const multiProfile = profiles.length > 1
@@ -365,9 +400,9 @@ export function ChatSidebar({
   const visibleSessions = useMemo(
     () =>
       (showAllProfiles ? sessions : sessions.filter(s => normalizeProfileKey(s.profile) === profileScope)).filter(
-        isOpenableSessionListRow
+        session => isOpenableSessionListRow(session) && session.id !== assistantState?.sessionId
       ),
-    [sessions, showAllProfiles, profileScope]
+    [assistantState?.sessionId, sessions, showAllProfiles, profileScope]
   )
 
   // Agent session order is pinned to creation time (started_at), NOT activity —
@@ -947,7 +982,9 @@ export function ChatSidebar({
     () => (showAllProfiles ? [] : visibleFoldersForScope(folders, profileScope)),
     [folders, profileScope, showAllProfiles]
   )
+
   const folderedKeys = useMemo(() => folderKeySet(visibleFolders), [visibleFolders])
+
   const displayAgentSessions = useMemo(
     () =>
       showAllProfiles
@@ -955,6 +992,7 @@ export function ChatSidebar({
         : filterUnfiledSessions(agentSessions, folderedKeys, session => sessionPinId(session)),
     [agentSessions, folderedKeys, showAllProfiles]
   )
+
   const folderSections = useMemo(
     () =>
       visibleFolders.map(folder => ({
@@ -963,11 +1001,13 @@ export function ChatSidebar({
       })),
     [visibleFolders, sessionByAnyId]
   )
+
   const [folderNameDialog, setFolderNameDialog] = useState<{
     id?: string
     mode: 'create' | 'rename'
     name: string
   } | null>(null)
+
   const [folderToDelete, setFolderToDelete] = useState<SidebarFolder | null>(null)
 
   const submitFolderName = (name: string) => {
@@ -1167,10 +1207,13 @@ export function ChatSidebar({
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
-              {SIDEBAR_NAV.map(item => {
+              {SIDEBAR_NAV.filter(
+                item => item.id !== 'personal-assistant' || personalAssistantAvailable(activeGatewayProfile)
+              ).map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
+                  (item.id === 'personal-assistant' && personalAssistantSelected) ||
                   (item.id === 'active-chats' && currentView === 'active-chats') ||
                   (item.id === 'skills' && currentView === 'skills') ||
                   (item.id === 'messaging' && currentView === 'messaging') ||
@@ -1205,7 +1248,11 @@ export function ChatSidebar({
                           $newChatProfile.set(null)
                         }
 
-                        onNavigate(item)
+                        if (item.id === 'personal-assistant') {
+                          onStartPersonalAssistant()
+                        } else {
+                          onNavigate(item)
+                        }
                       }}
                       tooltip={s.nav[item.id] ?? item.label}
                       type="button"
@@ -1214,6 +1261,13 @@ export function ChatSidebar({
                       {contentVisible && (
                         <>
                           <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
+                          {item.id === 'personal-assistant' &&
+                            assistantState &&
+                            assistantState.unreadCount + (assistantPendingCount ?? 0) > 0 && (
+                              <SidebarMenuBadge>
+                                {assistantState.unreadCount + (assistantPendingCount ?? 0)}
+                              </SidebarMenuBadge>
+                            )}
                           {isNewSession && (
                             <KbdGroup
                               className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
