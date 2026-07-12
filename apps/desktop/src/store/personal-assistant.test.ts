@@ -77,4 +77,3 @@ describe('personal assistant home', () => {
     expect(request).toHaveBeenNthCalledWith(2, 'personal_assistant.state.get', { profile: 'office-work' })
   })
 })
-

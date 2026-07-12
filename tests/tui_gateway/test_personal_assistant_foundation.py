@@ -1,6 +1,7 @@
 def test_personal_assistant_home_reuses_one_canonical_session(monkeypatch, tmp_path):
     import tui_gateway.server as server
 
+    assert server.DESKTOP_BACKEND_CONTRACT >= 4
     monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
     monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
     created = []

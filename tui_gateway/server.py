@@ -3336,13 +3336,122 @@ def _current_profile_name() -> str:
         return "default"
 
 
+_PERSONAL_ASSISTANT_OWNER_PROFILE = "office-work"
+_personal_assistant_home_lock = threading.RLock()
+
+
+def _personal_assistant_store_for_request(rid, params: dict):
+    """Resolve the single owner profile without falling back to another home."""
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    requested = str(
+        params.get("profile") or _PERSONAL_ASSISTANT_OWNER_PROFILE
+    ).strip()
+    if requested != _PERSONAL_ASSISTANT_OWNER_PROFILE:
+        return None, _err(
+            rid, 4000, "personal assistant requires the office-work profile"
+        )
+
+    owner_home = _profile_home(_PERSONAL_ASSISTANT_OWNER_PROFILE)
+    if owner_home is None and _current_profile_name() == _PERSONAL_ASSISTANT_OWNER_PROFILE:
+        owner_home = Path(get_hermes_home())
+    if owner_home is None:
+        return None, _err(
+            rid, 4007, "office-work personal assistant profile is unavailable"
+        )
+    return PersonalAssistantStateStore(owner_home), None
+
+
+@method("personal_assistant.state.get")
+def _(rid, params: dict) -> dict:
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_store_for_request(rid, params)
+    if error:
+        return error
+    return _ok(rid, {"state": public_state(store.read())})
+
+
+@method("personal_assistant.read")
+def _(rid, params: dict) -> dict:
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_store_for_request(rid, params)
+    if error:
+        return error
+    return _ok(rid, {"state": public_state(store.mark_read())})
+
+
+@method("personal_assistant.home")
+def _(rid, params: dict) -> dict:
+    """Open or create one durable assistant destination and acknowledge it."""
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_store_for_request(rid, params)
+    if error:
+        return error
+
+    with _personal_assistant_home_lock:
+        canonical = str(store.read().get("canonical_session_id") or "")
+        session_id = ""
+        if canonical:
+            resumed = _methods["session.resume"](
+                rid,
+                {
+                    "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
+                    "session_id": canonical,
+                    "source": "desktop",
+                },
+            )
+            if "error" not in resumed:
+                session_id = str((resumed.get("result") or {}).get("session_id") or "")
+            elif (resumed.get("error") or {}).get("code") != 4007:
+                return resumed
+
+        if not session_id:
+            created = _methods["session.create"](
+                rid,
+                {
+                    "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
+                    "source": "desktop",
+                    "title": "Personal assistant",
+                },
+            )
+            if "error" in created:
+                return created
+            result = created.get("result") or {}
+            session_id = str(result.get("session_id") or "")
+            canonical = str(result.get("stored_session_id") or session_id)
+            if not session_id or not canonical:
+                return _err(
+                    rid, 5000, "personal assistant home creation returned no session"
+                )
+            store.set_canonical_session(canonical)
+            with _sessions_lock:
+                home_session = _sessions.get(session_id)
+            if home_session is not None:
+                _ensure_session_db_row(home_session)
+
+        state = store.mark_read()
+        return _ok(
+            rid,
+            {
+                "canonical_session_id": canonical,
+                "session_id": session_id,
+                "state": public_state(state),
+                "status": "ready",
+            },
+        )
+
+
 # Monotonic GUI<->backend contract version. The desktop app refuses to drive a
 # backend reporting less than its required value (or none at all — a pre-GUI
 # checkout), surfacing a one-click "update to align" prompt instead of failing
 # cryptically downstream. Bump whenever the desktop's backend contract changes.
 # v2: adds the file.attach RPC (remote-gateway non-image file upload).
 # v3: adds approvals.mode config RPCs and session.info reconciliation.
-DESKTOP_BACKEND_CONTRACT = 3
+# v4: adds the persistent Personal assistant home and read acknowledgement.
+DESKTOP_BACKEND_CONTRACT = 4
 
 
 def _session_info(agent, session: dict | None = None) -> dict:

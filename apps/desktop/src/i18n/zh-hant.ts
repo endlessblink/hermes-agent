@@ -1419,10 +1419,13 @@ export const zhHant = defineLocale({
   sidebar: {
     nav: {
       'new-session': '新工作階段',
+      'personal-assistant': '個人助理',
       skills: '技能與工具',
       messaging: '訊息平台',
       artifacts: '成品'
     },
+    personalAssistantOpenFailed: '無法開啟個人助理',
+    personalAssistantUnread: count => `${count} 則未讀助理更新`,
     searchAria: '搜尋工作階段',
     searchPlaceholder: '搜尋工作階段…',
     clearSearch: '清除搜尋',

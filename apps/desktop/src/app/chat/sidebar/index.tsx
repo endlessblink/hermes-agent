@@ -2,7 +2,7 @@ import { KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/c
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { PlatformAvatar } from '@/app/messaging/platform-icon'
 import { Button } from '@/components/ui/button'
@@ -102,6 +102,7 @@ import { countLabel } from './chrome'
 import { SidebarCronJobsSection } from './cron-jobs-section'
 import { SidebarLoadMoreRow } from './load-more-row'
 import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
+import { PersonalAssistantSidebarRow } from './personal-assistant-row'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import {
@@ -1058,52 +1059,64 @@ export function ChatSidebar({
                 const isNewSession = item.id === 'new-session'
 
                 return (
-                  <SidebarMenuItem key={item.id}>
-                    <SidebarMenuButton
-                      aria-disabled={!isInteractive}
-                      className={cn(
-                        // no-drag: these rows sit directly under the titlebar's
-                        // [-webkit-app-region:drag] strips (app-shell.tsx), with only
-                        // 6px of clearance. Drag regions win hit-testing over DOM
-                        // (pointer-events can't override), and on Linux/WSLg the
-                        // resolved region has been observed to swallow clicks on the
-                        // top rows. Same carve-out as USER_BUBBLE_BASE_CLASS in
-                        // thread.tsx.
-                        'flex h-7 w-full justify-start gap-2 rounded-md border border-transparent px-2 text-left text-[0.8125rem] font-medium text-(--ui-text-secondary) transition-colors duration-100 ease-out [-webkit-app-region:no-drag] hover:bg-(--ui-control-hover-background) hover:text-foreground hover:transition-none',
-                        active &&
-                          'border-(--ui-stroke-tertiary) bg-(--ui-control-active-background) text-foreground shadow-none hover:border-(--ui-stroke-tertiary)!',
-                        !isInteractive &&
-                          'cursor-default hover:border-transparent hover:bg-transparent hover:text-inherit'
-                      )}
-                      onClick={() => {
-                        // A plain new session lands in whatever profile the live
-                        // gateway is on (= the active switcher context). null →
-                        // no swap. The switcher header is the single place to
-                        // change which profile that is.
-                        if (isNewSession) {
-                          $newChatProfile.set(null)
-                        }
+                  <Fragment key={item.id}>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        aria-disabled={!isInteractive}
+                        className={cn(
+                          // no-drag: these rows sit directly under the titlebar's
+                          // [-webkit-app-region:drag] strips (app-shell.tsx), with only
+                          // 6px of clearance. Drag regions win hit-testing over DOM
+                          // (pointer-events can't override), and on Linux/WSLg the
+                          // resolved region has been observed to swallow clicks on the
+                          // top rows. Same carve-out as USER_BUBBLE_BASE_CLASS in
+                          // thread.tsx.
+                          'flex h-7 w-full justify-start gap-2 rounded-md border border-transparent px-2 text-left text-[0.8125rem] font-medium text-(--ui-text-secondary) transition-colors duration-100 ease-out [-webkit-app-region:no-drag] hover:bg-(--ui-control-hover-background) hover:text-foreground hover:transition-none',
+                          active &&
+                            'border-(--ui-stroke-tertiary) bg-(--ui-control-active-background) text-foreground shadow-none hover:border-(--ui-stroke-tertiary)!',
+                          !isInteractive &&
+                            'cursor-default hover:border-transparent hover:bg-transparent hover:text-inherit'
+                        )}
+                        onClick={() => {
+                          // A plain new session lands in whatever profile the live
+                          // gateway is on (= the active switcher context). null →
+                          // no swap. The switcher header is the single place to
+                          // change which profile that is.
+                          if (isNewSession) {
+                            $newChatProfile.set(null)
+                          }
 
-                        onNavigate(item)
-                      }}
-                      tooltip={s.nav[item.id] ?? item.label}
-                      type="button"
-                    >
-                      <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
-                      {contentVisible && (
-                        <>
-                          <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
-                          {isNewSession && (
-                            <KbdGroup
-                              className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
-                              keys={[...NEW_SESSION_KBD]}
-                              size="sm"
-                            />
-                          )}
-                        </>
-                      )}
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
+                          onNavigate(item)
+                        }}
+                        tooltip={s.nav[item.id] ?? item.label}
+                        type="button"
+                      >
+                        <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
+                        {contentVisible && (
+                          <>
+                            <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
+                            {isNewSession && (
+                              <KbdGroup
+                                className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
+                                keys={[...NEW_SESSION_KBD]}
+                                size="sm"
+                              />
+                            )}
+                          </>
+                        )}
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                    {isNewSession && (
+                      <PersonalAssistantSidebarRow
+                        contentVisible={contentVisible}
+                        currentView={currentView}
+                        gatewayState={gatewayState}
+                        onOpenSession={onResumeSession}
+                        selectedSessionId={selectedSessionId}
+                        sessions={sessions}
+                      />
+                    )}
+                  </Fragment>
                 )
               })}
             </SidebarMenu>
