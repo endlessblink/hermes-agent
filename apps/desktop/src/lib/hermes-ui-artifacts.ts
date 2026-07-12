@@ -49,6 +49,7 @@ export interface HermesUiFormField {
   id: string
   label: string
   type: HermesUiFormFieldType
+  defaultValue?: HermesUiFormValue
   description?: string
   placeholder?: string
   required?: boolean
@@ -461,7 +462,7 @@ const MAX_GRAPH_EDGES = 16
 const MAX_FORM_FIELDS = 12
 const MAX_FORM_OPTIONS = 12
 const SAFE_FORM_KEYS = new Set(['description', 'direction', 'fields', 'id', 'submitLabel', 'title', 'type'])
-const SAFE_FORM_FIELD_KEYS = new Set(['description', 'id', 'label', 'options', 'placeholder', 'required', 'type'])
+const SAFE_FORM_FIELD_KEYS = new Set(['default', 'description', 'id', 'label', 'options', 'placeholder', 'required', 'type'])
 const SAFE_FORM_OPTION_KEYS = new Set(['label', 'value'])
 
 const SAFE_PLANNING_SESSION_KEYS = new Set(['categories', 'description', 'direction', 'id', 'mode', 'nextBlock', 'tasks', 'title', 'type'])
@@ -845,6 +846,7 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
     }
 
     let options: HermesUiFormOption[] | undefined
+    const optionValues = new Set<string>()
 
     if (raw.type === 'single-choice' || raw.type === 'multi-choice') {
       if (!Array.isArray(raw.options) || raw.options.length === 0 || raw.options.length > MAX_FORM_OPTIONS) {
@@ -852,7 +854,6 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
       }
 
       options = []
-      const values = new Set<string>()
 
       for (const [optionIndex, rawOption] of raw.options.entries()) {
         if (typeof rawOption === 'string') {
@@ -866,11 +867,11 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
             return optionText
           }
 
-          if (!optionText || values.has(optionText)) {
+          if (!optionText || optionValues.has(optionText)) {
             return { error: `fields[${index}] has invalid or duplicate options`, ok: false }
           }
 
-          values.add(optionText)
+          optionValues.add(optionText)
           options.push({ label: optionText, value: optionText })
 
           continue
@@ -895,18 +896,59 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
           return optionLabel
         }
 
-        if (!value || !optionLabel || values.has(value)) {
+        if (!value || !optionLabel || optionValues.has(value)) {
           return { error: `fields[${index}] has invalid or duplicate options`, ok: false }
         }
 
-        values.add(value)
+        optionValues.add(value)
         options.push({ label: optionLabel, value })
       }
     } else if (raw.options !== undefined) {
       return { error: `fields[${index}].options is only valid for choice fields`, ok: false }
     }
 
-    fields.push({ description, id, label, options, placeholder, required: raw.required === true, type: raw.type as HermesUiFormFieldType })
+    let defaultValue: HermesUiFormValue | undefined
+
+    if (raw.default !== undefined) {
+      if (raw.type === 'boolean' && typeof raw.default === 'boolean') {
+        defaultValue = raw.default
+      } else if (raw.type === 'number' && typeof raw.default === 'number' && Number.isFinite(raw.default)) {
+        defaultValue = String(raw.default)
+      } else if (raw.type === 'multi-choice' && Array.isArray(raw.default)) {
+        const selected = raw.default.filter(value => typeof value === 'string')
+
+        if (selected.length !== raw.default.length || selected.some(value => !optionValues.has(value))) {
+          return { error: `fields[${index}].default contains an unsupported option`, ok: false }
+        }
+
+        defaultValue = selected
+      } else if (typeof raw.default === 'string') {
+        const normalizedDefault = normalizeText(raw.default, MAX_ACTION_COPY_TEXT_LENGTH, `fields[${index}].default`)
+
+        if (typeof normalizedDefault !== 'string') {
+          return normalizedDefault
+        }
+
+        if (raw.type === 'single-choice' && !optionValues.has(normalizedDefault)) {
+          return { error: `fields[${index}].default contains an unsupported option`, ok: false }
+        }
+
+        defaultValue = normalizedDefault
+      } else {
+        return { error: `fields[${index}].default does not match its field type`, ok: false }
+      }
+    }
+
+    fields.push({
+      ...(defaultValue !== undefined ? { defaultValue } : {}),
+      description,
+      id,
+      label,
+      options,
+      placeholder,
+      required: raw.required === true,
+      type: raw.type as HermesUiFormFieldType
+    })
   }
 
   const submitLabel = optionalText(parsed.submitLabel, MAX_ACTION_LABEL_LENGTH, 'submitLabel')

@@ -193,9 +193,16 @@ function artifactDirection(
 
 function readFormDraft(key: string, fields: readonly HermesUiFormField[]): Record<string, HermesUiFormValue> {
   const raw = readKey(key)
+  const defaults: Record<string, HermesUiFormValue> = {}
+
+  for (const field of fields) {
+    if (field.defaultValue !== undefined) {
+      defaults[field.id] = field.defaultValue
+    }
+  }
 
   if (!raw) {
-    return {}
+    return defaults
   }
 
   try {
@@ -223,9 +230,9 @@ function readFormDraft(key: string, fields: readonly HermesUiFormField[]): Recor
       }
     }
 
-    return Object.fromEntries(entries)
+    return { ...defaults, ...Object.fromEntries(entries) }
   } catch {
-    return {}
+    return defaults
   }
 }
 

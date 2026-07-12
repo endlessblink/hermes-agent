@@ -188,6 +188,20 @@ describe('ChecklistArtifactCard', () => {
     expect(requestComposerSubmit).toHaveBeenCalledWith(expect.any(String), { target: 'main' })
   })
 
+  it('prefills a normalized numeric default in the rendered form', () => {
+    render(
+      <FormArtifactCard
+        artifact={{
+          fields: [{ defaultValue: '25', id: 'duration', label: 'משך בדקות', required: true, type: 'number' }],
+          id: 'laundry-duration',
+          type: 'form'
+        }}
+      />
+    )
+
+    expect((screen.getByLabelText('משך בדקות') as HTMLInputElement).value).toBe('25')
+  })
+
   it('renders FlowState planning sessions with categories, next block, task controls, and submit routing', () => {
     render(<FlowStatePlanningSessionCard artifact={planningSessionArtifact} />)
 

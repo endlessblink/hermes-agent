@@ -111,6 +111,23 @@ describe('form artifacts', () => {
       { id: 'revision', label: 'תיקון או הקשר (אופציונלי)', required: false, type: 'long-text' }
     ])
   })
+
+  it('accepts and normalizes a numeric default emitted for a number field', () => {
+    const result = parseHermesUiArtifact(JSON.stringify({
+      direction: 'rtl',
+      fields: [
+        { id: 'scheduled_time', label: 'שעת התחלה', required: true, type: 'time' },
+        { default: 25, id: 'duration', label: 'משך בדקות', required: true, type: 'number' }
+      ],
+      id: 'schedule-laundry-work-block-2026-07-13',
+      submitLabel: 'הכן תצוגה מקדימה',
+      title: 'מתי לשים את הכביסה ב־Canvas?',
+      type: 'form'
+    }))
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'form' && result.artifact.fields[1]?.defaultValue).toBe('25')
+  })
 })
 
 const obsidianPolicyChecklist = {
