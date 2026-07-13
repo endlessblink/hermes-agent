@@ -119,6 +119,40 @@ def test_personal_assistant_stuck_turn_is_classified(tmp_path, monkeypatch):
     assert rows[-1]["personal_assistant"] is True
 
 
+def test_post_completion_review_summary_does_not_rearm_stuck_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    ledger = home / "profiles" / "office-work" / "logs" / "turn-watchdog.jsonl"
+    ledger.parent.mkdir(parents=True)
+    base = {
+        "monotonic": time.time() - 90,
+        "session_id": "sid-complete",
+        "session_key": "assistant-key",
+        "personal_assistant": True,
+    }
+    ledger.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in (
+                {**base, "event": "message.complete", "running": True, "terminal_emitted": True},
+                {**base, "event": "review.summary", "running": False, "terminal_emitted": True},
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(
+        ["--home", str(home), "--idle-seconds", "1", "--from-start", "--once"]
+    )
+
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    events = [json.loads(line)["event"] for line in alerts.read_text(encoding="utf-8").splitlines()]
+    assert "personal_assistant_turn_stuck" not in events
+    assert "turn_stuck" not in events
+
+
 def test_session_not_found_is_alerted_immediately(tmp_path, monkeypatch):
     monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
     home = tmp_path / ".hermes"

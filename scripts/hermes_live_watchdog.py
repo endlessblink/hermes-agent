@@ -141,6 +141,11 @@ def is_terminal(row: dict[str, Any]) -> bool:
 
 
 def is_progress(row: dict[str, Any]) -> bool:
+    # Background review summaries and other trailing events can land after the
+    # turn has already completed. They are useful history, but must never arm a
+    # fresh stuck-turn timer for an idle session.
+    if row.get("running") is False or row.get("terminal_emitted") is True:
+        return False
     event = str(row.get("event") or "")
     if event in {"session.info"}:
         return False
