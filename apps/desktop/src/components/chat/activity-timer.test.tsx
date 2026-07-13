@@ -1,10 +1,10 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { __resetElapsedTimerRegistryForTests, useElapsedSeconds } from './activity-timer'
 
-function Probe({ active, timerKey }: { active: boolean; timerKey?: string }) {
-  const elapsed = useElapsedSeconds(active, timerKey)
+function Probe({ active, startedAtMs, timerKey }: { active: boolean; startedAtMs?: number; timerKey?: string }) {
+  const elapsed = useElapsedSeconds(active, timerKey, startedAtMs)
 
   return <span data-testid="elapsed">{elapsed}</span>
 }
@@ -17,6 +17,7 @@ describe('useElapsedSeconds', () => {
   })
 
   afterEach(() => {
+    cleanup()
     vi.useRealTimers()
     __resetElapsedTimerRegistryForTests()
   })
@@ -39,5 +40,26 @@ describe('useElapsedSeconds', () => {
     render(<Probe active timerKey="tool:abc" />)
 
     expect(screen.getByTestId('elapsed').textContent).toBe('8')
+  })
+
+  it('uses a stable turn start when a remounted message has a different id', () => {
+    const turnStartedAt = Date.now()
+    const first = render(<Probe active startedAtMs={turnStartedAt} timerKey="reasoning:temporary-message-a" />)
+
+    act(() => {
+      vi.advanceTimersByTime(5_000)
+    })
+
+    expect(first.getByTestId('elapsed').textContent).toBe('5')
+
+    first.unmount()
+
+    act(() => {
+      vi.advanceTimersByTime(3_000)
+    })
+
+    const second = render(<Probe active startedAtMs={turnStartedAt} timerKey="reasoning:temporary-message-b" />)
+
+    expect(second.getByTestId('elapsed').textContent).toBe('8')
   })
 })

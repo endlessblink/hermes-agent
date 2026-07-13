@@ -1,4 +1,5 @@
 import { type ToolCallMessagePartProps, useAuiState } from '@assistant-ui/react'
+import { useStore } from '@nanostores/react'
 import { type ComponentProps, type FC, type ReactNode, useEffect, useRef, useState } from 'react'
 
 import { ClarifyTool } from '@/components/assistant-ui/clarify-tool'
@@ -11,6 +12,7 @@ import { GeneratedImage } from '@/components/chat/generated-image-result'
 import { useI18n } from '@/i18n'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
+import { $turnStartedAt } from '@/store/session'
 
 const ImageGenerateTool: FC<ToolCallMessagePartProps> = ({ args, result }) => {
   const aspectRatio = typeof args?.aspect_ratio === 'string' ? args.aspect_ratio : undefined
@@ -43,15 +45,16 @@ const ThinkingDisclosure: FC<{
   children: ReactNode
   messageRunning?: boolean
   pending?: boolean
+  startedAtMs?: number | null
   timerKey?: string
-}> = ({ children, messageRunning = false, pending = false, timerKey }) => {
+}> = ({ children, messageRunning = false, pending = false, startedAtMs, timerKey }) => {
   const { t } = useI18n()
   // `null` = no explicit user toggle yet, defer to the streaming default.
   // The default is "auto-open while streaming, auto-collapse when done" so
   // reasoning surfaces a live preview without manual interaction. The first
   // explicit toggle wins from then on.
   const [userOpen, setUserOpen] = useState<boolean | null>(null)
-  const elapsed = useElapsedSeconds(pending, timerKey)
+  const elapsed = useElapsedSeconds(pending, timerKey, startedAtMs)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   const enterRef = useEnterAnimation(messageRunning, timerKey)
@@ -141,6 +144,7 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
 }) => {
   const messageId = useAuiState(s => s.message.id)
   const messageRunning = useAuiState(s => s.message.status?.type === 'running')
+  const turnStartedAt = useStore($turnStartedAt)
 
   const pending = useAuiState(
     s =>
@@ -168,7 +172,12 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
   }
 
   return (
-    <ThinkingDisclosure messageRunning={messageRunning} pending={pending} timerKey={`reasoning:${messageId}`}>
+    <ThinkingDisclosure
+      messageRunning={messageRunning}
+      pending={pending}
+      startedAtMs={pending ? turnStartedAt : null}
+      timerKey={`reasoning:${messageId}`}
+    >
       {children}
     </ThinkingDisclosure>
   )
