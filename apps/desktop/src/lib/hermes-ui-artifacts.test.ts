@@ -5,6 +5,7 @@ import {
   type HermesUiChecklistArtifact,
   type HermesUiFormArtifact,
   parseHermesUiArtifact,
+  parseHermesUiTaskBreakdownDraftSteps,
   stableArtifactStorageKey
 } from './hermes-ui-artifacts'
 
@@ -205,6 +206,85 @@ const obsidianPolicyChecklist = {
 }
 
 describe('parseHermesUiArtifact', () => {
+  it('parses a bounded task breakdown with a stable persistence identity', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        direction: 'rtl',
+        id: 'launch-brief-breakdown',
+        scope: 'working-session',
+        steps: [
+          { doneEnough: 'יש רשימת קהלים', estimateMinutes: 15, id: 'audience', title: 'להגדיר קהל' },
+          { doneEnough: 'יש טיוטה מלאה אחת', id: 'draft', optional: true, title: 'לכתוב טיוטה' }
+        ],
+        stoppingRule: 'לעצור אחרי טיוטה שניתנת למשוב',
+        submitLabel: 'להתחיל בצעד הראשון',
+        targetOutcome: 'בריף שאפשר להעביר לעיצוב',
+        task: { id: 'task-42', title: 'להכין\u0000 בריף השקה' },
+        title: 'פירוק למשימת עבודה',
+        type: 'task-breakdown'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'task-breakdown' && result.artifact.task.title).toBe('להכין בריף השקה')
+    expect(result.ok && result.artifact.type === 'task-breakdown' && result.artifact.steps[0]?.estimateMinutes).toBe(15)
+    expect(result.ok && stableArtifactStorageKey(result.artifact)).toBe('hermes-ui:task-breakdown:launch-brief-breakdown')
+  })
+
+  it('rejects unsupported task-breakdown keys and duplicate step ids', () => {
+    const validBreakdown = {
+      scope: 'next-move',
+      steps: [{ doneEnough: 'The first move is complete', id: 'first', title: 'Start' }],
+      task: { id: 'task-1', title: 'Large task' },
+      type: 'task-breakdown'
+    }
+
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, onSubmit: 'unsafe' }))).toEqual({
+      error: 'Unsupported task-breakdown field: onSubmit',
+      ok: false
+    })
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, task: { ...validBreakdown.task, href: 'javascript:alert(1)' } })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ command: 'rm', doneEnough: 'Done', id: 'first', title: 'A' }] })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ doneEnough: 'Done A', id: 'same', title: 'A' }, { doneEnough: 'Done B', id: 'same', title: 'B' }] }))).toEqual({
+      error: 'Duplicate step id: same',
+      ok: false
+    })
+  })
+
+  it('enforces task-breakdown scope, step count, and estimate bounds', () => {
+    const artifact = {
+      scope: 'full-delivery',
+      steps: [{ doneEnough: 'The first move is complete', estimateMinutes: 480, id: 'first', title: 'Start' }],
+      task: { id: 'task-1', title: 'Large task' },
+      type: 'task-breakdown'
+    }
+
+    expect(parseHermesUiArtifact(JSON.stringify(artifact)).ok).toBe(true)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, scope: 'finish-everything' })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [] })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: Array.from({ length: 13 }, (_, index) => ({ doneEnough: 'Done', id: `s-${index}`, title: 'Step' })) })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [{ doneEnough: 'Done', estimateMinutes: 481, id: 'first', title: 'Start' }] }))).toEqual({
+      error: 'steps[0].estimateMinutes must be an integer from 1 to 480',
+      ok: false
+    })
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [{ id: 'first', title: 'Start' }] }))).toEqual({
+      error: 'steps[0].doneEnough is required',
+      ok: false
+    })
+  })
+
+  it('accepts bounded incomplete draft steps but rejects oversized or unsafe drafts', () => {
+    expect(parseHermesUiTaskBreakdownDraftSteps([{ doneEnough: '', id: 'draft-1', title: '' }])).toEqual([
+      { doneEnough: '', estimateMinutes: undefined, id: 'draft-1', optional: undefined, title: '' }
+    ])
+    expect(parseHermesUiTaskBreakdownDraftSteps([
+      { doneEnough: 'Done', id: 'draft-1', title: 'x'.repeat(801) }
+    ])).toBeNull()
+    expect(parseHermesUiTaskBreakdownDraftSteps([
+      { command: 'unsafe', doneEnough: 'Done', id: 'draft-1', title: 'Start' }
+    ])).toBeNull()
+  })
+
   it('parses a valid checklist artifact', () => {
     const result = parseHermesUiArtifact(JSON.stringify(validChecklist))
 
