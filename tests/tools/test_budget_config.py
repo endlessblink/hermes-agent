@@ -7,6 +7,7 @@ and the PINNED_THRESHOLDS escape-hatch for read_file.
 
 import dataclasses
 import math
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -20,6 +21,18 @@ from tools.budget_config import (
     BudgetConfig,
     budget_for_context_window,
 )
+
+
+def test_agent_specific_tool_budget_takes_priority():
+    from agent.tool_executor import _budget_for_agent
+
+    override = BudgetConfig(default_result_size=20_000, turn_budget=40_000)
+    agent = SimpleNamespace(
+        _tool_result_budget_override=override,
+        context_compressor=SimpleNamespace(context_length=272_000),
+    )
+
+    assert _budget_for_agent(agent) is override
 
 
 # ---------------------------------------------------------------------------

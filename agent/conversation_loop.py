@@ -613,6 +613,8 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    foreground_tool_batches = 0
+    force_visible_response = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
@@ -920,6 +922,26 @@ def run_conversation(
             drop_codex_reasoning_items=agent.api_mode != "codex_responses",
         )
 
+        # Once a foreground tool budget is exhausted, guide the next model
+        # pass to answer from the verified results already collected.  Add
+        # this only to the per-request copy: the canonical conversation must
+        # retain the exact tool result so the control instruction cannot leak
+        # into persistence or suppress tools on a later user turn.
+        if force_visible_response:
+            for tool_message in reversed(api_messages):
+                if tool_message.get("role") != "tool":
+                    continue
+                content = tool_message.get("content")
+                if isinstance(content, str):
+                    tool_message["content"] = (
+                        f"{content}\n\n"
+                        "[Foreground discovery budget reached. Do not call more "
+                        "tools in this turn. Return a concise useful response now "
+                        "using the verified results above, and offer deeper work "
+                        "separately if needed.]"
+                    )
+                break
+
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
         # which enables KV cache reuse on local inference servers
@@ -1167,6 +1189,9 @@ def run_conversation(
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
                 api_kwargs = agent._build_api_kwargs(api_messages)
+                if force_visible_response:
+                    for key in ("tools", "tool_choice", "parallel_tool_calls"):
+                        api_kwargs.pop(key, None)
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
@@ -1201,6 +1226,9 @@ def run_conversation(
                 except Exception:
                     _original_api_kwargs = dict(api_kwargs)
                     _llm_middleware_trace = []
+                if force_visible_response:
+                    for key in ("tools", "tool_choice", "parallel_tool_calls"):
+                        api_kwargs.pop(key, None)
 
                 try:
                     from hermes_cli.plugins import (
@@ -1317,6 +1345,13 @@ def run_conversation(
                         _use_streaming = False
 
                 def _perform_api_call(next_api_kwargs):
+                    # Execution middleware may replace the request payload.
+                    # Keep the final-response backstop authoritative at the
+                    # terminal provider boundary as well.
+                    if force_visible_response:
+                        next_api_kwargs = dict(next_api_kwargs)
+                        for key in ("tools", "tool_choice", "parallel_tool_calls"):
+                            next_api_kwargs.pop(key, None)
                     if _use_streaming:
                         return agent._interruptible_streaming_api_call(
                             next_api_kwargs, on_first_delta=_stop_spinner
@@ -4694,6 +4729,17 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+
+                try:
+                    foreground_tool_batch_limit = int(
+                        getattr(agent, "_foreground_tool_batch_limit", 0) or 0
+                    )
+                except (TypeError, ValueError):
+                    foreground_tool_batch_limit = 0
+                if foreground_tool_batch_limit > 0:
+                    foreground_tool_batches += 1
+                    if foreground_tool_batches >= foreground_tool_batch_limit:
+                        force_visible_response = True
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision

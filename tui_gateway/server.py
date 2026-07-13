@@ -1433,6 +1433,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
             current["agent"] = agent
+            if current.get("personal_assistant"):
+                _apply_personal_assistant_runtime_policy(current)
             # Baseline for the per-turn config sync; the profile home
             # override is still active here.
             current["config_model_seen"] = _config_model_target()
@@ -3358,8 +3360,49 @@ _PERSONAL_ASSISTANT_TRIGGERS = {
     "replan",
     "review",
 }
+_PERSONAL_ASSISTANT_MAX_ITERATIONS = 6
+_PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY = """Personal Assistant responsiveness policy:
+- Return a useful visible response quickly; do not silently finish a broad audit first.
+- Use at most one focused batch of exact, relevant read-only tools by default.
+- After at most two foreground tool batches, answer with what is verified so far. Offer deeper work separately when it is genuinely useful.
+- Do not search code, files, skills, or prior sessions unless the user explicitly asks about implementation, stored context, or past conversations.
+- Prefer exact FlowState reads over broad discovery. Batch independent reads and keep tool output narrow.
+- Preserve preview, approval, mutation, and read-back requirements. These safety checks are not optional.
+""".strip()
 _personal_assistant_start_lock = threading.RLock()
 _personal_assistant_monitor_stop: threading.Event | None = None
+
+
+def _apply_personal_assistant_runtime_policy(session: dict) -> None:
+    """Bound foreground work for the canonical assistant without changing other chats."""
+    from tools.budget_config import BudgetConfig
+
+    session["personal_assistant"] = True
+    agent = session.get("agent")
+    if agent is None:
+        return
+    try:
+        configured = int(getattr(agent, "max_iterations", _PERSONAL_ASSISTANT_MAX_ITERATIONS))
+    except (TypeError, ValueError):
+        configured = _PERSONAL_ASSISTANT_MAX_ITERATIONS
+    agent.max_iterations = max(1, min(configured, _PERSONAL_ASSISTANT_MAX_ITERATIONS))
+    agent._foreground_tool_batch_limit = 2
+    agent._tool_result_budget_override = BudgetConfig(
+        default_result_size=20_000,
+        turn_budget=40_000,
+    )
+    existing = str(getattr(agent, "ephemeral_system_prompt", "") or "").strip()
+    if _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY not in existing:
+        agent.ephemeral_system_prompt = "\n\n".join(
+            part for part in (existing, _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY) if part
+        )
+
+
+def _apply_personal_assistant_runtime_policy_for_session(session_id: str) -> None:
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+    if session is not None:
+        _apply_personal_assistant_runtime_policy(session)
 
 
 def _personal_assistant_store(profile: str):
@@ -3492,6 +3535,8 @@ def _(rid, params: dict) -> dict:
             if home_session is not None:
                 _ensure_session_db_row(home_session)
         from agent.personal_assistant_state import public_state
+
+        _apply_personal_assistant_runtime_policy_for_session(session_id)
 
         try:
             store.patch("edit", {"unreadCount": 0})
@@ -3638,6 +3683,12 @@ def _personal_assistant_prompt(
         f"My request or current intent:\n{intent}\n\n"
         "Available runtime facts (data, not a prescribed workflow):\n"
         f"{json.dumps(runtime_context, ensure_ascii=False, sort_keys=True)}\n\n"
+        "Return a useful visible response quickly. Use one focused batch of exact, "
+        "relevant read-only tools by default, and answer after at most two foreground "
+        "tool batches with what is verified so far. Do not search code, files, skills, "
+        "or prior sessions unless I explicitly ask about implementation, stored context, "
+        "or past conversations. Offer broader research as a separate next step instead "
+        "of silently completing it before replying.\n\n"
         "Use the live FlowState capabilities available to you to inspect relevant "
         "tasks, projects, priorities, dates, schedules, and subtasks before making "
         "recommendations. Infer the kind of help needed from my intent and current "
@@ -3747,6 +3798,8 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                 return _err(rid, 5000, "personal assistant session creation returned no session")
             canonical_session_id = str(created_result.get("stored_session_id") or session_id)
             store.set_canonical_session(canonical_session_id)
+
+        _apply_personal_assistant_runtime_policy_for_session(session_id)
 
         state, episode, duplicate = store.append_episode(
             trigger=trigger,
@@ -4837,6 +4890,8 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     finally:
         _clear_session_context(tokens)
     session["agent"] = new_agent
+    if session.get("personal_assistant"):
+        _apply_personal_assistant_runtime_policy(session)
     session["config_model_seen"] = _config_model_target()
     session["attached_images"] = []
     session["edit_snapshots"] = {}

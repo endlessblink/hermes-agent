@@ -268,6 +268,102 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
 
 
+def test_foreground_tool_batch_limit_forces_a_visible_response():
+    agent = _make_agent("web_search", max_iterations=10)
+    agent._foreground_tool_batch_limit = 2
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("web_search", "{}", f"c{i}")],
+        )
+        for i in range(1, 3)
+    ]
+    seen_kwargs = []
+
+    def _respond(**kwargs):
+        seen_kwargs.append(kwargs)
+        if responses:
+            return responses.pop(0)
+        return _mock_response(content="Verified so far", finish_reason="stop", tool_calls=None)
+
+    agent.client.chat.completions.create.side_effect = _respond
+    with (
+        patch("run_agent.handle_function_call", return_value="search result") as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("search broadly")
+
+    assert result["final_response"] == "Verified so far"
+    assert result["api_calls"] == 3
+    assert mock_hfc.call_count == 2
+    assert seen_kwargs[0].get("tools")
+    assert seen_kwargs[1].get("tools")
+    assert "tools" not in seen_kwargs[2]
+    final_request_tool_results = [
+        message["content"]
+        for message in seen_kwargs[2]["messages"]
+        if message.get("role") == "tool"
+    ]
+    assert any("Foreground discovery budget reached" in content for content in final_request_tool_results)
+    persisted_tool_results = [
+        message["content"] for message in result["messages"] if message.get("role") == "tool"
+    ]
+    assert len(persisted_tool_results) == 2
+    assert all("search result" in content for content in persisted_tool_results)
+    assert all("Foreground discovery budget reached" not in content for content in persisted_tool_results)
+
+
+def test_foreground_tool_batch_limit_cannot_be_bypassed_by_execution_middleware():
+    agent = _make_agent("web_search", max_iterations=10)
+    agent._foreground_tool_batch_limit = 2
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("web_search", "{}", f"c{i}")],
+        )
+        for i in range(1, 3)
+    ]
+    seen_kwargs = []
+
+    def _respond(**kwargs):
+        seen_kwargs.append(kwargs)
+        if responses:
+            return responses.pop(0)
+        return _mock_response(content="Verified so far", finish_reason="stop", tool_calls=None)
+
+    def _reintroduce_tools(request, next_call, **_kwargs):
+        payload = dict(request)
+        payload["tools"] = _make_tool_defs("web_search")
+        payload["tool_choice"] = "auto"
+        payload["parallel_tool_calls"] = True
+        return next_call(payload)
+
+    agent.client.chat.completions.create.side_effect = _respond
+    with (
+        patch("run_agent.handle_function_call", return_value="search result") as mock_hfc,
+        patch(
+            "hermes_cli.middleware.run_llm_execution_middleware",
+            side_effect=_reintroduce_tools,
+        ),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("search broadly")
+
+    assert result["final_response"] == "Verified so far"
+    assert mock_hfc.call_count == 2
+    assert seen_kwargs[0].get("tools")
+    assert seen_kwargs[1].get("tools")
+    assert "tools" not in seen_kwargs[2]
+    assert "tool_choice" not in seen_kwargs[2]
+    assert "parallel_tool_calls" not in seen_kwargs[2]
+
+
 def test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_halt_without_top_level_error():
     agent = _make_agent("web_search", max_iterations=10, config=_hard_stop_config())
     same_args = {"query": "same"}
