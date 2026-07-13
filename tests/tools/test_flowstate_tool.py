@@ -667,6 +667,24 @@ def test_done_for_now_defaults_to_non_mutating_preview_and_uses_exact_task_id(mo
     assert seen["body"] == {"nextDueDate": "2026-07-16", "preview": True}
 
 
+def test_get_task_reads_one_exact_encoded_id(monkeypatch):
+    seen = {}
+    payload = {"ok": True, "task": {"id": "task/one", "title": "Exact task"}}
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, payload))
+
+    result = json.loads(fst._handle_get_task({"taskId": "task/one"}))
+
+    assert result["result"] == payload
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fone"
+
+
+def test_get_task_requires_exact_id_without_leaking_auth():
+    result = json.loads(fst._handle_get_task({}))
+    assert result["error"] == "taskId is required"
+    assert "token-123" not in json.dumps(result)
+
+
 @pytest.mark.parametrize(
     "args,error",
     [

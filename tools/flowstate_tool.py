@@ -254,6 +254,25 @@ def _handle_search_tasks(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+def _handle_get_task(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    if not task_id:
+        return _tool_error("taskId is required")
+    try:
+        path = f"/api/tasks/{urllib.parse.quote(task_id, safe='')}"
+        return _tool_result(_request("GET", path))
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_get_task API error: status=%s code=%s",
+            exc.status,
+            exc.code,
+        )
+        return _typed_tool_error(exc)
+    except Exception as exc:
+        logger.error("flowstate_get_task error: %s", exc)
+        return _tool_error(str(exc))
+
+
 def _handle_create_task(args: dict, **kw) -> str:
     title = str(args.get("title") or "").strip()
     if not title:
@@ -811,6 +830,23 @@ FLOWSTATE_SEARCH_TASKS_SCHEMA = {
 }
 
 
+FLOWSTATE_GET_TASK_SCHEMA = {
+    "name": "flowstate_get_task",
+    "description": (
+        "Read one exact Flow State task by its stable id through the signed-in Local Task API. "
+        "Returns supported metadata, recurrence identity, subtasks, work blocks, and Canvas placement "
+        "without authentication material. Use this read-back before and after exact mutations."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "description": "Exact Flow State task id."},
+        },
+        "required": ["taskId"],
+    },
+}
+
+
 FLOWSTATE_CREATE_TASK_SCHEMA = {
     "name": "flowstate_create_task",
     "description": (
@@ -1114,6 +1150,7 @@ for _name, _schema, _handler in [
     ("flowstate_health", FLOWSTATE_HEALTH_SCHEMA, _handle_health),
     ("flowstate_list_tasks", FLOWSTATE_LIST_TASKS_SCHEMA, _handle_list_tasks),
     ("flowstate_search_tasks", FLOWSTATE_SEARCH_TASKS_SCHEMA, _handle_search_tasks),
+    ("flowstate_get_task", FLOWSTATE_GET_TASK_SCHEMA, _handle_get_task),
     ("flowstate_create_task", FLOWSTATE_CREATE_TASK_SCHEMA, _handle_create_task),
     ("flowstate_update_task", FLOWSTATE_UPDATE_TASK_SCHEMA, _handle_update_task),
     ("flowstate_delete_task", FLOWSTATE_DELETE_TASK_SCHEMA, _handle_delete_task),

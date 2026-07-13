@@ -275,6 +275,7 @@ TOOLSETS = {
             "flowstate_health",
             "flowstate_list_tasks",
             "flowstate_search_tasks",
+            "flowstate_get_task",
             "flowstate_create_task",
             "flowstate_update_task",
             "flowstate_delete_task",
