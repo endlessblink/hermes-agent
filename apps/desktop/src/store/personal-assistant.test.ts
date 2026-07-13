@@ -4,11 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AssistantState } from './personal-assistant'
 
 const request = vi.fn()
-const ensureGatewayProfile = vi.fn(async () => undefined)
-const $gateway = atom<unknown>({ request })
+const foregroundRequest = vi.fn()
+const gatewayForProfile = vi.fn(async () => ({ request }))
+const $gateway = atom<unknown>({ request: foregroundRequest })
 
-vi.mock('@/store/gateway', () => ({ $gateway }))
-vi.mock('@/store/profile', () => ({ ensureGatewayProfile }))
+vi.mock('@/store/gateway', () => ({ $gateway, gatewayForProfile }))
 
 const {
   $personalAssistantState,
@@ -21,8 +21,10 @@ const {
 
 beforeEach(() => {
   request.mockReset()
-  ensureGatewayProfile.mockClear()
-  $gateway.set({ request })
+  foregroundRequest.mockReset()
+  gatewayForProfile.mockClear()
+  gatewayForProfile.mockResolvedValue({ request })
+  $gateway.set({ request: foregroundRequest })
   $personalAssistantState.set(null)
 })
 
@@ -38,8 +40,9 @@ describe('startPersonalAssistant', () => {
       sessionId: 'assistant-home',
       status: 'launched'
     })
-    expect(ensureGatewayProfile).toHaveBeenCalledWith('office-work')
-    expect(ensureGatewayProfile.mock.invocationCallOrder[0]).toBeLessThan(request.mock.invocationCallOrder[0])
+    expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
+    expect(gatewayForProfile.mock.invocationCallOrder[0]).toBeLessThan(request.mock.invocationCallOrder[0])
+    expect(foregroundRequest).not.toHaveBeenCalled()
     expect(request).toHaveBeenCalledWith('personal_assistant.start', {
       profile: 'office-work',
       trigger: 'manual'
@@ -67,7 +70,7 @@ describe('startPersonalAssistant', () => {
     request.mockResolvedValue({ session_id: 'assistant-live', state, status: 'ready' })
 
     await expect(openPersonalAssistantHome()).resolves.toBe('assistant-home')
-    expect(ensureGatewayProfile).toHaveBeenCalledWith('office-work')
+    expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
     expect(request).toHaveBeenCalledWith('personal_assistant.home', { profile: 'office-work' })
     expect($personalAssistantState.get()).toEqual(state)
   })
@@ -78,7 +81,7 @@ describe('startPersonalAssistant', () => {
 
     await refreshPersonalAssistantState()
 
-    expect(ensureGatewayProfile).toHaveBeenCalledWith('office-work')
+    expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
     expect(request).toHaveBeenCalledWith('personal_assistant.state.get', { profile: 'office-work' })
   })
 
@@ -93,7 +96,7 @@ describe('startPersonalAssistant', () => {
 
     await acknowledgePersonalAssistantRead()
 
-    expect(ensureGatewayProfile).toHaveBeenCalledWith('office-work')
+    expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
     expect(request).toHaveBeenCalledWith('personal_assistant.read', { profile: 'office-work' })
     expect($personalAssistantState.get()).toEqual(state)
   })
@@ -126,7 +129,7 @@ describe('startPersonalAssistant', () => {
 
     await patchPersonalAssistantState(operations)
 
-    expect(ensureGatewayProfile).toHaveBeenCalledWith('office-work')
+    expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
     expect(request).toHaveBeenCalledWith('personal_assistant.state.patch', {
       expectedVersion: 4,
       operations,

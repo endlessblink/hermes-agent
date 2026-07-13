@@ -44,6 +44,10 @@ vi.mock('@/store/thread-scroll', () => ({ $threadScrolledUp }))
 
 const { PersonalAssistantSituation } = await import('./personal-assistant-situation')
 
+function expandSituation() {
+  fireEvent.click(screen.getByRole('button', { name: /Situation/ }))
+}
+
 beforeEach(() => {
   acknowledgePersonalAssistantRead.mockClear()
   $personalAssistantState.set(baseState)
@@ -56,8 +60,23 @@ afterEach(() => {
 })
 
 describe('PersonalAssistantSituation', () => {
+  it('starts collapsed and expands on demand', () => {
+    render(<PersonalAssistantSituation />)
+
+    const toggle = screen.getByRole('button', { name: /Situation/ })
+
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText('Ship the launch')).toBeNull()
+
+    fireEvent.click(toggle)
+
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByText('Ship the launch')).toBeTruthy()
+  })
+
   it('shows the complete live situation and pending count', () => {
     render(<PersonalAssistantSituation />)
+    expandSituation()
 
     expect(screen.getByText('Ship the launch')).toBeTruthy()
     expect(screen.getByText('Three focused hours')).toBeTruthy()
@@ -81,6 +100,7 @@ describe('PersonalAssistantSituation', () => {
     })
 
     render(<PersonalAssistantSituation />)
+    expandSituation()
 
     expect(screen.getByText('0 approvals · 3 proposals')).toBeTruthy()
     expect(screen.getByLabelText('2 unread personal assistant updates')).toBeTruthy()
@@ -96,6 +116,7 @@ describe('PersonalAssistantSituation', () => {
   it('acknowledges unread activity when the open assistant is visible at the bottom', async () => {
     mountBottomedThreadViewport()
     render(<PersonalAssistantSituation />)
+    expandSituation()
 
     expect(screen.getByLabelText('1 unread personal assistant update')).toBeTruthy()
     await waitFor(() => expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(1))
@@ -173,6 +194,7 @@ describe('PersonalAssistantSituation', () => {
     })
 
     render(<PersonalAssistantSituation />)
+    expandSituation()
 
     const outcome = screen.getByText('לסיים את תכנון השבוע')
     const pending = screen.getByText('להכין לוח שנה לאירועים')
@@ -188,6 +210,7 @@ describe('PersonalAssistantSituation', () => {
 
   it('edits an item through a versioned state operation', async () => {
     render(<PersonalAssistantSituation />)
+    expandSituation()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit Ship the launch' }))
     const input = screen.getByRole('textbox', { name: 'Edit Ship the launch' })
@@ -202,6 +225,7 @@ describe('PersonalAssistantSituation', () => {
   it('keeps a failed state change visible', async () => {
     patchPersonalAssistantState.mockRejectedValueOnce(new Error('State changed elsewhere'))
     render(<PersonalAssistantSituation />)
+    expandSituation()
 
     fireEvent.click(screen.getByRole('button', { name: 'Archive Waiting for approval' }))
 

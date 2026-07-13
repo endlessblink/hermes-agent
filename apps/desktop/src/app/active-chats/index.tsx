@@ -46,6 +46,19 @@ function sessionKey(session: SessionInfo): string {
   return `${session.profile || 'default'}:${session.id}`
 }
 
+function projectSessionForOpen(session: SessionInfo): void {
+  const lineage = session._lineage_root_id ?? session.id
+
+  $sessions.set([
+    session,
+    ...$sessions.get().filter(existing => {
+      const existingLineage = existing._lineage_root_id ?? existing.id
+
+      return existing.id !== session.id && existingLineage !== lineage
+    })
+  ])
+}
+
 function sessionTimestamp(session: SessionInfo): number {
   return (session.last_active || session.started_at || 0) * 1000
 }
@@ -445,7 +458,18 @@ export function ActiveChatsView({
                     <Button onClick={() => void onRefreshSessions()} size="sm" variant="ghost">
                       {t.common.refresh}
                     </Button>
-                    <Button onClick={() => onOpenSession(selected.id)} size="sm" variant="outline">
+                    <Button
+                      onClick={() => {
+                        // Active Chats includes archived/aged-off rows that may
+                        // not exist in the recents store. Seed the exact row
+                        // before navigation so resume can route to its owner and
+                        // the chat header/sidebar keep its title and identity.
+                        projectSessionForOpen(selected)
+                        onOpenSession(selected.id)
+                      }}
+                      size="sm"
+                      variant="outline"
+                    >
                       {copy.open}
                     </Button>
                   </div>

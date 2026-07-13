@@ -5955,6 +5955,17 @@ def test_session_create_lazy_info_reports_desktop_contract(monkeypatch):
     server._sessions.pop(resp["result"]["session_id"], None)
 
 
+def test_live_lazy_session_info_reports_desktop_contract(monkeypatch):
+    """Reusing an already-live lazy session must not look like an old backend."""
+    monkeypatch.setattr(server, "_default_session_cwd", lambda: "/tmp/project")
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+
+    info = server._fallback_session_info({"agent": None})
+
+    assert info["lazy"] is True
+    assert info["desktop_contract"] == server.DESKTOP_BACKEND_CONTRACT
+
+
 def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_db_error", "locking protocol")

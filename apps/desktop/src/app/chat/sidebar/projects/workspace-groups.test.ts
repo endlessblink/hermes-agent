@@ -10,6 +10,7 @@ import {
   mergeRepoWorktreeGroups,
   overlayLiveLanes,
   overlayLivePreviews,
+  sessionsBesideProjectOverview,
   type SidebarProjectTree,
   type SidebarSessionGroup,
   sortWorktreeGroups
@@ -747,5 +748,21 @@ describe('overlayLivePreviews', () => {
     const previews = overlayLivePreviews([project], live, [], 3)
 
     expect(previews['/www/app'].map(s => s.id)).toEqual(['tip-5'])
+  })
+})
+
+describe('sessionsBesideProjectOverview', () => {
+  it('keeps the selected cwd-less session visible beside Projects without surfacing unrelated loose sessions', () => {
+    const selected = makeSession(null, { id: 'selected-post-chat', title: 'Post about my new website' })
+    const unrelated = makeSession(null, { id: 'other-loose-chat' })
+    const projectOwned = makeSession('/www/app', { id: 'project-chat' })
+
+    expect(sessionsBesideProjectOverview([selected, unrelated, projectOwned], selected.id, true)).toEqual([selected])
+  })
+
+  it('leaves the ordinary flat session list unchanged outside the project overview', () => {
+    const sessions = [makeSession(null, { id: 'loose' }), makeSession('/www/app', { id: 'project-chat' })]
+
+    expect(sessionsBesideProjectOverview(sessions, 'loose', false)).toEqual(sessions)
   })
 })

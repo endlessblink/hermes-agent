@@ -590,6 +590,21 @@ describe('ChecklistArtifactCard', () => {
 
     expect(screen.getByText('fallback code block')).toBeTruthy()
   })
+
+  it('hides incomplete hermes-ui JSON while the form is still streaming', () => {
+    const { rerender } = render(
+      <RichCodeBlock code={'{"type":"form","fields":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming />
+    )
+
+    expect(screen.getByRole('status').textContent).toBe('Preparing interactive form…')
+    expect(screen.queryByText('raw partial JSON')).toBeNull()
+
+    rerender(
+      <RichCodeBlock code={'{"type":"form","fields":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming={false} />
+    )
+
+    expect(screen.getByText('raw partial JSON')).toBeTruthy()
+  })
 })
 
 

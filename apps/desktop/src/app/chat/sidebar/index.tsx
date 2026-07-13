@@ -146,6 +146,7 @@ import {
   ProjectBackRow,
   ProjectMenu,
   projectTreeCwd,
+  sessionsBesideProjectOverview,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarSessionGroup,
@@ -986,6 +987,12 @@ export function ChatSidebar({
     [agentSessions, folderedKeys, showAllProfiles]
   )
 
+  const mainSectionSessions = useMemo(
+    () =>
+      sessionsBesideProjectOverview(displayAgentSessions, activeSidebarSessionId, Boolean(projectOverview?.length)),
+    [activeSidebarSessionId, displayAgentSessions, projectOverview]
+  )
+
   const folderSections = useMemo(
     () =>
       visibleFolders.map(folder => ({
@@ -1549,7 +1556,7 @@ export function ChatSidebar({
                   'min-h-32 flex-1 overflow-hidden p-0',
                   !recentsVirtualizes && 'compact:min-h-0 compact:flex-none compact:overflow-visible'
                 )}
-                sessions={displayAgentSessions}
+                sessions={mainSectionSessions}
                 sortable={!showAllProfiles && agentSessions.length > 1}
                 workingSessionIdSet={workingSessionIdSet}
               />

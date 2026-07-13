@@ -1,7 +1,6 @@
 import { atom } from 'nanostores'
 
-import { $gateway } from '@/store/gateway'
-import { ensureGatewayProfile } from '@/store/profile'
+import { gatewayForProfile } from '@/store/gateway'
 
 export const PERSONAL_ASSISTANT_OWNER_PROFILE = 'office-work'
 
@@ -65,6 +64,12 @@ export interface AssistantStateOperation {
 export const $personalAssistantState = atom<AssistantState | null>(null)
 export const $personalAssistantPendingCount = atom<number | null>(null)
 
+export function isPersonalAssistantSession(sessionId: string, lineageRootId?: string | null): boolean {
+  const canonicalSessionId = $personalAssistantState.get()?.sessionId
+
+  return Boolean(canonicalSessionId && (sessionId === canonicalSessionId || lineageRootId === canonicalSessionId))
+}
+
 function storePersonalAssistantState(state: AssistantState): AssistantState {
   const current = $personalAssistantState.get()
 
@@ -80,20 +85,14 @@ function storePersonalAssistantState(state: AssistantState): AssistantState {
   return state
 }
 
-function gatewayOrThrow() {
-  const gateway = $gateway.get()
+async function ownerGateway() {
+  const gateway = await gatewayForProfile(PERSONAL_ASSISTANT_OWNER_PROFILE)
 
   if (!gateway) {
     throw new Error('Hermes gateway is unavailable')
   }
 
   return gateway
-}
-
-async function ownerGateway() {
-  await ensureGatewayProfile(PERSONAL_ASSISTANT_OWNER_PROFILE)
-
-  return gatewayOrThrow()
 }
 
 export async function startPersonalAssistant(

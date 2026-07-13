@@ -115,7 +115,10 @@ describe('ActiveChatsView', () => {
     )
 
     await screen.findByText('Lower Hermes chat')
-    const rows = screen.getAllByRole('button', { name: /chat/i })
+
+    const rows = screen
+      .getAllByRole('button')
+      .filter(button => /Top active chat|Running chat|Lower Hermes chat/.test(button.textContent || ''))
 
     expect(rows[0]?.textContent).toContain('Top active chat')
     expect(rows[1]?.textContent).toContain('Running chat')
@@ -154,5 +157,39 @@ describe('ActiveChatsView', () => {
     const header = screen.getByRole('heading', { name: 'Running chat' }).closest('header')
     expect(header).not.toBeNull()
     expect(within(header as HTMLElement).getByText('Running')).toBeTruthy()
+  })
+
+  it('projects an opened archived row into the session store before navigation', async () => {
+    const onOpenSession = vi.fn()
+
+    $sessions.set(
+      $sessions.get().map(session =>
+        session.id === 'waiting-chat' ? { ...session, archived: true } : session
+      )
+    )
+
+    render(
+      <ActiveChatsView
+        onOpenSession={onOpenSession}
+        onRefreshSessions={vi.fn(async () => undefined)}
+        onSendReply={vi.fn(async () => true)}
+      />
+    )
+
+    await screen.findByRole('heading', { name: 'Top active chat' })
+    // Archived/aged-off rows can be present in Active Chats while absent from
+    // the recents store that drives the chat header and sidebar.
+    $sessions.set([])
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+
+    expect(onOpenSession).toHaveBeenCalledWith('waiting-chat')
+    expect($sessions.get()).toContainEqual(
+      expect.objectContaining({
+        archived: true,
+        id: 'waiting-chat',
+        profile: 'endlessblink',
+        title: 'Top active chat'
+      })
+    )
   })
 })

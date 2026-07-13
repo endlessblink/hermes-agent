@@ -102,10 +102,9 @@ interface SidebarSessionsSectionProps {
   footer?: React.ReactNode
   groups?: SidebarSessionGroup[]
   tree?: SidebarWorkspaceTree[]
-  // Project overview: when present, render a drill-in list of project rows
-  // instead of sessions. Clicking a row enters that project (onEnterProject),
-  // which then passes `projectContent` on the next render. Takes precedence
-  // over `tree` / `groups`.
+  // Project overview: when present, render a drill-in list of project rows.
+  // `sessions` may carry the one current cwd-less chat, which has no project
+  // membership but must stay visible while the overview is selected.
   projectOverview?: SidebarProjectTree[]
   // Per-project preview rows (from the backend tree), keyed by project path.
   projectOverviewPreviews?: Record<string, SessionInfo[]>
@@ -280,7 +279,7 @@ export function SidebarSessionsSection({
       />
     ))
 
-    inner =
+    const projectRows =
       projectsDraggable && onReorderProjects ? (
         <ReorderableList
           ids={projectOverview.map(project => project.id)}
@@ -292,6 +291,13 @@ export function SidebarSessionsSection({
       ) : (
         rows
       )
+
+    inner = (
+      <>
+        {displayEntries.map(({ branchStem, session }) => renderRow(session, false, branchStem))}
+        {projectRows}
+      </>
+    )
   } else if (groups?.length) {
     // Profile/source groups never reorder; render them flat with static rows.
     inner = groups.map(group => (

@@ -103,6 +103,17 @@ describe('setProfileIcon', () => {
 })
 
 describe('ensureGatewayProfile → $connection sync (#46651)', () => {
+  it('can activate a background owner without replacing the visible profile scope', async () => {
+    $selectedProfileScope.set('content-creator')
+    getConnection.mockResolvedValue(localConn({ profile: 'office-work' }))
+
+    await ensureGatewayProfile('office-work', { preserveSelectedScope: true })
+
+    expect($activeGatewayProfile.get()).toBe('office-work')
+    expect($selectedProfileScope.get()).toBe('content-creator')
+    expect($profileScope.get()).toBe('content-creator')
+  })
+
   it('refreshes $connection to the remote descriptor when activating a remote pool profile', async () => {
     // Regression: the primary window backend is local, so $connection.mode is
     // "local". Activating the remote profile must flip it to "remote" — without

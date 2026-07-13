@@ -38,6 +38,18 @@ export function RichCodeBlock({ code, fallback, language, streaming }: RichCodeB
   }
 
   if (normalizedLanguage === 'hermes-ui' && !parseHermesUiArtifact(code).ok) {
+    if (streaming) {
+      return (
+        <div
+          aria-live="polite"
+          className="my-3 rounded-xl border border-border/80 bg-muted/25 px-3 py-2 text-sm text-muted-foreground"
+          role="status"
+        >
+          Preparing interactive form…
+        </div>
+      )
+    }
+
     return <>{fallback}</>
   }
 

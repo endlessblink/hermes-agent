@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getSessionMessages, type SessionInfo } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
+import { $personalAssistantState, type AssistantState } from '@/store/personal-assistant'
+import { $activeGatewayProfile, $newChatProfile, $profileScope, $selectedProfileScope } from '@/store/profile'
 import {
   $activeSessionId,
   $currentCwd,
@@ -214,6 +215,7 @@ describe('resumeSession failure recovery', () => {
     setResumeFailedSessionId(null)
     setMessages([])
     setSessions([])
+    $personalAssistantState.set(null)
     $replyReadySessionIds.set([])
     $replyReadySessionProfiles.set({})
     vi.restoreAllMocks()
@@ -315,6 +317,27 @@ describe('resumeSession failure recovery', () => {
     await runResume(requestGateway)
 
     expect($resumeFailedSessionId.get()).toBeNull()
+  })
+
+  it('opens the global personal assistant without replacing the visible profile scope', async () => {
+    $activeGatewayProfile.set('default')
+    $selectedProfileScope.set('content-creator')
+    $personalAssistantState.set({ sessionId: 'stored-1' } as AssistantState)
+    setSessions([storedSession({ id: 'stored-1', profile: 'office-work' })])
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        return { session_id: 'runtime-1', resumed: params?.session_id, messages: [], info: {} } as never
+      }
+
+      return {} as never
+    })
+
+    await runResume(requestGateway)
+
+    expect($activeGatewayProfile.get()).toBe('office-work')
+    expect($selectedProfileScope.get()).toBe('content-creator')
+    expect($profileScope.get()).toBe('content-creator')
   })
 
   it('resumes via the gateway default (deferred build) — not lazy, no eager opt-out', async () => {

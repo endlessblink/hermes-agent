@@ -20,6 +20,7 @@ import {
 import { resetSessionBackground } from '@/store/composer-status'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { clearPreviewArtifacts } from '@/store/preview-status'
+import { $activeGatewayProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { clearAllPrompts } from '@/store/prompts'
 import {
   $busy,
@@ -42,6 +43,7 @@ import type {
   ImageAttachResponse,
   SessionSteerResponse
 } from '../../../types'
+import { resolveStoredSession } from '../use-session-actions/utils'
 
 import { useSlashCommand } from './slash'
 import { useSubmitPrompt } from './submit'
@@ -250,6 +252,29 @@ export function usePromptActions({
   // file.attach twice and stage duplicate copies on the gateway.
   const eagerUploadInFlight = useRef<Map<string, Promise<void>>>(new Map())
 
+  const ensureSelectedSessionOwner = useCallback(async () => {
+    const storedSessionId = selectedStoredSessionIdRef.current
+
+    if (!storedSessionId) {
+      return
+    }
+
+    // Resolve-by-id also restores a selected row that fell outside the current
+    // recents page, keeping the header title/sidebar projection attached to
+    // the durable chat while its owner profile becomes active.
+    const stored = await resolveStoredSession(storedSessionId)
+
+    if (!stored) {
+      return
+    }
+
+    const owner = normalizeProfileKey(stored.profile)
+
+    if (normalizeProfileKey($activeGatewayProfile.get()) !== owner) {
+      await ensureGatewayProfile(owner)
+    }
+  }, [selectedStoredSessionIdRef])
+
   const syncAttachmentsForSubmit = useCallback(
     async (
       sessionId: string,
@@ -317,6 +342,7 @@ export function usePromptActions({
   // small and still byte-upload at submit via image.attach_bytes.
   const eagerlyUploadAttachment = useCallback(
     async (sessionId: string, attachment: ComposerAttachment) => {
+      await ensureSelectedSessionOwner()
       const remote = $connection.get()?.mode === 'remote'
 
       setComposerAttachmentUploadState(attachment.id, 'uploading')
@@ -333,7 +359,7 @@ export function usePromptActions({
         notifyError(err, copy.dropFiles)
       }
     },
-    [copy.dropFiles, requestGateway]
+    [copy.dropFiles, ensureSelectedSessionOwner, requestGateway]
   )
 
   const composerAttachments = useStore($composerAttachments)
@@ -369,6 +395,7 @@ export function usePromptActions({
     busyRef,
     copy,
     createBackendSessionForSend,
+    ensureSelectedSessionOwner,
     requestGateway,
     selectedStoredSessionIdRef,
     syncAttachmentsForSubmit,
@@ -500,6 +527,7 @@ export function usePromptActions({
 
       let sessionId = runtimeSessionId || null
       const optimisticId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
       const optimisticMessage: ChatMessage = {
         id: optimisticId,
         role: 'user',

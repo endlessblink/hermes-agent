@@ -6872,11 +6872,11 @@ def _(rid, params: dict) -> dict:
     except ValueError as e:
         return _err(rid, 4017, str(e))
     agent = session.get("agent")
-    info = _session_info(agent, session) if agent is not None else {
-        "cwd": cwd,
-        "branch": _git_branch_for_cwd(cwd),
-        "lazy": True,
-    }
+    info = (
+        _session_info(agent, session)
+        if agent is not None
+        else _lazy_resume_info(cwd)
+    )
     _emit("session.info", params.get("session_id", ""), info)
     return _ok(rid, info)
 
@@ -6970,13 +6970,7 @@ def _fallback_session_info(session: dict) -> dict:
     agent = session.get("agent")
     if agent is not None:
         return _session_info(agent)
-    return {
-        "cwd": _default_session_cwd(),
-        "lazy": True,
-        "model": _resolve_model(),
-        "skills": {},
-        "tools": {},
-    }
+    return _lazy_resume_info(_default_session_cwd())
 
 
 def _live_session_payload(

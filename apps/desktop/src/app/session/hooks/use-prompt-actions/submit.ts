@@ -38,6 +38,7 @@ interface SubmitPromptDeps {
   busyRef: MutableRefObject<boolean>
   copy: Translations['desktop']
   createBackendSessionForSend: (preview?: string | null) => Promise<string | null>
+  ensureSelectedSessionOwner: () => Promise<void>
   requestGateway: GatewayRequest
   selectedStoredSessionIdRef: MutableRefObject<string | null>
   syncAttachmentsForSubmit: (
@@ -60,6 +61,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
     busyRef,
     copy,
     createBackendSessionForSend,
+    ensureSelectedSessionOwner,
     requestGateway,
     selectedStoredSessionIdRef,
     syncAttachmentsForSubmit,
@@ -113,6 +115,18 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       const hasSendable = Boolean(visibleText || terminalContextBlocks || attachments.length || hasImage)
 
       if (!hasSendable || (!options?.allowWhileBusy && !options?.fromQueue && busyRef.current)) {
+        return false
+      }
+
+      // The durable selection owns the gateway route. A profile switch can
+      // leave its transcript mounted while another profile socket is active;
+      // attachment RPCs happen before prompt.submit recovery, so they would
+      // otherwise fail immediately with "session not found".
+      try {
+        await ensureSelectedSessionOwner()
+      } catch (err) {
+        notifyError(err, copy.sessionUnavailable)
+
         return false
       }
 
@@ -293,9 +307,46 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       }
 
       try {
-        const syncedAttachments = await syncAttachmentsForSubmit(sessionId, attachments, {
-          updateComposerAttachments: usingComposerAttachments
-        })
+        let syncedAttachments: ComposerAttachment[]
+
+        try {
+          syncedAttachments = await syncAttachmentsForSubmit(sessionId, attachments, {
+            updateComposerAttachments: usingComposerAttachments
+          })
+        } catch (attachErr) {
+          const storedSessionId = selectedStoredSessionIdRef.current
+
+          if (!storedSessionId || !isSessionNotFoundError(attachErr)) {
+            throw attachErr
+          }
+
+          // Attachment staging is the first gateway call for image/file sends,
+          // so prompt.submit recovery never sees a stale runtime failure. Rebind
+          // the durable selected chat and retry the upload exactly once.
+          const resumed = await requestGateway<{ session_id?: string }>(
+            'session.resume',
+            resumeParamsForSelectedSession(storedSessionId, { source: 'desktop' })
+          )
+
+          const recoveredId = resumed?.session_id
+
+          if (!recoveredId) {
+            throw attachErr
+          }
+
+          const staleSessionId = sessionId
+          activeSessionIdRef.current = recoveredId
+
+          if (staleSessionId !== recoveredId) {
+            dropOptimistic(staleSessionId)
+          }
+
+          sessionId = recoveredId
+          seedOptimistic(recoveredId)
+          syncedAttachments = await syncAttachmentsForSubmit(recoveredId, attachments, {
+            updateComposerAttachments: usingComposerAttachments
+          })
+        }
 
         // Rewrite the optimistic message + prompt text with the synced refs so
         // the gateway receives @file: paths that resolve in its workspace.
@@ -473,6 +524,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       busyRef,
       copy,
       createBackendSessionForSend,
+      ensureSelectedSessionOwner,
       requestGateway,
       selectedStoredSessionIdRef,
       syncAttachmentsForSubmit,

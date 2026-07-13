@@ -117,7 +117,7 @@ function SituationSection({
 export function PersonalAssistantSituation() {
   const state = useStore($personalAssistantState)
   const threadScrolledUp = useStore($threadScrolledUp)
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
 
   useEffect(() => {
     let acknowledgementInFlight = false

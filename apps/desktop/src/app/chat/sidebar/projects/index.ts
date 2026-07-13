@@ -8,6 +8,7 @@ export {
   overlayLiveLanes,
   overlayLivePreviews,
   sessionRecency,
+  sessionsBesideProjectOverview,
   type SidebarProjectTree,
   type SidebarSessionGroup,
   type SidebarWorkspaceTree
