@@ -202,6 +202,55 @@ describe('ChecklistArtifactCard', () => {
     expect((screen.getByLabelText('משך בדקות') as HTMLInputElement).value).toBe('25')
   })
 
+  it('accepts, persists, and submits canonical 24-hour time in an RTL form', () => {
+    const timeForm: HermesUiFormArtifact = {
+      direction: 'rtl',
+      fields: [{ id: 'scheduled_time', label: 'שעת סיום קשיחה', required: true, type: 'time' }],
+      id: 'hard-stop-time',
+      submitLabel: 'בנה את תכנית היום',
+      type: 'form'
+    }
+
+    const { unmount } = render(<FormArtifactCard artifact={timeForm} />)
+
+    const input = screen.getByLabelText('שעת סיום קשיחה') as HTMLInputElement
+
+    expect(input.type).toBe('text')
+    expect(input.dir).toBe('ltr')
+    expect(input.inputMode).toBe('numeric')
+    expect(input.placeholder).toBe('HH:mm')
+
+    fireEvent.change(input, { target: { value: '20:00' } })
+    unmount()
+
+    render(<FormArtifactCard artifact={timeForm} />)
+    expect(screen.getByLabelText('שעת סיום קשיחה')).toHaveProperty('value', '20:00')
+    fireEvent.click(screen.getByRole('button', { name: 'בנה את תכנית היום' }))
+
+    const message = requestComposerSubmit.mock.calls[0]?.[0]
+    const response = JSON.parse(message.slice('Hermes UI form response:\n'.length))
+    expect(response.values).toEqual({ scheduled_time: '20:00' })
+  })
+
+  it('blocks non-canonical or out-of-range time values', () => {
+    const timeForm: HermesUiFormArtifact = {
+      fields: [{ id: 'scheduled_time', label: 'Hard stop', required: true, type: 'time' }],
+      id: 'hard-stop-validation',
+      submitLabel: 'Submit',
+      type: 'form'
+    }
+
+    render(<FormArtifactCard artifact={timeForm} />)
+    const input = screen.getByLabelText('Hard stop')
+
+    for (const value of ['8:00', '24:00', '20:']) {
+      fireEvent.change(input, { target: { value } })
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
+      expect(requestComposerSubmit).not.toHaveBeenCalled()
+      expect(screen.getByText('Use 24-hour time (HH:mm)')).toBeTruthy()
+    }
+  })
+
   it('renders FlowState planning sessions with categories, next block, task controls, and submit routing', () => {
     render(<FlowStatePlanningSessionCard artifact={planningSessionArtifact} />)
 

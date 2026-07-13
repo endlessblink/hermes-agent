@@ -25,6 +25,7 @@ import {
   type HermesUiTriageDecision,
   type HermesUiUrgencyEnergyMatrixArtifact,
   type HermesUiWorkloadBarsArtifact,
+  isCanonical24HourTime,
   parseHermesUiArtifact,
   stableArtifactStorageKey
 } from '@/lib/hermes-ui-artifacts'
@@ -252,6 +253,14 @@ function formValueMissing(field: HermesUiFormField, value: HermesUiFormValue | u
   return typeof value !== 'string' || value.trim().length === 0
 }
 
+function formValueInvalid(field: HermesUiFormField, value: HermesUiFormValue | undefined): boolean {
+  if (field.type === 'time' && typeof value === 'string' && value.length > 0) {
+    return !isCanonical24HourTime(value)
+  }
+
+  return formValueMissing(field, value)
+}
+
 export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact }) {
   const direction = artifactDirection(artifact)
   const storageKey = useMemo(() => `${stableArtifactStorageKey(artifact)}:draft`, [artifact])
@@ -270,7 +279,7 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
       return
     }
 
-    if (artifact.fields.some(field => formValueMissing(field, values[field.id]))) {
+    if (artifact.fields.some(field => formValueInvalid(field, values[field.id]))) {
       setShowErrors(true)
 
       return
@@ -289,7 +298,7 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
       <div className="mt-3 space-y-3">
         {artifact.fields.map(field => {
           const value = values[field.id]
-          const invalid = showErrors && formValueMissing(field, value)
+          const invalid = showErrors && formValueInvalid(field, value)
           const common = { 'aria-invalid': invalid, id: `hermes-form-${artifact.id || 'form'}-${field.id}` }
 
           return (
@@ -308,10 +317,12 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
                 })}</div>
               ) : field.type === 'boolean' ? (
                 <input {...common} aria-label={field.label} checked={value === true} className="mt-1" onChange={event => updateValue(field.id, event.target.checked)} type="checkbox" />
+              ) : field.type === 'time' ? (
+                <input {...common} aria-label={field.label} className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-sm tabular-nums" dir="ltr" inputMode="numeric" maxLength={5} onChange={event => updateValue(field.id, event.target.value)} placeholder={field.placeholder || 'HH:mm'} type="text" value={typeof value === 'string' ? value : ''} />
               ) : (
                 <input {...common} aria-label={field.label} className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" onChange={event => updateValue(field.id, event.target.value)} placeholder={field.placeholder} type={field.type === 'short-text' ? 'text' : field.type} value={typeof value === 'string' ? value : ''} />
               )}
-              {invalid && <p className="mt-1 text-xs text-destructive">שדה חובה</p>}
+              {invalid && <p className="mt-1 text-xs text-destructive">{field.type === 'time' && typeof value === 'string' && value.length > 0 ? (direction === 'rtl' ? 'יש להזין שעה בפורמט 24 שעות (HH:mm)' : 'Use 24-hour time (HH:mm)') : 'שדה חובה'}</p>}
             </div>
           )
         })}

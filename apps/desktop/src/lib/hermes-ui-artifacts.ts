@@ -40,6 +40,12 @@ export type HermesUiFormFieldType =
   | 'date'
   | 'time'
 
+const CANONICAL_24_HOUR_TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+
+export function isCanonical24HourTime(value: string): boolean {
+  return CANONICAL_24_HOUR_TIME.test(value)
+}
+
 export interface HermesUiFormOption {
   label: string
   value: string
@@ -931,6 +937,10 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
 
         if (raw.type === 'single-choice' && !optionValues.has(normalizedDefault)) {
           return { error: `fields[${index}].default contains an unsupported option`, ok: false }
+        }
+
+        if (raw.type === 'time' && !isCanonical24HourTime(normalizedDefault)) {
+          return { error: `fields[${index}].default must use 24-hour HH:mm format`, ok: false }
         }
 
         defaultValue = normalizedDefault

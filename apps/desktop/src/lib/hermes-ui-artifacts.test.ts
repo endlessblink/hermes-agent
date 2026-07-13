@@ -128,6 +128,30 @@ describe('form artifacts', () => {
     expect(result.ok).toBe(true)
     expect(result.ok && result.artifact.type === 'form' && result.artifact.fields[1]?.defaultValue).toBe('25')
   })
+
+  it('accepts canonical 24-hour time defaults and rejects ambiguous or invalid values', () => {
+    const withTimeDefault = (value: string) => JSON.stringify({
+      direction: 'rtl',
+      fields: [
+        { default: value, id: 'scheduled_time', label: 'שעת התחלה', required: true, type: 'time' }
+      ],
+      id: 'schedule-time',
+      type: 'form'
+    })
+
+    const valid = parseHermesUiArtifact(withTimeDefault('20:00'))
+
+    expect(valid.ok).toBe(true)
+    expect(valid.ok && valid.artifact.type === 'form' && valid.artifact.fields[0]?.defaultValue).toBe('20:00')
+    expect(parseHermesUiArtifact(withTimeDefault('8:00'))).toEqual({
+      error: 'fields[0].default must use 24-hour HH:mm format',
+      ok: false
+    })
+    expect(parseHermesUiArtifact(withTimeDefault('24:00'))).toEqual({
+      error: 'fields[0].default must use 24-hour HH:mm format',
+      ok: false
+    })
+  })
 })
 
 const obsidianPolicyChecklist = {
