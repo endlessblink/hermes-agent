@@ -109,6 +109,27 @@ def test_home_returns_live_and_canonical_session_ids(monkeypatch, tmp_path):
     assert response["result"]["state"]["sessionId"] == "assistant-home"
 
 
+def test_home_clears_unread_activity_persistently(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    store.set_canonical_session("assistant-home")
+    store.patch("edit", {"unreadCount": 5})
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: server._ok(rid, {"session_id": "assistant-live"}),
+    )
+
+    response = server._methods["personal_assistant.home"]("r1", {})
+
+    assert response["result"]["state"]["unreadCount"] == 0
+    assert store.public()["unreadCount"] == 0
+
+
 def test_start_idempotency_does_not_submit_twice(monkeypatch, tmp_path):
     import tui_gateway.server as server
 

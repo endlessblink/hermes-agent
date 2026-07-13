@@ -3494,6 +3494,7 @@ def _(rid, params: dict) -> dict:
         from agent.personal_assistant_state import public_state
 
         try:
+            store.patch("edit", {"unreadCount": 0})
             service = _personal_assistant_service("office-work")
             home_state = service.get() if service is not None else store.read()
         except ValueError as exc:
