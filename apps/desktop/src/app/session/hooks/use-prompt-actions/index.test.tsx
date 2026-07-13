@@ -1413,6 +1413,87 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after wake' })
   })
 
+  it('rebinds once more when a backend relaunch invalidates the first recovered runtime before retry', async () => {
+    // Desktop startup can replace a just-started profile backend while the
+    // selected durable chat is being restored. The first resume then succeeds,
+    // but its runtime id is already stale by the time prompt.submit retries.
+    // Keep the retry bounded while allowing that relaunch race to settle.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    let submitAttempts = 0
+    let resumeAttempts = 0
+
+    const attachment: ComposerAttachment = {
+      id: 'file:relaunch.png',
+      kind: 'file',
+      label: 'relaunch.png',
+      path: '/home/alice/relaunch.png',
+      refText: '@file:`/home/alice/relaunch.png`'
+    }
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'file.attach') {
+        return { attached: true, ref_text: '@file:data/relaunch.png' } as never
+      }
+
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+
+        if (submitAttempts < 3) {
+          throw new Error('session not found')
+        }
+
+        return {} as never
+      }
+
+      if (method === 'session.resume') {
+        resumeAttempts += 1
+
+        return { session_id: `rt-recovered-${resumeAttempts}` } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(
+      await handle!.submitText('message during backend relaunch', { attachments: [attachment] })
+    ).toBe(true)
+    expect(calls.map(c => c.method)).toEqual([
+      'file.attach',
+      'prompt.submit',
+      'session.resume',
+      'prompt.submit',
+      'session.resume',
+      'prompt.submit'
+    ])
+    expect(calls.filter(call => call.method === 'file.attach')).toHaveLength(1)
+    expect(calls[4]?.params).toEqual({
+      session_id: STORED_SESSION_ID,
+      profile: 'default',
+      source: 'desktop'
+    })
+    expect(calls[5]?.params).toEqual({
+      session_id: 'rt-recovered-2',
+      text: '@file:data/relaunch.png\n\nmessage during backend relaunch'
+    })
+    expect(calls.filter(call => call.method === 'prompt.submit').map(call => call.params?.text)).toEqual([
+      '@file:data/relaunch.png\n\nmessage during backend relaunch',
+      '@file:data/relaunch.png\n\nmessage during backend relaunch',
+      '@file:data/relaunch.png\n\nmessage during backend relaunch'
+    ])
+  })
+
   it('resumes the stored session and retries once when session.interrupt reports "session not found"', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
     let interruptAttempts = 0

@@ -103,11 +103,15 @@ class TurnState:
     last_progress_at: float = 0.0
     last_event: str = ""
     compression: bool = False
+    personal_assistant: bool = False
     payload: dict[str, Any] = field(default_factory=dict)
     last_alert_at: float = 0.0
 
     def update(self, row: dict[str, Any]) -> None:
-        now = float(row.get("monotonic") or time.monotonic())
+        # Ledger timestamps are Unix time despite the historical ``monotonic``
+        # field name. Keep the watchdog in that same clock domain so persisted
+        # rows can be compared after process restarts.
+        now = float(row.get("monotonic") or time.time())
         self.session_key = str(row.get("session_key") or self.session_key)
         self.cwd = str(row.get("cwd") or self.cwd)
         self.last_event = str(row.get("event") or self.last_event)
@@ -119,12 +123,15 @@ class TurnState:
             self.payload.get("component") == "compression"
             and self.payload.get("event") in {"start", "heartbeat"}
         )
+        self.personal_assistant = bool(
+            row.get("personal_assistant", self.personal_assistant)
+        )
 
 
 def is_terminal(row: dict[str, Any]) -> bool:
     event = str(row.get("event") or "")
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-    if event == "message.complete":
+    if event in {"message.complete", "rpc.error"}:
         return True
     if event == "diagnostic.event" and payload.get("component") == "turn":
         return payload.get("event") in {"complete", "error", "finally", "idle_timeout"}
@@ -191,7 +198,11 @@ def build_alert(
         "ts": utc_now(),
         "severity": "error",
         "component": "live_watchdog",
-        "event": "turn_stuck",
+        "event": (
+            "personal_assistant_turn_stuck"
+            if state.personal_assistant
+            else "turn_stuck"
+        ),
         "message": f"Hermes turn has been silent for {idle:.1f}s",
         "session_id": state.session_id,
         "session_key": state.session_key,
@@ -201,8 +212,41 @@ def build_alert(
         "elapsed_seconds": round(elapsed, 3),
         "threshold_seconds": idle_seconds,
         "compression": state.compression,
+        "personal_assistant": state.personal_assistant,
         "ledger": str(ledger),
         "payload": state.payload,
+        "processes": process_snapshot(),
+    }
+
+
+def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | None:
+    """Classify terminal failures that should alert without waiting for idle."""
+
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    searchable = " ".join(
+        str(value)
+        for value in (
+            payload.get("message"),
+            payload.get("text"),
+            payload.get("error"),
+            details.get("error"),
+        )
+        if value
+    )
+    if "session not found" not in searchable.lower():
+        return None
+    return {
+        "ts": utc_now(),
+        "severity": "error",
+        "component": "live_watchdog",
+        "event": "session_not_found",
+        "message": "Hermes attempted to use a missing runtime session",
+        "session_id": str(row.get("session_id") or ""),
+        "session_key": str(row.get("session_key") or ""),
+        "cwd": str(row.get("cwd") or ""),
+        "ledger": str(ledger),
+        "payload": payload,
         "processes": process_snapshot(),
     }
 
@@ -213,6 +257,7 @@ def run(args: argparse.Namespace) -> int:
     latest = alerts.with_suffix(".latest.json")
     states: dict[str, TurnState] = {}
     state_ledgers: dict[str, Path] = {}
+    incident_alerted_at: dict[tuple[str, str], float] = {}
     tails: dict[Path, LedgerTail] = {}
     last_ledger_refresh = 0.0
     stopped = False
@@ -251,7 +296,7 @@ def run(args: argparse.Namespace) -> int:
     )
 
     while not stopped:
-        now = time.monotonic()
+        now = time.time()
         if now - last_ledger_refresh >= LEDGER_REFRESH_SECONDS:
             refresh_ledgers()
             last_ledger_refresh = now
@@ -260,6 +305,24 @@ def run(args: argparse.Namespace) -> int:
                 sid = str(row.get("session_id") or "")
                 if not sid:
                     continue
+                incident = build_incident_alert(row, ledger)
+                if incident is not None:
+                    incident_key = (sid, str(incident["event"]))
+                    last_incident = incident_alerted_at.get(incident_key, 0.0)
+                    if now - last_incident >= args.alert_cooldown:
+                        incident_alerted_at[incident_key] = now
+                        append_jsonl(alerts, incident)
+                        latest.write_text(
+                            json.dumps(incident, ensure_ascii=False, indent=2, sort_keys=True),
+                            encoding="utf-8",
+                        )
+                        line = (
+                            f"[hermes-live-watchdog] SESSION_NOT_FOUND sid={sid[:8]} "
+                            f"key={incident['session_key']} ledger={ledger}"
+                        )
+                        print(line, flush=True)
+                        if args.notify:
+                            desktop_notify("Hermes session recovery failed", line)
                 if is_terminal(row):
                     states.pop(sid, None)
                     state_ledgers.pop(sid, None)

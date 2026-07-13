@@ -1292,7 +1292,17 @@ def handle_request(req: dict) -> dict | None:
     fn = _methods.get(method)
     if not fn:
         return _err(rid, -32601, f"unknown method: {method}")
-    return fn(rid, params)
+    response = fn(rid, params)
+    if isinstance(response, dict):
+        error = response.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str) and "session not found" in message.lower():
+            _record_turn_watchdog_event(
+                str(params.get("session_id") or ""),
+                "rpc.error",
+                {"method": method, "error": message},
+            )
+    return response
 
 
 def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
@@ -9883,13 +9893,24 @@ def _record_turn_watchdog_event(
         "tool.complete",
         "tool.error",
         "review.summary",
+        "rpc.error",
     } and not event.startswith(("tool.", "session.")):
         return
 
     session = _sessions.get(sid) or {}
     safe_payload: dict[str, Any] = {}
     if isinstance(payload, dict):
-        for key in ("kind", "status", "component", "event", "message", "idle_timeout", "compression_exhausted"):
+        for key in (
+            "kind",
+            "status",
+            "component",
+            "event",
+            "message",
+            "idle_timeout",
+            "compression_exhausted",
+            "method",
+            "error",
+        ):
             value = payload.get(key)
             if value is not None:
                 safe_payload[key] = value
@@ -9904,6 +9925,8 @@ def _record_turn_watchdog_event(
                     "last_progress_event",
                     "profile",
                     "mode",
+                    "error_type",
+                    "error",
                 )
                 if details.get(key) is not None
             }
@@ -9921,6 +9944,7 @@ def _record_turn_watchdog_event(
         "turn_last_progress_at": session.get("turn_last_progress_at"),
         "turn_last_progress_event": session.get("turn_last_progress_event") or "",
         "compression_started_at": session.get("compression_started_at"),
+        "personal_assistant": bool(session.get("personal_assistant")),
         "payload": safe_payload,
     }
     try:

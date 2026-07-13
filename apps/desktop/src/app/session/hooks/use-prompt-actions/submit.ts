@@ -389,31 +389,33 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             if (storedSessionId) {
               let recoveredId: null | string = null
 
-              try {
-                // Re-register the session in the gateway and get a fresh live ID.
-                // Timeouts recover the same way as "session not found": a starved
-                // backend loop (#55578 symptom d) rejects the submit even though
-                // the stored session is fine — resume + retry instead of erroring
-                // out and losing the session binding.
-                const resumed = await requestGateway<{ session_id: string }>(
-                  'session.resume',
-                  resumeParamsForSelectedSession(storedSessionId, { source: 'desktop' })
-                )
+              // A desktop relaunch can briefly start, replace, and reconnect a
+              // pooled profile backend. In that window the first resume returns
+              // a valid runtime id which is invalid again before prompt.submit
+              // reaches it. Allow one additional durable rebind, but keep the
+              // recovery budget bounded so a genuinely missing session fails
+              // visibly instead of looping or minting a split conversation.
+              for (let rebindAttempt = 0; rebindAttempt < 2; rebindAttempt += 1) {
+                try {
+                  const resumed = await requestGateway<{ session_id: string }>(
+                    'session.resume',
+                    resumeParamsForSelectedSession(storedSessionId, { source: 'desktop' })
+                  )
 
-                recoveredId = resumed?.session_id || null
-              } catch (resumeErr) {
-                // A selected stored session must either resume or fail visibly.
-                // Creating a fresh replacement here makes the UI look like the
-                // same chat while the backend has no prior context.
-                submitErr = resumeErr
-              }
+                  recoveredId = resumed?.session_id || null
+                } catch (resumeErr) {
+                  submitErr = resumeErr
 
-              if (!recoveredId && submitErr === null && !options?.fromQueue) {
-                recoveredId = await createBackendSessionForSend(visibleText)
-              }
+                  break
+                }
 
-              if (recoveredId) {
-                const staleSessionId = sessionId
+                if (!recoveredId) {
+                  submitErr = firstErr
+
+                  break
+                }
+
+                const staleSessionId: string = sessionId
 
                 activeSessionIdRef.current = recoveredId
 
@@ -425,11 +427,27 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 seedOptimistic(recoveredId)
                 rewriteOptimistic(recoveredId)
                 rememberContinuationPrompt(recoveredId, text)
-                await withSessionBusyRetry(() =>
-                  requestGateway('prompt.submit', { session_id: recoveredId, text, active_target: activeTarget }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
-                )
-              } else if (submitErr === null) {
-                submitErr = firstErr
+
+                try {
+                  await withSessionBusyRetry(() =>
+                    requestGateway('prompt.submit', { session_id: recoveredId, text, active_target: activeTarget }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                  )
+                  submitErr = null
+
+                  break
+                } catch (retryErr) {
+                  const mayRebindAgain =
+                    rebindAttempt === 0 &&
+                    isSessionNotFoundError(retryErr)
+
+                  if (mayRebindAgain) {
+                    continue
+                  }
+
+                  submitErr = retryErr
+
+                  break
+                }
               }
             } else if (!options?.fromQueue) {
               const staleSessionId = sessionId
