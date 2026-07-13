@@ -48,6 +48,48 @@ def test_discover_sources_includes_profile_monitor_health(tmp_path):
     assert health in watchdog.discover_sources(home)
 
 
+def test_discover_sources_includes_expected_monitor_before_its_first_heartbeat(tmp_path):
+    home = tmp_path / ".hermes"
+    expected = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
+
+    assert expected in watchdog.discover_sources(home, monitor_profile="office-work")
+
+
+def test_missing_expected_monitor_alerts_after_startup_grace(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    ticks = iter([1000.0, 1002.0])
+    monkeypatch.setattr(watchdog.time, "time", lambda: next(ticks))
+    home = tmp_path / ".hermes"
+
+    args = watchdog.parse_args(
+        [
+            "--home",
+            str(home),
+            "--once",
+            "--monitor-profile",
+            "office-work",
+            "--monitor-producer-stale-seconds",
+            "1",
+            "--monitor-consumer-stale-seconds",
+            "1",
+        ]
+    )
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    stale = {
+        row["event"]: row
+        for row in emitted
+        if row["event"].startswith("personal_assistant_monitor_")
+    }
+    assert set(stale) == {
+        "personal_assistant_monitor_consumer_stale",
+        "personal_assistant_monitor_producer_stale",
+    }
+    assert all(row["heartbeat_seen"] is False for row in stale.values())
+
+
 def test_monitor_connector_failure_alert_is_privacy_safe(tmp_path, monkeypatch):
     monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
     home = tmp_path / ".hermes"

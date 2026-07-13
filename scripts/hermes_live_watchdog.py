@@ -194,7 +194,12 @@ def discover_ledgers(home: Path, explicit_ledger: str = "") -> list[Path]:
     return sorted(ledgers)
 
 
-def discover_sources(home: Path, explicit_ledger: str = "") -> list[Path]:
+def discover_sources(
+    home: Path,
+    explicit_ledger: str = "",
+    *,
+    monitor_profile: str = "",
+) -> list[Path]:
     """Return privacy-safe runtime ledgers consumed by the live watchdog."""
 
     if explicit_ledger:
@@ -207,6 +212,13 @@ def discover_sources(home: Path, explicit_ledger: str = "") -> list[Path]:
     profiles_dir = home / "profiles"
     if profiles_dir.exists():
         sources.update(profiles_dir.glob("*/logs/personal-assistant-monitor.jsonl"))
+    if monitor_profile:
+        sources.add(
+            profiles_dir
+            / monitor_profile
+            / "logs"
+            / "personal-assistant-monitor.jsonl"
+        )
     return sorted(sources)
 
 
@@ -350,6 +362,7 @@ def build_monitor_stale_alert(
     age: float,
     threshold: float,
     ledger: Path,
+    heartbeat_seen: bool = True,
 ) -> dict[str, Any]:
     return {
         "ts": utc_now(),
@@ -360,6 +373,7 @@ def build_monitor_stale_alert(
         "source": source,
         "age_seconds": round(age, 3),
         "threshold_seconds": round(threshold, 3),
+        "heartbeat_seen": heartbeat_seen,
         "ledger": str(ledger),
         "processes": process_snapshot(),
     }
@@ -373,15 +387,38 @@ def run(args: argparse.Namespace) -> int:
     state_ledgers: dict[str, Path] = {}
     incident_alerted_at: dict[tuple[str, str], float] = {}
     monitor_heartbeats: dict[tuple[Path, str], float] = {}
+    monitor_heartbeat_seen: set[tuple[Path, str]] = set()
     tails: dict[Path, LedgerTail] = {}
     last_ledger_refresh = 0.0
     stopped = False
+    watchdog_started_at = time.time()
+    expected_monitor = (
+        home
+        / "profiles"
+        / args.monitor_profile
+        / "logs"
+        / "personal-assistant-monitor.jsonl"
+        if args.monitor_profile
+        else None
+    )
 
     def refresh_ledgers() -> None:
-        for path in discover_sources(home, args.ledger):
+        for path in discover_sources(
+            home,
+            args.ledger,
+            monitor_profile=args.monitor_profile,
+        ):
             if path not in tails:
-                for source, heartbeat_at in seed_monitor_heartbeats(path).items():
-                    monitor_heartbeats[(path, source)] = heartbeat_at
+                seeded = seed_monitor_heartbeats(path)
+                sources = {"producer", "consumer"} if path == expected_monitor else set(seeded)
+                for source in sources:
+                    heartbeat_at = seeded.get(source, 0.0)
+                    key = (path, source)
+                    if heartbeat_at > 0:
+                        monitor_heartbeats[key] = heartbeat_at
+                        monitor_heartbeat_seen.add(key)
+                    elif path == expected_monitor:
+                        monitor_heartbeats[key] = 0.0 if path.is_file() else watchdog_started_at
                 tails[path] = LedgerTail(path, from_end=args.from_end)
 
     def stop(_signum, _frame) -> None:
@@ -423,7 +460,9 @@ def run(args: argparse.Namespace) -> int:
                 heartbeat_at = monitor_heartbeat_timestamp(row)
                 if heartbeat_at is not None:
                     source = str(row.get("source") or "unknown")[:64]
-                    monitor_heartbeats[(ledger, source)] = heartbeat_at
+                    key = (ledger, source)
+                    monitor_heartbeats[key] = heartbeat_at
+                    monitor_heartbeat_seen.add(key)
                 incident = build_incident_alert(row, ledger)
                 if incident is not None:
                     incident_key = (sid or "desktop", str(incident["event"]))
@@ -495,6 +534,7 @@ def run(args: argparse.Namespace) -> int:
                 age=age,
                 threshold=threshold,
                 ledger=ledger,
+                heartbeat_seen=(ledger, source) in monitor_heartbeat_seen,
             )
             append_jsonl(alerts, alert)
             latest.write_text(
@@ -548,6 +588,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--alert-cooldown", type=float, default=env_float("HERMES_LIVE_WATCHDOG_ALERT_COOLDOWN_SECONDS", DEFAULT_ALERT_COOLDOWN_SECONDS))
     parser.add_argument("--monitor-producer-stale-seconds", type=float, default=env_float("HERMES_PA_MONITOR_PRODUCER_STALE_SECONDS", DEFAULT_MONITOR_PRODUCER_STALE_SECONDS))
     parser.add_argument("--monitor-consumer-stale-seconds", type=float, default=env_float("HERMES_PA_MONITOR_CONSUMER_STALE_SECONDS", DEFAULT_MONITOR_CONSUMER_STALE_SECONDS))
+    parser.add_argument("--monitor-profile", default=os.environ.get("HERMES_PA_MONITOR_PROFILE", "office-work").strip(), help="Expected personal-assistant monitor profile")
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--from-start", dest="from_end", action="store_false", help="Read existing ledger rows first")
     parser.add_argument("--from-end", dest="from_end", action="store_true", help="Only watch new ledger rows")
