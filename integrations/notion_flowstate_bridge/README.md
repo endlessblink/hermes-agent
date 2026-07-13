@@ -31,3 +31,9 @@ requests outside them fail closed. All writes default to preview. Apply calls
 require the exact, unexpired preview digest and retain a durable SQLite receipt.
 A Notion page is sent to FlowState only through the activation endpoint and
 keeps its page and data-source provenance.
+
+If a write is dispatched but its response is lost, the bridge retains the
+operation as applying instead of issuing an immediate duplicate. After the
+recovery grace period, the same operation ID may recover through exact Notion
+read-back or the canonical FlowState replay contract even if the local preview
+has since expired. Failures before any write is dispatched release the claim.
