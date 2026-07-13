@@ -127,17 +127,341 @@ def test_create_task_omits_empty_project_id(monkeypatch):
     }
 
 
-def test_update_task_requires_a_change():
-    result = json.loads(fst._handle_update_task({"id": "task-1"}))
+_CANONICAL_DIGEST = "a" * 64
+_CANONICAL_READ_BACK_HASH = "b" * 64
+_CANONICAL_PREVIEW_EXPIRY = "2026-07-13T18:30:00.000Z"
+_CANONICAL_COMMITTED_AT = "2026-07-13T18:25:01.000Z"
+_CANONICAL_UPDATED_AT = "2026-07-13T18:25:00.000Z"
 
-    assert result["error"]
-    assert "at least one field" in result["error"]
+
+def _canonical_preview_payload(**overrides):
+    payload = {
+        "ok": True,
+        "result": "preview",
+        "contractVersion": "task-v1",
+        "operationId": "op-123",
+        "baseRevision": 7,
+        "previewDigest": _CANONICAL_DIGEST,
+        "previewExpiresAt": _CANONICAL_PREVIEW_EXPIRY,
+        "normalizedPayload": {"title": "Clarified task"},
+        "readBack": {
+            "id": "task-1",
+            "title": "Existing task",
+            "canonicalRevision": 7,
+        },
+    }
+    payload.update(overrides)
+    return payload
 
 
-def test_update_task_validates_status():
-    result = json.loads(fst._handle_update_task({"id": "task-1", "status": "paused"}))
+def _canonical_committed_payload(*, replayed=False, **receipt_overrides):
+    receipt = {
+        "contractVersion": "task-v1",
+        "operationId": "op-123",
+        "source": "local-api",
+        "entityType": "task",
+        "action": "patch",
+        "entityId": "task-1",
+        "canonicalRevision": 8,
+        "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+        "changeSequence": 42,
+        "replayed": replayed,
+        "committedAt": _CANONICAL_COMMITTED_AT,
+        "readBack": {
+            "id": "task-1",
+            "title": "Clarified task",
+            "canonicalRevision": 8,
+        },
+        "readBackHash": _CANONICAL_READ_BACK_HASH,
+    }
+    receipt.update(receipt_overrides)
+    return {"ok": True, "result": "committed", "receipt": receipt}
 
-    assert result["error"] == "status must be todo|done"
+
+def _valid_update_args(**overrides):
+    args = {
+        "id": "task-1",
+        "operationId": "op-123",
+        "baseRevision": 7,
+        "patch": {"title": "Clarified task"},
+    }
+    args.update(overrides)
+    return args
+
+
+def test_update_task_schema_is_preview_first_and_locks_nested_patch_shape():
+    schema = fst.FLOWSTATE_UPDATE_TASK_SCHEMA
+    params = schema["parameters"]
+    patch_schema = params["properties"]["patch"]
+
+    assert params["required"] == ["id", "operationId", "baseRevision", "patch"]
+    assert params["additionalProperties"] is False
+    assert set(params["properties"]) == {
+        "id",
+        "operationId",
+        "baseRevision",
+        "patch",
+        "preview",
+        "previewDigest",
+        "previewExpiresAt",
+    }
+    assert patch_schema["additionalProperties"] is False
+    assert set(patch_schema["properties"]) == {
+        "title",
+        "description",
+        "priority",
+        "dueDate",
+        "progress",
+    }
+    assert "status" not in patch_schema["properties"]
+    assert "preview" in schema["description"].lower()
+
+
+@pytest.mark.parametrize("missing", ["id", "operationId", "baseRevision", "patch"])
+def test_update_task_requires_canonical_identity_before_io(monkeypatch, missing):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached Local Task API"),
+    )
+    args = _valid_update_args()
+    del args[missing]
+
+    result = json.loads(fst._handle_update_task(args))
+
+    assert missing in result["error"]
+    assert "token-123" not in json.dumps(result)
+
+
+def test_update_task_defaults_to_preview_and_forwards_exact_contract(monkeypatch):
+    seen = {}
+    preview = _canonical_preview_payload()
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, preview),
+    )
+
+    result = json.loads(fst._handle_update_task(_valid_update_args()))
+
+    assert result["result"] == preview
+    assert seen["method"] == "PATCH"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task-1"
+    assert seen["body"] == {
+        "operationId": "op-123",
+        "baseRevision": 7,
+        "patch": {"title": "Clarified task"},
+        "preview": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "args,error_fragment",
+    [
+        (_valid_update_args(title="legacy flat field"), "unsupported"),
+        (_valid_update_args(status="done"), "unsupported"),
+        (_valid_update_args(unexpected="value"), "unsupported"),
+        (_valid_update_args(patch={"status": "done"}), "status"),
+        (_valid_update_args(patch={"unknown": "value"}), "unknown"),
+        (_valid_update_args(patch={}), "at least one"),
+    ],
+)
+def test_update_task_rejects_legacy_flat_and_unknown_fields_before_io(
+    monkeypatch, args, error_fragment
+):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached Local Task API"),
+    )
+
+    result = json.loads(fst._handle_update_task(args))
+
+    assert error_fragment in result["error"].lower()
+
+
+@pytest.mark.parametrize("progress", [True, False, 1.5, -1, 101])
+def test_update_task_progress_is_integer_zero_to_one_hundred_before_io(
+    monkeypatch, progress
+):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached Local Task API"),
+    )
+
+    result = json.loads(
+        fst._handle_update_task(_valid_update_args(patch={"progress": progress}))
+    )
+
+    assert result["error"] == "patch.progress must be an integer from 0 to 100"
+
+
+@pytest.mark.parametrize("progress", [0, 50, 100])
+def test_update_task_accepts_integer_progress_boundaries(monkeypatch, progress):
+    seen = {}
+    preview = _canonical_preview_payload(
+        normalizedPayload={"progress": progress}
+    )
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, preview),
+    )
+
+    result = json.loads(
+        fst._handle_update_task(_valid_update_args(patch={"progress": progress}))
+    )
+
+    assert result["result"] == preview
+    assert seen["body"]["patch"] == {"progress": progress}
+
+
+@pytest.mark.parametrize("missing", ["previewDigest", "previewExpiresAt"])
+def test_update_task_apply_requires_preview_receipt_fields_before_io(monkeypatch, missing):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid apply reached Local Task API"),
+    )
+    args = _valid_update_args(
+        preview=False,
+        previewDigest=_CANONICAL_DIGEST,
+        previewExpiresAt=_CANONICAL_PREVIEW_EXPIRY,
+    )
+    del args[missing]
+
+    result = json.loads(fst._handle_update_task(args))
+
+    assert result["error"] == f"{missing} is required when preview is false"
+
+
+@pytest.mark.parametrize("replayed", [False, True])
+def test_update_task_apply_forwards_preview_receipt_and_validates_commit(
+    monkeypatch, replayed
+):
+    seen = {}
+    committed = _canonical_committed_payload(replayed=replayed)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, committed),
+    )
+    args = _valid_update_args(
+        preview=False,
+        previewDigest=_CANONICAL_DIGEST,
+        previewExpiresAt=_CANONICAL_PREVIEW_EXPIRY,
+    )
+
+    result = json.loads(fst._handle_update_task(args))
+
+    assert result["result"] == committed
+    assert seen["body"] == {
+        "operationId": "op-123",
+        "baseRevision": 7,
+        "patch": {"title": "Clarified task"},
+        "preview": False,
+        "previewDigest": _CANONICAL_DIGEST,
+        "previewExpiresAt": _CANONICAL_PREVIEW_EXPIRY,
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"operationId": "another-operation"},
+        {"entityId": "another-task"},
+        {"entityType": "project"},
+        {"action": "delete"},
+        {"contractVersion": "task-v0"},
+        {"source": "other-client"},
+        {"canonicalRevision": 0},
+        {"canonicalRevision": True},
+        {"changeSequence": 0},
+        {"changeSequence": 2.5},
+        {"canonicalUpdatedAt": ""},
+        {"committedAt": None},
+        {"replayed": "false"},
+        {"readBack": None},
+        {"readBack": {"id": "task-1", "canonicalRevision": 7}},
+        {"readBack": {"id": "wrong", "canonicalRevision": 8}},
+        {"readBackHash": "not-a-sha256"},
+    ],
+)
+def test_update_task_rejects_mismatched_or_malformed_commit_receipt(
+    monkeypatch, overrides
+):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, _canonical_committed_payload(**overrides)),
+    )
+    args = _valid_update_args(
+        preview=False,
+        previewDigest=_CANONICAL_DIGEST,
+        previewExpiresAt=_CANONICAL_PREVIEW_EXPIRY,
+    )
+
+    result = json.loads(fst._handle_update_task(args))
+
+    assert "error" in result
+    assert "canonical" in result["error"].lower() or "receipt" in result["error"].lower()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ok": True},
+        {"ok": True, "result": "queued"},
+        _canonical_preview_payload(operationId="another-operation"),
+        _canonical_preview_payload(baseRevision=8),
+        _canonical_preview_payload(previewDigest="short"),
+        _canonical_preview_payload(previewExpiresAt=""),
+        _canonical_preview_payload(normalizedPayload=None),
+        _canonical_preview_payload(readBack=None),
+    ],
+)
+def test_update_task_rejects_mismatched_malformed_or_queued_preview(monkeypatch, payload):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, payload),
+    )
+
+    result = json.loads(fst._handle_update_task(_valid_update_args()))
+
+    assert "error" in result
+    assert "preview" in result["error"].lower() or "canonical" in result["error"].lower()
+
+
+def test_update_task_preserves_typed_stale_revision_and_redacts_details(monkeypatch):
+    def _raise(req, timeout):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(json.dumps({
+                "error": {
+                    "code": "stale_revision",
+                    "message": "Task changed since preview.",
+                    "authorization": "Bearer secret-from-server",
+                },
+                "debug": "database secret",
+            }).encode("utf-8")),
+        )
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_update_task(_valid_update_args()))
+
+    assert result == {
+        "error": "Task changed since preview.",
+        "code": "stale_revision",
+        "status": 409,
+    }
+    assert "token-123" not in json.dumps(result)
+    assert "secret" not in json.dumps(result).lower()
 
 
 def test_update_task_schema_rejects_generic_recurring_completion_guidance():

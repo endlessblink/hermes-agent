@@ -11,6 +11,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,20 @@ _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_ONLY_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 _VALID_STATUS_FILTERS = {"todo", "open", "done"}
 _VALID_DUE_FILTERS = {"today", "overdue", "open"}
-_VALID_TASK_STATUSES = {"todo", "done"}
 _VALID_PRIORITIES = {"low", "medium", "high"}
+_CANONICAL_TASK_CONTRACT = "task-v1"
+_CANONICAL_TASK_SOURCE = "local-api"
+_CANONICAL_PATCH_FIELDS = {"title", "description", "priority", "dueDate", "progress"}
+_CANONICAL_UPDATE_FIELDS = {
+    "id",
+    "operationId",
+    "baseRevision",
+    "patch",
+    "preview",
+    "previewDigest",
+    "previewExpiresAt",
+}
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class _FlowStateApiError(RuntimeError):
@@ -276,55 +289,159 @@ def _handle_create_task(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_iso_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or "T" not in value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _valid_canonical_read_back(value: Any, task_id: str, revision: int) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("id") == task_id
+        and value.get("canonicalRevision") == revision
+    )
+
+
+def _valid_canonical_preview(payload: Any, task_id: str, operation_id: str, revision: int) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("result") == "preview"
+        and payload.get("contractVersion") == _CANONICAL_TASK_CONTRACT
+        and payload.get("operationId") == operation_id
+        and payload.get("baseRevision") == revision
+        and isinstance(payload.get("previewDigest"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(payload["previewDigest"]))
+        and _is_iso_timestamp(payload.get("previewExpiresAt"))
+        and isinstance(payload.get("normalizedPayload"), dict)
+        and _valid_canonical_read_back(payload.get("readBack"), task_id, revision)
+    )
+
+
+def _valid_canonical_commit(payload: Any, task_id: str, operation_id: str) -> bool:
+    if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("result") != "committed":
+        return False
+    receipt = payload.get("receipt")
+    if not isinstance(receipt, dict):
+        return False
+    revision = receipt.get("canonicalRevision")
+    return (
+        receipt.get("contractVersion") == _CANONICAL_TASK_CONTRACT
+        and receipt.get("operationId") == operation_id
+        and receipt.get("source") == _CANONICAL_TASK_SOURCE
+        and receipt.get("entityType") == "task"
+        and receipt.get("action") == "patch"
+        and receipt.get("entityId") == task_id
+        and _is_positive_int(revision)
+        and _is_iso_timestamp(receipt.get("canonicalUpdatedAt"))
+        and _is_positive_int(receipt.get("changeSequence"))
+        and isinstance(receipt.get("replayed"), bool)
+        and _is_iso_timestamp(receipt.get("committedAt"))
+        and _valid_canonical_read_back(receipt.get("readBack"), task_id, revision)
+        and isinstance(receipt.get("readBackHash"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(receipt["readBackHash"]))
+    )
+
+
+def _validate_canonical_patch(patch: Any) -> Optional[str]:
+    if not isinstance(patch, dict) or not patch:
+        return "patch must contain at least one field"
+    unknown = sorted(set(patch) - _CANONICAL_PATCH_FIELDS)
+    if unknown:
+        return f"unsupported patch fields: {', '.join(unknown)}"
+    if "title" in patch and (not isinstance(patch["title"], str) or not patch["title"].strip()):
+        return "patch.title must be a non-empty string"
+    if "description" in patch and not isinstance(patch["description"], str):
+        return "patch.description must be a string"
+    if "priority" in patch and patch["priority"] is not None and patch["priority"] not in _VALID_PRIORITIES:
+        return "patch.priority must be low|medium|high or null"
+    if "dueDate" in patch and patch["dueDate"] is not None:
+        if not isinstance(patch["dueDate"], str) or not _DATE_ONLY_RE.fullmatch(patch["dueDate"]):
+            return "patch.dueDate must be YYYY-MM-DD or null"
+    if "progress" in patch:
+        progress = patch["progress"]
+        if not isinstance(progress, int) or isinstance(progress, bool) or not 0 <= progress <= 100:
+            return "patch.progress must be an integer from 0 to 100"
+    return None
+
+
 def _handle_update_task(args: dict, **kw) -> str:
-    task_id = str(args.get("id") or "").strip()
-    if not task_id:
+    unknown = sorted(set(args) - _CANONICAL_UPDATE_FIELDS)
+    if unknown:
+        return _tool_error(f"unsupported canonical update fields: {', '.join(unknown)}")
+
+    task_id = args.get("id")
+    if not isinstance(task_id, str) or not task_id.strip():
         return _tool_error("id is required")
+    task_id = task_id.strip()
 
-    body: Dict[str, Any] = {}
-    if "status" in args and args.get("status") not in ("", None):
-        status = args["status"]
-        if status not in _VALID_TASK_STATUSES:
-            return _tool_error("status must be todo|done")
-        body["status"] = status
-    if "title" in args and args.get("title") not in ("", None):
-        title = str(args["title"]).strip()
-        if not title:
-            return _tool_error("title cannot be empty")
-        body["title"] = title
-    if "priority" in args:
-        priority = args.get("priority")
-        if priority in ("", None):
-            body["priority"] = None
-        elif priority in _VALID_PRIORITIES:
-            body["priority"] = priority
-        else:
-            return _tool_error("priority must be low|medium|high or null")
-    if "dueDate" in args:
-        due_date = args.get("dueDate")
-        if due_date in ("", None):
-            body["dueDate"] = None
-        elif _DATE_ONLY_RE.match(str(due_date)):
-            body["dueDate"] = due_date
-        else:
-            return _tool_error("dueDate must be YYYY-MM-DD")
-    if "progress" in args and args.get("progress") not in ("", None):
-        try:
-            progress = float(args["progress"])
-        except (TypeError, ValueError):
-            return _tool_error("progress must be a number from 0 to 100")
-        if progress < 0 or progress > 100:
-            return _tool_error("progress must be a number from 0 to 100")
-        body["progress"] = progress
+    operation_id = args.get("operationId")
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id.strip()
+        or operation_id != operation_id.strip()
+        or len(operation_id) > 160
+    ):
+        return _tool_error("operationId is required and must be at most 160 trimmed characters")
 
-    if not body:
-        return _tool_error("provide at least one field to update")
+    base_revision = args.get("baseRevision")
+    if not _is_positive_int(base_revision):
+        return _tool_error("baseRevision is required and must be a positive integer")
+
+    patch = args.get("patch")
+    patch_error = _validate_canonical_patch(patch)
+    if patch_error:
+        return _tool_error(patch_error)
+
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return _tool_error("preview must be a boolean")
+
+    body: Dict[str, Any] = {
+        "operationId": operation_id,
+        "baseRevision": base_revision,
+        "patch": patch,
+        "preview": preview,
+    }
+    if not preview:
+        digest = args.get("previewDigest")
+        expiry = args.get("previewExpiresAt")
+        if not isinstance(digest, str) or not _SHA256_HEX_RE.fullmatch(digest):
+            return _tool_error("previewDigest is required when preview is false")
+        if not _is_iso_timestamp(expiry):
+            return _tool_error("previewExpiresAt is required when preview is false")
+        body["previewDigest"] = digest
+        body["previewExpiresAt"] = expiry
 
     try:
-        return _tool_result(_request("PATCH", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}", body))
+        payload = _request("PATCH", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}", body)
+        if preview:
+            if not _valid_canonical_preview(payload, task_id, operation_id, base_revision):
+                return _tool_error("Canonical task preview could not be verified")
+        elif not _valid_canonical_commit(payload, task_id, operation_id):
+            return _tool_error("Canonical task receipt could not be verified")
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error("flowstate_update_task typed error: code=%s status=%s", exc.code, exc.status)
+        return _typed_tool_error(exc)
+    except RuntimeError as exc:
+        logger.error("flowstate_update_task runtime error: %s", type(exc).__name__)
+        message = str(exc)
+        if message.startswith("Flow State Local Task API"):
+            return _tool_error(message)
+        return _tool_error("Flow State canonical task update failed")
     except Exception as exc:
-        logger.error("flowstate_update_task error: %s", exc)
-        return _tool_error(str(exc))
+        logger.error("flowstate_update_task error: %s", type(exc).__name__)
+        return _tool_error("Flow State canonical task update failed")
 
 
 def _handle_delete_task(args: dict, **kw) -> str:
@@ -718,23 +835,35 @@ FLOWSTATE_CREATE_TASK_SCHEMA = {
 FLOWSTATE_UPDATE_TASK_SCHEMA = {
     "name": "flowstate_update_task",
     "description": (
-        "Update an existing Flow State task by exact task id. When the user asks "
-        "to change, complete, reprioritize, or reschedule a FlowState task, call "
-        "this tool instead of returning a passive preview. Generic status or progress "
-        "updates are not a substitute for recurring task completion; use Done for now "
-        "through flowstate_done_for_now for recurring tasks."
+        "Preview an exact Flow State task patch before mutation. Apply only after the user "
+        "approves that preview by resending the exact operation, base revision, patch, "
+        "preview digest, and expiry with preview=false. This generic patch is not a substitute "
+        "for task completion; recurring tasks use Done for now through flowstate_done_for_now."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "id": {"type": "string", "description": "Exact Flow State task id."},
-            "status": {"type": "string", "description": "Optional: todo or done."},
-            "title": {"type": "string", "description": "Optional new title."},
-            "priority": {"type": "string", "description": "Optional: low, medium, high, or null."},
-            "dueDate": {"type": "string", "description": "Optional YYYY-MM-DD or null."},
-            "progress": {"type": "number", "description": "Optional progress from 0 to 100."},
+            "operationId": {"type": "string", "description": "Stable idempotency key for preview and apply."},
+            "baseRevision": {"type": "integer", "minimum": 1, "description": "Canonical revision returned by Flow State task reads."},
+            "patch": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "priority": {"type": ["string", "null"]},
+                    "dueDate": {"type": ["string", "null"]},
+                    "progress": {"type": "integer", "minimum": 0, "maximum": 100},
+                },
+                "additionalProperties": False,
+                "minProperties": 1,
+            },
+            "preview": {"type": "boolean", "description": "Defaults true. False applies an approved preview."},
+            "previewDigest": {"type": "string", "description": "Server-issued digest required for apply."},
+            "previewExpiresAt": {"type": "string", "description": "Server-issued expiry required for apply."},
         },
-        "required": ["id"],
+        "required": ["id", "operationId", "baseRevision", "patch"],
+        "additionalProperties": False,
     },
 }
 
