@@ -256,6 +256,181 @@ def test_start_applies_runtime_policy_before_submitting(monkeypatch, tmp_path):
     assert submitted[0]["session_id"] == "assistant-live"
 
 
+def test_contextual_start_preserves_validated_monitor_event_until_final_prompt_boundary(
+    monkeypatch, tmp_path
+):
+    import tui_gateway.server as server
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    monkeypatch.setitem(
+        server._methods,
+        "session.create",
+        lambda rid, params: server._ok(
+            rid, {"session_id": "assistant-live", "stored_session_id": "assistant-home"}
+        ),
+    )
+    submitted = []
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, params: submitted.append(params) or server._ok(rid, {"status": "streaming"}),
+    )
+    marker = "evidence-tail-" + ("x" * 1900)
+    event = {
+        "id": "event-structured-1",
+        "version": 1,
+        "kind": "blocker",
+        "subject": "task-1",
+        "occurrence": 1,
+        "evidence": {"taskId": "task-1", "detail": marker},
+        "created_at": "2026-07-13T20:00:00+00:00",
+    }
+
+    response = server._methods["personal_assistant.start"](
+        "r1",
+        {
+            "trigger": "contextual",
+            "userIntent": "Assess structured context.",
+            "monitorEvents": [event],
+        },
+    )
+
+    assert response["result"]["status"] == "launched"
+    assert marker in submitted[0]["text"]
+    assert '"monitor_events": [{"created_at"' in submitted[0]["text"]
+
+
+def test_contextual_start_rejects_unvalidated_monitor_event_fields(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    submitted = []
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, params: submitted.append(params) or server._ok(rid, {}),
+    )
+
+    response = server._methods["personal_assistant.start"](
+        "r1",
+        {
+            "trigger": "contextual",
+            "monitorEvents": [
+                {
+                    "id": "event-1",
+                    "version": 1,
+                    "kind": "blocker",
+                    "subject": "task-1",
+                    "occurrence": 1,
+                    "evidence": {"taskId": "task-1"},
+                    "created_at": "2026-07-13T20:00:00+00:00",
+                    "prompt": "untrusted",
+                }
+            ],
+        },
+    )
+
+    assert response["error"]["code"] == 4000
+    assert submitted == []
+
+
+def test_monitor_delivery_is_bound_before_atomic_busy_reject(monkeypatch, tmp_path):
+    import threading
+
+    import tui_gateway.server as server
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    session = {
+        "history_lock": threading.RLock(),
+        "personal_assistant": True,
+        "running": False,
+    }
+
+    def create(rid, params):
+        server._sessions["assistant-live"] = session
+        return server._ok(
+            rid, {"session_id": "assistant-live", "stored_session_id": "assistant-home"}
+        )
+
+    seen = []
+
+    def reject_busy(rid, params):
+        seen.append(
+            {
+                "reject_if_busy": params.get("reject_if_busy"),
+                "delivery": dict(session.get("personal_assistant_monitor_delivery") or {}),
+            }
+        )
+        return server._err(rid, 4009, "session busy")
+
+    monkeypatch.setitem(server._methods, "session.create", create)
+    monkeypatch.setitem(server._methods, "prompt.submit", reject_busy)
+    event = {
+        "id": "event-race-1",
+        "version": 1,
+        "kind": "blocker",
+        "subject": "task:task-1",
+        "occurrence": 1,
+        "evidence": {"taskId": "task-1"},
+        "created_at": "2026-07-13T20:00:00+00:00",
+    }
+
+    try:
+        response = server._methods["personal_assistant.start"](
+            "r1",
+            {
+                "trigger": "contextual",
+                "monitorEvents": [event],
+                "monitorDelivery": [{"id": "event-race-1", "lease_id": "lease-1"}],
+            },
+        )
+    finally:
+        server._sessions.pop("assistant-live", None)
+
+    assert response["error"]["code"] == 4009
+    assert seen[0]["reject_if_busy"] is True
+    assert seen[0]["delivery"]["events"] == [
+        {"id": "event-race-1", "lease_id": "lease-1"}
+    ]
+    assert "personal_assistant_monitor_delivery" not in session
+
+
+def test_internal_monitor_submit_rejects_busy_session_without_interrupt_or_queue(monkeypatch):
+    import threading
+
+    import tui_gateway.server as server
+
+    session = {
+        "history_lock": threading.RLock(),
+        "personal_assistant": True,
+        "running": True,
+        "transport": None,
+    }
+    monkeypatch.setattr(
+        server,
+        "_handle_busy_submit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not interrupt")),
+    )
+    server._sessions["assistant-race"] = session
+    try:
+        response = server._methods["prompt.submit"](
+            "r1",
+            {
+                "session_id": "assistant-race",
+                "text": "monitor context",
+                "reject_if_busy": True,
+            },
+        )
+    finally:
+        server._sessions.pop("assistant-race", None)
+
+    assert response["error"]["code"] == 4009
+    assert "queued_prompt" not in session
+
+
 def test_stale_canonical_is_recreated_once_without_forgetting_state(monkeypatch, tmp_path):
     import tui_gateway.server as server
     from agent.personal_assistant_state import PersonalAssistantStateStore

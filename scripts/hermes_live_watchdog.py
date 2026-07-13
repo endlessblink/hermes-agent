@@ -27,6 +27,8 @@ from typing import Any
 
 DEFAULT_IDLE_SECONDS = 45.0
 DEFAULT_ALERT_COOLDOWN_SECONDS = 60.0
+DEFAULT_MONITOR_PRODUCER_STALE_SECONDS = 20 * 60.0
+DEFAULT_MONITOR_CONSUMER_STALE_SECONDS = 150.0
 LEDGER_REFRESH_SECONDS = 10.0
 
 
@@ -197,12 +199,15 @@ def discover_sources(home: Path, explicit_ledger: str = "") -> list[Path]:
 
     if explicit_ledger:
         return discover_ledgers(home, explicit_ledger)
-    return sorted(
-        {
-            *discover_ledgers(home),
-            home / "logs" / "desktop-events.jsonl",
-        }
-    )
+    sources = {
+        *discover_ledgers(home),
+        home / "logs" / "desktop-events.jsonl",
+        home / "logs" / "personal-assistant-monitor.jsonl",
+    }
+    profiles_dir = home / "profiles"
+    if profiles_dir.exists():
+        sources.update(profiles_dir.glob("*/logs/personal-assistant-monitor.jsonl"))
+    return sorted(sources)
 
 
 def build_alert(
@@ -242,6 +247,27 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
 
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    if row.get("component") == "personal_assistant_monitor" and row.get("event") in {
+        "connector_failure",
+        "dead_letter",
+    }:
+        event = str(row["event"])
+        return {
+            "ts": utc_now(),
+            "severity": "error",
+            "component": "live_watchdog",
+            "event": f"personal_assistant_monitor_{event}",
+            "message": (
+                "Hermes personal-assistant monitor cannot reach FlowState"
+                if event == "connector_failure"
+                else "Hermes personal-assistant monitor exhausted delivery retries"
+            ),
+            "source": str(row.get("source") or "unknown")[:64],
+            "status": str(row.get("status") or "unknown")[:64],
+            "count": max(0, int(row.get("count") or 0)),
+            "ledger": str(ledger),
+            "processes": process_snapshot(),
+        }
     if row.get("component") == "sidebar" and row.get("event") == "project_overview_hidden_sessions":
         desktop_details = row.get("details") if isinstance(row.get("details"), dict) else {}
         hidden_count = desktop_details.get("hidden_count")
@@ -284,6 +310,61 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
     }
 
 
+def monitor_heartbeat_timestamp(row: dict[str, Any]) -> float | None:
+    if row.get("component") != "personal_assistant_monitor":
+        return None
+    try:
+        value = str(row.get("ts") or "").replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def seed_monitor_heartbeats(path: Path) -> dict[str, float]:
+    """Read only the latest monitor heartbeats without replaying old incidents."""
+
+    if path.name != "personal-assistant-monitor.jsonl" or not path.is_file():
+        return {}
+    latest = {"producer": 0.0, "consumer": 0.0}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-1000:]
+    except OSError:
+        return latest
+    for line in lines:
+        row = load_json(line)
+        if row is None:
+            continue
+        heartbeat_at = monitor_heartbeat_timestamp(row)
+        source = str(row.get("source") or "")
+        if heartbeat_at is not None and source in latest:
+            latest[source] = max(latest[source], heartbeat_at)
+    return latest
+
+
+def build_monitor_stale_alert(
+    *,
+    source: str,
+    age: float,
+    threshold: float,
+    ledger: Path,
+) -> dict[str, Any]:
+    return {
+        "ts": utc_now(),
+        "severity": "error",
+        "component": "live_watchdog",
+        "event": f"personal_assistant_monitor_{source}_stale",
+        "message": f"Hermes personal-assistant monitor {source} heartbeat is stale",
+        "source": source,
+        "age_seconds": round(age, 3),
+        "threshold_seconds": round(threshold, 3),
+        "ledger": str(ledger),
+        "processes": process_snapshot(),
+    }
+
+
 def run(args: argparse.Namespace) -> int:
     home = Path(args.home).expanduser() if args.home else hermes_home()
     alerts = Path(args.alerts).expanduser() if args.alerts else home / "logs" / "live-watchdog-alerts.jsonl"
@@ -291,6 +372,7 @@ def run(args: argparse.Namespace) -> int:
     states: dict[str, TurnState] = {}
     state_ledgers: dict[str, Path] = {}
     incident_alerted_at: dict[tuple[str, str], float] = {}
+    monitor_heartbeats: dict[tuple[Path, str], float] = {}
     tails: dict[Path, LedgerTail] = {}
     last_ledger_refresh = 0.0
     stopped = False
@@ -298,6 +380,8 @@ def run(args: argparse.Namespace) -> int:
     def refresh_ledgers() -> None:
         for path in discover_sources(home, args.ledger):
             if path not in tails:
+                for source, heartbeat_at in seed_monitor_heartbeats(path).items():
+                    monitor_heartbeats[(path, source)] = heartbeat_at
                 tails[path] = LedgerTail(path, from_end=args.from_end)
 
     def stop(_signum, _frame) -> None:
@@ -336,6 +420,10 @@ def run(args: argparse.Namespace) -> int:
         for ledger, tail in list(tails.items()):
             for row in tail.rows():
                 sid = str(row.get("session_id") or "")
+                heartbeat_at = monitor_heartbeat_timestamp(row)
+                if heartbeat_at is not None:
+                    source = str(row.get("source") or "unknown")[:64]
+                    monitor_heartbeats[(ledger, source)] = heartbeat_at
                 incident = build_incident_alert(row, ledger)
                 if incident is not None:
                     incident_key = (sid or "desktop", str(incident["event"]))
@@ -352,6 +440,12 @@ def run(args: argparse.Namespace) -> int:
                                 "[hermes-live-watchdog] SIDEBAR_SESSIONS_HIDDEN "
                                 f"count={incident['hidden_count']} ledger={ledger}"
                             )
+                        elif incident["event"].startswith("personal_assistant_monitor_"):
+                            line = (
+                                "[hermes-live-watchdog] PERSONAL_ASSISTANT_MONITOR "
+                                f"event={incident['event']} status={incident['status']} "
+                                f"count={incident['count']} ledger={ledger}"
+                            )
                         else:
                             line = (
                                 f"[hermes-live-watchdog] SESSION_NOT_FOUND sid={sid[:8]} "
@@ -359,11 +453,12 @@ def run(args: argparse.Namespace) -> int:
                             )
                         print(line, flush=True)
                         if args.notify:
-                            title = (
-                                "Hermes conversations may be hidden"
-                                if incident["event"] == "sidebar_sessions_hidden"
-                                else "Hermes session recovery failed"
-                            )
+                            if incident["event"] == "sidebar_sessions_hidden":
+                                title = "Hermes conversations may be hidden"
+                            elif incident["event"].startswith("personal_assistant_monitor_"):
+                                title = "Hermes personal assistant monitor needs attention"
+                            else:
+                                title = "Hermes session recovery failed"
                             desktop_notify(title, line)
                 if not sid:
                     continue
@@ -379,6 +474,40 @@ def run(args: argparse.Namespace) -> int:
                     states[sid] = state
                 state_ledgers[sid] = ledger
                 state.update(row)
+
+        for (ledger, source), heartbeat_at in list(monitor_heartbeats.items()):
+            threshold = (
+                args.monitor_producer_stale_seconds
+                if source == "producer"
+                else args.monitor_consumer_stale_seconds
+            )
+            age = now - heartbeat_at
+            if age < threshold:
+                continue
+            event_name = f"personal_assistant_monitor_{source}_stale"
+            incident_key = (str(ledger), event_name)
+            last_incident = incident_alerted_at.get(incident_key, 0.0)
+            if now - last_incident < args.alert_cooldown:
+                continue
+            incident_alerted_at[incident_key] = now
+            alert = build_monitor_stale_alert(
+                source=source,
+                age=age,
+                threshold=threshold,
+                ledger=ledger,
+            )
+            append_jsonl(alerts, alert)
+            latest.write_text(
+                json.dumps(alert, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            line = (
+                "[hermes-live-watchdog] PERSONAL_ASSISTANT_MONITOR_STALE "
+                f"source={source} age={age:.1f}s ledger={ledger}"
+            )
+            print(line, flush=True)
+            if args.notify:
+                desktop_notify("Hermes personal assistant monitor is stale", line)
 
         for sid, state in list(states.items()):
             last = state.last_progress_at or state.started_at
@@ -417,6 +546,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--alerts", default="", help="Alert JSONL path")
     parser.add_argument("--idle-seconds", type=float, default=env_float("HERMES_LIVE_WATCHDOG_IDLE_SECONDS", DEFAULT_IDLE_SECONDS))
     parser.add_argument("--alert-cooldown", type=float, default=env_float("HERMES_LIVE_WATCHDOG_ALERT_COOLDOWN_SECONDS", DEFAULT_ALERT_COOLDOWN_SECONDS))
+    parser.add_argument("--monitor-producer-stale-seconds", type=float, default=env_float("HERMES_PA_MONITOR_PRODUCER_STALE_SECONDS", DEFAULT_MONITOR_PRODUCER_STALE_SECONDS))
+    parser.add_argument("--monitor-consumer-stale-seconds", type=float, default=env_float("HERMES_PA_MONITOR_CONSUMER_STALE_SECONDS", DEFAULT_MONITOR_CONSUMER_STALE_SECONDS))
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--from-start", dest="from_end", action="store_false", help="Read existing ledger rows first")
     parser.add_argument("--from-end", dest="from_end", action="store_true", help="Only watch new ledger rows")

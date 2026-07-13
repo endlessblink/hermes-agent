@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tui_gateway import server
@@ -33,8 +34,152 @@ def test_discover_sources_also_tails_desktop_diagnostics(tmp_path):
 
     assert watchdog.discover_sources(home) == [
         home / "logs" / "desktop-events.jsonl",
+        home / "logs" / "personal-assistant-monitor.jsonl",
         home / "logs" / "turn-watchdog.jsonl",
     ]
+
+
+def test_discover_sources_includes_profile_monitor_health(tmp_path):
+    home = tmp_path / ".hermes"
+    health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
+    health.parent.mkdir(parents=True)
+    health.write_text("", encoding="utf-8")
+
+    assert health in watchdog.discover_sources(home)
+
+
+def test_monitor_connector_failure_alert_is_privacy_safe(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
+    health.parent.mkdir(parents=True)
+    health.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-13T20:00:00+00:00",
+                "component": "personal_assistant_monitor",
+                "source": "producer",
+                "event": "connector_failure",
+                "status": "not_signed_in",
+                "count": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(["--home", str(home), "--from-start", "--once"])
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    alert = next(
+        row for row in emitted if row["event"] == "personal_assistant_monitor_connector_failure"
+    )
+    assert alert["status"] == "not_signed_in"
+    serialized = json.dumps(alert)
+    assert "evidence" not in serialized
+    assert "taskId" not in serialized
+
+
+def test_stale_monitor_consumer_heartbeat_alerts(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
+    health.parent.mkdir(parents=True)
+    old = datetime.fromtimestamp(time.time() - 60, timezone.utc).isoformat()
+    health.write_text(
+        json.dumps(
+            {
+                "ts": old,
+                "component": "personal_assistant_monitor",
+                "source": "consumer",
+                "event": "consumer_heartbeat",
+                "status": "available",
+                "count": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(
+        [
+            "--home",
+            str(home),
+            "--from-start",
+            "--once",
+            "--monitor-consumer-stale-seconds",
+            "1",
+        ]
+    )
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    alert = next(
+        row for row in emitted if row["event"] == "personal_assistant_monitor_consumer_stale"
+    )
+    assert alert["source"] == "consumer"
+    assert alert["age_seconds"] >= 59
+
+
+def test_from_end_seeds_existing_monitor_heartbeats_without_replaying_incidents(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
+    health.parent.mkdir(parents=True)
+    old = datetime.fromtimestamp(time.time() - 60, timezone.utc).isoformat()
+    health.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": old,
+                        "component": "personal_assistant_monitor",
+                        "source": "producer",
+                        "event": "producer_heartbeat",
+                        "status": "available",
+                        "count": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": old,
+                        "component": "personal_assistant_monitor",
+                        "source": "producer",
+                        "event": "connector_failure",
+                        "status": "timeout",
+                        "count": 0,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(
+        [
+            "--home",
+            str(home),
+            "--once",
+            "--monitor-producer-stale-seconds",
+            "1",
+            "--monitor-consumer-stale-seconds",
+            "1",
+        ]
+    )
+    assert args.from_end is True
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    events = [json.loads(line)["event"] for line in alerts.read_text(encoding="utf-8").splitlines()]
+    assert "personal_assistant_monitor_producer_stale" in events
+    assert "personal_assistant_monitor_consumer_stale" in events
+    assert "personal_assistant_monitor_connector_failure" not in events
 
 
 def test_hidden_sidebar_sessions_are_alerted_immediately_without_private_data(tmp_path, monkeypatch):

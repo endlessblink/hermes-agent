@@ -3646,39 +3646,36 @@ def _personal_assistant_runtime_context() -> dict[str, Any]:
     )
 
 
-def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
-    """Deliver one leased deterministic monitor event to the canonical home."""
-    from agent.personal_assistant_monitor import ack_candidate_event, lease_candidate_event
+_PERSONAL_ASSISTANT_MONITOR_BATCH_LIMIT = 8
+_PERSONAL_ASSISTANT_MONITOR_EVENT_FIELDS = (
+    "id", "version", "kind", "subject", "occurrence", "evidence", "created_at",
+)
 
-    event = lease_candidate_event(profile_home, "tui-gateway")
-    if event is None:
-        return False
-    event_id = str(event.get("id") or "")
-    kind = str(event.get("kind") or "context_change")[:100]
-    evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
-    intent = (
-        "A deterministic FlowState monitor detected a material change. Assess it "
-        "in the context of my current plan and help me respond if needed.\n"
-        f"Kind: {kind}\nEvidence: "
-        f"{json.dumps(evidence, ensure_ascii=False, sort_keys=True)[:4000]}"
-    )
-    response = _methods["personal_assistant.start"](
-        f"monitor-{event_id}",
-        {
-            "profile": "office-work",
-            "trigger": "contextual",
-            "userIntent": intent,
-            "idempotencyKey": event_id,
-        },
-    )
-    if "error" in response:
-        return False
-    result = response.get("result") or {}
-    if result.get("status") not in {"launched", "already_submitted"}:
-        return False
-    if not ack_candidate_event(profile_home, event_id, str(event.get("lease_id") or "")):
-        return False
 
+def _canonical_personal_assistant_monitor_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Strip queue lifecycle metadata before crossing into assistant context."""
+    return {field: event.get(field) for field in _PERSONAL_ASSISTANT_MONITOR_EVENT_FIELDS}
+
+
+def _active_personal_assistant_session() -> tuple[str, dict[str, Any]] | None:
+    """Return a live canonical assistant turn that monitor work must not interrupt."""
+    with _sessions_lock:
+        sessions = list(_sessions.items())
+    for session_id, session in sessions:
+        if not session.get("personal_assistant"):
+            continue
+        if _session_live_status(session_id, session) != "idle":
+            return session_id, session
+    return None
+
+
+def _update_personal_assistant_attention(
+    profile_home: Path,
+    *,
+    session_id: str,
+    episode_id: str | None,
+    kind: str,
+) -> None:
     from agent.personal_assistant_state import PersonalAssistantStateStore
 
     store = PersonalAssistantStateStore(profile_home)
@@ -3695,21 +3692,283 @@ def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
             ),
         )
     )
-    episode = result.get("episode") or {}
     pending_count = len(state.get("pendingApprovals") or []) + len(
         state.get("captureProposals") or []
     )
-    session_id = str(result.get("session_id") or "")
     _emit(
         "personal_assistant.attention",
         session_id,
         {
             "session_id": session_id,
-            "episode_id": episode.get("episode_id"),
+            "episode_id": episode_id,
             "kind": kind,
             "unread_count": state.get("unreadCount", 0),
             "pending_count": pending_count,
         },
+    )
+
+
+def _finish_personal_assistant_monitor_delivery(
+    session: dict[str, Any],
+    *,
+    status: str,
+    has_visible_response: bool,
+) -> None:
+    """Settle monitor leases only after the contextual turn reaches a real outcome."""
+    delivery = session.pop("personal_assistant_monitor_delivery", None)
+    if not isinstance(delivery, dict):
+        return
+
+    from agent.personal_assistant_monitor import (
+        record_monitor_health,
+        retry_candidate_event,
+        settle_candidate_event,
+    )
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    profile_home = Path(str(delivery.get("profile_home") or ""))
+    raw_events = delivery.get("events")
+    events = raw_events if isinstance(raw_events, list) else []
+    event_ids = [
+        str(event.get("id") or "")
+        for event in events
+        if isinstance(event, dict) and event.get("id")
+    ]
+    store = PersonalAssistantStateStore(profile_home)
+    completed = status == "complete" and has_visible_response
+    disposition = "handled" if completed else "retry_wait"
+    if event_ids:
+        store.mark_monitor_events(
+            event_ids,
+            disposition=disposition,
+            episode_id=str(delivery.get("episode_id") or "") or None,
+        )
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_id = str(event.get("id") or "")
+        lease_id = str(event.get("lease_id") or "")
+        if completed:
+            settle_candidate_event(profile_home, event_id, lease_id, "handled")
+        else:
+            retry_candidate_event(
+                profile_home,
+                event_id,
+                lease_id,
+                {"category": "episode_failed", "code": status or "unknown"},
+            )
+    episode_id = str(delivery.get("episode_id") or "")
+    if episode_id:
+        try:
+            store.mark_episode_status(
+                episode_id,
+                "completed" if completed else "failed",
+            )
+        except ValueError:
+            logger.warning("Personal assistant monitor episode status could not be updated")
+    record_monitor_health(
+        profile_home,
+        component="consumer",
+        event="episode_handled" if completed else "episode_failed",
+        status="available" if completed else "retry_wait",
+        count=len(event_ids),
+    )
+
+
+def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
+    """Coalesce deterministic monitor work without interrupting an active turn."""
+    from agent.personal_assistant_monitor import (
+        defer_candidate_event,
+        lease_candidate_event,
+        record_monitor_health,
+        retry_candidate_event,
+        settle_candidate_event,
+    )
+    from agent.personal_assistant_state import (
+        PersonalAssistantStateStore,
+        validate_monitor_events,
+    )
+
+    leased: list[dict[str, Any]] = []
+    for _ in range(_PERSONAL_ASSISTANT_MONITOR_BATCH_LIMIT):
+        event = lease_candidate_event(profile_home, "tui-gateway")
+        if event is None:
+            break
+        leased.append(event)
+    if not leased:
+        return False
+
+    try:
+        canonical_events = validate_monitor_events(
+            [_canonical_personal_assistant_monitor_event(event) for event in leased]
+        )
+    except ValueError as exc:
+        for event in leased:
+            retry_candidate_event(
+                profile_home,
+                str(event.get("id") or ""),
+                str(event.get("lease_id") or ""),
+                {"category": "invalid_event", "code": type(exc).__name__},
+            )
+        record_monitor_health(
+            profile_home,
+            component="consumer",
+            event="invalid_event",
+            status="retry_wait",
+            count=len(leased),
+        )
+        return False
+
+    store = PersonalAssistantStateStore(profile_home)
+    ledger_dispositions = {
+        str(entry.get("eventId") or ""): str(entry.get("disposition") or "")
+        for entry in store.read().get("context_ledger", [])
+        if isinstance(entry, dict)
+    }
+    remaining_leased: list[dict[str, Any]] = []
+    remaining_canonical: list[dict[str, Any]] = []
+    for leased_event, canonical_event in zip(leased, canonical_events):
+        prior = ledger_dispositions.get(str(canonical_event.get("id") or ""))
+        if prior in {"handled", "suppressed"}:
+            settle_candidate_event(
+                profile_home,
+                str(leased_event.get("id") or ""),
+                str(leased_event.get("lease_id") or ""),
+                prior,
+            )
+            continue
+        remaining_leased.append(leased_event)
+        remaining_canonical.append(canonical_event)
+    leased = remaining_leased
+    canonical_events = remaining_canonical
+    if not leased:
+        return True
+    new_event_count = sum(
+        1 for event in canonical_events if event["id"] not in ledger_dispositions
+    )
+
+    active = _active_personal_assistant_session()
+    if active is not None:
+        session_id, active_session = active
+        history_lock = active_session.get("history_lock")
+        lock_context = history_lock if history_lock is not None else contextlib.nullcontext()
+        deferred_while_busy = False
+        with lock_context:
+            if _session_live_status(session_id, active_session) != "idle":
+                store.merge_monitor_events(canonical_events, disposition="retry_wait")
+                for event in leased:
+                    defer_candidate_event(
+                        profile_home,
+                        str(event.get("id") or ""),
+                        str(event.get("lease_id") or ""),
+                    )
+                deferred_while_busy = True
+        if deferred_while_busy:
+            if new_event_count:
+                _update_personal_assistant_attention(
+                    profile_home,
+                    session_id=session_id,
+                    episode_id=None,
+                    kind="context_batch",
+                )
+            record_monitor_health(
+                profile_home,
+                component="consumer",
+                event="events_deferred",
+                status="retry_wait",
+                count=new_event_count,
+            )
+            return True
+
+    event_ids = [event["id"] for event in canonical_events]
+    response = _methods["personal_assistant.start"](
+        f"monitor-{event_ids[0]}",
+        {
+            "profile": "office-work",
+            "trigger": "contextual",
+            "userIntent": (
+                "Assess the attached structured FlowState monitor events against my "
+                "current plan. Surface only consequential changes."
+            ),
+            "idempotencyKey": f"monitor-batch:{','.join(event_ids)}",
+            "monitorEvents": canonical_events,
+            "monitorDelivery": [
+                {
+                    "id": str(event.get("id") or ""),
+                    "lease_id": str(event.get("lease_id") or ""),
+                }
+                for event in leased
+            ],
+        },
+    )
+    if "error" in response:
+        error = response.get("error") or {}
+        if error.get("code") == 4009:
+            store.merge_monitor_events(canonical_events, disposition="retry_wait")
+            for event in leased:
+                defer_candidate_event(
+                    profile_home,
+                    str(event.get("id") or ""),
+                    str(event.get("lease_id") or ""),
+                )
+            record_monitor_health(
+                profile_home,
+                component="consumer",
+                event="events_deferred",
+                status="retry_wait",
+                count=new_event_count,
+            )
+            return False
+        safe_error = {
+            "category": "episode_start_failed",
+            "code": str(error.get("code") or "unknown"),
+        }
+        for event in leased:
+            retry_candidate_event(
+                profile_home,
+                str(event.get("id") or ""),
+                str(event.get("lease_id") or ""),
+                safe_error,
+            )
+        record_monitor_health(
+            profile_home,
+            component="consumer",
+            event="episode_start_failed",
+            status="retry_wait",
+            count=len(leased),
+        )
+        return False
+    result = response.get("result") or {}
+    if result.get("status") not in {"launched", "already_submitted"}:
+        for event in leased:
+            retry_candidate_event(
+                profile_home,
+                str(event.get("id") or ""),
+                str(event.get("lease_id") or ""),
+                {"category": "episode_start_failed", "code": "unexpected_status"},
+            )
+        return False
+
+    episode = result.get("episode") or {}
+    episode_id = str(episode.get("episode_id") or "") or None
+    session_id = str(result.get("session_id") or "")
+    store.merge_monitor_events(
+        canonical_events,
+        disposition="processing",
+        episode_id=episode_id,
+    )
+    _update_personal_assistant_attention(
+        profile_home,
+        session_id=session_id,
+        episode_id=episode_id,
+        kind="context_batch",
+    )
+    record_monitor_health(
+        profile_home,
+        component="consumer",
+        event="episode_processing",
+        status="available",
+        count=len(leased),
     )
     return True
 
@@ -3727,10 +3986,22 @@ def start_personal_assistant_monitor_consumer() -> threading.Event | None:
     profile_home = _profile_home("office-work") or Path(get_hermes_home())
 
     def poll() -> None:
+        last_heartbeat = 0.0
         while not stop.is_set():
             try:
                 while _consume_personal_assistant_monitor_once(profile_home):
                     pass
+                monotonic_now = time.monotonic()
+                if monotonic_now - last_heartbeat >= 60:
+                    from agent.personal_assistant_monitor import record_monitor_health
+
+                    record_monitor_health(
+                        profile_home,
+                        component="consumer",
+                        event="consumer_heartbeat",
+                        status="available",
+                    )
+                    last_heartbeat = monotonic_now
             except Exception:
                 logger.warning("Personal assistant monitor delivery failed", exc_info=True)
             stop.wait(5)
@@ -3807,7 +4078,32 @@ def _start_personal_assistant(rid, params: dict) -> dict:
 
     user_intent = str(params.get("userIntent") or "").strip()
     idempotency_key = str(params.get("idempotencyKey") or "").strip() or None
+    monitor_events: list[dict[str, Any]] = []
+    monitor_delivery: list[dict[str, str]] = []
+    if params.get("monitorEvents") is not None:
+        if trigger != "contextual":
+            return _err(rid, 4000, "monitor events require a contextual trigger")
+        try:
+            from agent.personal_assistant_state import validate_monitor_events
+
+            monitor_events = validate_monitor_events(params.get("monitorEvents"))
+        except ValueError as exc:
+            return _err(rid, 4000, str(exc))
+        raw_delivery = params.get("monitorDelivery")
+        if raw_delivery is not None:
+            if not isinstance(raw_delivery, list) or len(raw_delivery) != len(monitor_events):
+                return _err(rid, 4000, "monitor delivery must match monitor events")
+            for event, delivery in zip(monitor_events, raw_delivery):
+                if not isinstance(delivery, dict) or set(delivery) != {"id", "lease_id"}:
+                    return _err(rid, 4000, "monitor delivery fields are invalid")
+                event_id = str(delivery.get("id") or "").strip()
+                lease_id = str(delivery.get("lease_id") or "").strip()
+                if event_id != event["id"] or not lease_id or len(lease_id) > 160:
+                    return _err(rid, 4000, "monitor delivery identity is invalid")
+                monitor_delivery.append({"id": event_id, "lease_id": lease_id})
     runtime_context = _personal_assistant_runtime_context()
+    if monitor_events:
+        runtime_context["monitor_events"] = monitor_events
     store = _personal_assistant_store(profile)
 
     with _personal_assistant_start_lock:
@@ -3881,7 +4177,7 @@ def _start_personal_assistant(rid, params: dict) -> dict:
             user_intent=user_intent,
             idempotency_key=idempotency_key,
         )
-        if duplicate and episode.get("status") == "accepted":
+        if duplicate and episode.get("status") == "accepted" and not monitor_events:
             return _ok(
                 rid,
                 {
@@ -3904,16 +4200,51 @@ def _start_personal_assistant(rid, params: dict) -> dict:
             "captureProposals": state.get("captureProposals", []),
             "sync": state.get("sync", {}),
             "recent_episodes": state.get("episode_summaries", [])[-20:],
+            "contextLedger": [
+                {
+                    key: entry.get(key)
+                    for key in (
+                        "eventId", "taskIds", "operationIds", "disposition", "episodeId"
+                    )
+                }
+                for entry in state.get("context_ledger", [])[-20:]
+                if isinstance(entry, dict)
+            ],
         }
+
+        if monitor_delivery:
+            with _sessions_lock:
+                monitor_session = _sessions.get(session_id)
+                if monitor_session is None:
+                    return _err(rid, 5000, "personal assistant runtime session is unavailable")
+                monitor_session["personal_assistant_monitor_delivery"] = {
+                    "profile_home": str(owner_home),
+                    "episode_id": str(episode.get("episode_id") or "") or None,
+                    "events": monitor_delivery,
+                }
 
         submitted = _methods["prompt.submit"](
             rid,
             {
                 "session_id": session_id,
                 "text": _personal_assistant_prompt(trigger, user_intent, runtime_context),
+                "reject_if_busy": bool(monitor_events),
             },
         )
         if "error" in submitted:
+            if monitor_delivery:
+                with _sessions_lock:
+                    monitor_session = _sessions.get(session_id)
+                    if monitor_session is not None:
+                        current_delivery = monitor_session.get(
+                            "personal_assistant_monitor_delivery"
+                        )
+                        if (
+                            isinstance(current_delivery, dict)
+                            and current_delivery.get("episode_id")
+                            == str(episode.get("episode_id") or "")
+                        ):
+                            monitor_session.pop("personal_assistant_monitor_delivery", None)
             if claim is not None:
                 abandon_daily_planning_trigger(profile_home, claim)
             return submitted
@@ -9393,6 +9724,8 @@ def _(rid, params: dict) -> dict:
         session["transport"] = t
     with session["history_lock"]:
         if session.get("running"):
+            if params.get("reject_if_busy"):
+                return _err(rid, 4009, "session busy")
             # Don't reject a mid-turn prompt — queue it (and, by default,
             # interrupt the live turn) so it runs as the next turn. See
             # _handle_busy_submit for why the old "session busy" rejection
@@ -10556,6 +10889,18 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 details={"status": status},
             )
             _emit("message.complete", sid, payload)
+            if session.get("personal_assistant"):
+                try:
+                    _finish_personal_assistant_monitor_delivery(
+                        session,
+                        status=status,
+                        has_visible_response=isinstance(raw, str) and bool(raw.strip()),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Personal assistant monitor delivery settlement failed",
+                        exc_info=True,
+                    )
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -10724,6 +11069,18 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 _clear_inflight_turn(session)
                 _clear_compression_tracking(session)
                 _clear_turn_watchdog_tracking(session)
+            if session.get("personal_assistant"):
+                try:
+                    _finish_personal_assistant_monitor_delivery(
+                        session,
+                        status="error",
+                        has_visible_response=False,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Personal assistant deferred monitor delivery release failed",
+                        exc_info=True,
+                    )
             _emit("session.info", sid, _session_info(agent, session))
 
         # A user prompt that arrived mid-turn (interrupt + queue) wins over

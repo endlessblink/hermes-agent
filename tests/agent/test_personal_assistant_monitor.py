@@ -1,15 +1,30 @@
 from datetime import datetime, timedelta, timezone
 import json
+import urllib.error
+
+import pytest
 
 from agent.personal_assistant_monitor import (
     ack_candidate_event,
+    defer_candidate_event,
+    fetch_flowstate_context,
     lease_candidate_event,
+    main,
+    retry_candidate_event,
+    settle_candidate_event,
     run_cli_monitor_check,
     run_monitor_check,
 )
 
 
 NOW = datetime(2026, 7, 12, 22, 0, tzinfo=timezone.utc)
+
+
+class _ConnectorHttpError(RuntimeError):
+    def __init__(self, message, *, code, status):
+        super().__init__(message)
+        self.code = code
+        self.status = status
 
 
 def test_first_check_establishes_baseline_without_emitting(tmp_path):
@@ -36,8 +51,99 @@ def test_material_changes_emit_deduplicated_restart_safe_candidates(tmp_path):
     first = run_monitor_check(tmp_path, changed, now=NOW + timedelta(minutes=15))
     repeated = run_monitor_check(tmp_path, changed, now=NOW + timedelta(minutes=30))
 
-    assert first == {"status": "checked", "candidate_count": 4}
+    assert first == {"status": "checked", "candidate_count": 3}
     assert repeated == {"status": "checked", "candidate_count": 0}
+
+
+def test_high_priority_events_require_an_existing_task_to_transition_into_high(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        {
+            "tasks": [
+                {"id": "promoted", "title": "Promote me", "priority": "medium"},
+                {"id": "already-high", "title": "Stable", "priority": "high", "duration": 20},
+            ]
+        },
+        now=NOW,
+    )
+
+    result = run_monitor_check(
+        tmp_path,
+        {
+            "tasks": [
+                {"id": "promoted", "title": "Promote me", "priority": "high"},
+                {"id": "already-high", "title": "Stable", "priority": "high", "duration": 35},
+                {"id": "new-high", "title": "Created by this plan", "priority": "high"},
+            ]
+        },
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert result == {"status": "checked", "candidate_count": 1}
+    event = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+    assert event is not None
+    assert event["kind"] == "changed_high_priority"
+    assert event["evidence"]["taskId"] == "promoted"
+    assert event["subject"] == "task:promoted"
+
+
+def test_schedule_drift_emits_on_threshold_crossing_or_material_jump_only(tmp_path):
+    run_monitor_check(tmp_path, {"scheduleDriftMinutes": 29}, now=NOW)
+
+    crossing = run_monitor_check(
+        tmp_path, {"scheduleDriftMinutes": 30}, now=NOW + timedelta(minutes=15)
+    )
+    noise = run_monitor_check(
+        tmp_path, {"scheduleDriftMinutes": 31}, now=NOW + timedelta(minutes=30)
+    )
+    material = run_monitor_check(
+        tmp_path, {"scheduleDriftMinutes": 46}, now=NOW + timedelta(minutes=45)
+    )
+
+    assert crossing["candidate_count"] == 1
+    assert noise["candidate_count"] == 0
+    assert material["candidate_count"] == 1
+
+
+def test_event_identity_counts_occurrences_per_subject_not_globally(tmp_path):
+    both = tmp_path / "both"
+    single = tmp_path / "single"
+    baseline = {
+        "tasks": [
+            {"id": "task-a", "title": "A", "priority": "medium"},
+            {"id": "task-b", "title": "B", "priority": "medium"},
+        ]
+    }
+    promoted = {
+        "tasks": [
+            {"id": "task-a", "title": "A", "priority": "high"},
+            {"id": "task-b", "title": "B", "priority": "high"},
+        ]
+    }
+    run_monitor_check(both, baseline, now=NOW)
+    run_monitor_check(both, promoted, now=NOW + timedelta(minutes=15))
+
+    first = lease_candidate_event(both, "gateway", now=NOW + timedelta(minutes=16))
+    assert first is not None
+    assert ack_candidate_event(both, first["id"], first["lease_id"])
+    second = lease_candidate_event(both, "gateway", now=NOW + timedelta(minutes=17))
+    assert second is not None
+
+    run_monitor_check(
+        single,
+        {"tasks": [{"id": "task-b", "title": "B", "priority": "medium"}]},
+        now=NOW,
+    )
+    run_monitor_check(
+        single,
+        {"tasks": [{"id": "task-b", "title": "B", "priority": "high"}]},
+        now=NOW + timedelta(minutes=15),
+    )
+    task_b_alone = lease_candidate_event(single, "gateway", now=NOW + timedelta(minutes=16))
+
+    assert first["occurrence"] == second["occurrence"] == 1
+    assert task_b_alone is not None
+    assert second["id"] == task_b_alone["id"]
 
 
 def test_queue_lease_survives_restart_and_ack_is_idempotent(tmp_path):
@@ -54,6 +160,197 @@ def test_queue_lease_survives_restart_and_ack_is_idempotent(tmp_path):
     assert ack_candidate_event(tmp_path, leased["id"], leased["lease_id"]) is True
     assert ack_candidate_event(tmp_path, leased["id"], leased["lease_id"]) is True
     assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=17)) is None
+
+
+def test_v2_event_can_be_settled_with_an_explicit_terminal_disposition(tmp_path):
+    run_monitor_check(tmp_path, {"taskPressure": {"overdue": 0}}, now=NOW)
+    run_monitor_check(
+        tmp_path,
+        {"taskPressure": {"overdue": 1}},
+        now=NOW + timedelta(minutes=15),
+    )
+    leased = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+
+    assert leased is not None
+    assert leased["version"] == 1
+    assert leased["lifecycle_version"] == 2
+    assert leased["status"] == "leased"
+    assert leased["attempts"] == 1
+    assert not settle_candidate_event(tmp_path, leased["id"], "another-lease", "merged")
+    assert settle_candidate_event(tmp_path, leased["id"], leased["lease_id"], "merged")
+    assert settle_candidate_event(tmp_path, leased["id"], leased["lease_id"], "merged")
+    assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=17)) is None
+
+    queue_path = tmp_path / "state" / "personal-assistant-monitor" / "queue.json"
+    stored = json.loads(queue_path.read_text(encoding="utf-8"))["events"][0]
+    assert stored["status"] == "merged"
+    assert stored["disposition"] == "merged"
+    assert stored["lease"] is None
+
+
+def test_busy_turn_deferral_does_not_spend_delivery_attempts(tmp_path):
+    run_monitor_check(tmp_path, {"taskPressure": {"overdue": 0}}, now=NOW)
+    run_monitor_check(
+        tmp_path,
+        {"taskPressure": {"overdue": 1}},
+        now=NOW + timedelta(minutes=15),
+    )
+    leased = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+
+    assert leased is not None and leased["attempts"] == 1
+    assert defer_candidate_event(
+        tmp_path,
+        leased["id"],
+        leased["lease_id"],
+        now=NOW + timedelta(minutes=16),
+        delay=timedelta(seconds=5),
+    )
+    assert lease_candidate_event(
+        tmp_path, "gateway", now=NOW + timedelta(minutes=16, seconds=4)
+    ) is None
+    again = lease_candidate_event(
+        tmp_path, "gateway", now=NOW + timedelta(minutes=16, seconds=5)
+    )
+    assert again is not None and again["attempts"] == 1
+
+
+def test_failed_delivery_retries_after_backoff_then_dead_letters_without_raw_error(tmp_path):
+    run_monitor_check(tmp_path, {"taskPressure": {"overdue": 0}}, now=NOW)
+    run_monitor_check(
+        tmp_path,
+        {"taskPressure": {"overdue": 1}},
+        now=NOW + timedelta(minutes=15),
+    )
+    first = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+    assert first is not None
+    assert not retry_candidate_event(
+        tmp_path,
+        first["id"],
+        "another-lease",
+        RuntimeError("not persisted"),
+        now=NOW + timedelta(minutes=16),
+    )
+    assert retry_candidate_event(
+        tmp_path,
+        first["id"],
+        first["lease_id"],
+        RuntimeError("Bearer super-secret-value failed"),
+        now=NOW + timedelta(minutes=16),
+        backoff=timedelta(minutes=2),
+    )
+    assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=17)) is None
+
+    second = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=18))
+    assert second is not None and second["attempts"] == 2
+    assert retry_candidate_event(
+        tmp_path,
+        second["id"],
+        second["lease_id"],
+        {"category": "submission_failed", "code": "gateway_error"},
+        now=NOW + timedelta(minutes=18),
+        backoff=timedelta(0),
+    )
+    third = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=18))
+    assert third is not None and third["attempts"] == 3
+    assert retry_candidate_event(
+        tmp_path,
+        third["id"],
+        third["lease_id"],
+        RuntimeError("Bearer super-secret-value failed again"),
+        now=NOW + timedelta(minutes=18),
+    )
+
+    queue_path = tmp_path / "state" / "personal-assistant-monitor" / "queue.json"
+    stored_text = queue_path.read_text(encoding="utf-8")
+    stored = json.loads(stored_text)["events"][0]
+    assert stored["status"] == "dead_letter"
+    assert stored["disposition"] == "dead_letter"
+    assert "super-secret-value" not in stored_text
+    assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(hours=1)) is None
+    health_text = (tmp_path / "logs" / "personal-assistant-monitor.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert '"event":"dead_letter"' in health_text
+    assert "event-" not in health_text
+
+
+def test_repeated_expired_leases_dead_letter_after_the_bounded_attempt_limit(tmp_path):
+    run_monitor_check(tmp_path, {"taskPressure": {"overdue": 0}}, now=NOW)
+    run_monitor_check(
+        tmp_path,
+        {"taskPressure": {"overdue": 1}},
+        now=NOW + timedelta(minutes=15),
+    )
+    for second in range(3):
+        leased = lease_candidate_event(
+            tmp_path,
+            "crashing-gateway",
+            now=NOW + timedelta(minutes=16, seconds=second),
+            lease_ttl=timedelta(0),
+        )
+        assert leased is not None and leased["attempts"] == second + 1
+
+    assert (
+        lease_candidate_event(
+            tmp_path,
+            "gateway",
+            now=NOW + timedelta(minutes=16, seconds=3),
+        )
+        is None
+    )
+    queue_path = tmp_path / "state" / "personal-assistant-monitor" / "queue.json"
+    stored = json.loads(queue_path.read_text(encoding="utf-8"))["events"][0]
+    assert stored["status"] == "dead_letter"
+    assert stored["last_error"]["code"] == "lease_expired"
+    health = (tmp_path / "logs" / "personal-assistant-monitor.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert '"event":"dead_letter"' in health
+
+
+def test_v1_acked_and_pending_queue_entries_migrate_without_redelivery_or_loss(tmp_path):
+    queue_path = tmp_path / "state" / "personal-assistant-monitor" / "queue.json"
+    queue_path.parent.mkdir(parents=True)
+    queue_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "events": [
+                    {
+                        "id": "old-done",
+                        "version": 1,
+                        "kind": "deadline_risk",
+                        "occurrence": 1,
+                        "evidence": {"overdue": 1},
+                        "created_at": NOW.isoformat(),
+                        "lease": None,
+                        "acked": True,
+                    },
+                    {
+                        "id": "old-pending",
+                        "version": 1,
+                        "kind": "blocker",
+                        "occurrence": 1,
+                        "evidence": {"taskId": "task-1"},
+                        "created_at": NOW.isoformat(),
+                        "lease": None,
+                        "acked": False,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    leased = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=1))
+
+    assert leased is not None and leased["id"] == "old-pending"
+    migrated = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert migrated["version"] == 2
+    by_id = {event["id"]: event for event in migrated["events"]}
+    assert by_id["old-done"]["status"] == "handled"
+    assert by_id["old-pending"]["status"] == "leased"
+    assert by_id["old-pending"]["subject"] == "task:task-1"
 
 
 def test_offline_check_fails_closed_and_does_not_destroy_baseline(tmp_path):
@@ -164,3 +461,85 @@ def test_cli_notifies_only_when_new_candidates_are_added(tmp_path):
             "Personal assistant noticed a material change and will prepare it in Hermes.",
         )
     ]
+
+
+def test_fetch_flowstate_context_uses_one_testable_seam_and_validates_shapes():
+    seen = []
+
+    def request(method, path):
+        seen.append((method, path))
+        if path == "/api/assistant/context":
+            return {"taskPressure": {"overdue": 1}}
+        return {"tasks": [{"id": "task-1", "title": "One"}]}
+
+    result = fetch_flowstate_context(request)
+
+    assert result["taskPressure"] == {"overdue": 1}
+    assert result["tasks"] == [{"id": "task-1", "title": "One"}]
+    assert seen == [
+        ("GET", "/api/assistant/context"),
+        ("GET", "/api/tasks?status=open&limit=25"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure", "category", "code"),
+    [
+        (
+            _ConnectorHttpError("Bearer auth-secret", code="unauthorized", status=401),
+            "authentication",
+            "unauthorized",
+        ),
+        (
+            _ConnectorHttpError("Bearer signin-secret", code="not_signed_in", status=503),
+            "not_signed_in",
+            "not_signed_in",
+        ),
+        (TimeoutError("Bearer timeout-secret"), "timeout", "timeout"),
+        (
+            urllib.error.URLError(ConnectionRefusedError("Bearer refused-secret")),
+            "connection_refused",
+            "connection_refused",
+        ),
+        (json.JSONDecodeError("Bearer invalid-secret", "x", 0), "invalid_response", "invalid_json"),
+    ],
+)
+def test_cli_connector_failures_are_typed_persisted_redacted_and_nonzero(
+    tmp_path, capsys, failure, category, code
+):
+    profile_home = tmp_path / category
+
+    def fail():
+        raise failure
+
+    exit_code = main(
+        ["--profile-home", str(profile_home)],
+        fetch_context=fail,
+    )
+
+    assert exit_code != 0
+    state_path = profile_home / "state" / "personal-assistant-monitor" / "state.json"
+    stored_text = state_path.read_text(encoding="utf-8")
+    stored = json.loads(stored_text)
+    assert stored["last_status"] == "offline"
+    assert stored["connector_error"]["category"] == category
+    assert stored["connector_error"]["code"] == code
+    combined = stored_text + capsys.readouterr().err
+    assert "timeout-secret" not in combined
+    assert "refused-secret" not in combined
+    assert "invalid-secret" not in combined
+    assert "auth-secret" not in combined
+    assert "signin-secret" not in combined
+    health_text = (
+        profile_home / "logs" / "personal-assistant-monitor.jsonl"
+    ).read_text(encoding="utf-8")
+    health = json.loads(health_text.splitlines()[-1])
+    assert health == {
+        "component": "personal_assistant_monitor",
+        "count": 0,
+        "event": "connector_failure",
+        "source": "producer",
+        "status": category,
+        "ts": health["ts"],
+    }
+    assert "secret" not in health_text
