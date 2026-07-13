@@ -21,6 +21,12 @@ export type ChatMessage = {
   attachmentRefs?: string[]
 }
 
+const HERMES_UI_FORM_RESPONSE_PREFIX = 'Hermes UI form response:\n'
+
+function isHiddenHermesUiResponse(message: SessionMessage, displayContent: string): boolean {
+  return message.role === 'user' && displayContent.startsWith(HERMES_UI_FORM_RESPONSE_PREFIX)
+}
+
 export function isSessionBusyMessage(value: unknown): boolean {
   return /(?:^|\b)session busy(?:\b|$)/i.test(typeof value === 'string' ? value : String(value ?? ''))
 }
@@ -847,7 +853,8 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       id: `${message.timestamp || Date.now()}-${index}-${message.role}`,
       role: message.role,
       parts,
-      timestamp: message.timestamp
+      timestamp: message.timestamp,
+      hidden: isHiddenHermesUiResponse(message, displayContent) || undefined
     })
 
     activeAssistantIndex = message.role === 'assistant' ? result.length - 1 : null

@@ -112,7 +112,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // keeps the guard so a stray Enter mid-turn can't double-submit.
       const hasSendable = Boolean(visibleText || terminalContextBlocks || attachments.length || hasImage)
 
-      if (!hasSendable || (!options?.fromQueue && busyRef.current)) {
+      if (!hasSendable || (!options?.allowWhileBusy && !options?.fromQueue && busyRef.current)) {
         return false
       }
 
@@ -140,7 +140,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         id: optimisticId,
         role: 'user',
         parts: [textPart(visibleText || (attachmentRefs.length ? '' : attachments.map(a => a.label).join(', ')))],
-        attachmentRefs
+        attachmentRefs,
+        hidden: options?.hidden
       })
 
       const releaseBusy = () => {
@@ -314,6 +315,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // instead of the model guessing from history/memory. `source` lets the
         // backend distrust a preview that auto-followed a generation result.
         const previewTarget = $filePreviewTarget.get()
+
         const activeTarget = previewTarget
           ? {
               kind: previewTarget.kind,

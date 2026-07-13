@@ -288,7 +288,11 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
     setSubmitting(true)
     const response = buildHermesUiFormResponse(artifact, values)
 
-    requestComposerSubmit(`Hermes UI form response:\n${JSON.stringify(response)}`, { target: 'main' })
+    requestComposerSubmit(`Hermes UI form response:\n${JSON.stringify(response)}`, {
+      allowWhileBusy: true,
+      hidden: true,
+      target: 'main'
+    })
   }
 
   return (

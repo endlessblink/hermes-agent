@@ -1,6 +1,8 @@
-import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { useRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import { requestComposerSubmit } from '../focus'
 
 import { useComposerSubmit } from './use-composer-submit'
 
@@ -84,6 +86,23 @@ function Harness({
 }
 
 describe('useComposerSubmit clarify routing', () => {
+  it('does not restore a rejected hidden form response into the composer', async () => {
+    const onQueue = vi.fn(() => true)
+    const onSubmit = vi.fn(() => false)
+    const { getByTestId } = render(<Harness onQueue={onQueue} onSubmit={onSubmit} />)
+
+    requestComposerSubmit('Hermes UI form response:\n{"type":"form-response"}', {
+      allowWhileBusy: true,
+      hidden: true,
+      target: 'main'
+    })
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith(expect.any(String), { allowWhileBusy: true, hidden: true })
+    })
+    expect(getByTestId('editor').textContent).toBe('')
+  })
+
   it('answers an active clarify request from the main composer instead of queuing', async () => {
     const onClarify = vi.fn(async () => true)
     const onQueue = vi.fn(() => true)

@@ -81,9 +81,12 @@ export function useComposerSubmit({
 }: UseComposerSubmitArgs) {
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
-  const dispatchSubmit = (text: string, attachments?: ComposerAttachment[]) => {
+  const dispatchSubmit = (
+    text: string,
+    options?: { allowWhileBusy?: boolean; attachments?: ComposerAttachment[]; hidden?: boolean }
+  ) => {
     const submittedScope = activeQueueSessionKeyRef.current
-    const submittedAttachments = attachments ?? []
+    const submittedAttachments = options?.attachments ?? []
     const submittedText = transformSubmitText?.(text) ?? text
 
     const restore = () => {
@@ -91,16 +94,22 @@ export function useComposerSubmit({
       stashAt(activeQueueSessionKeyRef.current, text, submittedAttachments)
     }
 
-    void Promise.resolve(attachments ? onSubmit(submittedText, { attachments }) : onSubmit(submittedText))
+    void Promise.resolve(onSubmit(submittedText, options))
       .then(accepted => {
         if (accepted === false) {
-          restore()
+          if (!options?.hidden) {
+            restore()
+          }
         } else {
           clearSessionDraft(submittedScope)
           onSubmitAccepted?.()
         }
       })
-      .catch(restore)
+      .catch(() => {
+        if (!options?.hidden) {
+          restore()
+        }
+      })
   }
 
   // External "submit this prompt" requests (e.g. the review pane's agent-ship
@@ -139,9 +148,9 @@ export function useComposerSubmit({
 
   useEffect(
     () =>
-      onComposerSubmitRequest(({ target, text }) => {
+      onComposerSubmitRequest(({ allowWhileBusy, hidden, target, text }) => {
         if (target === 'main' && !inputDisabled) {
-          dispatchSubmitRef.current(text)
+          dispatchSubmitRef.current(text, allowWhileBusy || hidden ? { allowWhileBusy, hidden } : undefined)
         }
       }),
     [inputDisabled]
@@ -209,7 +218,7 @@ export function useComposerSubmit({
       resetBrowseState(sessionId)
       clearDraft()
       clearComposerAttachments()
-      dispatchSubmit(text, submittedAttachments)
+      dispatchSubmit(text, { attachments: submittedAttachments })
     }
 
     focusInput()

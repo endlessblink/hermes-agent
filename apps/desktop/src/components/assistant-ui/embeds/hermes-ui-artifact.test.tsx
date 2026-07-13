@@ -185,7 +185,11 @@ describe('ChecklistArtifactCard', () => {
       type: 'form-response',
       values: { outcome: 'לסיים את המצגת', energy: 'high' }
     })
-    expect(requestComposerSubmit).toHaveBeenCalledWith(expect.any(String), { target: 'main' })
+    expect(requestComposerSubmit).toHaveBeenCalledWith(expect.any(String), {
+      allowWhileBusy: true,
+      hidden: true,
+      target: 'main'
+    })
   })
 
   it('prefills a normalized numeric default in the rendered form', () => {

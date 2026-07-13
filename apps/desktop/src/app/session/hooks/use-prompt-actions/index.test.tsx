@@ -61,7 +61,15 @@ interface HarnessHandle {
     text: string
   }) => Promise<boolean>
   steerPrompt: (text: string) => Promise<boolean>
-  submitText: (text: string, options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }) => Promise<boolean>
+  submitText: (
+    text: string,
+    options?: {
+      allowWhileBusy?: boolean
+      attachments?: ComposerAttachment[]
+      fromQueue?: boolean
+      hidden?: boolean
+    }
+  ) => Promise<boolean>
 }
 
 function Harness({
@@ -555,6 +563,40 @@ describe('usePromptActions submit / queue drain semantics', () => {
       },
       1_800_000
     )
+  })
+
+  it('sends a hidden Hermes UI response while busy without exposing its optimistic payload', async () => {
+    const busyRef = { current: true }
+    const seeds: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        busyRef={busyRef}
+        onReady={h => (handle = h)}
+        onSeedState={state => seeds.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    const text = 'Hermes UI form response:\n{"type":"form-response"}'
+    const accepted = await handle!.submitText(text, { allowWhileBusy: true, hidden: true })
+
+    expect(accepted).toBe(true)
+    expect(requestGateway).toHaveBeenCalledWith(
+      'prompt.submit',
+      { session_id: RUNTIME_SESSION_ID, text },
+      1_800_000
+    )
+    expect(
+      seeds.some(state =>
+        ((state.messages ?? []) as Array<{ hidden?: boolean; role?: string }>).some(
+          message => message.role === 'user' && message.hidden === true
+        )
+      )
+    ).toBe(true)
   })
 
   it('a fromQueue drain uses the live session ref when rendered activeSessionId is stale', async () => {

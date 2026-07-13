@@ -12,6 +12,18 @@ import {
 } from './chat-messages'
 
 describe('toChatMessages', () => {
+  it('keeps persisted Hermes UI form responses out of the visible transcript', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'user',
+        content: 'Hermes UI form response:\n{"type":"form-response","values":{"status":"ready"}}',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.hidden).toBe(true)
+  })
+
   it('drops stored assistant session-busy bounces', () => {
     const messages = toChatMessages([
       { role: 'user', content: 'continue', timestamp: 1 },
