@@ -628,34 +628,74 @@ class Bridge:
     def _validate_activation_preview(
         self,
         response: Mapping[str, Any],
-        operation_id: str,
-        page_id: str,
-        data_source_id: str,
+        request: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         normalized = response.get("normalizedPayload")
+        notion = request["notion"]
         if (
             response.get("ok") is not True
             or response.get("result") != "preview"
             or response.get("contractVersion") != "notion-activation-v1"
-            or response.get("operationId") != operation_id
+            or response.get("operationId") != request["operationId"]
             or not isinstance(normalized, dict)
-            or normalized.get("operationId") != operation_id
-            or normalized.get("notionPageId") != page_id
-            or normalized.get("notionDataSourceId") != data_source_id
+            or normalized.get("operationId") != request["operationId"]
+            or normalized.get("notionPageId") != notion["pageId"]
+            or normalized.get("notionDataSourceId") != notion["dataSourceId"]
+            or normalized.get("notionUrl") != notion["url"]
+            or not self._same_timestamp(
+                normalized.get("notionLastEditedAt"), notion["lastEditedAt"]
+            )
+            or not self._activation_task_matches(normalized.get("task"), request["task"])
+            or normalized.get("workBlock") != request["workBlock"]
         ):
             raise BridgeError("receipt_mismatch", "FlowState preview identity did not match the request")
         return response
 
+    @staticmethod
+    def _same_timestamp(left: Any, right: Any) -> bool:
+        try:
+            return _parse_time(left) == _parse_time(right)
+        except BridgeError:
+            return False
+
+    def _activation_task_matches(self, actual: Any, requested: Mapping[str, Any]) -> bool:
+        if not isinstance(actual, dict):
+            return False
+        requested_due_date = requested.get("dueDate")
+        return (
+            actual.get("title") == requested["title"]
+            and actual.get("description") == requested.get("description", "")
+            and actual.get("priority") == requested.get("priority")
+            and actual.get("projectId") == requested.get("projectId")
+            and (
+                actual.get("dueDate") is None
+                if requested_due_date is None
+                else self._same_timestamp(actual.get("dueDate"), requested_due_date)
+            )
+        )
+
+    def _activation_provenance_matches(
+        self, provenance: Any, notion: Mapping[str, Any]
+    ) -> bool:
+        return (
+            isinstance(provenance, dict)
+            and provenance.get("source") == "notion"
+            and provenance.get("externalId") == notion["pageId"]
+            and provenance.get("dataSourceId") == notion["dataSourceId"]
+            and provenance.get("url") == notion["url"]
+            and self._same_timestamp(
+                provenance.get("lastEditedAt"), notion["lastEditedAt"]
+            )
+        )
+
     def _validate_activation_receipt(
         self,
         response: Mapping[str, Any],
-        operation_id: str,
-        page_id: str,
-        data_source_id: str,
-        work_block: Mapping[str, Any],
+        request: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         receipt = response.get("receipt")
         read_back = receipt.get("readBack") if isinstance(receipt, dict) else None
+        notion = request["notion"]
         canonical_revision = receipt.get("canonicalRevision") if isinstance(receipt, dict) else None
         change_sequence = receipt.get("changeSequence") if isinstance(receipt, dict) else None
         read_back_hash = receipt.get("readBackHash") if isinstance(receipt, dict) else None
@@ -665,10 +705,11 @@ class Bridge:
             or not isinstance(receipt, dict)
             or receipt.get("contractVersion") != "notion-activation-v1"
             or receipt.get("source") != "notion"
-            or receipt.get("externalId") != page_id
-            or receipt.get("operationId") != operation_id
+            or receipt.get("externalId") != notion["pageId"]
+            or receipt.get("operationId") != request["operationId"]
             or receipt.get("entityType") != "task"
             or receipt.get("action") != "activate"
+            or not self._activation_provenance_matches(receipt.get("provenance"), notion)
             or not isinstance(canonical_revision, int)
             or isinstance(canonical_revision, bool)
             or canonical_revision < 1
@@ -681,24 +722,32 @@ class Bridge:
             or not isinstance(receipt.get("canonicalUpdatedAt"), str)
             or not isinstance(receipt.get("committedAt"), str)
             or not isinstance(read_back, dict)
+            or not self._activation_task_matches(read_back, request["task"])
             or read_back.get("id") != receipt.get("entityId")
             or read_back.get("canonicalRevision") != canonical_revision
             or read_back.get("canonicalUpdatedAt") != receipt.get("canonicalUpdatedAt")
             or read_back.get("externalSource") != "notion"
-            or read_back.get("externalId") != page_id
-            or read_back.get("externalDataSourceId") != data_source_id
+            or read_back.get("externalId") != notion["pageId"]
+            or read_back.get("externalDataSourceId") != notion["dataSourceId"]
+            or read_back.get("externalUrl") != notion["url"]
+            or not self._same_timestamp(
+                read_back.get("externalLastEditedAt"), notion["lastEditedAt"]
+            )
+            or not self._activation_provenance_matches(read_back.get("provenance"), notion)
+            or read_back_hash != _digest(read_back).removeprefix("sha256:")
         ):
             raise BridgeError("receipt_mismatch", "FlowState receipt identity did not match the request")
         _parse_time(receipt["canonicalUpdatedAt"])
         _parse_time(receipt["committedAt"])
         instances = read_back.get("instances")
-        if not isinstance(instances, list) or not any(
+        work_block = request["workBlock"]
+        if work_block is not None and (not isinstance(instances, list) or not any(
             isinstance(instance, dict)
             and instance.get("scheduledDate") == work_block.get("scheduledDate")
             and instance.get("scheduledTime") == work_block.get("scheduledTime")
             and instance.get("duration") == work_block.get("duration")
             for instance in instances
-        ):
+        )):
             raise BridgeError(
                 "verification_failed", "FlowState read-back omitted the approved work block"
             )
@@ -716,9 +765,12 @@ class Bridge:
         allowed_task = {"title", "description", "priority", "dueDate", "projectId"}
         if set(task) - allowed_task:
             raise BridgeError("invalid_input", "task contains unsupported fields")
-        work_block = _object(args.get("work_block"), "work_block")
-        if not work_block:
-            raise BridgeError("invalid_input", "work_block must not be empty")
+        work_block_value = args.get("work_block")
+        work_block = None
+        if work_block_value is not None:
+            work_block = _object(work_block_value, "work_block")
+            if not work_block:
+                raise BridgeError("invalid_input", "work_block must not be empty")
         request = {
             "operationId": operation_id,
             "notion": {
@@ -753,9 +805,7 @@ class Bridge:
                 headers=self._flowstate_headers(),
                 payload={**request, "preview": True},
             )
-            identity = self._validate_activation_preview(
-                response, operation_id, page_id, data_source_id
-            )
+            identity = self._validate_activation_preview(response, request)
             preview_digest = identity.get("previewDigest")
             preview_digest = _required_text(preview_digest, "FlowState preview digest")
             expires_raw = identity.get("previewExpiresAt")
@@ -805,9 +855,7 @@ class Bridge:
                     ).isoformat(),
                 },
             )
-            identity = self._validate_activation_receipt(
-                response, operation_id, page_id, data_source_id, request["workBlock"]
-            )
+            identity = self._validate_activation_receipt(response, request)
             flowstate_id = identity.get("entityId")
             flowstate_id = _required_text(flowstate_id, "FlowState task id")
             receipt = {

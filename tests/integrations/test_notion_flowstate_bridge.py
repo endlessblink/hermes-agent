@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import urllib.error
 from datetime import datetime, timezone
@@ -530,14 +531,27 @@ def activation_preview(
             "operationId": operation,
             "notionPageId": page_id,
             "notionDataSourceId": source_id,
-            "task": {"title": "Work"},
+            "notionUrl": f"https://notion.so/{page_id}",
+            "notionLastEditedAt": "2026-07-13T18:00:00Z",
+            "task": {
+                "title": "Work",
+                "description": "",
+                "priority": None,
+                "dueDate": None,
+                "projectId": None,
+            },
+            "workBlock": {
+                "scheduledDate": "2026-07-13",
+                "scheduledTime": "18:30",
+                "duration": 25,
+            },
         },
         "readBack": None,
     }
 
 
 def activation_receipt(operation="activation-1", page_id="page-1", source_id="source-1"):
-    return {
+    response = {
         "ok": True,
         "result": "committed",
         "receipt": {
@@ -553,14 +567,35 @@ def activation_receipt(operation="activation-1", page_id="page-1", source_id="so
             "changeSequence": 42,
             "replayed": False,
             "committedAt": "2026-07-13T18:30:00Z",
-            "readBackHash": "a" * 64,
+            "readBackHash": "",
+            "provenance": {
+                "source": "notion",
+                "externalId": page_id,
+                "dataSourceId": source_id,
+                "url": f"https://notion.so/{page_id}",
+                "lastEditedAt": "2026-07-13T18:00:00Z",
+            },
             "readBack": {
                 "id": "flow-task-1",
+                "title": "Work",
+                "description": "",
+                "priority": None,
+                "dueDate": None,
+                "projectId": None,
                 "canonicalRevision": 3,
                 "canonicalUpdatedAt": "2026-07-13T18:30:00Z",
                 "externalSource": "notion",
                 "externalId": page_id,
                 "externalDataSourceId": source_id,
+                "externalUrl": f"https://notion.so/{page_id}",
+                "externalLastEditedAt": "2026-07-13T18:00:00Z",
+                "provenance": {
+                    "source": "notion",
+                    "externalId": page_id,
+                    "dataSourceId": source_id,
+                    "url": f"https://notion.so/{page_id}",
+                    "lastEditedAt": "2026-07-13T18:00:00Z",
+                },
                 "instances": [
                     {
                         "scheduledDate": "2026-07-13",
@@ -571,6 +606,20 @@ def activation_receipt(operation="activation-1", page_id="page-1", source_id="so
             },
         }
     }
+    refresh_activation_hash(response)
+    return response
+
+
+def refresh_activation_hash(response):
+    read_back = response["receipt"]["readBack"]
+    response["receipt"]["readBackHash"] = hashlib.sha256(
+        json.dumps(
+            read_back,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def test_activation_fetches_exact_page_and_uses_preview_apply_contract(tmp_path):
@@ -619,6 +668,7 @@ def test_activation_surfaces_existing_task_and_requires_exact_approved_block_in_
     existing = activation_preview(already=True)
     receipt = activation_receipt()
     receipt["receipt"]["readBack"]["instances"] = []
+    refresh_activation_hash(receipt)
     transport = FakeTransport([page(), existing, page(), receipt])
     bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
     args = {
@@ -638,6 +688,31 @@ def test_activation_surfaces_existing_task_and_requires_exact_approved_block_in_
             {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
         )
     assert error.value.code == "verification_failed"
+
+
+def test_activation_can_start_without_scheduling_a_work_block(tmp_path):
+    preview_response = activation_preview()
+    preview_response["normalizedPayload"]["workBlock"] = None
+    receipt_response = activation_receipt()
+    receipt_response["receipt"]["readBack"]["instances"] = []
+    refresh_activation_hash(receipt_response)
+    transport = FakeTransport(
+        [page(), preview_response, page(), receipt_response]
+    )
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
+    args = {
+        "operation_id": "activation-1",
+        "page_id": "page-1",
+        "task": {"title": "Work"},
+    }
+
+    preview = bridge.activate(args)
+    receipt = bridge.activate(
+        {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+    )
+
+    assert preview["preview"]["workBlock"] is None
+    assert receipt["flowstate_task_id"] == "flow-task-1"
 
 
 def test_ambiguous_activation_commit_can_replay_after_local_preview_expiry(tmp_path):
@@ -686,16 +761,138 @@ def test_activation_rejects_page_and_receipt_provenance_mismatches(tmp_path):
         )
     assert wrong_receipt.value.code == "receipt_mismatch"
 
+    changed_preview = activation_preview()
+    changed_preview["normalizedPayload"]["notionUrl"] = "https://notion.so/other"
+    transport = FakeTransport([page(), changed_preview])
+    bridge = Bridge(
+        config(tmp_path, state_path=tmp_path / "changed-preview.sqlite3"),
+        transport=transport,
+        clock=lambda: 1000,
+    )
+    with pytest.raises(BridgeError) as changed_intent:
+        bridge.activate(
+            {
+                "operation_id": "activation-1",
+                "page_id": "page-1",
+                "task": {"title": "Work"},
+                "work_block": {
+                    "scheduledDate": "2026-07-13",
+                    "scheduledTime": "18:30",
+                    "duration": 25,
+                },
+            }
+        )
+    assert changed_intent.value.code == "receipt_mismatch"
+
+
+def test_activation_accepts_semantically_equal_normalized_due_date(tmp_path):
+    preview_response = activation_preview()
+    preview_response["normalizedPayload"]["task"]["dueDate"] = "2026-07-14T08:00:00Z"
+    transport = FakeTransport([page(), preview_response])
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
+    preview = bridge.activate(
+        {
+            "operation_id": "activation-1",
+            "page_id": "page-1",
+            "task": {"title": "Work", "dueDate": "2026-07-14T10:00:00+02:00"},
+            "work_block": {
+                "scheduledDate": "2026-07-13",
+                "scheduledTime": "18:30",
+                "duration": 25,
+            },
+        }
+    )
+    assert preview["preview_digest"] == "sha256:flowstate-preview"
+
 
 def test_activation_requires_flowstate_verified_receipt(tmp_path):
     unverified = activation_receipt()
     unverified["receipt"]["readBack"]["externalId"] = "other-page"
     transport = FakeTransport([page(), activation_preview(), page(), unverified])
     bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
-    base = {"operation_id": "activation-1", "page_id": "page-1", "task": {"title": "Work"}, "work_block": {"scheduledDate": "2026-07-13", "scheduledTime": "18:30", "duration": 10}}
+    base = {
+        "operation_id": "activation-1",
+        "page_id": "page-1",
+        "task": {"title": "Work"},
+        "work_block": {
+            "scheduledDate": "2026-07-13",
+            "scheduledTime": "18:30",
+            "duration": 25,
+        },
+    }
     preview = bridge.activate(base)
     with pytest.raises(BridgeError) as error:
         bridge.activate({**base, "mode": "apply", "preview_digest": preview["preview_digest"]})
+    assert error.value.code == "receipt_mismatch"
+
+
+def test_activation_rejects_receipt_with_changed_notion_provenance(tmp_path):
+    changed = activation_receipt()
+    changed["receipt"]["provenance"]["dataSourceId"] = "other-source"
+    transport = FakeTransport([page(), activation_preview(), page(), changed])
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
+    args = {
+        "operation_id": "activation-1",
+        "page_id": "page-1",
+        "task": {"title": "Work"},
+        "work_block": {
+            "scheduledDate": "2026-07-13",
+            "scheduledTime": "18:30",
+            "duration": 25,
+        },
+    }
+    preview = bridge.activate(args)
+    with pytest.raises(BridgeError) as error:
+        bridge.activate(
+            {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+        )
+    assert error.value.code == "receipt_mismatch"
+
+
+def test_activation_rejects_changed_task_projection_even_with_matching_hash(tmp_path):
+    changed = activation_receipt()
+    changed["receipt"]["readBack"]["title"] = "Different task"
+    refresh_activation_hash(changed)
+    transport = FakeTransport([page(), activation_preview(), page(), changed])
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
+    args = {
+        "operation_id": "activation-1",
+        "page_id": "page-1",
+        "task": {"title": "Work"},
+        "work_block": {
+            "scheduledDate": "2026-07-13",
+            "scheduledTime": "18:30",
+            "duration": 25,
+        },
+    }
+    preview = bridge.activate(args)
+    with pytest.raises(BridgeError) as error:
+        bridge.activate(
+            {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+        )
+    assert error.value.code == "receipt_mismatch"
+
+
+def test_activation_rejects_readback_hash_mismatch(tmp_path):
+    changed = activation_receipt()
+    changed["receipt"]["readBack"]["description"] = "Changed after hashing"
+    transport = FakeTransport([page(), activation_preview(), page(), changed])
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
+    args = {
+        "operation_id": "activation-1",
+        "page_id": "page-1",
+        "task": {"title": "Work"},
+        "work_block": {
+            "scheduledDate": "2026-07-13",
+            "scheduledTime": "18:30",
+            "duration": 25,
+        },
+    }
+    preview = bridge.activate(args)
+    with pytest.raises(BridgeError) as error:
+        bridge.activate(
+            {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+        )
     assert error.value.code == "receipt_mismatch"
 
 
