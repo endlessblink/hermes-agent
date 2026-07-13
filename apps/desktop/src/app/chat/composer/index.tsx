@@ -93,7 +93,8 @@ export function ChatBar({
   onRemoveAttachment,
   onSteer,
   onSubmit,
-  onTranscribeAudio
+  onTranscribeAudio,
+  recoverLostClarifyWhileBusy = false
 }: ChatBarProps) {
   const attachments = useStore($composerAttachments)
   const scrolledUp = useStore($threadScrolledUp)
@@ -288,6 +289,7 @@ export function ChatBar({
     onSubmitClarifyAnswer: clarifyRequest ? submitClarifyAnswer : undefined,
     queueCurrentDraft,
     queueEdit,
+    recoverLostClarifyWhileBusy,
     sendBlocked,
     sessionId,
     setComposerText,

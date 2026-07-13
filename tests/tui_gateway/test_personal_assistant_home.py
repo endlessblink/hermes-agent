@@ -134,7 +134,7 @@ def test_personal_assistant_runtime_policy_caps_only_its_agent():
     assert not hasattr(ordinary, "_tool_result_budget_override")
 
 
-def test_generic_create_marks_legacy_personal_assistant_for_deferred_policy(monkeypatch, tmp_path):
+def test_explicit_create_marks_personal_assistant_for_deferred_policy(monkeypatch, tmp_path):
     import tui_gateway.server as server
 
     monkeypatch.setattr(server, "_schedule_agent_build", lambda sid: None)
@@ -143,7 +143,12 @@ def test_generic_create_marks_legacy_personal_assistant_for_deferred_policy(monk
     monkeypatch.setattr(server, "_completion_cwd", lambda params=None: str(tmp_path))
 
     response = server._methods["session.create"](
-        "r1", {"title": "Personal assistant", "source": "desktop"}
+        "r1",
+        {
+            "title": "Personal assistant",
+            "source": "desktop",
+            "personal_assistant": True,
+        },
     )
     sid = response["result"]["session_id"]
     try:
@@ -153,7 +158,7 @@ def test_generic_create_marks_legacy_personal_assistant_for_deferred_policy(monk
             server._sessions.pop(sid, None)
 
 
-def test_generic_cold_resume_marks_legacy_personal_assistant_for_deferred_policy(
+def test_explicit_cold_resume_marks_personal_assistant_for_deferred_policy(
     monkeypatch, tmp_path
 ):
     import tui_gateway.server as server
@@ -181,11 +186,37 @@ def test_generic_cold_resume_marks_legacy_personal_assistant_for_deferred_policy
     monkeypatch.setattr(server, "_default_session_cwd", lambda: str(tmp_path))
 
     response = server._methods["session.resume"](
-        "r1", {"session_id": "legacy-assistant", "source": "desktop"}
+        "r1",
+        {
+            "session_id": "legacy-assistant",
+            "source": "desktop",
+            "personal_assistant": True,
+        },
     )
     sid = response["result"]["session_id"]
     try:
         assert server._sessions[sid]["personal_assistant"] is True
+    finally:
+        with server._sessions_lock:
+            server._sessions.pop(sid, None)
+
+
+def test_user_chat_named_personal_assistant_does_not_receive_assistant_policy(
+    monkeypatch, tmp_path
+):
+    import tui_gateway.server as server
+
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda sid: None)
+    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(server, "_completion_cwd", lambda params=None: str(tmp_path))
+
+    response = server._methods["session.create"](
+        "r1", {"title": "Personal assistant", "source": "desktop"}
+    )
+    sid = response["result"]["session_id"]
+    try:
+        assert server._sessions[sid]["personal_assistant"] is False
     finally:
         with server._sessions_lock:
             server._sessions.pop(sid, None)
@@ -292,7 +323,7 @@ def test_home_returns_live_and_canonical_session_ids(monkeypatch, tmp_path):
     assert applied == ["assistant-live"]
 
 
-def test_home_clears_unread_activity_persistently(monkeypatch, tmp_path):
+def test_home_preserves_unread_activity_until_the_transcript_is_read(monkeypatch, tmp_path):
     import tui_gateway.server as server
     from agent.personal_assistant_state import PersonalAssistantStateStore
 
@@ -309,8 +340,8 @@ def test_home_clears_unread_activity_persistently(monkeypatch, tmp_path):
 
     response = server._methods["personal_assistant.home"]("r1", {})
 
-    assert response["result"]["state"]["unreadCount"] == 0
-    assert store.public()["unreadCount"] == 0
+    assert response["result"]["state"]["unreadCount"] == 5
+    assert store.public()["unreadCount"] == 5
 
 
 def test_read_acknowledgement_is_idempotent(monkeypatch, tmp_path):
@@ -332,6 +363,35 @@ def test_read_acknowledgement_is_idempotent(monkeypatch, tmp_path):
     assert first["unreadCount"] == 0
     assert second["unreadCount"] == 0
     assert second["version"] == first["version"]
+
+
+def test_read_acknowledgement_retries_a_concurrent_state_change(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore, StateVersionConflict
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    store.patch("edit", {"unreadCount": 1})
+    original_patch = PersonalAssistantStateStore.patch
+    attempts = 0
+
+    def conflict_once(self, *args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            original_patch(self, "edit", {"unreadCount": 2})
+            raise StateVersionConflict(self.read()["version"])
+        return original_patch(self, *args, **kwargs)
+
+    monkeypatch.setattr(PersonalAssistantStateStore, "patch", conflict_once)
+
+    response = server._methods["personal_assistant.read"](
+        "r1", {"profile": "office-work"}
+    )
+
+    assert response["result"]["state"]["unreadCount"] == 0
+    assert attempts == 2
 
 
 def test_start_idempotency_does_not_submit_twice(monkeypatch, tmp_path):

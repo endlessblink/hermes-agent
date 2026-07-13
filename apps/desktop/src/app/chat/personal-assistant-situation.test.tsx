@@ -27,6 +27,14 @@ const baseState: AssistantState = {
 
 const $personalAssistantState = atom(baseState)
 
+function mountBottomedThreadViewport() {
+  const viewport = document.createElement('div')
+
+  viewport.dataset.slot = 'aui_thread-viewport'
+  viewport.dataset.following = 'true'
+  document.body.append(viewport)
+}
+
 vi.mock('@/store/personal-assistant', () => ({
   $personalAssistantState,
   acknowledgePersonalAssistantRead,
@@ -42,7 +50,10 @@ beforeEach(() => {
   $threadScrolledUp.set(false)
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
 })
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  document.querySelectorAll('[data-slot="aui_thread-viewport"]').forEach(viewport => viewport.remove())
+})
 
 describe('PersonalAssistantSituation', () => {
   it('shows the complete live situation and pending count', () => {
@@ -83,6 +94,7 @@ describe('PersonalAssistantSituation', () => {
   })
 
   it('acknowledges unread activity when the open assistant is visible at the bottom', async () => {
+    mountBottomedThreadViewport()
     render(<PersonalAssistantSituation />)
 
     expect(screen.getByLabelText('1 unread personal assistant update')).toBeTruthy()
@@ -91,9 +103,14 @@ describe('PersonalAssistantSituation', () => {
     $personalAssistantState.set({ ...baseState, unreadCount: 2, version: 3 })
 
     await waitFor(() => expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(2))
+
+    $personalAssistantState.set({ ...baseState, unreadCount: 2, version: 4 })
+
+    await waitFor(() => expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(3))
   })
 
   it('waits to acknowledge until the assistant is visible and scrolled to the bottom', async () => {
+    mountBottomedThreadViewport()
     $threadScrolledUp.set(true)
     render(<PersonalAssistantSituation />)
 
@@ -104,7 +121,38 @@ describe('PersonalAssistantSituation', () => {
     await waitFor(() => expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(1))
   })
 
+  it('waits for the transcript viewport to load before acknowledging', async () => {
+    render(<PersonalAssistantSituation />)
+
+    await Promise.resolve()
+    expect(acknowledgePersonalAssistantRead).not.toHaveBeenCalled()
+
+    mountBottomedThreadViewport()
+
+    await waitFor(() => expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(1))
+  })
+
+  it('coalesces transcript mutations while a read acknowledgement is in flight', async () => {
+    let resolveAcknowledgement: (value: undefined) => void = () => undefined
+
+    acknowledgePersonalAssistantRead.mockImplementationOnce(
+      () => new Promise<undefined>(resolve => {
+        resolveAcknowledgement = resolve
+      })
+    )
+    mountBottomedThreadViewport()
+    render(<PersonalAssistantSituation />)
+    await waitFor(() => expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(1))
+
+    document.body.append(document.createElement('span'), document.createElement('span'))
+    await Promise.resolve()
+
+    expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(1)
+    resolveAcknowledgement(undefined)
+  })
+
   it('acknowledges unread activity when a bottomed assistant window becomes visible', async () => {
+    mountBottomedThreadViewport()
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
     render(<PersonalAssistantSituation />)
 

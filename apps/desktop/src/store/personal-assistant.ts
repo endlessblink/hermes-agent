@@ -65,6 +65,21 @@ export interface AssistantStateOperation {
 export const $personalAssistantState = atom<AssistantState | null>(null)
 export const $personalAssistantPendingCount = atom<number | null>(null)
 
+function storePersonalAssistantState(state: AssistantState): AssistantState {
+  const current = $personalAssistantState.get()
+
+  if (current && state.version < current.version) {
+    return current
+  }
+
+  $personalAssistantState.set(state)
+  $personalAssistantPendingCount.set(
+    (state.pendingApprovals?.length ?? 0) + (state.captureProposals?.length ?? 0)
+  )
+
+  return state
+}
+
 function gatewayOrThrow() {
   const gateway = $gateway.get()
 
@@ -125,10 +140,7 @@ export async function openPersonalAssistantHome(): Promise<string> {
     throw new Error('Personal assistant home did not return a session')
   }
 
-  $personalAssistantState.set(response.state)
-  $personalAssistantPendingCount.set(
-    (response.state.pendingApprovals?.length ?? 0) + (response.state.captureProposals?.length ?? 0)
-  )
+  storePersonalAssistantState(response.state)
 
   return destinationSessionId
 }
@@ -138,12 +150,7 @@ export async function refreshPersonalAssistantState(): Promise<AssistantState> {
     profile: PERSONAL_ASSISTANT_OWNER_PROFILE
   })
 
-  $personalAssistantState.set(response.state)
-  $personalAssistantPendingCount.set(
-    (response.state.pendingApprovals?.length ?? 0) + (response.state.captureProposals?.length ?? 0)
-  )
-
-  return response.state
+  return storePersonalAssistantState(response.state)
 }
 
 export async function acknowledgePersonalAssistantRead(): Promise<AssistantState> {
@@ -151,9 +158,13 @@ export async function acknowledgePersonalAssistantRead(): Promise<AssistantState
     profile: PERSONAL_ASSISTANT_OWNER_PROFILE
   })
 
-  $personalAssistantState.set(response.state)
+  const current = $personalAssistantState.get()
 
-  return response.state
+  if (current && response.state.version < current.version) {
+    return refreshPersonalAssistantState()
+  }
+
+  return storePersonalAssistantState(response.state)
 }
 
 export async function patchPersonalAssistantState(
@@ -171,10 +182,5 @@ export async function patchPersonalAssistantState(
     profile: PERSONAL_ASSISTANT_OWNER_PROFILE
   })
 
-  $personalAssistantState.set(response.state)
-  $personalAssistantPendingCount.set(
-    (response.state.pendingApprovals?.length ?? 0) + (response.state.captureProposals?.length ?? 0)
-  )
-
-  return response.state
+  return storePersonalAssistantState(response.state)
 }

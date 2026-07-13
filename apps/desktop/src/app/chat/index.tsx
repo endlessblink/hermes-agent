@@ -551,6 +551,7 @@ export function ChatView({
               onSubmit={onSubmit}
               onTranscribeAudio={onTranscribeAudio}
               queueSessionKey={selectedSessionId}
+              recoverLostClarifyWhileBusy={isPersonalAssistant}
               sessionId={activeSessionId}
               state={chatBarState}
             />

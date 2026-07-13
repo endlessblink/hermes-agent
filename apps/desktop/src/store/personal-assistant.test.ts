@@ -23,6 +23,7 @@ beforeEach(() => {
   request.mockReset()
   ensureGatewayProfile.mockClear()
   $gateway.set({ request })
+  $personalAssistantState.set(null)
 })
 
 describe('startPersonalAssistant', () => {
@@ -95,6 +96,26 @@ describe('startPersonalAssistant', () => {
     expect(ensureGatewayProfile).toHaveBeenCalledWith('office-work')
     expect(request).toHaveBeenCalledWith('personal_assistant.read', { profile: 'office-work' })
     expect($personalAssistantState.get()).toEqual(state)
+  })
+
+  it('re-reads instead of overwriting newer attention with a stale read acknowledgement', async () => {
+    const current = {
+      schemaVersion: 1 as const,
+      version: 4,
+      unreadCount: 1
+    } as unknown as AssistantState
+
+    const staleAcknowledgement = { ...current, version: 3, unreadCount: 0 }
+    const refreshed = { ...current, version: 5, unreadCount: 0 }
+
+    $personalAssistantState.set(current)
+    request.mockResolvedValueOnce({ state: staleAcknowledgement }).mockResolvedValueOnce({ state: refreshed })
+
+    await expect(acknowledgePersonalAssistantRead()).resolves.toEqual(refreshed)
+
+    expect(request).toHaveBeenNthCalledWith(1, 'personal_assistant.read', { profile: 'office-work' })
+    expect(request).toHaveBeenNthCalledWith(2, 'personal_assistant.state.get', { profile: 'office-work' })
+    expect($personalAssistantState.get()).toEqual(refreshed)
   })
 
   it('patches state with optimistic concurrency and stores the returned snapshot', async () => {

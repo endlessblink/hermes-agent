@@ -3420,10 +3420,6 @@ def _personal_assistant_profile_home(profile: str) -> Path:
     raise FileNotFoundError(f"personal assistant owner profile is unavailable: {profile}")
 
 
-def _is_personal_assistant_session_title(title: Any) -> bool:
-    return str(title or "").strip() == "Personal assistant"
-
-
 def _personal_assistant_store(profile: str):
     from agent.personal_assistant_state import PersonalAssistantStateStore
 
@@ -3473,20 +3469,28 @@ def _(rid, params: dict) -> dict:
 @method("personal_assistant.read")
 def _(rid, params: dict) -> dict:
     """Clear unread activity once while preserving pending approval counts."""
-    from agent.personal_assistant_state import public_state
+    from agent.personal_assistant_state import StateVersionConflict, public_state
 
     store, error = _personal_assistant_state_params(rid, params)
     if error:
         return error
     try:
-        service = _personal_assistant_service(_PERSONAL_ASSISTANT_OWNER_PROFILE)
-        state = service.get() if service is not None else store.read()
-        if int(state.get("unreadCount") or 0) > 0:
-            state = store.patch(
-                "edit",
-                {"unreadCount": 0},
-                expected_version=int(state.get("version") or 0),
-            )
+        for attempt in range(3):
+            service = _personal_assistant_service(_PERSONAL_ASSISTANT_OWNER_PROFILE)
+            state = service.get() if service is not None else store.read()
+            if int(state.get("unreadCount") or 0) == 0:
+                break
+            try:
+                state = store.patch(
+                    "edit",
+                    {"unreadCount": 0},
+                    expected_version=int(state.get("version") or 0),
+                )
+                break
+            except StateVersionConflict:
+                if attempt == 2:
+                    raise
+                continue
     except ValueError as exc:
         return _err(rid, 4092, str(exc))
     return _ok(rid, {"state": public_state(state)})
@@ -3534,7 +3538,12 @@ def _(rid, params: dict) -> dict:
         if canonical:
             resumed = _methods["session.resume"](
                 rid,
-                {"session_id": canonical, "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE, "source": "desktop"},
+                {
+                    "session_id": canonical,
+                    "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
+                    "source": "desktop",
+                    "personal_assistant": True,
+                },
             )
             if "error" not in resumed:
                 resumed_result = resumed.get("result") or {}
@@ -3545,7 +3554,12 @@ def _(rid, params: dict) -> dict:
         if canonical and (not session_id or canonical_empty):
             recovered = _methods["session.resume"](
                 rid,
-                {"session_id": "Personal assistant", "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE, "source": "desktop"},
+                {
+                    "session_id": "Personal assistant",
+                    "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
+                    "source": "desktop",
+                    "personal_assistant": True,
+                },
             )
             if "error" not in recovered:
                 recovered_result = recovered.get("result") or {}
@@ -3561,7 +3575,12 @@ def _(rid, params: dict) -> dict:
         if not session_id:
             created = _methods["session.create"](
                 rid,
-                {"profile": _PERSONAL_ASSISTANT_OWNER_PROFILE, "source": "desktop", "title": "Personal assistant"},
+                {
+                    "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
+                    "source": "desktop",
+                    "title": "Personal assistant",
+                    "personal_assistant": True,
+                },
             )
             if "error" in created:
                 return created
@@ -3583,7 +3602,6 @@ def _(rid, params: dict) -> dict:
         _apply_personal_assistant_runtime_policy_for_session(session_id)
 
         try:
-            store.patch("edit", {"unreadCount": 0})
             service = _personal_assistant_service(_PERSONAL_ASSISTANT_OWNER_PROFILE)
             home_state = service.get() if service is not None else store.read()
         except ValueError as exc:
@@ -6006,7 +6024,7 @@ def _(rid, params: dict) -> dict:
             "create_service_tier_override": create_service_tier_override,
             "parent_session_id": parent_session_id,
             "pending_title": title or None,
-            "personal_assistant": _is_personal_assistant_session_title(title),
+            "personal_assistant": is_truthy_value(params.get("personal_assistant", False)),
             "profile_home": str(profile_home) if profile_home is not None else None,
             "running": False,
             "session_key": key,
@@ -6525,7 +6543,7 @@ def _(rid, params: dict) -> dict:
             target = tip
             found = db.get_session(target) or found
 
-    personal_assistant = _is_personal_assistant_session_title(found.get("title"))
+    personal_assistant = is_truthy_value(params.get("personal_assistant", False))
 
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home

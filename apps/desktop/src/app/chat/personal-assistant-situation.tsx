@@ -120,17 +120,43 @@ export function PersonalAssistantSituation() {
   const [open, setOpen] = useState(true)
 
   useEffect(() => {
+    let acknowledgementInFlight = false
+
     const acknowledgeIfRead = () => {
-      if (state?.unreadCount && !threadScrolledUp && document.visibilityState === 'visible') {
+      const viewport = document.querySelector('[data-slot="aui_thread-viewport"]')
+
+      if (
+        state?.unreadCount &&
+        !acknowledgementInFlight &&
+        !threadScrolledUp &&
+        viewport?.getAttribute('data-following') === 'true' &&
+        document.visibilityState === 'visible'
+      ) {
+        acknowledgementInFlight = true
         void acknowledgePersonalAssistantRead()
+          .catch(() => undefined)
+          .finally(() => {
+            acknowledgementInFlight = false
+          })
       }
     }
 
     acknowledgeIfRead()
+    const observer = new MutationObserver(acknowledgeIfRead)
+
+    observer.observe(document.body, {
+      attributeFilter: ['data-following'],
+      attributes: true,
+      childList: true,
+      subtree: true
+    })
     document.addEventListener('visibilitychange', acknowledgeIfRead)
 
-    return () => document.removeEventListener('visibilitychange', acknowledgeIfRead)
-  }, [state?.unreadCount, threadScrolledUp])
+    return () => {
+      observer.disconnect()
+      document.removeEventListener('visibilitychange', acknowledgeIfRead)
+    }
+  }, [state?.unreadCount, state?.version, threadScrolledUp])
 
   if (!state) {
     return null
