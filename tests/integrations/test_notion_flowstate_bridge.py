@@ -546,10 +546,18 @@ def activation_receipt(operation="activation-1", page_id="page-1", source_id="so
             "externalId": page_id,
             "operationId": operation,
             "entityType": "task",
+            "action": "activate",
             "entityId": "flow-task-1",
+            "canonicalRevision": 3,
+            "canonicalUpdatedAt": "2026-07-13T18:30:00Z",
+            "changeSequence": 42,
             "replayed": False,
+            "committedAt": "2026-07-13T18:30:00Z",
+            "readBackHash": "a" * 64,
             "readBack": {
                 "id": "flow-task-1",
+                "canonicalRevision": 3,
+                "canonicalUpdatedAt": "2026-07-13T18:30:00Z",
                 "externalSource": "notion",
                 "externalId": page_id,
                 "externalDataSourceId": source_id,
@@ -688,6 +696,29 @@ def test_activation_requires_flowstate_verified_receipt(tmp_path):
     preview = bridge.activate(base)
     with pytest.raises(BridgeError) as error:
         bridge.activate({**base, "mode": "apply", "preview_digest": preview["preview_digest"]})
+    assert error.value.code == "receipt_mismatch"
+
+
+def test_activation_rejects_receipt_without_canonical_revision_sequence_and_hash(tmp_path):
+    invalid = activation_receipt()
+    del invalid["receipt"]["changeSequence"]
+    transport = FakeTransport([page(), activation_preview(), page(), invalid])
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: 1000)
+    args = {
+        "operation_id": "activation-1",
+        "page_id": "page-1",
+        "task": {"title": "Work"},
+        "work_block": {
+            "scheduledDate": "2026-07-13",
+            "scheduledTime": "18:30",
+            "duration": 25,
+        },
+    }
+    preview = bridge.activate(args)
+    with pytest.raises(BridgeError) as error:
+        bridge.activate(
+            {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+        )
     assert error.value.code == "receipt_mismatch"
 
 

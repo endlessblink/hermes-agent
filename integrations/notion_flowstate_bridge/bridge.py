@@ -656,6 +656,9 @@ class Bridge:
     ) -> Mapping[str, Any]:
         receipt = response.get("receipt")
         read_back = receipt.get("readBack") if isinstance(receipt, dict) else None
+        canonical_revision = receipt.get("canonicalRevision") if isinstance(receipt, dict) else None
+        change_sequence = receipt.get("changeSequence") if isinstance(receipt, dict) else None
+        read_back_hash = receipt.get("readBackHash") if isinstance(receipt, dict) else None
         if (
             response.get("ok") is not True
             or response.get("result") != "committed"
@@ -665,13 +668,29 @@ class Bridge:
             or receipt.get("externalId") != page_id
             or receipt.get("operationId") != operation_id
             or receipt.get("entityType") != "task"
+            or receipt.get("action") != "activate"
+            or not isinstance(canonical_revision, int)
+            or isinstance(canonical_revision, bool)
+            or canonical_revision < 1
+            or not isinstance(change_sequence, int)
+            or isinstance(change_sequence, bool)
+            or change_sequence < 1
+            or not isinstance(read_back_hash, str)
+            or len(read_back_hash) != 64
+            or any(character not in "0123456789abcdef" for character in read_back_hash)
+            or not isinstance(receipt.get("canonicalUpdatedAt"), str)
+            or not isinstance(receipt.get("committedAt"), str)
             or not isinstance(read_back, dict)
             or read_back.get("id") != receipt.get("entityId")
+            or read_back.get("canonicalRevision") != canonical_revision
+            or read_back.get("canonicalUpdatedAt") != receipt.get("canonicalUpdatedAt")
             or read_back.get("externalSource") != "notion"
             or read_back.get("externalId") != page_id
             or read_back.get("externalDataSourceId") != data_source_id
         ):
             raise BridgeError("receipt_mismatch", "FlowState receipt identity did not match the request")
+        _parse_time(receipt["canonicalUpdatedAt"])
+        _parse_time(receipt["committedAt"])
         instances = read_back.get("instances")
         if not isinstance(instances, list) or not any(
             isinstance(instance, dict)
@@ -686,7 +705,7 @@ class Bridge:
         return receipt
 
     def _activation_request(self, args: dict[str, Any], page: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        operation_id = _required_text(args.get("operation_id"), "operation_id", MAX_OPERATION_ID)
+        operation_id = _required_text(args.get("operation_id"), "operation_id", 160)
         page_id = _required_text(args.get("page_id"), "page_id")
         data_source_id = self._data_source_id(args)
         parent_source = self._page_data_source(page)
