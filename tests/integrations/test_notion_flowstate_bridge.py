@@ -437,6 +437,84 @@ def test_ambiguous_create_failure_recovers_with_same_exact_operation_query(tmp_p
     assert query_calls[0][3] == query_calls[1][3]
 
 
+def test_response_lost_create_keeps_claim_until_stale_recovery(tmp_path):
+    now = [1000.0]
+    expected = {
+        "Name": rich_text("Task"),
+        "Hermes operation ID": rich_text("op-response-lost-create"),
+    }
+    created = page("created-page", properties=expected)
+    transport = FakeTransport(
+        [
+            {"properties": {"Hermes operation ID": {"type": "rich_text"}}},
+            {"properties": {"Hermes operation ID": {"type": "rich_text"}}},
+            {"results": []},
+            BridgeError("remote_unavailable", "response lost after commit"),
+            BridgeError("remote_unavailable", "recovery query unavailable"),
+            {"properties": {"Hermes operation ID": {"type": "rich_text"}}},
+            {"results": [created]},
+            created,
+        ]
+    )
+    bridge = Bridge(
+        config(tmp_path, preview_ttl_seconds=30), transport=transport, clock=lambda: now[0]
+    )
+    args = {
+        "operation_id": "op-response-lost-create",
+        "action": "create",
+        "properties": {"Name": rich_text("Task")},
+    }
+    preview = bridge.mutate_notion(args)
+    apply = {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+
+    with pytest.raises(BridgeError, match="recovery query unavailable"):
+        bridge.mutate_notion(apply)
+    with pytest.raises(BridgeError) as pending:
+        bridge.mutate_notion(apply)
+    assert pending.value.code == "operation_in_progress"
+
+    now[0] = 1061
+    receipt = bridge.mutate_notion(apply)
+    assert receipt["page_id"] == "created-page"
+    assert not transport.responses
+
+
+def test_response_lost_property_update_keeps_claim_until_readback_recovery(tmp_path):
+    now = [1000.0]
+    before = page(properties={"Done": {"checkbox": False}})
+    after = page(properties={"Done": {"checkbox": True}})
+    transport = FakeTransport(
+        [
+            before,
+            before,
+            BridgeError("remote_unavailable", "response lost after commit"),
+            after,
+        ]
+    )
+    bridge = Bridge(
+        config(tmp_path, preview_ttl_seconds=30), transport=transport, clock=lambda: now[0]
+    )
+    args = {
+        "operation_id": "op-response-lost-update",
+        "action": "property_update",
+        "page_id": "page-1",
+        "properties": {"Done": {"checkbox": True}},
+    }
+    preview = bridge.mutate_notion(args)
+    apply = {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+
+    with pytest.raises(BridgeError, match="response lost after commit"):
+        bridge.mutate_notion(apply)
+    with pytest.raises(BridgeError) as pending:
+        bridge.mutate_notion(apply)
+    assert pending.value.code == "operation_in_progress"
+
+    now[0] = 1061
+    receipt = bridge.mutate_notion(apply)
+    assert receipt["verified"] is True
+    assert [call[0] for call in transport.calls].count("PATCH") == 1
+
+
 def test_expired_stale_create_claim_only_recovers_existing_remote_page(tmp_path):
     now = [1000.0]
     transport = FakeTransport(
@@ -466,6 +544,7 @@ def test_expired_stale_create_claim_only_recovers_existing_remote_page(tmp_path)
         )
     assert error.value.code == "preview_expired"
     assert not any(call[0] == "POST" and call[1].endswith("/pages") for call in transport.calls)
+    assert bridge.store.claim("op-stale-create", "notion_mutation", request, now[0]) is None
 
 
 def test_expired_stale_claim_recovers_matching_notion_readback_without_new_write(tmp_path):
@@ -739,6 +818,51 @@ def test_ambiguous_activation_commit_can_replay_after_local_preview_expiry(tmp_p
         {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
     )
     assert receipt["flowstate_task_id"] == "flow-task-1"
+
+
+def test_response_lost_activation_keeps_claim_until_canonical_replay(tmp_path):
+    now = [1000.0]
+    transport = FakeTransport(
+        [
+            page(),
+            activation_preview(expires_at=1030),
+            page(),
+            BridgeError("remote_unavailable", "response lost after commit"),
+            page(),
+            page(),
+            activation_receipt(),
+        ]
+    )
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: now[0])
+    args = {
+        "operation_id": "activation-1",
+        "page_id": "page-1",
+        "task": {"title": "Work"},
+        "work_block": {
+            "scheduledDate": "2026-07-13",
+            "scheduledTime": "18:30",
+            "duration": 25,
+        },
+    }
+    preview = bridge.activate(args)
+    apply = {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+
+    with pytest.raises(BridgeError, match="response lost after commit"):
+        bridge.activate(apply)
+    with pytest.raises(BridgeError) as pending:
+        bridge.activate(apply)
+    assert pending.value.code == "operation_in_progress"
+
+    now[0] = 1061
+    bridge = Bridge(config(tmp_path), transport=transport, clock=lambda: now[0])
+    receipt = bridge.activate(apply)
+    assert receipt["flowstate_task_id"] == "flow-task-1"
+    apply_calls = [
+        call
+        for call in transport.calls
+        if call[1].endswith("/activations") and call[3].get("preview") is False
+    ]
+    assert len(apply_calls) == 2
 
 
 def test_activation_rejects_page_and_receipt_provenance_mismatches(tmp_path):

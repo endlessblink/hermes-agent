@@ -554,6 +554,7 @@ class Bridge:
         claimed = self.store.claim(operation_id, kind, request, now)
         if claimed is not None:
             return claimed
+        mutation_dispatched = False
         try:
             if request["action"] == "create":
                 self._assert_idempotency_schema(request["data_source_id"])
@@ -568,6 +569,7 @@ class Bridge:
                     if expired_recovery:
                         raise BridgeError("preview_expired", "The approved preview has expired")
                     try:
+                        mutation_dispatched = True
                         page = self._notion(
                             "POST",
                             "/pages",
@@ -595,6 +597,7 @@ class Bridge:
                 if not self._properties_match(readback, request["properties"]):
                     if expired_recovery:
                         raise BridgeError("preview_expired", "The approved preview has expired")
+                    mutation_dispatched = True
                     self._notion(
                         "PATCH",
                         f"/pages/{urllib.parse.quote(page_id)}",
@@ -614,7 +617,8 @@ class Bridge:
             }
             return self.store.verify(operation_id, kind, request, page_id, receipt, self.clock())
         except Exception:
-            self.store.abandon(operation_id, kind)
+            if not mutation_dispatched:
+                self.store.abandon(operation_id, kind)
             raise
 
     @staticmethod
@@ -841,7 +845,9 @@ class Bridge:
         claimed = self.store.claim(operation_id, kind, request, now)
         if claimed is not None:
             return claimed
+        mutation_dispatched = False
         try:
+            mutation_dispatched = True
             response = self.transport.request(
                 "POST",
                 endpoint,
@@ -870,7 +876,8 @@ class Bridge:
             }
             return self.store.verify(operation_id, kind, request, flowstate_id, receipt, self.clock())
         except Exception:
-            self.store.abandon(operation_id, kind)
+            if not mutation_dispatched:
+                self.store.abandon(operation_id, kind)
             raise
 
 
