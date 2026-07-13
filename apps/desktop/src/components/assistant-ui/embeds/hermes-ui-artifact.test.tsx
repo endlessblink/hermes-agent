@@ -580,7 +580,7 @@ describe('ChecklistArtifactCard', () => {
     )
   })
 
-  it('renders valid hermes-ui rich code blocks and falls back for invalid payloads', async () => {
+  it('renders valid hermes-ui blocks and offers recovery without exposing invalid JSON', async () => {
     const { rerender } = render(
       <RichCodeBlock code={JSON.stringify(artifact)} fallback={<pre>fallback code block</pre>} language="hermes-ui" />
     )
@@ -590,7 +590,13 @@ describe('ChecklistArtifactCard', () => {
 
     rerender(<RichCodeBlock code="{ nope" fallback={<pre>fallback code block</pre>} language="hermes-ui" />)
 
-    expect(screen.getByText('fallback code block')).toBeTruthy()
+    expect(screen.queryByText('fallback code block')).toBeNull()
+    expect(screen.getByRole('alert').textContent).toContain('Interactive form could not be shown')
+    fireEvent.click(screen.getByRole('button', { name: 'Ask Hermes to resend' }))
+    expect(requestComposerSubmit).toHaveBeenCalledWith(
+      expect.stringContaining('resend it as one complete valid hermes-ui artifact'),
+      { target: 'main' }
+    )
   })
 
   it('hides incomplete hermes-ui JSON while the form is still streaming', () => {
@@ -605,7 +611,8 @@ describe('ChecklistArtifactCard', () => {
       <RichCodeBlock code={'{"type":"form","fields":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming={false} />
     )
 
-    expect(screen.getByText('raw partial JSON')).toBeTruthy()
+    expect(screen.queryByText('raw partial JSON')).toBeNull()
+    expect(screen.getByRole('alert').textContent).toContain('Interactive form could not be shown')
   })
 })
 
