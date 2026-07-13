@@ -13,6 +13,7 @@ vi.mock('@/store/gateway', () => ({ $gateway, gatewayForProfile }))
 const {
   $personalAssistantState,
   acknowledgePersonalAssistantRead,
+  hydratePersonalAssistantStateWhenReady,
   openPersonalAssistantHome,
   patchPersonalAssistantState,
   refreshPersonalAssistantState,
@@ -29,6 +30,30 @@ beforeEach(() => {
 })
 
 describe('startPersonalAssistant', () => {
+  it('hydrates persisted unread state once when the desktop gateway becomes ready', async () => {
+    const state = {
+      schemaVersion: 1 as const,
+      version: 7,
+      unreadCount: 4
+    } as unknown as AssistantState
+
+    request.mockResolvedValue({ state })
+
+    await Promise.all([
+      hydratePersonalAssistantStateWhenReady('open'),
+      hydratePersonalAssistantStateWhenReady('open')
+    ])
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect($personalAssistantState.get()?.unreadCount).toBe(4)
+  })
+
+  it('does not open the owner gateway before the desktop gateway is ready', async () => {
+    await hydratePersonalAssistantStateWhenReady('connecting')
+
+    expect(gatewayForProfile).not.toHaveBeenCalled()
+  })
+
   it('routes every profile through the single office-work assistant owner', async () => {
     request.mockResolvedValue({
       session_id: 'assistant-live-1',

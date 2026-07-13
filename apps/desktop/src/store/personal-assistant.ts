@@ -64,6 +64,8 @@ export interface AssistantStateOperation {
 export const $personalAssistantState = atom<AssistantState | null>(null)
 export const $personalAssistantPendingCount = atom<number | null>(null)
 
+let stateHydration: Promise<AssistantState> | null = null
+
 export function isPersonalAssistantSession(sessionId: string, lineageRootId?: string | null): boolean {
   const canonicalSessionId = $personalAssistantState.get()?.sessionId
 
@@ -150,6 +152,24 @@ export async function refreshPersonalAssistantState(): Promise<AssistantState> {
   })
 
   return storePersonalAssistantState(response.state)
+}
+
+export async function hydratePersonalAssistantStateWhenReady(
+  gatewayState: string
+): Promise<AssistantState | null> {
+  const current = $personalAssistantState.get()
+
+  if (gatewayState !== 'open' || current) {
+    return current
+  }
+
+  if (!stateHydration) {
+    stateHydration = refreshPersonalAssistantState().finally(() => {
+      stateHydration = null
+    })
+  }
+
+  return stateHydration
 }
 
 export async function acknowledgePersonalAssistantRead(): Promise<AssistantState> {

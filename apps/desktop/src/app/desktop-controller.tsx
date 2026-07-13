@@ -49,6 +49,7 @@ import { notify } from '../store/notifications'
 import { $paneOpen } from '../store/panes'
 import {
   $personalAssistantState,
+  hydratePersonalAssistantStateWhenReady,
   openPersonalAssistantHome,
   refreshPersonalAssistantState,
   startPersonalAssistant
@@ -1271,6 +1272,12 @@ export function DesktopController() {
       void refreshSessions().catch(() => undefined)
     }
   }, [gatewayState, refreshCurrentModel, refreshSessions])
+
+  useEffect(() => {
+    if (!personalAssistantState) {
+      void hydratePersonalAssistantStateWhenReady(gatewayState).catch(() => undefined)
+    }
+  }, [gatewayState, personalAssistantState])
 
   // Keep the cron jobs section live without a user action: the scheduler ticks
   // in the background (advancing next-run/state and creating runs), so poll the
