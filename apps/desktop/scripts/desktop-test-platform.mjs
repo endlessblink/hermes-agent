@@ -7,3 +7,7 @@ export function supportsDesktopBundleValidation(platform) {
 export function desktopExecutableName(platform) {
   return platform === 'win32' ? 'Hermes.exe' : 'Hermes'
 }
+
+export function desktopTestLaunchArgs(platform) {
+  return platform === 'linux' ? ['--no-sandbox'] : []
+}

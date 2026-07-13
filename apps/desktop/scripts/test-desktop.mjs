@@ -8,6 +8,7 @@ import { listPackage } from '@electron/asar'
 import PACKAGE_JSON from '../package.json' with { type: 'json' }
 import {
   desktopExecutableName,
+  desktopTestLaunchArgs,
   supportsDesktopBundleValidation
 } from './desktop-test-platform.mjs'
 
@@ -187,9 +188,9 @@ function openApp() {
     run('open', ['-n', APP.appPath])
   } else if (PLATFORM === 'win32') {
     // Spawn detached so the test script exits while the app keeps running.
-    spawn(APP.binary, [], { detached: true, stdio: 'ignore' }).unref()
+    spawn(APP.binary, desktopTestLaunchArgs(PLATFORM), { detached: true, stdio: 'ignore' }).unref()
   } else {
-    spawn(APP.binary, [], { detached: true, stdio: 'ignore' }).unref()
+    spawn(APP.binary, desktopTestLaunchArgs(PLATFORM), { detached: true, stdio: 'ignore' }).unref()
   }
 }
 
@@ -264,7 +265,7 @@ function launchFresh() {
   delete env.HERMES_DESKTOP_HERMES
   delete env.HERMES_DESKTOP_HERMES_ROOT
 
-  const child = spawn(APP.binary, [], {
+  const child = spawn(APP.binary, desktopTestLaunchArgs(PLATFORM), {
     cwd: os.homedir(),
     detached: true,
     env,
