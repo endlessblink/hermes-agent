@@ -26,6 +26,15 @@ _VALID_TASK_STATUSES = {"todo", "done"}
 _VALID_PRIORITIES = {"low", "medium", "high"}
 
 
+class _FlowStateApiError(RuntimeError):
+    """Safe, typed Local Task API error with no request credentials attached."""
+
+    def __init__(self, message: str, *, code: str, status: int):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
 def _get_env_value(key: str) -> Optional[str]:
     try:
         from hermes_cli.config import get_env_value
@@ -62,20 +71,33 @@ def _is_valid_date_or_due_filter(value: str) -> bool:
     return value in _VALID_DUE_FILTERS or bool(_DATE_ONLY_RE.match(value))
 
 
-def _compact_http_error(exc: urllib.error.HTTPError) -> str:
+def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
     try:
         raw = exc.read().decode("utf-8", errors="replace")
         payload = json.loads(raw) if raw else {}
-        message = payload.get("error") if isinstance(payload, dict) else None
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = error.get("message")
+            code = error.get("code")
+        else:
+            message = error
+            code = payload.get("code") if isinstance(payload, dict) else None
     except Exception:
         message = None
+        code = None
     if not message:
         message = exc.reason or "HTTP error"
     if exc.code == 401:
-        return "Flow State Local Task API rejected the bearer token. Check FLOW_STATE_API_TOKEN."
+        message = "Flow State Local Task API rejected the bearer token. Check FLOW_STATE_API_TOKEN."
+        code = code or "unauthorized"
     if exc.code == 503:
-        return "Flow State Local Task API is running but is not signed in."
-    return f"Flow State API returned {exc.code}: {message}"
+        message = "Flow State Local Task API is running but is not signed in."
+        code = code or "not_signed_in"
+    return _FlowStateApiError(
+        str(message),
+        code=str(code or f"http_{exc.code}"),
+        status=exc.code,
+    )
 
 
 def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -91,7 +113,7 @@ def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> D
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(_compact_http_error(exc)) from exc
+        raise _compact_http_error(exc) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(
             f"Flow State Local Task API is unavailable at {base_url}. "
@@ -119,6 +141,12 @@ def _tool_error(message: str) -> str:
     from tools.registry import tool_error
 
     return tool_error(message)
+
+
+def _typed_tool_error(exc: _FlowStateApiError) -> str:
+    from tools.registry import tool_error
+
+    return tool_error(str(exc), code=exc.code, status=exc.status)
 
 
 def _check_flowstate_available() -> bool:
@@ -185,6 +213,31 @@ def _handle_list_tasks(args: dict, **kw) -> str:
         return _tool_result(_request("GET", f"/api/tasks{suffix}"))
     except Exception as exc:
         logger.error("flowstate_list_tasks error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_search_tasks(args: dict, **kw) -> str:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return _tool_error("query is required")
+
+    limit = args.get("limit")
+    params: Dict[str, Any] = {"q": query}
+    if limit not in (None, ""):
+        if isinstance(limit, bool):
+            return _tool_error("limit must be an integer from 1 to 25")
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            return _tool_error("limit must be an integer from 1 to 25")
+        if limit < 1 or limit > 25:
+            return _tool_error("limit must be an integer from 1 to 25")
+        params["limit"] = limit
+
+    try:
+        return _tool_result(_request("GET", f"/api/tasks/search?{urllib.parse.urlencode(params)}"))
+    except Exception as exc:
+        logger.error("flowstate_search_tasks error: %s", exc)
         return _tool_error(str(exc))
 
 
@@ -293,6 +346,14 @@ def _handle_current_timer(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+def _handle_timer_diagnostics(args: dict, **kw) -> str:
+    try:
+        return _tool_result(_request("GET", "/api/timer/diagnostics"))
+    except Exception as exc:
+        logger.error("flowstate_get_timer_diagnostics error: %s", exc)
+        return _tool_error(str(exc))
+
+
 def _handle_list_task_instances(args: dict, **kw) -> str:
     task_id = str(args.get("id") or "").strip()
     if not task_id:
@@ -336,6 +397,90 @@ def _handle_schedule_task_instance(args: dict, **kw) -> str:
         return _tool_result(_request("POST", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances", body))
     except Exception as exc:
         logger.error("flowstate_schedule_task_instance error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_done_for_now(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    if not task_id:
+        return _tool_error("taskId is required")
+
+    next_due_date = args.get("nextDueDate")
+    if next_due_date in ("", None):
+        next_due_date = None
+    elif not _DATE_ONLY_RE.match(str(next_due_date)):
+        return _tool_error("nextDueDate must be YYYY-MM-DD")
+
+    preview = False if args.get("preview") is False else True
+    request_id = str(args.get("requestId") or "").strip()
+    preview_version = str(args.get("previewVersion") or "").strip()
+    if not preview and not request_id:
+        return _tool_error("requestId is required when preview is false")
+    if not preview and not preview_version:
+        return _tool_error("previewVersion is required when preview is false")
+
+    body: Dict[str, Any] = {"preview": preview}
+    if next_due_date is not None:
+        body["nextDueDate"] = next_due_date
+    if request_id:
+        body["requestId"] = request_id
+    if preview_version:
+        body["previewVersion"] = preview_version
+
+    try:
+        path = f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/done-for-now"
+        return _tool_result(_request("POST", path, body))
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_done_for_now API error: status=%s code=%s",
+            exc.status,
+            exc.code,
+        )
+        return _typed_tool_error(exc)
+    except Exception as exc:
+        logger.error("flowstate_done_for_now error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_merge_tasks(args: dict, **kw) -> str:
+    survivor_task_id = str(args.get("survivorTaskId") or "").strip()
+    if not survivor_task_id:
+        return _tool_error("survivorTaskId is required")
+    duplicate_task_id = str(args.get("duplicateTaskId") or "").strip()
+    if not duplicate_task_id:
+        return _tool_error("duplicateTaskId is required")
+    if survivor_task_id == duplicate_task_id:
+        return _tool_error("survivorTaskId and duplicateTaskId must be different")
+
+    preview = False if args.get("preview") is False else True
+    request_id = str(args.get("requestId") or "").strip()
+    preview_version = str(args.get("previewVersion") or "").strip()
+    if not preview and not request_id:
+        return _tool_error("requestId is required when preview is false")
+    if not preview and not preview_version:
+        return _tool_error("previewVersion is required when preview is false")
+
+    body: Dict[str, Any] = {
+        "duplicateTaskId": duplicate_task_id,
+        "preview": preview,
+    }
+    if request_id:
+        body["requestId"] = request_id
+    if preview_version:
+        body["previewVersion"] = preview_version
+
+    try:
+        path = f"/api/tasks/{urllib.parse.quote(survivor_task_id, safe='')}/merge"
+        return _tool_result(_request("POST", path, body))
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_merge_tasks API error: status=%s code=%s",
+            exc.status,
+            exc.code,
+        )
+        return _typed_tool_error(exc)
+    except Exception as exc:
+        logger.error("flowstate_merge_tasks error: %s", exc)
         return _tool_error(str(exc))
 
 
@@ -525,6 +670,30 @@ FLOWSTATE_LIST_TASKS_SCHEMA = {
     },
 }
 
+
+FLOWSTATE_SEARCH_TASKS_SCHEMA = {
+    "name": "flowstate_search_tasks",
+    "description": (
+        "Search the signed-in user's Flow State tasks by title through the read-only Local Task API. "
+        "Use this before proposing a mutation when the exact task id is not already known. The response "
+        "preserves FlowState's exact task identifiers so similar titles are never treated as duplicates."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Non-empty title search text."},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 25,
+                "description": "Optional result cap, 1-25.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
+
 FLOWSTATE_CREATE_TASK_SCHEMA = {
     "name": "flowstate_create_task",
     "description": (
@@ -551,7 +720,9 @@ FLOWSTATE_UPDATE_TASK_SCHEMA = {
     "description": (
         "Update an existing Flow State task by exact task id. When the user asks "
         "to change, complete, reprioritize, or reschedule a FlowState task, call "
-        "this tool instead of returning a passive preview."
+        "this tool instead of returning a passive preview. Generic status or progress "
+        "updates are not a substitute for recurring task completion; use Done for now "
+        "through flowstate_done_for_now for recurring tasks."
     ),
     "parameters": {
         "type": "object",
@@ -582,6 +753,19 @@ FLOWSTATE_CURRENT_TIMER_SCHEMA = {
     "description": "Get the current Flow State timer session, if one is active.",
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
+
+
+FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA = {
+    "name": "flowstate_get_timer_diagnostics",
+    "description": (
+        "Read-only Flow State timer synchronization diagnostics. Use this to verify whether the "
+        "running UI snapshot or signed-in database is authoritative, whether a device leader is "
+        "active, and whether local and remote active-timer state agree. This never starts, pauses, "
+        "resumes, replaces, or stops a timer."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
 
 FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA = {
     "name": "flowstate_list_task_instances",
@@ -619,6 +803,74 @@ FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA = {
         "required": ["id", "scheduledDate", "scheduledTime", "duration"],
     },
 }
+
+
+FLOWSTATE_DONE_FOR_NOW_SCHEMA = {
+    "name": "flowstate_done_for_now",
+    "description": (
+        "Preview or apply FlowState's real Done for now operation for one exact recurring task. "
+        "Defaults to preview and never treats a generic status, progress, or due-date update as "
+        "recurring completion. Apply only after explicit user approval of the preview; preview=false "
+        "requires the stable requestId and previewVersion returned by FlowState. The response includes "
+        "FlowState's typed receipt and read-back verification without authentication material."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "description": "Exact recurring Flow State task id."},
+            "nextDueDate": {
+                "type": "string",
+                "description": "Optional YYYY-MM-DD override, only when FlowState's recurrence rules allow it.",
+            },
+            "preview": {
+                "type": "boolean",
+                "description": "Defaults true; set false only after the user approves the exact preview.",
+            },
+            "requestId": {
+                "type": "string",
+                "description": "Stable idempotency key. Required when preview is false.",
+            },
+            "previewVersion": {
+                "type": "string",
+                "description": "State-bound version returned by preview. Required when preview is false.",
+            },
+        },
+        "required": ["taskId"],
+    },
+}
+
+
+FLOWSTATE_MERGE_TASKS_SCHEMA = {
+    "name": "flowstate_merge_tasks",
+    "description": (
+        "Preview or apply FlowState's safe merge for two exact task ids. Defaults to preview and "
+        "returns FlowState's retained fields, transfers, conflicts, archival behavior, receipt, and "
+        "read-back unchanged. Apply only after explicit approval of that preview and provide its "
+        "requestId and previewVersion. Title similarity is never approval, and this tool does not "
+        "implement or guess merge semantics outside FlowState."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "survivorTaskId": {"type": "string", "description": "Exact task id that will survive."},
+            "duplicateTaskId": {"type": "string", "description": "Exact task id to merge and archive."},
+            "preview": {
+                "type": "boolean",
+                "description": "Defaults true; set false only after explicit approval of this exact merge.",
+            },
+            "requestId": {
+                "type": "string",
+                "description": "Stable idempotency key. Required when preview is false.",
+            },
+            "previewVersion": {
+                "type": "string",
+                "description": "State-bound version returned by preview. Required when preview is false.",
+            },
+        },
+        "required": ["survivorTaskId", "duplicateTaskId"],
+    },
+}
+
 
 _SUBTASK_MUTATION_PROPERTIES = {
     "preview": {
@@ -732,12 +984,16 @@ for _name, _schema, _handler in [
     ("flowstate_get_assistant_context", FLOWSTATE_ASSISTANT_CONTEXT_SCHEMA, _handle_assistant_context),
     ("flowstate_health", FLOWSTATE_HEALTH_SCHEMA, _handle_health),
     ("flowstate_list_tasks", FLOWSTATE_LIST_TASKS_SCHEMA, _handle_list_tasks),
+    ("flowstate_search_tasks", FLOWSTATE_SEARCH_TASKS_SCHEMA, _handle_search_tasks),
     ("flowstate_create_task", FLOWSTATE_CREATE_TASK_SCHEMA, _handle_create_task),
     ("flowstate_update_task", FLOWSTATE_UPDATE_TASK_SCHEMA, _handle_update_task),
     ("flowstate_delete_task", FLOWSTATE_DELETE_TASK_SCHEMA, _handle_delete_task),
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
+    ("flowstate_get_timer_diagnostics", FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA, _handle_timer_diagnostics),
     ("flowstate_list_task_instances", FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA, _handle_list_task_instances),
     ("flowstate_schedule_task_instance", FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA, _handle_schedule_task_instance),
+    ("flowstate_done_for_now", FLOWSTATE_DONE_FOR_NOW_SCHEMA, _handle_done_for_now),
+    ("flowstate_merge_tasks", FLOWSTATE_MERGE_TASKS_SCHEMA, _handle_merge_tasks),
     ("flowstate_list_subtasks", FLOWSTATE_LIST_SUBTASKS_SCHEMA, _handle_list_subtasks),
     ("flowstate_create_subtask", FLOWSTATE_CREATE_SUBTASK_SCHEMA, _handle_create_subtask),
     ("flowstate_update_subtask", FLOWSTATE_UPDATE_SUBTASK_SCHEMA, _handle_update_subtask),

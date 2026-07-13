@@ -1,5 +1,6 @@
 """Tests for the Flow State local API tool module."""
 
+import io
 import json
 import urllib.error
 from unittest.mock import patch
@@ -57,6 +58,47 @@ def test_list_tasks_sends_query_and_bearer_header(monkeypatch):
     assert seen["headers"]["Authorization"] == "Bearer token-123"
 
 
+def test_search_tasks_uses_encoded_query_and_preserves_exact_results(monkeypatch):
+    seen = {}
+    payload = {
+        "ok": True,
+        "query": "לשלוח כביסה",
+        "tasks": [{"id": "task-1", "title": "לשלוח כביסה", "status": "todo"}],
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_search_tasks({"query": "לשלוח כביסה", "limit": 25}))
+
+    assert result["result"] == payload
+    assert seen["method"] == "GET"
+    assert seen["url"] == (
+        "http://127.0.0.1:5577/api/tasks/search?"
+        "q=%D7%9C%D7%A9%D7%9C%D7%95%D7%97+%D7%9B%D7%91%D7%99%D7%A1%D7%94&limit=25"
+    )
+    assert seen["body"] is None
+
+
+@pytest.mark.parametrize(
+    "args,error",
+    [
+        ({}, "query is required"),
+        ({"query": "   "}, "query is required"),
+        ({"query": "laundry", "limit": 0}, "limit must be an integer from 1 to 25"),
+        ({"query": "laundry", "limit": 26}, "limit must be an integer from 1 to 25"),
+        ({"query": "laundry", "limit": "many"}, "limit must be an integer from 1 to 25"),
+    ],
+)
+def test_search_tasks_validates_query_and_limit_without_calling_api(args, error):
+    result = json.loads(fst._handle_search_tasks(args))
+
+    assert result["error"] == error
+    assert "token-123" not in json.dumps(result)
+
+
 def test_create_task_omits_empty_project_id(monkeypatch):
     seen = {}
     monkeypatch.setattr(
@@ -96,6 +138,14 @@ def test_update_task_validates_status():
     result = json.loads(fst._handle_update_task({"id": "task-1", "status": "paused"}))
 
     assert result["error"] == "status must be todo|done"
+
+
+def test_update_task_schema_rejects_generic_recurring_completion_guidance():
+    description = fst.FLOWSTATE_UPDATE_TASK_SCHEMA["description"]
+
+    assert "recurring" in description.lower()
+    assert "Done for now" in description
+    assert "not a substitute" in description
 
 
 def test_delete_task_uses_exact_id(monkeypatch):
@@ -267,6 +317,219 @@ def test_schedule_task_instance_validation_returns_safe_error():
     assert "token-123" not in json.dumps(result)
 
 
+def test_done_for_now_defaults_to_non_mutating_preview_and_uses_exact_task_id(monkeypatch):
+    seen = {}
+    payload = {
+        "ok": True,
+        "preview": True,
+        "requestId": "preview-1",
+        "previewVersion": "version-1",
+        "verification": {"taskId": "task/one", "nextDueDate": "2026-07-16"},
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task/one",
+        "nextDueDate": "2026-07-16",
+    }))
+
+    assert result["result"] == payload
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fone/done-for-now"
+    assert seen["body"] == {"nextDueDate": "2026-07-16", "preview": True}
+
+
+@pytest.mark.parametrize(
+    "args,error",
+    [
+        ({}, "taskId is required"),
+        ({"taskId": "task-1", "nextDueDate": "07/16/2026"}, "nextDueDate must be YYYY-MM-DD"),
+        ({"taskId": "task-1", "preview": False, "previewVersion": "version-1"}, "requestId is required when preview is false"),
+        ({"taskId": "task-1", "preview": False, "requestId": "apply-1"}, "previewVersion is required when preview is false"),
+    ],
+)
+def test_done_for_now_validates_exact_preview_apply_contract(args, error):
+    result = json.loads(fst._handle_done_for_now(args))
+
+    assert result["error"] == error
+    assert "token-123" not in json.dumps(result)
+
+
+def test_done_for_now_apply_forwards_preview_receipt_and_returns_readback(monkeypatch):
+    seen = {}
+    payload = {
+        "ok": True,
+        "preview": False,
+        "receipt": {"requestId": "apply-1", "completedOccurrenceId": "occ-1"},
+        "readBack": {"taskId": "task-1", "nextOccurrenceId": "occ-2", "nextDueDate": "2026-07-16"},
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task-1",
+        "nextDueDate": "2026-07-16",
+        "preview": False,
+        "requestId": "apply-1",
+        "previewVersion": "version-1",
+    }))
+
+    assert result["result"] == payload
+    assert seen["body"] == {
+        "nextDueDate": "2026-07-16",
+        "preview": False,
+        "previewVersion": "version-1",
+        "requestId": "apply-1",
+    }
+
+
+def test_done_for_now_preserves_typed_api_conflict_without_exposing_secrets(monkeypatch):
+    def _raise(req, timeout):
+        body = json.dumps({
+            "error": {"code": "stale_preview", "message": "Preview no longer matches current state"},
+            "debug": "Bearer secret-that-must-not-leak",
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task-1",
+        "preview": False,
+        "requestId": "apply-1",
+        "previewVersion": "version-1",
+    }))
+
+    assert result == {
+        "error": "Preview no longer matches current state",
+        "code": "stale_preview",
+        "status": 409,
+    }
+    assert "secret-that-must-not-leak" not in json.dumps(result)
+
+
+def test_merge_tasks_defaults_to_non_mutating_preview_with_exact_ids(monkeypatch):
+    seen = {}
+    payload = {
+        "ok": True,
+        "preview": True,
+        "requestId": "merge-preview-1",
+        "previewVersion": "merge-version-1",
+        "survivor": {"id": "survivor/1", "title": "Keep me"},
+        "duplicate": {"id": "duplicate/1", "title": "Merge me"},
+        "transfers": ["subtasks", "instances"],
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor/1",
+        "duplicateTaskId": "duplicate/1",
+    }))
+
+    assert result["result"] == payload
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/survivor%2F1/merge"
+    assert seen["body"] == {"duplicateTaskId": "duplicate/1", "preview": True}
+
+
+@pytest.mark.parametrize(
+    "args,error",
+    [
+        ({"duplicateTaskId": "duplicate-1"}, "survivorTaskId is required"),
+        ({"survivorTaskId": "survivor-1"}, "duplicateTaskId is required"),
+        (
+            {"survivorTaskId": "same", "duplicateTaskId": "same"},
+            "survivorTaskId and duplicateTaskId must be different",
+        ),
+        (
+            {"survivorTaskId": "survivor-1", "duplicateTaskId": "duplicate-1", "preview": False, "previewVersion": "v1"},
+            "requestId is required when preview is false",
+        ),
+        (
+            {"survivorTaskId": "survivor-1", "duplicateTaskId": "duplicate-1", "preview": False, "requestId": "r1"},
+            "previewVersion is required when preview is false",
+        ),
+    ],
+)
+def test_merge_tasks_validates_exact_preview_apply_contract(args, error):
+    result = json.loads(fst._handle_merge_tasks(args))
+
+    assert result["error"] == error
+    assert "token-123" not in json.dumps(result)
+
+
+def test_merge_tasks_apply_forwards_preview_binding_and_receipt(monkeypatch):
+    seen = {}
+    payload = {
+        "ok": True,
+        "preview": False,
+        "receipt": {
+            "requestId": "merge-apply-1",
+            "survivorTaskId": "survivor-1",
+            "duplicateTaskId": "duplicate-1",
+            "replayed": False,
+        },
+        "readBack": {"survivorTaskId": "survivor-1", "duplicateArchived": True},
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "preview": False,
+        "requestId": "merge-apply-1",
+        "previewVersion": "merge-version-1",
+    }))
+
+    assert result["result"] == payload
+    assert seen["body"] == {
+        "duplicateTaskId": "duplicate-1",
+        "preview": False,
+        "previewVersion": "merge-version-1",
+        "requestId": "merge-apply-1",
+    }
+
+
+def test_timer_diagnostics_reads_safe_leader_and_sync_state(monkeypatch):
+    seen = {}
+    payload = {
+        "appVersion": "1.2.3",
+        "mode": "token",
+        "hasAuthContext": True,
+        "currentTimerBranch": "local-snapshot-active",
+        "localSnapshotActive": True,
+        "supabaseLookupOk": True,
+        "supabaseActiveSessionFound": True,
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_timer_diagnostics({}))
+
+    assert result["result"] == payload
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://127.0.0.1:5577/api/timer/diagnostics"
+    assert seen["body"] is None
+
+
 def test_list_subtasks_uses_parent_task_route(monkeypatch):
     seen = {}
     monkeypatch.setattr(
@@ -404,12 +667,16 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_get_assistant_context",
         "flowstate_health",
         "flowstate_list_tasks",
+        "flowstate_search_tasks",
         "flowstate_create_task",
         "flowstate_update_task",
         "flowstate_delete_task",
         "flowstate_get_current_timer",
+        "flowstate_get_timer_diagnostics",
         "flowstate_list_task_instances",
         "flowstate_schedule_task_instance",
+        "flowstate_done_for_now",
+        "flowstate_merge_tasks",
         "flowstate_list_subtasks",
         "flowstate_create_subtask",
         "flowstate_update_subtask",
@@ -435,3 +702,53 @@ def test_flowstate_schemas_require_real_tool_use_for_task_requests():
     assert "call this tool" in create_description
     assert "hermes-ui/task-triage" in create_description
     assert "instead of this tool" in list_description
+
+
+def test_done_for_now_schema_is_preview_first_and_apply_is_receipt_bound():
+    schema = fst.FLOWSTATE_DONE_FOR_NOW_SCHEMA
+
+    assert schema["name"] == "flowstate_done_for_now"
+    assert schema["parameters"]["required"] == ["taskId"]
+    assert "Defaults to preview" in schema["description"]
+    assert "generic" in schema["description"].lower()
+    assert set(schema["parameters"]["properties"]) == {
+        "taskId",
+        "nextDueDate",
+        "preview",
+        "requestId",
+        "previewVersion",
+    }
+
+
+def test_timer_diagnostics_schema_is_read_only_and_verification_focused():
+    schema = fst.FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA
+
+    assert schema["name"] == "flowstate_get_timer_diagnostics"
+    assert "read-only" in schema["description"].lower()
+    assert "leader" in schema["description"].lower()
+    assert schema["parameters"] == {"type": "object", "properties": {}, "required": []}
+
+
+def test_search_tasks_schema_is_read_only_and_requires_a_query():
+    schema = fst.FLOWSTATE_SEARCH_TASKS_SCHEMA
+
+    assert schema["name"] == "flowstate_search_tasks"
+    assert "read-only" in schema["description"].lower()
+    assert schema["parameters"]["required"] == ["query"]
+    assert set(schema["parameters"]["properties"]) == {"query", "limit"}
+
+
+def test_merge_tasks_schema_is_preview_first_and_exact_id_bound():
+    schema = fst.FLOWSTATE_MERGE_TASKS_SCHEMA
+
+    assert schema["name"] == "flowstate_merge_tasks"
+    assert schema["parameters"]["required"] == ["survivorTaskId", "duplicateTaskId"]
+    assert "Defaults to preview" in schema["description"]
+    assert "title similarity" in schema["description"].lower()
+    assert set(schema["parameters"]["properties"]) == {
+        "survivorTaskId",
+        "duplicateTaskId",
+        "preview",
+        "requestId",
+        "previewVersion",
+    }
