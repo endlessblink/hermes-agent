@@ -1,10 +1,10 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const patchPersonalAssistantState = vi.fn(async () => undefined)
 
-const $personalAssistantState = atom({
+const baseState = {
   schemaVersion: 1 as const,
   version: 2,
   sessionId: 'assistant-home',
@@ -19,12 +19,15 @@ const $personalAssistantState = atom({
   sync: { status: 'fresh' as const, lastCheckedAt: null, lastVerifiedAt: '2026-07-12T09:00:00Z' },
   unreadCount: 1,
   episodes: []
-})
+}
+
+const $personalAssistantState = atom(baseState)
 
 vi.mock('@/store/personal-assistant', () => ({ $personalAssistantState, patchPersonalAssistantState }))
 
 const { PersonalAssistantSituation } = await import('./personal-assistant-situation')
 
+beforeEach(() => $personalAssistantState.set(baseState))
 afterEach(cleanup)
 
 describe('PersonalAssistantSituation', () => {
@@ -36,6 +39,27 @@ describe('PersonalAssistantSituation', () => {
     expect(screen.getByText('Waiting for approval')).toBeTruthy()
     expect(screen.getByText('1 approvals · 0 proposals')).toBeTruthy()
     expect(screen.getByText('fresh')).toBeTruthy()
+  })
+
+  it('resolves Hebrew user content independently from the English dashboard chrome', () => {
+    $personalAssistantState.set({
+      ...baseState,
+      outcomes: [{ id: 'outcome-he', title: 'לסיים את תכנון השבוע' }],
+      pendingApprovals: [{ id: 'approval-he', title: 'להכין לוח שנה לאירועים' }]
+    })
+
+    render(<PersonalAssistantSituation />)
+
+    const outcome = screen.getByText('לסיים את תכנון השבוע')
+    const pending = screen.getByText('להכין לוח שנה לאירועים')
+
+    expect(screen.getByText('Situation').closest('aside')?.getAttribute('dir')).toBe('ltr')
+    expect(outcome.getAttribute('dir')).toBe('auto')
+    expect(outcome.className).toContain('text-start')
+    expect(pending.closest('li')?.getAttribute('dir')).toBe('auto')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit לסיים את תכנון השבוע' }))
+    expect(screen.getByRole('textbox', { name: 'Edit לסיים את תכנון השבוע' }).getAttribute('dir')).toBe('auto')
   })
 
   it('edits an item through a versioned state operation', async () => {

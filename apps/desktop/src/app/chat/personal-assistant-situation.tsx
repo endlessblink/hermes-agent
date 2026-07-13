@@ -48,12 +48,15 @@ function SituationItem({ item, section }: { item: AssistantStateItem; section: A
           <input
             aria-label={`Edit ${itemLabel(item)}`}
             autoFocus
-            className="min-w-0 flex-1 rounded border border-(--ui-stroke-secondary) bg-transparent px-1.5 py-1 text-xs outline-none focus:border-primary"
+            className="min-w-0 flex-1 rounded border border-(--ui-stroke-secondary) bg-transparent px-1.5 py-1 text-start text-xs outline-none focus:border-primary"
+            dir="auto"
             onChange={event => setDraft(event.target.value)}
             value={draft}
           />
         ) : (
-          <span className="min-w-0 flex-1 truncate text-xs text-(--ui-text-primary)">{itemLabel(item)}</span>
+          <span className="min-w-0 flex-1 truncate text-start text-xs text-(--ui-text-primary)" dir="auto">
+            {itemLabel(item)}
+          </span>
         )}
         {editing ? (
           <Button disabled={busy || !draft.trim()} onClick={() => void mutate('upsert')} size="xs" type="button">
@@ -77,11 +80,11 @@ function SituationItem({ item, section }: { item: AssistantStateItem; section: A
         )}
       </div>
       {expanded && (
-        <pre className="mt-1.5 max-h-28 overflow-auto whitespace-pre-wrap break-words text-[0.6875rem] text-(--ui-text-tertiary)">
+        <pre className="mt-1.5 max-h-28 overflow-auto whitespace-pre-wrap break-words text-[0.6875rem] text-(--ui-text-tertiary)" dir="ltr">
           {JSON.stringify(item, null, 2)}
         </pre>
       )}
-      {error && <p className="mt-1 text-[0.6875rem] text-destructive" role="alert">{error}</p>}
+      {error && <p className="mt-1 text-start text-[0.6875rem] text-destructive" dir="auto" role="alert">{error}</p>}
     </li>
   )
 }
@@ -120,7 +123,7 @@ export function PersonalAssistantSituation() {
   const pending = state.pendingApprovals.length + state.captureProposals.length
 
   return (
-    <aside className="relative z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background)" dir="auto">
+    <aside className="relative z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background)" dir="ltr">
       <button
         aria-expanded={open}
         className="flex w-full items-center gap-2 px-3 py-2 text-start hover:bg-(--ui-control-hover-background)"
@@ -141,8 +144,13 @@ export function PersonalAssistantSituation() {
           <SituationSection items={state.commitments} section="commitments" title="Commitments" />
           <section aria-label="Capacity and focus">
             <h3 className="mb-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Capacity & focus</h3>
-            <p className="text-xs">{state.capacity.summary || 'Not set'}</p>
-            {state.focus && <p className="mt-1 text-xs font-medium">Focus: {itemLabel(state.focus)}</p>}
+            <p className="text-start text-xs" dir="auto">{state.capacity.summary || 'Not set'}</p>
+            {state.focus && (
+              <p className="mt-1 flex min-w-0 gap-1 text-xs font-medium">
+                <span>Focus:</span>
+                <span className="min-w-0 flex-1 text-start" dir="auto">{itemLabel(state.focus)}</span>
+              </p>
+            )}
           </section>
           <SituationSection items={state.blockers} section="blockers" title="Blockers" />
           <SituationSection items={state.deferred} section="deferred" title="Deferred important work" />
@@ -153,7 +161,7 @@ export function PersonalAssistantSituation() {
             {[...state.pendingApprovals, ...state.captureProposals].length > 0 && (
               <ul className="mt-1 space-y-1 text-xs">
                 {[...state.pendingApprovals, ...state.captureProposals].map(item => (
-                  <li className="rounded border border-(--ui-stroke-tertiary) px-1.5 py-1" key={item.id}>
+                  <li className="rounded border border-(--ui-stroke-tertiary) px-1.5 py-1 text-start" dir="auto" key={item.id}>
                     {itemLabel(item)}
                   </li>
                 ))}
