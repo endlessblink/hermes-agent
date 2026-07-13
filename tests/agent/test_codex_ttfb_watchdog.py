@@ -423,3 +423,49 @@ def test_large_codex_request_strict_ttfb_env_still_reconnects(tmp_path, monkeypa
         assert "codex_ttfb_kill" in closes
     finally:
         stop["flag"] = True
+
+
+def test_agent_scoped_strict_ttfb_reconnects_large_personal_assistant_request(
+    tmp_path, monkeypatch
+):
+    """A Personal Assistant request must not inherit the generic large-input
+    watchdog exemption.  Its foreground contract is latency-sensitive, so a
+    zero-byte Codex connection is retried at the per-agent cutoff while normal
+    large requests retain the existing wait behavior."""
+    from agent import chat_completion_helpers as h
+
+    agent = _make_codex_agent(tmp_path, monkeypatch)
+    agent._force_codex_ttfb_watchdog = True
+    agent._codex_ttfb_timeout_seconds = 1
+    monkeypatch.setattr(agent, "_compute_non_stream_stale_timeout", lambda *a, **k: 3.0)
+    monkeypatch.delenv("HERMES_CODEX_TTFB_STRICT", raising=False)
+    monkeypatch.delenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", raising=False)
+
+    closes: list = []
+    dummy_client = SimpleNamespace()
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **k: dummy_client)
+    monkeypatch.setattr(
+        agent, "_abort_request_openai_client", lambda c, reason=None: closes.append(reason)
+    )
+    monkeypatch.setattr(
+        agent, "_close_request_openai_client", lambda c, reason=None: closes.append(reason)
+    )
+
+    stop = {"flag": False}
+
+    def fake_hang(api_kwargs, client=None, on_first_delta=None):
+        deadline = time.time() + 30
+        while time.time() < deadline and not stop["flag"] and not agent._interrupt_requested:
+            time.sleep(0.02)
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
+
+    large_input = "x" * 600_000
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            h.interruptible_api_call(agent, {"model": "gpt-5.6-sol", "input": large_input})
+        assert "TTFB threshold: 1s" in str(excinfo.value)
+        assert "codex_ttfb_kill" in closes
+    finally:
+        stop["flag"] = True

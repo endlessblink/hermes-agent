@@ -3360,6 +3360,7 @@ _PERSONAL_ASSISTANT_TRIGGERS = {
     "replan",
     "review",
 }
+_PERSONAL_ASSISTANT_OWNER_PROFILE = "office-work"
 _PERSONAL_ASSISTANT_MAX_ITERATIONS = 6
 _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY = """Personal Assistant responsiveness policy:
 - Return a useful visible response quickly; do not silently finish a broad audit first.
@@ -3391,6 +3392,8 @@ def _apply_personal_assistant_runtime_policy(session: dict) -> None:
         default_result_size=20_000,
         turn_budget=40_000,
     )
+    agent._force_codex_ttfb_watchdog = True
+    agent._codex_ttfb_timeout_seconds = 60
     existing = str(getattr(agent, "ephemeral_system_prompt", "") or "").strip()
     if _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY not in existing:
         agent.ephemeral_system_prompt = "\n\n".join(
@@ -3405,10 +3408,26 @@ def _apply_personal_assistant_runtime_policy_for_session(session_id: str) -> Non
         _apply_personal_assistant_runtime_policy(session)
 
 
+def _personal_assistant_profile_home(profile: str) -> Path:
+    """Resolve assistant ownership without falling back into another profile."""
+    from hermes_constants import get_hermes_home
+
+    profile_home = _profile_home(profile)
+    if profile_home is not None:
+        return profile_home
+    if profile == _current_profile_name():
+        return Path(get_hermes_home())
+    raise FileNotFoundError(f"personal assistant owner profile is unavailable: {profile}")
+
+
+def _is_personal_assistant_session_title(title: Any) -> bool:
+    return str(title or "").strip() == "Personal assistant"
+
+
 def _personal_assistant_store(profile: str):
     from agent.personal_assistant_state import PersonalAssistantStateStore
 
-    return PersonalAssistantStateStore(_profile_home(profile) or Path(get_hermes_home()))
+    return PersonalAssistantStateStore(_personal_assistant_profile_home(profile))
 
 
 def _personal_assistant_service(profile: str):
@@ -3417,7 +3436,7 @@ def _personal_assistant_service(profile: str):
     from agent.personal_assistant_service import PersonalAssistantStateService
     import yaml
 
-    profile_home = _profile_home(profile) or Path(get_hermes_home())
+    profile_home = _personal_assistant_profile_home(profile)
     config_path = profile_home / "config.yaml"
     if not config_path.is_file():
         return None
@@ -3429,9 +3448,12 @@ def _personal_assistant_service(profile: str):
 
 def _personal_assistant_state_params(rid, params: dict):
     profile = str(params.get("profile") or _current_profile_name()).strip()
-    if profile != "office-work":
+    if profile != _PERSONAL_ASSISTANT_OWNER_PROFILE:
         return None, _err(rid, 4000, "personal assistant requires the office-work profile")
-    return _personal_assistant_store(profile), None
+    try:
+        return _personal_assistant_store(profile), None
+    except FileNotFoundError as exc:
+        return None, _err(rid, 4007, str(exc))
 
 
 @method("personal_assistant.state.get")
@@ -3440,11 +3462,33 @@ def _(rid, params: dict) -> dict:
     if error:
         return error
     try:
-        service = _personal_assistant_service("office-work")
+        service = _personal_assistant_service(_PERSONAL_ASSISTANT_OWNER_PROFILE)
         state = service.get() if service is not None else store.read()
     except ValueError as exc:
         return _err(rid, 4092, str(exc))
     from agent.personal_assistant_state import public_state
+    return _ok(rid, {"state": public_state(state)})
+
+
+@method("personal_assistant.read")
+def _(rid, params: dict) -> dict:
+    """Clear unread activity once while preserving pending approval counts."""
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    try:
+        service = _personal_assistant_service(_PERSONAL_ASSISTANT_OWNER_PROFILE)
+        state = service.get() if service is not None else store.read()
+        if int(state.get("unreadCount") or 0) > 0:
+            state = store.patch(
+                "edit",
+                {"unreadCount": 0},
+                expected_version=int(state.get("version") or 0),
+            )
+    except ValueError as exc:
+        return _err(rid, 4092, str(exc))
     return _ok(rid, {"state": public_state(state)})
 
 
@@ -3458,7 +3502,7 @@ def _(rid, params: dict) -> dict:
     action = str(params.get("action") or "edit").strip().lower()
     try:
         expected = params.get("expectedVersion")
-        service = _personal_assistant_service("office-work")
+        service = _personal_assistant_service(_PERSONAL_ASSISTANT_OWNER_PROFILE)
         if service is not None and params.get("operations") is not None:
             state = service.patch(int(expected), params.get("operations") or [])
         else:
@@ -3490,7 +3534,7 @@ def _(rid, params: dict) -> dict:
         if canonical:
             resumed = _methods["session.resume"](
                 rid,
-                {"session_id": canonical, "profile": "office-work", "source": "desktop"},
+                {"session_id": canonical, "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE, "source": "desktop"},
             )
             if "error" not in resumed:
                 resumed_result = resumed.get("result") or {}
@@ -3501,7 +3545,7 @@ def _(rid, params: dict) -> dict:
         if canonical and (not session_id or canonical_empty):
             recovered = _methods["session.resume"](
                 rid,
-                {"session_id": "Personal assistant", "profile": "office-work", "source": "desktop"},
+                {"session_id": "Personal assistant", "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE, "source": "desktop"},
             )
             if "error" not in recovered:
                 recovered_result = recovered.get("result") or {}
@@ -3517,7 +3561,7 @@ def _(rid, params: dict) -> dict:
         if not session_id:
             created = _methods["session.create"](
                 rid,
-                {"profile": "office-work", "source": "desktop", "title": "Personal assistant"},
+                {"profile": _PERSONAL_ASSISTANT_OWNER_PROFILE, "source": "desktop", "title": "Personal assistant"},
             )
             if "error" in created:
                 return created
@@ -3540,7 +3584,7 @@ def _(rid, params: dict) -> dict:
 
         try:
             store.patch("edit", {"unreadCount": 0})
-            service = _personal_assistant_service("office-work")
+            service = _personal_assistant_service(_PERSONAL_ASSISTANT_OWNER_PROFILE)
             home_state = service.get() if service is not None else store.read()
         except ValueError as exc:
             return _err(rid, 4092, str(exc))
@@ -3708,21 +3752,24 @@ def _start_personal_assistant(rid, params: dict) -> dict:
         claim_daily_planning_trigger,
         complete_daily_planning_trigger,
     )
-    from hermes_constants import get_hermes_home
-
     trigger = str(params.get("trigger") or "manual").strip().lower()
     if trigger not in _PERSONAL_ASSISTANT_TRIGGERS:
         return _err(rid, 4000, f"unsupported personal assistant trigger: {trigger}")
 
     active_profile = _current_profile_name()
     profile = str(params.get("profile") or active_profile).strip()
-    if profile != "office-work":
+    if profile != _PERSONAL_ASSISTANT_OWNER_PROFILE:
         return _err(rid, 4000, "personal assistant requires the office-work profile")
+
+    try:
+        owner_home = _personal_assistant_profile_home(profile)
+    except FileNotFoundError as exc:
+        return _err(rid, 4007, str(exc))
 
     claim = None
     profile_home = None
     if trigger == "scheduled":
-        profile_home = get_hermes_home()
+        profile_home = owner_home
         claim = claim_daily_planning_trigger(profile, profile_home, on_launch=True)
         if not claim.claimed:
             return _ok(
@@ -5789,6 +5836,23 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any)
     without interrupting; ``steer`` → inject into the live turn if accepted,
     else queue.
     """
+    # The Desktop normally routes composer text through ``clarify.respond``,
+    # but a reconnect can lose the one-shot clarify event while the backend is
+    # still blocked in ``_block``.  Treat typed text as the answer at the
+    # backend seam too, so it cannot sit queued behind a five-minute clarify
+    # timeout.  Scope this recovery to Personal Assistant sessions; ordinary
+    # busy chats retain their configured queue/interrupt behavior.
+    if session.get("personal_assistant") and isinstance(text, str) and text.strip():
+        with _prompt_lock:
+            for request_id, (owner_sid, event) in list(_pending.items()):
+                pending = _pending_prompt_payloads.get(request_id)
+                if owner_sid != sid or not pending or pending[0] != "clarify.request":
+                    continue
+                _answers[request_id] = text.strip()
+                event.set()
+                session["last_active"] = time.time()
+                return _ok(rid, {"status": "clarify_answered"})
+
     mode = _load_busy_input_mode()
     agent = session.get("agent")
     if mode == "steer" and agent is not None and hasattr(agent, "steer"):
@@ -5942,6 +6006,7 @@ def _(rid, params: dict) -> dict:
             "create_service_tier_override": create_service_tier_override,
             "parent_session_id": parent_session_id,
             "pending_title": title or None,
+            "personal_assistant": _is_personal_assistant_session_title(title),
             "profile_home": str(profile_home) if profile_home is not None else None,
             "running": False,
             "session_key": key,
@@ -6320,6 +6385,7 @@ def _deferred_session_record(
     lazy: bool = False,
     model_override=None,
     resume_runtime_overrides: dict | None = None,
+    personal_assistant: bool = False,
 ) -> dict:
     """A live-session record whose AIAgent is built later (lazy watch / cold
     resume) — _init_session's shape minus the agent."""
@@ -6346,6 +6412,7 @@ def _deferred_session_record(
         "lazy": lazy,
         "model_override": model_override,
         "pending_title": None,
+        "personal_assistant": personal_assistant,
         "profile_home": str(profile_home) if profile_home is not None else None,
         "resume_runtime_overrides": resume_runtime_overrides,
         "resume_session_id": session_key,
@@ -6458,11 +6525,15 @@ def _(rid, params: dict) -> dict:
             target = tip
             found = db.get_session(target) or found
 
+    personal_assistant = _is_personal_assistant_session_title(found.get("title"))
+
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home
     )
 
     def _reuse_live_payload(sid: str, session: dict) -> dict:
+        if personal_assistant:
+            _apply_personal_assistant_runtime_policy(session)
         payload = _live_session_payload(
             sid,
             session,
@@ -6520,6 +6591,7 @@ def _(rid, params: dict) -> dict:
             close_on_disconnect=is_truthy_value(params.get("close_on_disconnect", False)),
             profile_home=profile_home,
             lazy=True,
+            personal_assistant=personal_assistant,
         )
         if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
             return _ok(rid, _reuse_live_payload(*live))
@@ -6598,6 +6670,7 @@ def _(rid, params: dict) -> dict:
             profile_home=profile_home,
             model_override=overrides.get("model_override"),
             resume_runtime_overrides=overrides or None,
+            personal_assistant=personal_assistant,
         )
         if (live := _claim_or_reuse_live(sid, target, record, lease)) is not None:
             return _ok(rid, _reuse_live_payload(*live))
@@ -6699,6 +6772,8 @@ def _(rid, params: dict) -> dict:
             if lease is not None:
                 lease.release()
             other_sid, other_session = live
+            if personal_assistant:
+                _apply_personal_assistant_runtime_policy(other_session)
             payload = _live_session_payload(
                 other_sid,
                 other_session,
@@ -6740,6 +6815,8 @@ def _(rid, params: dict) -> dict:
                 if profile_home is not None:
                     _sessions[sid]["profile_home"] = str(profile_home)
                 _sessions[sid]["active_session_lease"] = lease
+                if personal_assistant:
+                    _apply_personal_assistant_runtime_policy(_sessions[sid])
         except Exception as e:
             if lease is not None:
                 lease.release()

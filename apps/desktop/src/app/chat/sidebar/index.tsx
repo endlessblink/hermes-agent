@@ -69,13 +69,8 @@ import {
   unpinSession
 } from '@/store/layout'
 import { notify } from '@/store/notifications'
+import { $personalAssistantState } from '@/store/personal-assistant'
 import {
-  $personalAssistantPendingCount,
-  $personalAssistantState,
-  personalAssistantAvailable
-} from '@/store/personal-assistant'
-import {
-  $activeGatewayProfile,
   $newChatProfile,
   $profiles,
   $profileScope,
@@ -309,9 +304,7 @@ export function ChatSidebar({
   const folders = useStore($sidebarFolders)
   const profiles = useStore($profiles)
   const profileScope = useStore($profileScope)
-  const activeGatewayProfile = useStore($activeGatewayProfile)
   const assistantState = useStore($personalAssistantState)
-  const assistantPendingCount = useStore($personalAssistantPendingCount)
 
   const personalAssistantSelected = Boolean(
     currentView === 'chat' &&
@@ -1207,9 +1200,7 @@ export function ChatSidebar({
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
-              {SIDEBAR_NAV.filter(
-                item => item.id !== 'personal-assistant' || personalAssistantAvailable(activeGatewayProfile)
-              ).map(item => {
+              {SIDEBAR_NAV.map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
@@ -1263,10 +1254,8 @@ export function ChatSidebar({
                           <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
                           {item.id === 'personal-assistant' &&
                             assistantState &&
-                            assistantState.unreadCount + (assistantPendingCount ?? 0) > 0 && (
-                              <SidebarMenuBadge>
-                                {assistantState.unreadCount + (assistantPendingCount ?? 0)}
-                              </SidebarMenuBadge>
+                            assistantState.unreadCount > 0 && (
+                              <SidebarMenuBadge>{assistantState.unreadCount}</SidebarMenuBadge>
                             )}
                           {isNewSession && (
                             <KbdGroup

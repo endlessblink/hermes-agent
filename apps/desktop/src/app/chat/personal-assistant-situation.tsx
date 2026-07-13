@@ -1,15 +1,17 @@
 import { useStore } from '@nanostores/react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { cn } from '@/lib/utils'
 import {
   $personalAssistantState,
+  acknowledgePersonalAssistantRead,
   type AssistantStateItem,
   type AssistantStateSection,
   patchPersonalAssistantState
 } from '@/store/personal-assistant'
+import { $threadScrolledUp } from '@/store/thread-scroll'
 
 const itemLabel = (item: AssistantStateItem) => item.title || item.summary || item.id
 
@@ -114,13 +116,25 @@ function SituationSection({
 
 export function PersonalAssistantSituation() {
   const state = useStore($personalAssistantState)
+  const threadScrolledUp = useStore($threadScrolledUp)
   const [open, setOpen] = useState(true)
+
+  useEffect(() => {
+    const acknowledgeIfRead = () => {
+      if (state?.unreadCount && !threadScrolledUp && document.visibilityState === 'visible') {
+        void acknowledgePersonalAssistantRead()
+      }
+    }
+
+    acknowledgeIfRead()
+    document.addEventListener('visibilitychange', acknowledgeIfRead)
+
+    return () => document.removeEventListener('visibilitychange', acknowledgeIfRead)
+  }, [state?.unreadCount, threadScrolledUp])
 
   if (!state) {
     return null
   }
-
-  const pending = state.pendingApprovals.length + state.captureProposals.length
 
   return (
     <aside className="relative z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background)" dir="ltr">
@@ -135,7 +149,14 @@ export function PersonalAssistantSituation() {
         <span className={cn('text-[0.6875rem]', state.sync.status === 'fresh' ? 'text-success' : 'text-warning')}>
           {state.sync.status}
         </span>
-        {pending > 0 && <span className="rounded-full bg-primary px-1.5 text-[0.6875rem] text-primary-foreground">{pending}</span>}
+        {state.unreadCount > 0 && (
+          <span
+            aria-label={`${state.unreadCount} unread personal assistant ${state.unreadCount === 1 ? 'update' : 'updates'}`}
+            className="rounded-full bg-primary px-1.5 text-[0.6875rem] text-primary-foreground"
+          >
+            {state.unreadCount}
+          </span>
+        )}
         <Codicon name={open ? 'chevron-up' : 'chevron-down'} />
       </button>
       {open && (
