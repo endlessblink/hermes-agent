@@ -30,6 +30,7 @@ import {
 import { Tip } from '@/components/ui/tooltip'
 import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { emitDesktopDiagnostic } from '@/lib/desktop-diagnostics'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { profileColor } from '@/lib/profile-color'
 import { sessionMatchesSearch } from '@/lib/session-search'
@@ -140,6 +141,7 @@ import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } 
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import {
+  hiddenLooseSessionCount,
   overlayLiveLanes,
   overlayLivePreviews,
   PROJECT_PREVIEW_COUNT,
@@ -988,10 +990,37 @@ export function ChatSidebar({
   )
 
   const mainSectionSessions = useMemo(
-    () =>
-      sessionsBesideProjectOverview(displayAgentSessions, activeSidebarSessionId, Boolean(projectOverview?.length)),
-    [activeSidebarSessionId, displayAgentSessions, projectOverview]
+    () => sessionsBesideProjectOverview(displayAgentSessions, Boolean(projectOverview?.length)),
+    [displayAgentSessions, projectOverview]
   )
+
+  const hiddenLooseCount = useMemo(
+    () => hiddenLooseSessionCount(displayAgentSessions, mainSectionSessions, Boolean(projectOverview?.length)),
+    [displayAgentSessions, mainSectionSessions, projectOverview]
+  )
+
+  const lastHiddenLooseCountRef = useRef(0)
+
+  useEffect(() => {
+    if (hiddenLooseCount === 0) {
+      lastHiddenLooseCountRef.current = 0
+
+      return
+    }
+
+    if (lastHiddenLooseCountRef.current === hiddenLooseCount) {
+      return
+    }
+
+    lastHiddenLooseCountRef.current = hiddenLooseCount
+    emitDesktopDiagnostic({
+      component: 'sidebar',
+      event: 'project_overview_hidden_sessions',
+      message: 'Project overview omitted loaded loose sessions',
+      severity: 'error',
+      details: { hidden_count: hiddenLooseCount, presentation: 'projects' }
+    })
+  }, [hiddenLooseCount])
 
   const folderSections = useMemo(
     () =>

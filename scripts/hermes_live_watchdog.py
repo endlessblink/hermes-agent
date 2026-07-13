@@ -192,6 +192,19 @@ def discover_ledgers(home: Path, explicit_ledger: str = "") -> list[Path]:
     return sorted(ledgers)
 
 
+def discover_sources(home: Path, explicit_ledger: str = "") -> list[Path]:
+    """Return privacy-safe runtime ledgers consumed by the live watchdog."""
+
+    if explicit_ledger:
+        return discover_ledgers(home, explicit_ledger)
+    return sorted(
+        {
+            *discover_ledgers(home),
+            home / "logs" / "desktop-events.jsonl",
+        }
+    )
+
+
 def build_alert(
     state: TurnState,
     idle: float,
@@ -229,6 +242,21 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
 
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    if row.get("component") == "sidebar" and row.get("event") == "project_overview_hidden_sessions":
+        desktop_details = row.get("details") if isinstance(row.get("details"), dict) else {}
+        hidden_count = desktop_details.get("hidden_count")
+        if isinstance(hidden_count, bool) or not isinstance(hidden_count, (int, float)) or hidden_count <= 0:
+            return None
+        return {
+            "ts": utc_now(),
+            "severity": "error",
+            "component": "live_watchdog",
+            "event": "sidebar_sessions_hidden",
+            "message": "Hermes Projects view omitted loaded conversations",
+            "hidden_count": int(hidden_count),
+            "ledger": str(ledger),
+            "processes": process_snapshot(),
+        }
     searchable = " ".join(
         str(value)
         for value in (
@@ -268,7 +296,7 @@ def run(args: argparse.Namespace) -> int:
     stopped = False
 
     def refresh_ledgers() -> None:
-        for path in discover_ledgers(home, args.ledger):
+        for path in discover_sources(home, args.ledger):
             if path not in tails:
                 tails[path] = LedgerTail(path, from_end=args.from_end)
 
@@ -308,11 +336,9 @@ def run(args: argparse.Namespace) -> int:
         for ledger, tail in list(tails.items()):
             for row in tail.rows():
                 sid = str(row.get("session_id") or "")
-                if not sid:
-                    continue
                 incident = build_incident_alert(row, ledger)
                 if incident is not None:
-                    incident_key = (sid, str(incident["event"]))
+                    incident_key = (sid or "desktop", str(incident["event"]))
                     last_incident = incident_alerted_at.get(incident_key, 0.0)
                     if now - last_incident >= args.alert_cooldown:
                         incident_alerted_at[incident_key] = now
@@ -321,13 +347,26 @@ def run(args: argparse.Namespace) -> int:
                             json.dumps(incident, ensure_ascii=False, indent=2, sort_keys=True),
                             encoding="utf-8",
                         )
-                        line = (
-                            f"[hermes-live-watchdog] SESSION_NOT_FOUND sid={sid[:8]} "
-                            f"key={incident['session_key']} ledger={ledger}"
-                        )
+                        if incident["event"] == "sidebar_sessions_hidden":
+                            line = (
+                                "[hermes-live-watchdog] SIDEBAR_SESSIONS_HIDDEN "
+                                f"count={incident['hidden_count']} ledger={ledger}"
+                            )
+                        else:
+                            line = (
+                                f"[hermes-live-watchdog] SESSION_NOT_FOUND sid={sid[:8]} "
+                                f"key={incident['session_key']} ledger={ledger}"
+                            )
                         print(line, flush=True)
                         if args.notify:
-                            desktop_notify("Hermes session recovery failed", line)
+                            title = (
+                                "Hermes conversations may be hidden"
+                                if incident["event"] == "sidebar_sessions_hidden"
+                                else "Hermes session recovery failed"
+                            )
+                            desktop_notify(title, line)
+                if not sid:
+                    continue
                 if is_terminal(row):
                     states.pop(sid, None)
                     state_ledgers.pop(sid, None)

@@ -5,6 +5,7 @@ import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 import {
   baseName,
+  hiddenLooseSessionCount,
   kanbanWorktreeDir,
   liveSessionProjectId,
   mergeRepoWorktreeGroups,
@@ -752,17 +753,28 @@ describe('overlayLivePreviews', () => {
 })
 
 describe('sessionsBesideProjectOverview', () => {
-  it('keeps the selected cwd-less session visible beside Projects without surfacing unrelated loose sessions', () => {
+  it('keeps cwd-less sessions discoverable when a restart restores Projects before a stored session selection', () => {
     const selected = makeSession(null, { id: 'selected-post-chat', title: 'Post about my new website' })
     const unrelated = makeSession(null, { id: 'other-loose-chat' })
     const projectOwned = makeSession('/www/app', { id: 'project-chat' })
 
-    expect(sessionsBesideProjectOverview([selected, unrelated, projectOwned], selected.id, true)).toEqual([selected])
+    expect(sessionsBesideProjectOverview([selected, unrelated, projectOwned], true)).toEqual([selected, unrelated])
   })
 
   it('leaves the ordinary flat session list unchanged outside the project overview', () => {
     const sessions = [makeSession(null, { id: 'loose' }), makeSession('/www/app', { id: 'project-chat' })]
 
-    expect(sessionsBesideProjectOverview(sessions, 'loose', false)).toEqual(sessions)
+    expect(sessionsBesideProjectOverview(sessions, false)).toEqual(sessions)
+  })
+})
+
+describe('hiddenLooseSessionCount', () => {
+  it('counts only cwd-less loaded sessions omitted from the Projects main projection', () => {
+    const visibleLoose = makeSession(null, { id: 'visible-loose', title: 'private visible title' })
+    const hiddenLoose = makeSession(null, { id: 'hidden-loose', title: 'private hidden title' })
+    const projectOwned = makeSession('/www/app', { id: 'project-owned' })
+
+    expect(hiddenLooseSessionCount([visibleLoose, hiddenLoose, projectOwned], [visibleLoose], true)).toBe(1)
+    expect(hiddenLooseSessionCount([visibleLoose, hiddenLoose, projectOwned], [visibleLoose], false)).toBe(0)
   })
 })

@@ -28,6 +28,69 @@ def test_discover_ledgers_includes_profile_ledgers(tmp_path):
     ]
 
 
+def test_discover_sources_also_tails_desktop_diagnostics(tmp_path):
+    home = tmp_path / ".hermes"
+
+    assert watchdog.discover_sources(home) == [
+        home / "logs" / "desktop-events.jsonl",
+        home / "logs" / "turn-watchdog.jsonl",
+    ]
+
+
+def test_hidden_sidebar_sessions_are_alerted_immediately_without_private_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    diagnostics = home / "logs" / "desktop-events.jsonl"
+    diagnostics.parent.mkdir(parents=True)
+    diagnostics.write_text(
+        json.dumps(
+            {
+                "ts": "2026-07-13T19:00:00.000Z",
+                "severity": "error",
+                "component": "sidebar",
+                "event": "project_overview_hidden_sessions",
+                "message": "Project overview omitted loaded loose sessions",
+                "details": {"hidden_count": 2, "presentation": "projects"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(["--home", str(home), "--from-start", "--once"])
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    alert = next(row for row in emitted if row["event"] == "sidebar_sessions_hidden")
+    assert alert["hidden_count"] == 2
+    assert alert["ledger"] == str(diagnostics)
+    serialized = json.dumps(alert)
+    assert "title" not in serialized
+    assert "session_id" not in serialized
+    assert "private" not in serialized
+
+
+def test_hidden_sidebar_session_diagnostics_are_deduplicated(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    diagnostics = home / "logs" / "desktop-events.jsonl"
+    diagnostics.parent.mkdir(parents=True)
+    row = {
+        "component": "sidebar",
+        "event": "project_overview_hidden_sessions",
+        "details": {"hidden_count": 1, "presentation": "projects"},
+    }
+    diagnostics.write_text("".join(json.dumps(row) + "\n" for _ in range(2)), encoding="utf-8")
+
+    args = watchdog.parse_args(["--home", str(home), "--from-start", "--once"])
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    events = [json.loads(line)["event"] for line in alerts.read_text(encoding="utf-8").splitlines()]
+    assert events.count("sidebar_sessions_hidden") == 1
+
+
 def test_profile_ledger_stuck_turn_writes_shared_alert(tmp_path, monkeypatch):
     monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
     home = tmp_path / ".hermes"
