@@ -3504,7 +3504,8 @@ _PERSONAL_ASSISTANT_MAX_ITERATIONS = 6
 _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY = """Personal Assistant responsiveness policy:
 - Return a useful visible response quickly; do not silently finish a broad audit first.
 - Use at most one focused batch of exact, relevant read-only tools by default.
-- After at most two foreground tool batches, answer with what is verified so far. Offer deeper work separately when it is genuinely useful.
+- For read-only discovery or audit requests, after at most two foreground tool batches, answer with what is verified so far. Offer deeper work separately when it is genuinely useful.
+- For explicit creation or change requests, do not stop at a progress report: continue until the requested deliverable exists and has been verified, or report a concrete blocker that prevents completion.
 - Do not search code, files, skills, or prior sessions unless the user explicitly asks about implementation, stored context, or past conversations.
 - Prefer exact FlowState reads over broad discovery. Batch independent reads and keep tool output narrow.
 - Preserve preview, approval, mutation, and read-back requirements. These safety checks are not optional.
@@ -3526,7 +3527,11 @@ def _apply_personal_assistant_runtime_policy(session: dict) -> None:
     except (TypeError, ValueError):
         configured = _PERSONAL_ASSISTANT_MAX_ITERATIONS
     agent.max_iterations = max(1, min(configured, _PERSONAL_ASSISTANT_MAX_ITERATIONS))
-    agent._foreground_tool_batch_limit = 2
+    # The prompt keeps read-only discovery concise. Do not enforce the old
+    # unconditional two-batch tool cutoff here: it stripped every tool from
+    # the next model call even when the user explicitly requested a file or
+    # other deliverable, forcing a progress report before the first write.
+    agent._foreground_tool_batch_limit = 0
     agent._tool_result_budget_override = BudgetConfig(
         default_result_size=20_000,
         turn_budget=40_000,
@@ -4185,8 +4190,11 @@ def _personal_assistant_prompt(
         "Available runtime facts (data, not a prescribed workflow):\n"
         f"{json.dumps(runtime_context, ensure_ascii=False, sort_keys=True)}\n\n"
         "Return a useful visible response quickly. Use one focused batch of exact, "
-        "relevant read-only tools by default, and answer after at most two foreground "
-        "tool batches with what is verified so far. Do not search code, files, skills, "
+        "relevant read-only tools by default. For read-only discovery or audits, answer "
+        "after at most two foreground tool batches with what is verified so far. For "
+        "explicit creation or change requests, do not stop at a progress report: continue "
+        "until the requested deliverable exists and has been verified, or report a concrete "
+        "blocker that prevents completion. Do not search code, files, skills, "
         "or prior sessions unless I explicitly ask about implementation, stored context, "
         "or past conversations. Offer broader research as a separate next step instead "
         "of silently completing it before replying.\n\n"

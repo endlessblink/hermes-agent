@@ -154,6 +154,8 @@ def test_personal_assistant_prompt_sets_a_fast_foreground_contract():
     assert "two foreground tool batches" in prompt
     assert "Do not search code, files, skills, or prior sessions" in prompt
     assert "Return a useful visible response" in prompt
+    assert "do not stop at a progress report" in prompt
+    assert "requested deliverable exists" in prompt
 
 
 def test_personal_assistant_runtime_policy_caps_only_its_agent():
@@ -175,7 +177,7 @@ def test_personal_assistant_runtime_policy_caps_only_its_agent():
 
     assert session["personal_assistant"] is True
     assert agent.max_iterations == server._PERSONAL_ASSISTANT_MAX_ITERATIONS
-    assert agent._foreground_tool_batch_limit == 2
+    assert agent._foreground_tool_batch_limit == 0
     assert agent._tool_result_budget_override.default_result_size == 20_000
     assert agent._tool_result_budget_override.turn_budget == 40_000
     assert agent._force_codex_ttfb_watchdog is True
