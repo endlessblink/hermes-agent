@@ -207,3 +207,21 @@ def test_openai_codex_stale_floor_tiers():
 
     assert openai_codex_stale_timeout_floor(55_000) == 900.0
     assert openai_codex_stale_timeout_floor(120_000) == 1200.0
+
+
+def test_desktop_codex_stale_timeout_is_bounded_below_ui_watchdog(tmp_path):
+    """A silent interactive desktop request must settle before the UI watchdog."""
+    from agent.chat_completion_helpers import effective_openai_codex_stale_timeout
+
+    agent = _make_agent(tmp_path, platform="desktop")
+
+    assert effective_openai_codex_stale_timeout(agent, 240.0, 120_000) == 60.0
+
+
+def test_noninteractive_codex_keeps_large_context_floor(tmp_path):
+    """Headless/CLI work retains the existing generous large-context floor."""
+    from agent.chat_completion_helpers import effective_openai_codex_stale_timeout
+
+    agent = _make_agent(tmp_path, platform="cli")
+
+    assert effective_openai_codex_stale_timeout(agent, 240.0, 120_000) == 1200.0

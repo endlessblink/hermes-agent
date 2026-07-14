@@ -147,6 +147,22 @@ def openai_codex_stale_timeout_floor(est_tokens: int) -> float:
     return 0.0
 
 
+def effective_openai_codex_stale_timeout(
+    agent: Any, computed_timeout: float, est_tokens: int
+) -> float:
+    """Apply the Codex context floor without outliving an interactive UI turn.
+
+    Large CLI and gateway jobs retain the generous context-dependent floor.
+    Desktop requests are user-attended. Bound a completely silent request to
+    one minute so the user gets a retry or terminal error instead of watching
+    an apparently frozen turn for several minutes.
+    """
+    timeout = max(computed_timeout, openai_codex_stale_timeout_floor(est_tokens))
+    if str(getattr(agent, "platform", "") or "").strip().lower() == "desktop":
+        return min(timeout, 60.0)
+    return timeout
+
+
 def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
     """Return a normalized OpenRouter provider.sort value or None."""
     if not isinstance(raw_sort, str):
@@ -407,9 +423,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
     _openai_codex_backend = _is_openai_codex_backend(agent)
     _est_tokens_for_codex_watchdog = estimate_request_context_tokens(api_kwargs)
     if _codex_watchdog_enabled and _openai_codex_backend:
-        _codex_floor = openai_codex_stale_timeout_floor(_est_tokens_for_codex_watchdog)
-        if _codex_floor:
-            _stale_timeout = max(_stale_timeout, _codex_floor)
+        _stale_timeout = effective_openai_codex_stale_timeout(
+            agent, _stale_timeout, _est_tokens_for_codex_watchdog
+        )
 
     if _est_tokens_for_codex_watchdog > 100_000:
         _codex_idle_timeout_default = 180.0
@@ -441,7 +457,12 @@ def interruptible_api_call(agent, api_kwargs: dict):
         _ttfb_enabled = False
     elif _openai_codex_backend:
         _ttfb_disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
-        _ttfb_strict = bool(getattr(agent, "_force_codex_ttfb_watchdog", False)) or (
+        _desktop_request = (
+            str(getattr(agent, "platform", "") or "").strip().lower() == "desktop"
+        )
+        _ttfb_strict = _desktop_request or bool(
+            getattr(agent, "_force_codex_ttfb_watchdog", False)
+        ) or (
             os.environ.get("HERMES_CODEX_TTFB_STRICT", "").strip().lower()
             in {"1", "true", "yes", "on"}
         )

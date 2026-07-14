@@ -298,6 +298,14 @@ class TestTerminalSchema:
         assert props["notify_on_complete"]["type"] == "boolean"
         assert props["notify_on_complete"]["default"] is False
 
+    def test_background_schema_rejects_sleep_as_a_reminder(self):
+        """Timers belong in the scheduler, not an hour-long shell process."""
+        from tools.terminal_tool import TERMINAL_SCHEMA
+
+        description = TERMINAL_SCHEMA["parameters"]["properties"]["background"]["description"]
+
+        assert "Never use a background sleep command as a reminder or session timer" in description
+
     def test_handler_passes_notify(self):
         """_handle_terminal passes notify_on_complete to terminal_tool."""
         from tools.terminal_tool import _handle_terminal
