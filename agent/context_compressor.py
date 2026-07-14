@@ -2873,6 +2873,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             return messages
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+        message_tokens_before = estimate_messages_tokens_rough(messages)
 
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
@@ -3164,10 +3165,18 @@ This compaction should PRIORITISE preserving all information related to the focu
         compressed = _strip_historical_media(compressed)
 
         new_estimate = estimate_messages_tokens_rough(compressed)
-        saved_estimate = display_tokens - new_estimate
+        # Compression can only remove message content. Provider prompt usage
+        # also includes fixed system/tool schemas, so comparing the compacted
+        # messages against that larger total makes a no-op look highly
+        # effective and defeats the anti-thrashing guard.
+        saved_estimate = message_tokens_before - new_estimate
 
         # Anti-thrashing: track compression effectiveness
-        savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
+        savings_pct = (
+            saved_estimate / message_tokens_before * 100
+            if message_tokens_before > 0
+            else 0
+        )
         self._last_compression_savings_pct = savings_pct
         if savings_pct < 10:
             self._ineffective_compression_count += 1

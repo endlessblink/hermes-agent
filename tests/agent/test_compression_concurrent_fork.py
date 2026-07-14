@@ -202,6 +202,68 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     agent.context_compressor.compress.assert_not_called()
 
 
+def test_pre_compress_memory_capture_does_not_block_compaction(tmp_path: Path) -> None:
+    """Slow inferred-memory extraction must not keep Desktop on Summarizing."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    session_id = "NONBLOCKING_MEMORY_CAPTURE"
+    db.create_session(session_id, source="desktop")
+    agent = _build_agent_with_db(db, session_id)
+    agent.compression_in_place = True
+    agent.context_compressor.compress.side_effect = lambda *_a, **_kw: [
+        {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
+        {"role": "user", "content": "tail"},
+    ]
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _SlowMemoryManager:
+        def on_pre_compress(self, _messages):
+            started.set()
+            release.wait(timeout=5)
+
+    agent._memory_manager = _SlowMemoryManager()
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+
+    before = time.monotonic()
+    compressed, _sp = agent._compress_context(
+        messages, "sys", approx_tokens=120_000
+    )
+    elapsed = time.monotonic() - before
+
+    assert started.wait(timeout=1), "memory capture was not scheduled"
+    assert elapsed < 1.0, "memory extraction blocked the compaction path"
+    assert len(compressed) == 2
+    release.set()
+
+
+def test_noop_compression_does_not_reinject_tasks_or_rewrite_history(
+    tmp_path: Path,
+) -> None:
+    """A no-op must not persist another visible task-preservation card."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    session_id = "NOOP_COMPRESSION"
+    db.create_session(session_id, source="desktop")
+    agent = _build_agent_with_db(db, session_id)
+    agent.compression_in_place = True
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+    agent.context_compressor.compress.side_effect = lambda incoming, **_kw: incoming
+    agent._todo_store.format_for_injection = MagicMock(
+        return_value="[Your active task list was preserved across context compression]"
+    )
+    archive = MagicMock(wraps=db.archive_and_compact)
+    db.archive_and_compact = archive
+
+    compressed, _sp = agent._compress_context(
+        messages, "sys", approx_tokens=120_000
+    )
+
+    assert compressed == messages
+    assert all("active task list was preserved" not in m["content"] for m in compressed)
+    agent._todo_store.format_for_injection.assert_not_called()
+    archive.assert_not_called()
+
+
 def test_compression_restores_user_turn_when_compressor_drops_all_users(tmp_path: Path) -> None:
     """Provider chat templates need at least one user message after compaction.
 

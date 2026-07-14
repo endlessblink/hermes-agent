@@ -153,6 +153,26 @@ def _compression_lock_holder(agent: Any) -> str:
     )
 
 
+def _schedule_pre_compress_memory_capture(agent: Any, messages: list) -> None:
+    """Capture inferred memory from a snapshot without blocking compaction."""
+    manager = getattr(agent, "_memory_manager", None)
+    if manager is None:
+        return
+    snapshot = [dict(message) for message in messages]
+
+    def _capture() -> None:
+        try:
+            manager.on_pre_compress(snapshot)
+        except Exception:
+            logger.debug("pre-compress memory capture failed", exc_info=True)
+
+    threading.Thread(
+        target=_capture,
+        name=f"memory-pre-compress-{getattr(agent, 'session_id', '') or 'unknown'}",
+        daemon=True,
+    ).start()
+
+
 class _CompressionLockLeaseRefresher:
     def __init__(
         self,
@@ -709,12 +729,9 @@ def compress_context(
             except Exception as _rel_err:
                 logger.debug("compression lock release failed: %s", _rel_err)
 
-    # Notify external memory provider before compression discards context
-    if agent._memory_manager:
-        try:
-            agent._memory_manager.on_pre_compress(messages)
-        except Exception:
-            pass
+    # The durable transcript is already stored by SessionDB. Additional
+    # inferred-memory extraction must not block the active chat turn.
+    _schedule_pre_compress_memory_capture(agent, messages)
 
     try:
         compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
@@ -755,6 +772,22 @@ def compress_context(
                     "No messages were dropped — conversation continues unchanged. "
                     "Run /compress to retry, or /new to start a fresh session."
                 )
+            _existing_sp = getattr(agent, "_cached_system_prompt", None)
+            if not _existing_sp:
+                _existing_sp = agent._build_system_prompt(system_message)
+            return messages, _existing_sp
+        finally:
+            _release_lock()
+
+    # A schema-heavy request can cross the provider threshold even when the
+    # conversation itself has no compressible middle. Do not turn that no-op
+    # into a durable compaction by appending another task snapshot and
+    # rewriting the same history.
+    if compressed == messages:
+        try:
+            callback = getattr(agent, "status_callback", None)
+            if callback:
+                callback("compression_complete", "Context compression finished")
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
                 _existing_sp = agent._build_system_prompt(system_message)

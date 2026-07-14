@@ -226,6 +226,27 @@ class TestEffectiveCompressionResetsCounter:
             f"got {comp._ineffective_compression_count}"
         )
 
+    def test_tool_schema_overhead_does_not_fake_message_savings(self):
+        """Provider prompt tokens include tools that compression cannot remove."""
+        comp = _make_compressor(
+            summary_target_ratio=0.20,
+            config_context_length=96000,
+        )
+        messages = _build_session(8, words_per_turn=4)
+        comp._ineffective_compression_count = 1
+        comp._generate_summary = MagicMock(return_value="summary " * 700)
+        compress_start = comp._align_boundary_forward(
+            messages, comp._protect_head_size(messages)
+        )
+        comp._find_tail_cut_by_tokens = lambda _messages, _head: compress_start + 2
+
+        comp.compress(messages, current_tokens=200_000)
+
+        assert comp._ineffective_compression_count >= 2, (
+            "large fixed tool-schema overhead must not make an ineffective "
+            "message compaction look successful"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Test: anti-thrashing in should_compress
