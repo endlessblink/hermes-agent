@@ -36,6 +36,7 @@ export type GatewayEventPayload = {
   rendered?: string
   status?: string
   compression_exhausted?: boolean
+  same_session_recovery?: boolean
   message?: string
   id?: string
   name?: string

@@ -573,16 +573,18 @@ export function useSessionActions({
         const recovery = resumed.recoverable_turn
 
         if (
-          recovery?.kind === 'restart_interrupted' &&
+          (recovery?.kind === 'restart_interrupted' || recovery?.kind === 'continue_interrupted') &&
           recovery.text.trim() &&
           Number.isInteger(recovery.user_ordinal) &&
           recovery.user_ordinal >= 0
         ) {
           await requestGateway('prompt.submit', {
-            recovery_kind: 'restart_interrupted',
+            recovery_kind: recovery.kind,
             session_id: resumed.session_id,
             text: recovery.text,
-            truncate_before_user_ordinal: recovery.user_ordinal
+            ...(recovery.kind === 'restart_interrupted' && {
+              truncate_before_user_ordinal: recovery.user_ordinal
+            })
           })
           resumedRunning = true
           updateSessionState(

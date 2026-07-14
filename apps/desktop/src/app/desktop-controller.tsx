@@ -19,7 +19,6 @@ import { formatRefValue } from '../components/assistant-ui/directive-text'
 import {
   getSession,
   getSessionMessages,
-  PROMPT_SUBMIT_REQUEST_TIMEOUT_MS,
   type SessionMessage,
   triggerCronJob
 } from '../hermes'
@@ -129,7 +128,7 @@ import { CommandPalette } from './command-palette'
 import {
   activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
-  continueFromDropoffWithStaleRuntimeRecovery,
+  recoverSameSessionFromCompression,
   resolveProfileRestoreSessionId,
   shouldSettleBusyFromLiveStatus,
   storedSessionIdForCompressionContinuation
@@ -159,7 +158,7 @@ import { useMessageStream } from './session/hooks/use-message-stream'
 import { useModelControls } from './session/hooks/use-model-controls'
 import { usePreviewRouting } from './session/hooks/use-preview-routing'
 import { usePromptActions } from './session/hooks/use-prompt-actions'
-import { consumeContinuationPrompt, rememberContinuationPrompt } from './session/hooks/use-prompt-actions/continuation-recovery'
+import { consumeContinuationPrompt } from './session/hooks/use-prompt-actions/continuation-recovery'
 import { useRouteResume } from './session/hooks/use-route-resume'
 import { useSessionActions } from './session/hooks/use-session-actions'
 import { useSessionListActions } from './session/hooks/use-session-list-actions'
@@ -761,7 +760,7 @@ export function DesktopController() {
       let nextStoredId: string | null = null
 
       try {
-        const continued = await continueFromDropoffWithStaleRuntimeRecovery(requestGateway, {
+        const continued = await recoverSameSessionFromCompression(requestGateway, {
           cwd: $currentCwd.get().trim() || undefined,
           error: errorMessage,
           parentSessionId: parentStoredSessionId,
@@ -777,7 +776,7 @@ export function DesktopController() {
         const continuationNote: ChatMessage = {
           id: `continuation-${Date.now()}`,
           role: 'system',
-          parts: [textPart('Continued in a fresh compacted context from the previous oversized chat.')]
+          parts: [textPart('Recovered the saved turn in this conversation.')]
         }
 
         activeSessionIdRef.current = nextRuntimeId
@@ -809,8 +808,6 @@ export function DesktopController() {
           nextStoredId
         )
 
-        rememberContinuationPrompt(nextRuntimeId, prompt)
-        await requestGateway('prompt.submit', { session_id: nextRuntimeId, text: prompt }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
       } catch (err) {
         setBusy(false)
         setAwaitingResponse(false)

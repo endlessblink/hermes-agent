@@ -31,7 +31,7 @@ def test_completed_turn_patches_working_state(tmp_path):
     assert state["relevant_files"] == ["./src/auth.ts"]
 
 
-def test_interrupted_turn_does_not_mark_completed(tmp_path):
+def test_interrupted_turn_preserves_pending_recovery_marker(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     db.create_session("s1", source="cli")
     db.set_working_state(
@@ -49,7 +49,11 @@ def test_interrupted_turn_does_not_mark_completed(tmp_path):
         failed=False,
     )
 
-    assert "pending_turn" not in db.get_working_state("s1")
+    assert db.get_working_state("s1")["pending_turn"] == {
+        "prompt_hash": "abc",
+        "started_at": 1,
+        "state": "running",
+    }
 
 
 def test_failed_turn_clears_pending_recovery_marker(tmp_path):

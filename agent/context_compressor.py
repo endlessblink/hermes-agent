@@ -2075,6 +2075,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             _is_timeout = (
                 _status in {408, 429, 502, 504}
                 or "timeout" in _err_str
+                or "timed out" in _err_str
             )
             # Non-JSON / malformed-body responses from misconfigured providers
             # or proxies (e.g. an HTML 502 page returned with
@@ -2128,7 +2129,11 @@ This compaction should PRIORITISE preserving all information related to the focu
                     e,
                 )
             if (
-                (_is_model_not_found or _is_timeout or _is_json_decode or _is_streaming_closed)
+                (
+                    _is_model_not_found
+                    or _is_json_decode
+                    or (_is_streaming_closed and not _is_timeout)
+                )
                 and self.summary_model
                 and self.summary_model != self.model
                 and not getattr(self, "_summary_model_fallen_back", False)
@@ -2154,7 +2159,8 @@ This compaction should PRIORITISE preserving all information related to the focu
             # aggregator rejections, etc.) where auto-retry is still safer
             # than dropping the turns.
             if (
-                self.summary_model
+                not _is_timeout
+                and self.summary_model
                 and self.summary_model != self.model
                 and not getattr(self, "_summary_model_fallen_back", False)
             ):
@@ -2177,7 +2183,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             # placeholder marker — retrying once the network recovers is
             # strictly better than dropping context (#29559, #25585). Mirrors
             # the auth-failure carve-out; independent of abort_on_summary_failure.
-            if _is_streaming_closed:
+            if _is_streaming_closed and not _is_timeout:
                 self._last_summary_network_failure = True
             logger.warning(
                 "Failed to generate context summary: %s. "

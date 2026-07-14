@@ -1,18 +1,14 @@
-"""Regression tests for the compression-scoped auxiliary timeout floor (#54915).
+"""Regression tests for the bounded compression auxiliary timeout.
 
-Context compression summarises large conversation histories.  When the
-resolved auxiliary provider is a reasoning model (e.g. Codex / GPT-5.5) the
-summary can legitimately exceed the default ``auxiliary.compression.timeout``
-of 120 s, causing the stream to time out and the compressor to fall back to a
-deterministic context marker — silently losing the LLM summary.
+Context compression blocks the user's active turn. The request therefore gets
+one bounded remote attempt before the existing deterministic local handoff.
 
-The fix layers a *bounded* timeout floor on top of the config-derived
-compression timeout, while honouring the four constraints from the issue:
+The cap honours these constraints:
 
-  * Only the ``compression`` task gets the floor (other auxiliary tasks keep
+  * Only the ``compression`` task gets the cap (other auxiliary tasks keep
     their own timeouts).
   * An explicit per-call ``timeout=`` override is **not** floored.
-  * The floor is a minimum — a config value already above it is unchanged.
+  * Config values above the budget are capped.
   * Both the sync (``call_llm``) and async (``async_call_llm``) paths are
     covered.
 
@@ -27,11 +23,8 @@ import pytest
 
 from agent.auxiliary_client import call_llm, async_call_llm
 
-# The committed bounded floor for config-derived compression timeouts.
-# Behaviour contract (see AGENTS.md "Behavior contracts over snapshots"):
-# compression's effective timeout must be at least this when it is
-# config-derived.
-COMPRESSION_TIMEOUT_FLOOR = 300.0
+# The committed wall-clock budget for config-derived compression timeouts.
+COMPRESSION_TIMEOUT_BUDGET = 30.0
 
 # The default ``auxiliary.compression.timeout`` shipped in the config schema
 # (hermes_cli/config.py).  Simulated here as the config-derived value.
@@ -72,11 +65,9 @@ def _patches(client, *, task_timeout):
 
 
 class TestCompressionTimeoutFloorSync:
-    """Sync ``call_llm`` applies the floor to config-derived compression timeouts."""
+    """Sync ``call_llm`` caps config-derived compression timeouts."""
 
-    def test_config_derived_compression_timeout_is_raised_to_floor(self):
-        """Layer 1: compression with a 120 s config timeout must reach the
-        client with at least the 300 s floor."""
+    def test_config_derived_compression_timeout_is_capped_to_budget(self):
         client = _client_sync()
         p1, p2, p3, p4 = _patches(client, task_timeout=COMPRESSION_CONFIG_TIMEOUT)
         with p1, p2, p3, p4:
@@ -85,13 +76,7 @@ class TestCompressionTimeoutFloorSync:
                 messages=[{"role": "user", "content": "summarise this"}],
             )
         timeout = client.chat.completions.create.call_args.kwargs["timeout"]
-        assert timeout >= COMPRESSION_TIMEOUT_FLOOR, (
-            f"compression timeout {timeout} should be >= floor "
-            f"{COMPRESSION_TIMEOUT_FLOOR}"
-        )
-        assert timeout > COMPRESSION_CONFIG_TIMEOUT, (
-            "the too-low config timeout must not pass through unchanged"
-        )
+        assert timeout == COMPRESSION_TIMEOUT_BUDGET
 
     def test_explicit_per_call_timeout_is_not_floored(self):
         """Layer 3: an explicit per-call ``timeout=`` override is honoured
@@ -126,9 +111,7 @@ class TestCompressionTimeoutFloorSync:
             f"non-compression task timeout must stay {low}, got {timeout}"
         )
 
-    def test_higher_config_timeout_is_not_lowered(self):
-        """Layer 5: the floor is a minimum — a config value already above it
-        is kept unchanged (``max`` semantics)."""
+    def test_higher_config_timeout_is_lowered_to_budget(self):
         client = _client_sync()
         high = 600.0
         p1, p2, p3, p4 = _patches(client, task_timeout=high)
@@ -138,16 +121,14 @@ class TestCompressionTimeoutFloorSync:
                 messages=[{"role": "user", "content": "x"}],
             )
         timeout = client.chat.completions.create.call_args.kwargs["timeout"]
-        assert timeout == high, (
-            f"config timeout {high} above the floor must be unchanged, got {timeout}"
-        )
+        assert timeout == COMPRESSION_TIMEOUT_BUDGET
 
 
 class TestCompressionTimeoutFloorAsync:
-    """Async ``async_call_llm`` mirrors the sync floor (Layer 2)."""
+    """Async ``async_call_llm`` mirrors the sync cap."""
 
     @pytest.mark.asyncio
-    async def test_async_config_derived_compression_timeout_is_raised_to_floor(self):
+    async def test_async_config_derived_compression_timeout_is_capped_to_budget(self):
         client = _client_async()
         p1, p2, p3, p4 = _patches(client, task_timeout=COMPRESSION_CONFIG_TIMEOUT)
         with p1, p2, p3, p4:
@@ -156,10 +137,7 @@ class TestCompressionTimeoutFloorAsync:
                 messages=[{"role": "user", "content": "summarise this"}],
             )
         timeout = client.chat.completions.create.call_args.kwargs["timeout"]
-        assert timeout >= COMPRESSION_TIMEOUT_FLOOR, (
-            f"async compression timeout {timeout} should be >= floor "
-            f"{COMPRESSION_TIMEOUT_FLOOR}"
-        )
+        assert timeout == COMPRESSION_TIMEOUT_BUDGET
 
     @pytest.mark.asyncio
     async def test_async_explicit_per_call_timeout_is_not_floored(self):

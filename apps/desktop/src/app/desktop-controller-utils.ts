@@ -7,6 +7,11 @@ type ProfileSessionProbe = (sessionId: string, profile: string) => Promise<Sessi
 export type CompressionContinuationResponse = SessionCreateResponse & {
   continued_from_session_id?: string
   dropoff_message_count?: number
+  recoverable_turn?: {
+    kind: 'continue_interrupted' | 'restart_interrupted'
+    text: string
+    user_ordinal: number
+  }
 }
 
 interface ContinueFromDropoffParams {
@@ -157,50 +162,31 @@ export function shouldSettleBusyFromLiveStatus(status: string | null | undefined
   return status === 'idle'
 }
 
-function isSessionNotFoundError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-
-  return /session not found/i.test(message)
-}
-
-function dropoffRequestParams(params: ContinueFromDropoffParams, runtimeSessionId: string): Record<string, unknown> {
-  return {
-    cwd: params.cwd,
-    error: params.error,
-    parent_session_id: params.parentSessionId,
-    pending_prompt: params.pendingPrompt,
-    profile: params.profile,
-    session_id: runtimeSessionId
-  }
-}
-
-export async function continueFromDropoffWithStaleRuntimeRecovery(
+export async function recoverSameSessionFromCompression(
   requestGateway: GatewayRequest,
   params: ContinueFromDropoffParams
 ): Promise<CompressionContinuationResponse> {
-  try {
-    return await requestGateway<CompressionContinuationResponse>(
-      'session.continue_from_dropoff',
-      dropoffRequestParams(params, params.runtimeSessionId)
-    )
-  } catch (err) {
-    if (!isSessionNotFoundError(err)) {
-      throw err
-    }
+  const resumed = await requestGateway<CompressionContinuationResponse>('session.resume', {
+    ...(params.profile ? { profile: params.profile } : {}),
+    session_id: params.parentSessionId
+  })
 
-    const resumed = await requestGateway<{ session_id?: string }>('session.resume', {
-      session_id: params.parentSessionId
-    })
+  const recoveredRuntimeId = resumed.session_id?.trim()
 
-    const recoveredRuntimeId = resumed.session_id?.trim()
+  const recovery = resumed.recoverable_turn
 
-    if (!recoveredRuntimeId) {
-      throw err
-    }
-
-    return await requestGateway<CompressionContinuationResponse>(
-      'session.continue_from_dropoff',
-      dropoffRequestParams(params, recoveredRuntimeId)
-    )
+  if (!recoveredRuntimeId || !recovery?.text?.trim()) {
+    throw new Error('The saved turn could not be claimed for same-conversation recovery')
   }
+
+  await requestGateway('prompt.submit', {
+    recovery_kind: recovery.kind,
+    session_id: recoveredRuntimeId,
+    text: recovery.text,
+    ...(recovery.kind === 'restart_interrupted' && {
+      truncate_before_user_ordinal: recovery.user_ordinal
+    })
+  })
+
+  return resumed
 }

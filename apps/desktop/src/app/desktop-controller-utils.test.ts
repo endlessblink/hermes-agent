@@ -5,8 +5,8 @@ import type { SessionInfo } from '@/hermes'
 import {
   activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
-  continueFromDropoffWithStaleRuntimeRecovery,
   profileRestoreSessionId,
+  recoverSameSessionFromCompression,
   resolveProfileRestoreSessionId,
   sameCronSignature,
   shouldSettleBusyFromLiveStatus,
@@ -188,7 +188,7 @@ describe('resolveProfileRestoreSessionId', () => {
   })
 })
 
-describe('continueFromDropoffWithStaleRuntimeRecovery', () => {
+describe('recoverSameSessionFromCompression', () => {
   const params = {
     cwd: '/work',
     error: 'Context length exceeded',
@@ -198,60 +198,52 @@ describe('continueFromDropoffWithStaleRuntimeRecovery', () => {
     runtimeSessionId: 'stale-runtime'
   }
 
-  it('resumes the stored parent and retries once when the runtime session is gone', async () => {
+  it('resumes and replays on the stored parent without creating a child session', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
-    let continueAttempts = 0
 
     const requestGateway = async <T,>(method: string, requestParams?: Record<string, unknown>): Promise<T> => {
       calls.push({ method, params: requestParams })
 
-      if (method === 'session.continue_from_dropoff') {
-        continueAttempts += 1
-
-        if (continueAttempts === 1) {
-          throw new Error('session not found')
-        }
-
-        return { session_id: 'child-runtime', stored_session_id: 'child-stored' } as T
+      if (method === 'session.resume') {
+        return {
+          session_id: 'recovered-runtime',
+          recoverable_turn: {
+            kind: 'restart_interrupted',
+            text: 'continue',
+            user_ordinal: 3
+          }
+        } as T
       }
 
-      if (method === 'session.resume') {
-        return { session_id: 'recovered-runtime' } as T
+      if (method === 'prompt.submit') {
+        return { accepted: true } as T
       }
 
       return {} as T
     }
 
-    const continued = await continueFromDropoffWithStaleRuntimeRecovery(requestGateway, params)
+    const continued = await recoverSameSessionFromCompression(requestGateway, params)
 
-    expect(continued.session_id).toBe('child-runtime')
-    expect(calls.map(call => call.method)).toEqual([
-      'session.continue_from_dropoff',
-      'session.resume',
-      'session.continue_from_dropoff'
-    ])
-    expect(calls[0]?.params).toMatchObject({
-      parent_session_id: 'parent-stored',
-      pending_prompt: 'continue',
-      session_id: 'stale-runtime'
-    })
-    expect(calls[1]?.params).toEqual({ session_id: 'parent-stored' })
-    expect(calls[2]?.params).toMatchObject({
-      parent_session_id: 'parent-stored',
-      pending_prompt: 'continue',
-      session_id: 'recovered-runtime'
+    expect(continued.session_id).toBe('recovered-runtime')
+    expect(calls.map(call => call.method)).toEqual(['session.resume', 'prompt.submit'])
+    expect(calls[0]?.params).toEqual({ profile: 'bina', session_id: 'parent-stored' })
+    expect(calls[1]?.params).toMatchObject({
+      recovery_kind: 'restart_interrupted',
+      session_id: 'recovered-runtime',
+      text: 'continue',
+      truncate_before_user_ordinal: 3
     })
   })
 
   it('does not retry non-stale continuation failures', async () => {
     const requestGateway = async <T,>(method: string): Promise<T> => {
-      if (method === 'session.continue_from_dropoff') {
+      if (method === 'session.resume') {
         throw new Error('provider failed')
       }
 
       return {} as T
     }
 
-    await expect(continueFromDropoffWithStaleRuntimeRecovery(requestGateway, params)).rejects.toThrow('provider failed')
+    await expect(recoverSameSessionFromCompression(requestGateway, params)).rejects.toThrow('provider failed')
   })
 })

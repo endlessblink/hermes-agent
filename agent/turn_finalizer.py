@@ -141,8 +141,12 @@ def _patch_completed_turn_working_state(
         return
     user_text = _state_text(original_user_message, 800)
     try:
-        # Clear before interrupted/failed early returns: an intentional Stop
-        # must never remain eligible for replay after a later backend restart.
+        # Gateway-owned intentional Stop clears its marker synchronously before
+        # interrupting the agent. Preserve any marker that remains here when an
+        # infrastructure watchdog interrupted the turn, so restart recovery can
+        # replay the exact accepted prompt instead of silently losing it.
+        if interrupted:
+            return
         db.patch_working_state(
             session_id,
             {"pending_turn": None},
@@ -159,7 +163,7 @@ def _patch_completed_turn_working_state(
                 source="turn_supersession",
             )
             return
-        if not final_response or interrupted or failed:
+        if not final_response or failed:
             return
         patch = {
             "active_task": user_text,

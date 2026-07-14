@@ -390,7 +390,7 @@ export interface SessionResumeResponse {
   message_count: number
   messages: SessionMessage[]
   recoverable_turn?: {
-    kind: 'restart_interrupted'
+    kind: 'restart_interrupted' | 'continue_interrupted'
     text: string
     user_ordinal: number
   }

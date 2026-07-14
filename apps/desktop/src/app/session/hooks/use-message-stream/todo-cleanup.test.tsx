@@ -280,14 +280,14 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.messages.at(-1)?.parts.at(-1)).toMatchObject({ type: 'text', text: 'Recovered after refreshing auth.' })
   })
 
-  it('requests automatic continuation when compression is exhausted', async () => {
+  it('requests automatic same-session recovery when compression times out', async () => {
     await mountStream()
 
     act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
     act(() =>
       handleEvent!({
         payload: {
-          compression_exhausted: true,
+          same_session_recovery: true,
           status: 'error',
           text: 'Context length exceeded (358,245 tokens). Cannot compress further.'
         },

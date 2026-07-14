@@ -62,6 +62,20 @@ def test_compaction_lifecycle_is_retagged(server, monkeypatch):
     ]
 
 
+def test_compaction_completion_clears_live_watchdog_state(server, monkeypatch):
+    from agent.conversation_compression import COMPACTION_STATUS
+
+    events = _capture(server, monkeypatch)
+    session = server._sessions.setdefault("sid", {"running": True})
+    server._status_update("sid", "lifecycle", COMPACTION_STATUS)
+    assert session.get("compression_started_at")
+
+    server._status_update("sid", "compression_complete", "Context compression finished")
+
+    assert "compression_started_at" not in session
+    assert any(event.get("event") == "success" for event in events)
+
+
 def test_other_lifecycle_status_stays_lifecycle(server, monkeypatch):
     events = _capture(server, monkeypatch)
     server._status_update("sid", "lifecycle", "❌ Rate limited after 5 retries")

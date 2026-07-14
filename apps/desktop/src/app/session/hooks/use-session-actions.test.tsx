@@ -400,6 +400,45 @@ describe('resumeSession failure recovery', () => {
     })
   })
 
+  it('continues an interrupted tool trail without truncating or repeating completed actions', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        return {
+          recoverable_turn: {
+            kind: 'continue_interrupted',
+            text: 'Continue the interrupted request above using the saved tool results.',
+            user_ordinal: 0
+          },
+          session_id: 'runtime-1',
+          resumed: params?.session_id,
+          messages: [
+            { content: 'retry this', role: 'user', timestamp: 1 },
+            { content: 'saved result', role: 'tool', timestamp: 2 }
+          ],
+          info: {}
+        } as never
+      }
+
+      return {} as never
+    })
+
+    vi.mocked(getSessionMessages).mockResolvedValue({
+      messages: [
+        { content: 'retry this', role: 'user', timestamp: 1 },
+        { content: 'saved result', role: 'tool', timestamp: 2 }
+      ],
+      session_id: 'stored-1'
+    } as never)
+
+    await runResume(requestGateway)
+
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      recovery_kind: 'continue_interrupted',
+      session_id: 'runtime-1',
+      text: 'Continue the interrupted request above using the saved tool results.'
+    })
+  })
+
   it('arms the failure latch when resume succeeds with an empty transcript for a non-empty stored session', async () => {
     setSessions([storedSession({ message_count: 4 })])
 

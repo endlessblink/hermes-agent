@@ -5981,16 +5981,10 @@ def _resolve_task_provider_model(
 
 _DEFAULT_AUX_TIMEOUT = 30.0
 
-# Compression summarises large conversation histories; a reasoning auxiliary
-# model (e.g. Codex / GPT-5.5) can legitimately take longer than the default
-# ``auxiliary.compression.timeout`` (120 s), causing the stream to time out and
-# the compressor to fall back to the deterministic context marker (#54915).
-# This is a bounded *floor* applied only to config-derived compression timeouts
-# — it does not affect other auxiliary tasks and does not override an explicit
-# per-call ``timeout=``.  A floor is harmless for fast compression models
-# (they finish before the deadline) and is a minimum, so a higher config value
-# is kept unchanged.
-_COMPRESSION_TIMEOUT_FLOOR_SECONDS = 300.0
+# Compression blocks the user's turn. One bounded attempt is enough; on timeout
+# the context compressor preserves the exact transcript and builds its existing
+# deterministic local handoff instead of freezing the UI for repeated requests.
+_COMPRESSION_TIMEOUT_BUDGET_SECONDS = 30.0
 
 
 def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
@@ -6056,15 +6050,13 @@ def _effective_aux_timeout(task: str, timeout: Optional[float]) -> float:
 
     Uses the caller-provided ``timeout`` when given; otherwise reads
     ``auxiliary.{task}.timeout`` from config via :func:`_get_task_timeout`.
-    For the ``compression`` task only, applies a bounded floor so a reasoning
-    model summarising a large context is not cut off by the default timeout
-    (#54915).  The floor is intentionally skipped when the caller passes an
-    explicit ``timeout=`` — explicit per-call deadlines are always honoured —
-    and it is a minimum (``max``), so a config value already above it is kept.
+    For the ``compression`` task only, caps config-derived timeouts so a stalled
+    summarizer cannot block the visible conversation for minutes. Explicit
+    per-call deadlines remain authoritative.
     """
     effective = timeout if timeout is not None else _get_task_timeout(task)
     if timeout is None and task == "compression":
-        effective = max(effective, _COMPRESSION_TIMEOUT_FLOOR_SECONDS)
+        effective = min(effective, _COMPRESSION_TIMEOUT_BUDGET_SECONDS)
     return effective
 
 
@@ -6627,6 +6619,9 @@ def call_llm(
                 first_err = retry_err
                 kwargs = retry_kwargs
 
+        if task == "compression" and _is_timeout_error(first_err):
+            raise first_err
+
         err_str = str(first_err)
         # ZAI vision models (glm-4v-flash etc.) return error code 1210
         # ("API 调用参数有误") when max_tokens is passed on multimodal
@@ -7177,6 +7172,9 @@ async def async_call_llm(
                     raise
                 first_err = retry_err
                 kwargs = retry_kwargs
+
+        if task == "compression" and _is_timeout_error(first_err):
+            raise first_err
 
         err_str = str(first_err)
         # ZAI vision models (glm-4v-flash etc.) return error code 1210

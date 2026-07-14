@@ -76,7 +76,7 @@ def test_recoverable_turn_fails_closed_for_mismatch_or_assistant_tail(server):
     ) is None
 
 
-def test_recoverable_turn_accepts_matching_user_before_tool_trail(server):
+def test_recoverable_turn_continues_matching_user_before_tool_trail(server):
     marker = server._pending_turn_marker("retry this", now=123.0)
 
     assert server._recoverable_pending_turn(
@@ -89,11 +89,18 @@ def test_recoverable_turn_accepts_matching_user_before_tool_trail(server):
                 "finish_reason": "tool_calls",
             },
             {"role": "tool", "content": "saved tool result", "tool_call_id": "call-1"},
+            {
+                "role": "user",
+                "content": "[Your active task list was preserved across context compression]\n- continue",
+            },
         ],
         {"pending_turn": marker},
     ) == {
-        "kind": "restart_interrupted",
-        "text": "retry this",
+        "kind": "continue_interrupted",
+        "text": (
+            "Continue the interrupted request above using the saved tool results. "
+            "Do not repeat actions that already completed."
+        ),
         "user_ordinal": 0,
     }
 

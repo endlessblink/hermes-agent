@@ -207,6 +207,44 @@ def test_idle_timeout_diagnostic_becomes_an_internal_watchdog_incident(tmp_path)
     assert "session_id" not in alert
 
 
+def test_turn_timeout_is_recorded_as_contained_not_repaired(tmp_path):
+    home = tmp_path / ".hermes"
+
+    watchdog._record_turn_timeout_recovery_event(home, "office-work")
+
+    inbox = (
+        home
+        / "profiles"
+        / "office-work"
+        / "state"
+        / "improvement-supervisor"
+        / "runtime-events.jsonl"
+    )
+    event = json.loads(inbox.read_text(encoding="utf-8"))
+    assert event["action"] == "interrupt"
+    assert event["outcome"] == "contained"
+    assert event["reason"] == "turn_idle_timeout"
+
+
+def test_compression_timeout_becomes_an_internal_watchdog_incident(tmp_path):
+    alert = watchdog.build_incident_alert(
+        {
+            "session_id": "runtime-private",
+            "event": "diagnostic.event",
+            "payload": {
+                "component": "compression",
+                "event": "timeout",
+                "details": {"timeout_seconds": 12},
+            },
+        },
+        tmp_path / "turn-watchdog.jsonl",
+    )
+
+    assert alert["event"] == "stuck_turn_automatically_stopped"
+    assert alert["recovery_reason"] == "compression_timeout"
+    assert "session_id" not in alert
+
+
 def test_flowstate_recovery_launches_absent_app_when_api_is_enabled():
     decision = watchdog.classify_flowstate_recovery(
         status="unavailable",

@@ -1508,6 +1508,27 @@ class TestSummaryFailureTrackingForGatewayWarning:
         assert "deterministic fallback" in fallback
         assert "important detail" in fallback
 
+    def test_summary_timeout_does_not_retry_on_main_model(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="main-model",
+                summary_model_override="summary-model",
+                quiet_mode=True,
+                protect_first_n=1,
+                protect_last_n=1,
+            )
+        msgs = [{"role": "system", "content": "sys"}] + [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
+            for i in range(10)
+        ]
+
+        with patch("agent.context_compressor.call_llm", side_effect=TimeoutError("timed out")) as call:
+            result = c.compress(msgs)
+
+        assert call.call_count == 1
+        assert c._last_summary_fallback_used is True
+        assert any("deterministic fallback" in str(message.get("content")) for message in result)
+
     def test_compress_clears_fallback_flag_on_subsequent_success(self):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]

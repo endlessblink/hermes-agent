@@ -2208,7 +2208,7 @@ class TestStaleFallbackCandidateSkip:
              patch("agent.auxiliary_client._refresh_provider_credentials",
                    return_value=True) as mock_refresh:
             result = call_llm(
-                task="compression",
+                task="web_extract",
                 messages=[{"role": "user", "content": "summarize"}],
             )
 
@@ -2251,7 +2251,7 @@ class TestStaleFallbackCandidateSkip:
                    return_value=False), \
              patch("agent.auxiliary_client._mark_provider_unhealthy") as mock_mark:
             result = call_llm(
-                task="compression",
+                task="web_extract",
                 messages=[{"role": "user", "content": "summarize"}],
             )
 
@@ -2284,7 +2284,7 @@ class TestStaleFallbackCandidateSkip:
                    return_value=(broken_fb, "claude-haiku-4-5-20251001", "anthropic")):
             with pytest.raises(ValueError, match="malformed response"):
                 call_llm(
-                    task="compression",
+                    task="web_extract",
                     messages=[{"role": "user", "content": "summarize"}],
                 )
 
@@ -2841,9 +2841,8 @@ class TestTransientTransportRetry:
         assert fb_client.chat.completions.create.call_count == 1
 
     def test_compression_skips_same_provider_retry_on_timeout(self):
-        """A timeout on the critical compression path must NOT retry the same
-        provider (that doubles the user-visible stall, issue #54465) — it
-        falls straight through to the fallback chain instead.
+        """A compression timeout must return to the local deterministic
+        fallback without another remote request.
         """
         class _Timeout(Exception):
             pass
@@ -2858,22 +2857,17 @@ class TestTransientTransportRetry:
         fb_client.chat.completions.create.return_value = {"fallback": True}
 
         p1, p2, p3 = self._patches(primary)
-        with (
-            p1, p2, p3,
-            patch(
+        with p1, p2, p3, patch(
                 "agent.auxiliary_client._try_configured_fallback_chain",
                 return_value=(None, None, ""),
-            ),
-            patch(
+            ), patch(
                 "agent.auxiliary_client._try_main_agent_model_fallback",
                 return_value=(fb_client, "fb-model", "openai"),
-            ),
-        ):
-            result = call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
-        assert result == {"fallback": True}
-        # Primary tried ONCE only — no same-provider timeout retry — then fallback.
+            ), pytest.raises(_Timeout):
+            call_llm(task="compression", messages=[{"role": "user", "content": "hi"}])
+        # Exactly one remote attempt; the context compressor owns local fallback.
         assert primary.chat.completions.create.call_count == 1
-        assert fb_client.chat.completions.create.call_count == 1
+        assert fb_client.chat.completions.create.call_count == 0
 
     def test_non_compression_still_retries_same_provider_on_timeout(self):
         """The timeout skip is scoped to compression only; other auxiliary

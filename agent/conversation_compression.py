@@ -732,6 +732,14 @@ def compress_context(
         _release_lock()
         raise
 
+    if bool(getattr(agent, "_compression_watchdog_abandoned", False)):
+        agent._compression_watchdog_abandoned = False
+        _existing_sp = getattr(agent, "_cached_system_prompt", None)
+        if not _existing_sp:
+            _existing_sp = agent._build_system_prompt(system_message)
+        _release_lock()
+        return messages, _existing_sp
+
     # If compression aborted (aux LLM failed to produce a usable summary)
     # the compressor returns the input messages unchanged.  Surface the
     # error to the user, skip the session-rotation work entirely (no
@@ -1058,6 +1066,13 @@ def compress_context(
             agent.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
+        if getattr(agent, "status_callback", None):
+            try:
+                agent.status_callback(
+                    "compression_complete", "Context compression finished"
+                )
+            except Exception:
+                logger.debug("status_callback error after compression", exc_info=True)
         return compressed, new_system_prompt
     finally:
         # Release the lock on the OLD session_id only AFTER rotation completed

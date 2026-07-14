@@ -342,7 +342,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         if (completionStatus === MESSAGE_COMPLETE_ERROR_STATUS) {
           const errorMessage = finalText || payload?.message || 'Hermes reported an error'
 
-          if (payload?.compression_exhausted) {
+          if (payload?.compression_exhausted || payload?.same_session_recovery) {
             void continueFromCompressionExhausted?.(sessionId, errorMessage)
 
             updateSessionState(sessionId, state => ({

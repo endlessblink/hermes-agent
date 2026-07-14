@@ -243,15 +243,20 @@ def _record_restart_recovery_event(home: Path, profile: str) -> None:
         pass
 
 
-def _record_turn_timeout_recovery_event(home: Path, profile: str) -> None:
+def _record_turn_timeout_recovery_event(
+    home: Path, profile: str, *, reason: str = "turn_idle_timeout"
+) -> None:
     safe = {
         "ts": utc_now(),
         "component": "improvement_supervisor",
         "event": "stuck_turn_automatically_stopped",
         "profile": str(profile)[:80],
         "action": "interrupt",
-        "outcome": "repaired",
-        "reason": "turn_idle_timeout",
+        # Interrupting contains the frozen UI, but it does not prove that the
+        # user's task completed. Only a later successful continuation may be
+        # reported as repaired.
+        "outcome": "contained",
+        "reason": str(reason)[:120],
     }
     safe["event_id"] = hashlib.sha256(
         json.dumps(safe, sort_keys=True).encode("utf-8")
@@ -558,6 +563,22 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
         }
     if (
         row.get("event") == "diagnostic.event"
+        and payload.get("component") == "compression"
+        and payload.get("event") == "timeout"
+    ):
+        return {
+            "ts": utc_now(),
+            "severity": "info",
+            "component": "live_watchdog",
+            "event": "stuck_turn_automatically_stopped",
+            "message": "Hermes safely stopped stalled context compression",
+            "timeout_seconds": float(details.get("timeout_seconds") or 0),
+            "last_progress_event": "compression",
+            "recovery_reason": "compression_timeout",
+            "ledger": str(ledger),
+        }
+    if (
+        row.get("event") == "diagnostic.event"
         and payload.get("component") == "turn"
         and payload.get("event") == "orphan_recovery_started"
     ):
@@ -830,6 +851,10 @@ def run(args: argparse.Namespace) -> int:
                                     home,
                                     ledger,
                                     args.monitor_profile,
+                                ),
+                                reason=str(
+                                    incident.get("recovery_reason")
+                                    or "turn_idle_timeout"
                                 ),
                             )
                         append_jsonl(alerts, incident)

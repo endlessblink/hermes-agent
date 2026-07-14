@@ -1030,6 +1030,47 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     assert captured["history_calls"] == [("tip", False), ("tip", True)]
 
 
+def test_live_session_resume_rehydrates_saved_pending_turn(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("stored", source="tui")
+    db.append_message("stored", role="user", content="finish the report")
+    db.patch_working_state(
+        "stored",
+        {"pending_turn": server._pending_turn_marker("finish the report", now=1.0)},
+        source="test",
+    )
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+
+    previous_sessions = dict(server._sessions)
+    server._sessions.clear()
+    live = _session(
+        agent=types.SimpleNamespace(model="test"),
+        history=[],
+        session_key="stored",
+        running=False,
+    )
+    server._sessions["runtime"] = live
+    try:
+        response = server.handle_request(
+            {"id": "1", "method": "session.resume", "params": {"session_id": "stored"}}
+        )
+    finally:
+        server._sessions.clear()
+        server._sessions.update(previous_sessions)
+        db.close()
+
+    assert response["result"]["session_id"] == "runtime"
+    assert response["result"]["recoverable_turn"] == {
+        "kind": "restart_interrupted",
+        "text": "finish the report",
+        "user_ordinal": 0,
+    }
+    assert live["history"][0]["role"] == "user"
+    assert live["history"][0]["content"] == "finish the report"
+
+
 def test_session_resume_follows_compression_tip(monkeypatch, tmp_path):
     """Resuming a rotated-out parent id must load the continuation's messages.
 
@@ -6643,7 +6684,7 @@ def test_status_update_emits_compression_diagnostic(monkeypatch):
 def test_compression_watchdog_default_is_desktop_bounded(monkeypatch):
     monkeypatch.delenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", raising=False)
 
-    assert server._compression_watchdog_timeout_seconds() == 12.0
+    assert server._compression_watchdog_timeout_seconds() == 45.0
 
 
 def test_compression_watchdog_env_override(monkeypatch):
@@ -6655,13 +6696,16 @@ def test_compression_watchdog_env_override(monkeypatch):
 def test_compression_watchdog_bad_env_uses_desktop_default(monkeypatch):
     monkeypatch.setenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", "not-a-number")
 
-    assert server._compression_watchdog_timeout_seconds() == 12.0
+    assert server._compression_watchdog_timeout_seconds() == 45.0
 
 
 def test_turn_idle_watchdog_default_automatically_unblocks_chat(monkeypatch):
     monkeypatch.delenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", raising=False)
 
-    assert server._turn_idle_watchdog_timeout_seconds() == 60.0
+    # The provider stream watchdog reconnects at 60s. The turn-level fail-safe
+    # must leave it time to retry instead of interrupting the entire turn at
+    # the same boundary.
+    assert server._turn_idle_watchdog_timeout_seconds() == 90.0
 
 
 def test_turn_idle_watchdog_env_override(monkeypatch):
@@ -6673,7 +6717,7 @@ def test_turn_idle_watchdog_env_override(monkeypatch):
 def test_turn_idle_watchdog_bad_env_uses_default(monkeypatch):
     monkeypatch.setenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "bad")
 
-    assert server._turn_idle_watchdog_timeout_seconds() == 60.0
+    assert server._turn_idle_watchdog_timeout_seconds() == 90.0
 
 
 def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):
@@ -6695,6 +6739,12 @@ def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):
     )
     monkeypatch.setattr(server, "_get_usage", lambda _agent: {"context_used": 0})
     monkeypatch.setattr(server, "_session_info", lambda _agent, _session: {"running": False})
+    cleared_markers: list[str] = []
+    monkeypatch.setattr(
+        server,
+        "_clear_pending_turn_marker",
+        lambda _session, *, source: cleared_markers.append(source),
+    )
 
     try:
         assert server._emit_compression_timeout_terminal("sid", session, 30) is True
@@ -6702,6 +6752,7 @@ def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):
         server._sessions.pop("sid", None)
 
     assert calls["interrupted"] is True
+    assert cleared_markers == []
     assert session["running"] is False
     assert session["_turn_terminal_emitted"] is True
     diagnostic = [e for e in emitted if e[0] == "diagnostic.event"]
@@ -6709,7 +6760,9 @@ def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):
     complete = [e for e in emitted if e[0] == "message.complete"]
     assert complete, "expected terminal message.complete"
     assert complete[-1][2]["status"] == "error"
-    assert complete[-1][2]["compression_exhausted"] is True
+    assert complete[-1][2]["same_session_recovery"] is True
+    assert "compression_exhausted" not in complete[-1][2]
+    assert "same conversation" in complete[-1][2]["text"]
 
 
 def test_turn_idle_watchdog_timeout_marks_turn_terminal(monkeypatch):
@@ -6732,6 +6785,12 @@ def test_turn_idle_watchdog_timeout_marks_turn_terminal(monkeypatch):
     )
     monkeypatch.setattr(server, "_get_usage", lambda _agent: {"context_used": 0})
     monkeypatch.setattr(server, "_session_info", lambda _agent, _session: {"running": False})
+    cleared_markers: list[str] = []
+    monkeypatch.setattr(
+        server,
+        "_clear_pending_turn_marker",
+        lambda _session, *, source: cleared_markers.append(source),
+    )
 
     try:
         assert server._emit_turn_idle_timeout_terminal("sid", session, 120) is True
@@ -6739,6 +6798,7 @@ def test_turn_idle_watchdog_timeout_marks_turn_terminal(monkeypatch):
         server._sessions.pop("sid", None)
 
     assert calls["interrupted"] is True
+    assert cleared_markers == []
     assert session["running"] is False
     assert session["_turn_terminal_emitted"] is True
     diagnostic = [e for e in emitted if e[0] == "diagnostic.event"]
@@ -6749,6 +6809,7 @@ def test_turn_idle_watchdog_timeout_marks_turn_terminal(monkeypatch):
     assert complete, "expected terminal message.complete"
     assert complete[-1][2]["status"] == "error"
     assert complete[-1][2]["idle_timeout"] is True
+    assert complete[-1][2]["same_session_recovery"] is True
     assert complete[-1][2]["retryable"] is True
 
 
@@ -6811,6 +6872,10 @@ def test_turn_progress_ignores_diagnostics_and_terminal(monkeypatch):
 
     try:
         server._mark_turn_progress("sid", "diagnostic.event")
+        assert session["turn_last_progress_event"] == "prompt.submit"
+        server._mark_turn_progress("sid", "thinking.delta")
+        server._mark_turn_progress("sid", "reasoning.delta")
+        server._mark_turn_progress("sid", "status.update")
         assert session["turn_last_progress_event"] == "prompt.submit"
         server._mark_turn_progress("sid", "message.delta")
         assert session["turn_last_progress_event"] == "message.delta"

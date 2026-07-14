@@ -1202,6 +1202,24 @@ def _status_update(sid: str, kind: str, text: str | None = None):
 
         if COMPACTION_STATUS_MARKER in body:
             out_kind = "compacting"
+    if out_kind == "compression_complete":
+        session = _sessions.get(sid) or {}
+        started_at = session.get("compression_started_at")
+        if started_at:
+            _emit_diagnostic_event(
+                sid,
+                component="compression",
+                event="success",
+                message="Context compression finished",
+                details={
+                    "session_id": sid,
+                    "session_key": session.get("session_key") or "",
+                    "cwd": session.get("cwd") or "",
+                    "elapsed_seconds": round(time.time() - float(started_at), 3),
+                },
+            )
+        _clear_compression_tracking(session)
+        out_kind = "status"
     if out_kind == "compacting":
         session = _sessions.get(sid) or {}
         now = time.time()
@@ -1952,21 +1970,38 @@ def _recoverable_pending_turn(
         if candidate_index < 0:
             return None
 
-        # A pending marker may survive a process death after tool calls/results
-        # were persisted. That trail is unfinished and safe to replay. Fail
-        # closed if another user turn or a completed assistant answer followed.
-        for message in history[candidate_index + 1 :]:
-            if not isinstance(message, dict):
-                return None
-            role = message.get("role")
-            if role == "tool":
-                continue
-            if role != "assistant":
-                return None
-            if message.get("finish_reason") == "stop":
-                return None
-            if not message.get("tool_calls") and str(message.get("content") or "").strip():
-                return None
+        suffix = history[candidate_index + 1 :]
+        if suffix:
+            for message in suffix:
+                if not isinstance(message, dict):
+                    return None
+                role = message.get("role")
+                if role == "tool":
+                    continue
+                if role == "user" and str(message.get("content") or "").startswith(
+                    "[Your active task list was preserved across context compression]"
+                ):
+                    continue
+                if role != "assistant":
+                    return None
+                if message.get("finish_reason") == "stop":
+                    return None
+                if not message.get("tool_calls") and str(
+                    message.get("content") or ""
+                ).strip():
+                    return None
+            return {
+                "kind": "continue_interrupted",
+                "text": (
+                    "Continue the interrupted request above using the saved tool results. "
+                    "Do not repeat actions that already completed."
+                ),
+                "user_ordinal": sum(
+                    1
+                    for message in history[:candidate_index]
+                    if isinstance(message, dict) and message.get("role") == "user"
+                ),
+            }
     return {
         "kind": "restart_interrupted",
         "text": text,
@@ -7035,6 +7070,43 @@ def _(rid, params: dict) -> dict:
             transport=current_transport() or _stdio_transport,
         )
         payload["resumed"] = target
+        if not session.get("running"):
+            try:
+                recovery_state = db.get_working_state(target)
+                raw_recovery_history = db.get_messages_as_conversation(target)
+                recoverable_turn = _recoverable_pending_turn(
+                    raw_recovery_history,
+                    recovery_state,
+                    end_reason=str(found.get("end_reason") or ""),
+                )
+                if recoverable_turn is not None:
+                    with session["history_lock"]:
+                        session["history"] = sanitize_replay_history(
+                            raw_recovery_history
+                        )
+                        session["history_version"] = int(
+                            session.get("history_version", 0)
+                        ) + 1
+                    payload["messages"] = _history_to_messages(
+                        raw_recovery_history
+                    )
+                    payload["message_count"] = len(raw_recovery_history)
+                    payload["recoverable_turn"] = recoverable_turn
+                    db.patch_working_state(
+                        target,
+                        {
+                            "pending_turn": {
+                                "prompt_hash": hashlib.sha256(
+                                    recoverable_turn["text"].encode("utf-8")
+                                ).hexdigest(),
+                                "claimed_at": time.time(),
+                                "state": "claimed",
+                            }
+                        },
+                        source="live_session_resume_recovery_claim",
+                    )
+            except Exception:
+                logger.debug("live pending-turn recovery probe failed", exc_info=True)
         # A lazy watch session never owns a run loop, so its payload's running
         # flag is always False — overlay the child-run registry so a reconnecting
         # watch window keeps its busy indicator while the child is still mid-run.
@@ -10407,21 +10479,21 @@ def _compression_watchdog_timeout_seconds() -> float:
     # thread" turn. If the auxiliary compression call has not completed quickly,
     # continuity recovery is more reliable than making the user stare at a
     # non-terminal busy state for minutes.
-    raw = os.environ.get("HERMES_COMPRESSION_WATCHDOG_SECONDS", "12")
+    raw = os.environ.get("HERMES_COMPRESSION_WATCHDOG_SECONDS", "45")
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 12.0
+        return 45.0
 
 
 def _turn_idle_watchdog_timeout_seconds() -> float:
     # Active tools and approval waits are protected below. For every other turn
     # state, bounded recovery is safer than leaving Desktop permanently busy.
-    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "60")
+    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "90")
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 60.0
+        return 90.0
 
 
 def _record_turn_watchdog_event(
@@ -10602,7 +10674,6 @@ def _emit_turn_idle_timeout_terminal(sid: str, session: dict, timeout_seconds: f
         started_at = float(session.get("turn_started_at") or time.time())
         last_progress_at = float(session.get("turn_last_progress_at") or started_at)
         _clear_inflight_turn(session)
-    _clear_pending_turn_marker(session, source="turn_idle_timeout")
     agent = session.get("agent")
     if hasattr(agent, "interrupt"):
         try:
@@ -10613,7 +10684,7 @@ def _emit_turn_idle_timeout_terminal(sid: str, session: dict, timeout_seconds: f
     idle_elapsed = max(0.0, time.time() - last_progress_at)
     message = (
         "Hermes did not produce turn progress for "
-        f"{int(timeout_seconds)}s. The turn was stopped so the chat can continue."
+        f"{int(timeout_seconds)}s. Your turn was saved and will recover in the same conversation."
     )
     logger.warning(
         "turn idle watchdog timeout: sid=%s session_key=%s elapsed=%.1fs idle=%.1fs last_event=%s timeout=%.1fs",
@@ -10644,6 +10715,7 @@ def _emit_turn_idle_timeout_terminal(sid: str, session: dict, timeout_seconds: f
             "text": message,
             "status": "error",
             "idle_timeout": True,
+            "same_session_recovery": True,
             "retryable": True,
             "usage": _get_usage(agent) if agent is not None else {},
         },
@@ -10665,6 +10737,8 @@ def _emit_compression_timeout_terminal(sid: str, session: dict, timeout_seconds:
         session["running"] = False
         _clear_inflight_turn(session)
     agent = session.get("agent")
+    if agent is not None:
+        agent._compression_watchdog_abandoned = True
     if hasattr(agent, "interrupt"):
         try:
             agent.interrupt()
@@ -10673,7 +10747,7 @@ def _emit_compression_timeout_terminal(sid: str, session: dict, timeout_seconds:
     elapsed = max(0.0, time.time() - float(started_at))
     message = (
         "Context compression did not finish within "
-        f"{int(timeout_seconds)}s. Continuing in a fresh session."
+        f"{int(timeout_seconds)}s. Your turn was saved and will recover in the same conversation."
     )
     logger.warning(
         "compression watchdog timeout: sid=%s session_key=%s elapsed=%.1fs timeout=%.1fs",
@@ -10704,7 +10778,8 @@ def _emit_compression_timeout_terminal(sid: str, session: dict, timeout_seconds:
         {
             "text": message,
             "status": "error",
-            "compression_exhausted": True,
+            "same_session_recovery": True,
+            "retryable": True,
             "usage": _get_usage(agent) if agent is not None else {},
         },
     )
