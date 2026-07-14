@@ -141,7 +141,14 @@ export const ClarifyTool = (props: ToolCallMessagePartProps) => {
       (!fromArgs.question || !request.question || fromArgs.question === request.question)
   )
 
-  const isPending = (messageRunning && props.result === undefined) || hasLiveMatchingRequest
+  const isSupersededMatchingRequest = Boolean(
+    request?.question &&
+      fromArgs.question === request.question &&
+      latestMatchingClarifyMessageId &&
+      messageId !== latestMatchingClarifyMessageId
+  )
+
+  const isPending = !isSupersededMatchingRequest && ((messageRunning && props.result === undefined) || hasLiveMatchingRequest)
 
   if (!isPending) {
     return <ToolFallback {...props} />

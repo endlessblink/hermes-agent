@@ -363,7 +363,7 @@ describe('flat tool list approval surfacing', () => {
     })
 
     const older = {
-      ...completedClarifyWithPendingRequestMessage(),
+      ...groupedPendingClarifyMessage('Pick one', ['One', 'Two']),
       id: 'assistant-older-clarify',
       content: [
         {
@@ -371,8 +371,7 @@ describe('flat tool list approval surfacing', () => {
           toolCallId: 'clarify-older',
           toolName: 'clarify',
           args: { choices: ['One', 'Two'], question: 'Pick one' },
-          argsText: JSON.stringify({ choices: ['One', 'Two'], question: 'Pick one' }),
-          result: { choices_offered: ['One', 'Two'], question: 'Pick one', user_response: '' }
+          argsText: JSON.stringify({ choices: ['One', 'Two'], question: 'Pick one' })
         }
       ]
     } as ThreadMessage
