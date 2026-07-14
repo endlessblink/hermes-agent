@@ -3,7 +3,20 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { dashboardFallbackArgs, serveBackendArgs, sourceDeclaresServe } from './backend-command'
+import {
+  dashboardFallbackArgs,
+  serveBackendArgs,
+  shouldUseActiveRuntime,
+  sourceDeclaresServe
+} from './backend-command'
+
+test('a healthy active runtime wins even when its completion marker is missing', () => {
+  assert.equal(shouldUseActiveRuntime({ activeRuntimeUsable: true }), true)
+})
+
+test('an unusable active runtime does not take precedence', () => {
+  assert.equal(shouldUseActiveRuntime({ activeRuntimeUsable: false }), false)
+})
 
 test('serveBackendArgs builds a headless serve invocation', () => {
   assert.deepEqual(serveBackendArgs(), ['serve', '--host', '127.0.0.1', '--port', '0'])

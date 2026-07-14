@@ -14,6 +14,16 @@
 // These helpers are pure so they can be unit-tested without Electron.
 
 /**
+ * A runnable canonical runtime is authoritative even when an older install
+ * predates the desktop completion marker. The runtime probe already verifies
+ * the checkout, interpreter, and Hermes import, so the marker must not force
+ * resolution to fall through to a stale command on PATH.
+ */
+export function shouldUseActiveRuntime({ activeRuntimeUsable }) {
+  return Boolean(activeRuntimeUsable)
+}
+
+/**
  * Build the canonical headless backend argv (always `serve`).
  * @param {string} [profile] optional Hermes profile to pin via `--profile`.
  */

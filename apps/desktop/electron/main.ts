@@ -30,7 +30,7 @@ import {
 } from 'electron'
 import nodePty from 'node-pty'
 
-import { dashboardFallbackArgs, sourceDeclaresServe } from './backend-command'
+import { dashboardFallbackArgs, shouldUseActiveRuntime, sourceDeclaresServe } from './backend-command'
 import { buildDesktopBackendEnv, normalizeHermesHomeRoot } from './backend-env'
 import { canImportHermesCli, verifyHermesCli } from './backend-probes'
 import { waitForDashboardPortAnnouncement } from './backend-ready'
@@ -3528,13 +3528,14 @@ function resolveHermesBackend(backendArgs) {
     }
   }
 
-  // 3. Bootstrap-complete ACTIVE_HERMES_ROOT -- the canonical install at
+  // 3. Runnable ACTIVE_HERMES_ROOT -- the canonical install at
   //    %LOCALAPPDATA%\hermes\hermes-agent (Windows) or ~/.hermes/hermes-agent.
-  //    The bootstrap marker means install.ps1 stages finished and the user
-  //    completed initial configuration; we trust the install and go straight
-  //    to spawning hermes. Updates flow through the in-app update path
-  //    (applyUpdates -> git pull) or `hermes update` from the CLI.
-  if (isBootstrapComplete()) {
+  //    Prefer a healthy canonical runtime even if it predates (or lost) the
+  //    desktop completion marker. The live import probe is the stronger signal
+  //    and prevents a stale `hermes` command on PATH from taking precedence.
+  //    Updates flow through the in-app update path (applyUpdates -> git pull)
+  //    or `hermes update` from the CLI.
+  if (shouldUseActiveRuntime({ activeRuntimeUsable: isActiveRuntimeUsable() })) {
     return createActiveBackend(backendArgs)
   }
 
