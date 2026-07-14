@@ -26,6 +26,17 @@ def test_default_monitor_stale_thresholds_cover_the_fifteen_minute_timer_cadence
     assert watchdog.DEFAULT_MONITOR_CONSUMER_STALE_SECONDS >= minimum_with_grace
 
 
+def test_monitor_stale_alerts_do_not_repeat_faster_than_the_stale_window():
+    args = watchdog.parse_args([])
+
+    assert watchdog.monitor_stale_alert_cooldown(args, "producer") >= (
+        args.monitor_producer_stale_seconds
+    )
+    assert watchdog.monitor_stale_alert_cooldown(args, "consumer") >= (
+        args.monitor_consumer_stale_seconds
+    )
+
+
 def test_discover_ledgers_includes_profile_ledgers(tmp_path):
     home = tmp_path / ".hermes"
     profile_ledger = home / "profiles" / "film-maker" / "logs" / "turn-watchdog.jsonl"
