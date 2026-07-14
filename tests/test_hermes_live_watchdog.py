@@ -530,3 +530,37 @@ def test_missing_session_during_idempotent_cleanup_does_not_alert(tmp_path, monk
     alerts = home / "logs" / "live-watchdog-alerts.jsonl"
     emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
     assert "session_not_found" not in {row["event"] for row in emitted}
+
+
+def test_missing_session_during_read_only_status_poll_does_not_alert(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    ledger = home / "logs" / "turn-watchdog.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "monotonic": time.time(),
+                    "event": "rpc.error",
+                    "session_id": "retired-runtime",
+                    "session_key": "",
+                    "running": False,
+                    "payload": {
+                        "error": "session not found",
+                        "method": method,
+                    },
+                }
+            )
+            + "\n"
+            for method in ("session.usage", "process.list")
+        ),
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(["--home", str(home), "--from-start", "--once"])
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    assert "session_not_found" not in {row["event"] for row in emitted}

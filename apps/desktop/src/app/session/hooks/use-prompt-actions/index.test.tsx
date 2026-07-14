@@ -1013,7 +1013,7 @@ describe('usePromptActions restoreToMessage', () => {
     expect((lastState.messages as { id: string }[]).map(m => m.id)).toEqual(['u1'])
   })
 
-  it('continues from surviving history when compression removed the restore target', async () => {
+  it('preserves surviving history without duplicating a prompt when compression removed the restore target', async () => {
     let submitAttempts = 0
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
@@ -1042,17 +1042,10 @@ describe('usePromptActions restoreToMessage', () => {
 
     await handle!.restoreToMessage('u1')
 
-    expect(submitAttempts).toBe(2)
-    expect(requestGateway).toHaveBeenLastCalledWith(
-      'prompt.submit',
-      {
-        session_id: RUNTIME_SESSION_ID,
-        text: 'first prompt'
-      },
-      1_800_000
-    )
+    expect(submitAttempts).toBe(1)
     expect((lastState.messages as { id: string }[]).map(m => m.id)).toEqual(['u1', 'a1', 'u2', 'a2'])
-    expect(lastState.busy).toBe(true)
+    expect(lastState.busy).toBe(false)
+    expect(lastState.awaitingResponse).toBe(false)
   })
 })
 

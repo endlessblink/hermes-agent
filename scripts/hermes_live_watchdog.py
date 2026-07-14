@@ -310,7 +310,13 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
     # Idempotent cleanup can legitimately race with another client or retry a
     # stale sidebar row. That is not a failed user turn and must not produce a
     # critical desktop recovery notification.
-    if payload.get("method") in {"session.delete", "session.close", "session.cancel"}:
+    if payload.get("method") in {
+        "session.delete",
+        "session.close",
+        "session.cancel",
+        "session.usage",
+        "process.list",
+    }:
         return None
     return {
         "ts": utc_now(),

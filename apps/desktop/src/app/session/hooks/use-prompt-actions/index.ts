@@ -972,19 +972,22 @@ export function usePromptActions({
         let surfaced = err
 
         if (truncateBeforeUserOrdinal !== undefined && isStaleRewindTargetError(err)) {
-          try {
-            await submitRewindPrompt(sessionId, text, undefined, false)
-            updateSessionState(sessionId, state => ({
-              ...state,
-              busy: true,
-              awaitingResponse: true,
-              messages
-            }))
+          setMutableRef(busyRef, false)
+          setBusy(false)
+          setAwaitingResponse(false)
+          updateSessionState(sessionId, state => ({
+            ...state,
+            busy: false,
+            awaitingResponse: false,
+            messages
+          }))
+          notify({
+            kind: 'info',
+            title: 'Checkpoint compacted',
+            message: 'The original checkpoint is no longer restorable. Your current conversation was preserved.'
+          })
 
-            return
-          } catch (retryErr) {
-            surfaced = retryErr
-          }
+          return
         }
 
         // The rewind never landed (e.g. the gateway stayed busy past the retry
