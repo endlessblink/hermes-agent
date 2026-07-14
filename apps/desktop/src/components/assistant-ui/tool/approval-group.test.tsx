@@ -421,6 +421,33 @@ describe('flat tool list approval surfacing', () => {
     })
   })
 
+  it('toggles multiple options with keyboard shortcuts and submits once', async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true })
+
+    $gateway.set({ request } as unknown as HermesGateway)
+    setClarifyRequest({
+      choices: ['One', 'Two'],
+      question: 'Pick one',
+      requestId: 'clarify-request-keyboard-selection',
+      sessionId: 'sess-1'
+    })
+
+    render(<GroupHarness message={groupedPendingClarifyMessage()} />)
+
+    await screen.findByRole('button', { name: /One/ })
+    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(window, { key: 'b' })
+    fireEvent.keyDown(window, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledTimes(1)
+      expect(request).toHaveBeenCalledWith('clarify.respond', {
+        answer: 'One\nTwo',
+        request_id: 'clarify-request-keyboard-selection'
+      })
+    })
+  })
+
   it('uses an RTL question layout for Hebrew while isolating each mixed-language text run', async () => {
     setClarifyRequest({
       choices: ['להוסיף אותה לפרויקט FlowState', 'Keep it in Inbox'],
