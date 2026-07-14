@@ -309,6 +309,34 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.messages.at(-1)?.error).toBeUndefined()
   })
 
+  it('continues a saved turn instead of showing an idle-timeout failure', async () => {
+    await mountStream()
+
+    act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
+    act(() =>
+      handleEvent!({
+        payload: {
+          idle_timeout: true,
+          same_session_recovery: true,
+          status: 'error',
+          text: 'Your turn was saved and will recover in the same conversation.'
+        },
+        session_id: SID,
+        type: 'message.complete'
+      })
+    )
+
+    expect(continueFromCompressionExhausted).toHaveBeenCalledWith(
+      SID,
+      'Your turn was saved and will recover in the same conversation.'
+    )
+
+    const state = stateByRuntimeId.get(SID)
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(state?.messages.at(-1)?.error).toBeUndefined()
+  })
+
   it('forwards gateway diagnostic events to desktop diagnostics', async () => {
     await mountStream()
 
