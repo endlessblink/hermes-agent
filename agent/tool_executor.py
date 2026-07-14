@@ -1689,6 +1689,33 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             stage=f"tool result {function_name}",
         )
 
+        # A trusted tool result can impose an immediate safety stop (for
+        # example, a recurrence-conflicted FlowState merge).  Tool batches are
+        # sequential here, so do not let later calls from the same model
+        # response run after that stop has been recorded.
+        if agent._tool_guardrail_halt_decision is not None and i < len(assistant_message.tool_calls):
+            remaining_calls = assistant_message.tool_calls[i:]
+            halt_code = agent._tool_guardrail_halt_decision.code
+            halt_reason = (
+                "the preceding tool required a recurrence resolution"
+                if halt_code == "flowstate_recurrence_resolution_required"
+                else "the preceding tool triggered an immediate safety stop"
+            )
+            for skipped_tc in remaining_calls:
+                skipped_name = skipped_tc.function.name
+                messages.append(make_tool_result_message(
+                    skipped_name,
+                    f"[Tool execution skipped — {skipped_name} was not started because "
+                    f"{halt_reason} ({halt_code}).]",
+                    skipped_tc.id,
+                ))
+                _flush_session_db_after_tool_progress(
+                    agent,
+                    messages,
+                    stage=f"guardrail-skipped tool result {skipped_name}",
+                )
+            break
+
         # ── Per-tool /steer drain ───────────────────────────────────
         # Drain pending steer BETWEEN individual tool calls so the
         # injection lands as soon as a tool finishes — not after the

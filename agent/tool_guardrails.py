@@ -59,6 +59,27 @@ MUTATING_TOOL_NAMES = frozenset(
     }
 )
 
+_TRUSTED_TOOL_HALT_ACTIONS = {
+    (
+        "flowstate_merge_tasks",
+        "stop_mutations_and_request_recurrence_resolution",
+    ): (
+        "flowstate_recurrence_resolution_required",
+        "FlowState rejected the merge because the recurrence definitions need an exact user choice. "
+        "No later FlowState mutation was executed. Ask for or confirm the intended cadence, then create "
+        "a fresh recurrence-aware merge preview.",
+    ),
+    (
+        "flowstate_merge_tasks",
+        "stop_mutations_and_report_recurrence_history",
+    ): (
+        "flowstate_recurrence_history_requires_strategy",
+        "FlowState rejected the merge because one or both tasks have established recurrence history. "
+        "No later FlowState mutation was executed. Report the conflict and wait for an explicit series "
+        "strategy instead of rewriting recurrence history automatically.",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class ToolCallGuardrailConfig:
@@ -292,6 +313,22 @@ class ToolCallGuardrailController:
     ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
+        result_data = safe_json_loads(result) if isinstance(result, str) else None
+        halt_contract = None
+        if isinstance(result_data, dict):
+            halt_contract = _TRUSTED_TOOL_HALT_ACTIONS.get((tool_name, result_data.get("action")))
+        if halt_contract is not None:
+            code, message = halt_contract
+            decision = ToolGuardrailDecision(
+                action="halt",
+                code=code,
+                message=message,
+                tool_name=tool_name,
+                count=1,
+                signature=signature,
+            )
+            self._halt_decision = decision
+            return decision
         if failed is None:
             failed, _ = classify_tool_failure(tool_name, result)
 

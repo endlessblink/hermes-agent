@@ -39,6 +39,13 @@ _CANONICAL_UPDATE_FIELDS = {
     "previewDigest",
     "previewExpiresAt",
 }
+_RECURRENCE_COMMON_FIELDS = {"pattern", "interval", "endType", "endDate", "endCount"}
+_RECURRENCE_PATTERN_FIELDS = {
+    "daily": set(),
+    "weekly": {"weekdays"},
+    "monthly": {"monthDay", "monthWeekday"},
+    "yearly": set(),
+}
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -811,6 +818,63 @@ def _handle_done_for_now(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+def _is_canonical_recurrence_rule(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    pattern = value.get("pattern")
+    allowed_pattern_fields = _RECURRENCE_PATTERN_FIELDS.get(pattern)
+    if allowed_pattern_fields is None:
+        return False
+    if set(value) - (_RECURRENCE_COMMON_FIELDS | allowed_pattern_fields):
+        return False
+    interval = value.get("interval")
+    if not isinstance(interval, int) or isinstance(interval, bool) or not 1 <= interval <= 365:
+        return False
+    end_type = value.get("endType")
+    if end_type not in {"never", "after_count", "on_date"}:
+        return False
+    if end_type == "never" and ("endDate" in value or "endCount" in value):
+        return False
+    if end_type == "after_count":
+        end_count = value.get("endCount")
+        if not isinstance(end_count, int) or isinstance(end_count, bool) or end_count < 1 or "endDate" in value:
+            return False
+    if end_type == "on_date":
+        end_date = value.get("endDate")
+        if not isinstance(end_date, str) or not _DATE_ONLY_RE.fullmatch(end_date) or "endCount" in value:
+            return False
+    if pattern == "weekly":
+        weekdays = value.get("weekdays")
+        if (
+            not isinstance(weekdays, list)
+            or not weekdays
+            or len(weekdays) != len(set(weekdays))
+            or any(not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= 6 for day in weekdays)
+        ):
+            return False
+    if pattern == "monthly":
+        month_day = value.get("monthDay")
+        month_weekday = value.get("monthWeekday")
+        if (month_day is None) == (month_weekday is None):
+            return False
+        if month_day is not None and (
+            not isinstance(month_day, int) or isinstance(month_day, bool) or not 1 <= month_day <= 31
+        ):
+            return False
+        if month_weekday is not None and (
+            not isinstance(month_weekday, dict)
+            or set(month_weekday) != {"nth", "day"}
+            or not isinstance(month_weekday.get("nth"), int)
+            or isinstance(month_weekday.get("nth"), bool)
+            or month_weekday["nth"] not in {-1, 1, 2, 3, 4, 5}
+            or not isinstance(month_weekday.get("day"), int)
+            or isinstance(month_weekday.get("day"), bool)
+            or not 0 <= month_weekday["day"] <= 6
+        ):
+            return False
+    return True
+
+
 def _handle_merge_tasks(args: dict, **kw) -> str:
     survivor_task_id = str(args.get("survivorTaskId") or "").strip()
     if not survivor_task_id:
@@ -828,6 +892,9 @@ def _handle_merge_tasks(args: dict, **kw) -> str:
         return _tool_error("requestId is required when preview is false")
     if not preview and not preview_version:
         return _tool_error("previewVersion is required when preview is false")
+    recurrence_resolution = args.get("recurrenceResolution")
+    if recurrence_resolution is not None and not _is_canonical_recurrence_rule(recurrence_resolution):
+        return _tool_error("recurrenceResolution must be a canonical recurrence rule")
 
     body: Dict[str, Any] = {
         "duplicateTaskId": duplicate_task_id,
@@ -837,6 +904,8 @@ def _handle_merge_tasks(args: dict, **kw) -> str:
         body["requestId"] = request_id
     if preview_version:
         body["previewVersion"] = preview_version
+    if recurrence_resolution is not None:
+        body["recurrenceResolution"] = recurrence_resolution
 
     try:
         path = f"/api/tasks/{urllib.parse.quote(survivor_task_id, safe='')}/merge"
@@ -1254,13 +1323,47 @@ FLOWSTATE_MERGE_TASKS_SCHEMA = {
         "returns FlowState's retained fields, transfers, conflicts, archival behavior, receipt, and "
         "read-back unchanged. Apply only after explicit approval of that preview and provide its "
         "requestId and previewVersion. Title similarity is never approval, and this tool does not "
-        "implement or guess merge semantics outside FlowState."
+        "implement or guess merge semantics outside FlowState. If FlowState returns a recurrence "
+        "conflict without a supplied resolution, stop all further Flow State mutations and ask for "
+        "the exact intended cadence; never fall back to separate task updates or deletion."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "survivorTaskId": {"type": "string", "description": "Exact task id that will survive."},
             "duplicateTaskId": {"type": "string", "description": "Exact task id to merge and archive."},
+            "recurrenceResolution": {
+                "type": "object",
+                "description": (
+                    "Optional exact canonical cadence selected by the user for the surviving root task. "
+                    "Use only after exact-reading both tasks and confirming there is no established series history."
+                ),
+                "properties": {
+                    "pattern": {"type": "string", "enum": ["daily", "weekly", "monthly", "yearly"]},
+                    "interval": {"type": "integer", "minimum": 1, "maximum": 365},
+                    "weekdays": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 6},
+                        "minItems": 1,
+                        "uniqueItems": True,
+                    },
+                    "monthDay": {"type": "integer", "minimum": 1, "maximum": 31},
+                    "monthWeekday": {
+                        "type": "object",
+                        "properties": {
+                            "nth": {"type": "integer", "enum": [-1, 1, 2, 3, 4, 5]},
+                            "day": {"type": "integer", "minimum": 0, "maximum": 6},
+                        },
+                        "required": ["nth", "day"],
+                        "additionalProperties": False,
+                    },
+                    "endType": {"type": "string", "enum": ["never", "after_count", "on_date"]},
+                    "endDate": {"type": "string", "description": "YYYY-MM-DD; required only for on_date."},
+                    "endCount": {"type": "integer", "minimum": 1},
+                },
+                "required": ["pattern", "interval", "endType"],
+                "additionalProperties": False,
+            },
             "preview": {
                 "type": "boolean",
                 "description": "Defaults true; set false only after explicit approval of this exact merge.",

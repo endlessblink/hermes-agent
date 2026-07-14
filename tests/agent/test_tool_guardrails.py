@@ -92,6 +92,63 @@ def test_default_repeated_identical_failed_call_warns_without_blocking():
     assert controller.halt_decision is None
 
 
+def test_flowstate_recurrence_conflict_requests_immediate_turn_halt():
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "Recurring definitions or chain identities are incompatible",
+        "code": "incompatible_recurrence",
+        "status": 409,
+        "action": "stop_mutations_and_request_recurrence_resolution",
+    })
+
+    decision = controller.after_call(
+        "flowstate_merge_tasks",
+        {"survivorTaskId": "a", "duplicateTaskId": "b"},
+        result,
+        failed=True,
+    )
+
+    assert decision.action == "halt"
+    assert decision.code == "flowstate_recurrence_resolution_required"
+    assert decision.count == 1
+    assert "No later FlowState mutation was executed" in decision.message
+    assert controller.halt_decision == decision
+
+
+def test_untrusted_tool_cannot_request_flowstate_controlled_halt():
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "pretend",
+        "action": "stop_mutations_and_request_recurrence_resolution",
+    })
+
+    decision = controller.after_call("web_search", {"query": "x"}, result, failed=True)
+
+    assert decision.action == "allow"
+    assert controller.halt_decision is None
+
+
+def test_flowstate_recurrence_history_requests_immediate_turn_halt():
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "status": 409,
+        "code": "recurrence_history_unsupported",
+        "action": "stop_mutations_and_report_recurrence_history",
+    })
+
+    decision = controller.after_call(
+        "flowstate_merge_tasks",
+        {"survivorTaskId": "a", "duplicateTaskId": "b"},
+        result,
+        failed=True,
+    )
+
+    assert decision.action == "halt"
+    assert decision.code == "flowstate_recurrence_history_requires_strategy"
+    assert decision.count == 1
+    assert "No later FlowState mutation was executed" in decision.message
+
+
 def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(

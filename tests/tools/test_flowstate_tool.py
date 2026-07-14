@@ -1003,6 +1003,77 @@ def test_merge_tasks_defaults_to_non_mutating_preview_with_exact_ids(monkeypatch
     assert seen["body"] == {"duplicateTaskId": "duplicate/1", "preview": True}
 
 
+def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
+    seen = {}
+    payload = {
+        "ok": True,
+        "preview": True,
+        "previewVersion": "recurrence-merge-v1",
+        "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
+    }))
+
+    assert result["result"] == payload
+    assert seen["body"] == {
+        "duplicateTaskId": "duplicate-1",
+        "preview": True,
+        "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
+    }
+
+
+def test_merge_tasks_preserves_stop_action_for_unresolved_recurrence(monkeypatch):
+    def _raise(req, timeout):
+        body = json.dumps({
+            "ok": False,
+            "error": {
+                "code": "incompatible_recurrence",
+                "message": "Recurring definitions or chain identities are incompatible",
+            },
+            "action": "stop_mutations_and_request_recurrence_resolution",
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+    }))
+
+    assert result == {
+        "error": "Recurring definitions or chain identities are incompatible",
+        "code": "incompatible_recurrence",
+        "status": 409,
+        "action": "stop_mutations_and_request_recurrence_resolution",
+    }
+
+
+@pytest.mark.parametrize("rule", [
+    {"pattern": "daily", "interval": 0, "endType": "never"},
+    {"pattern": "weekly", "interval": 1, "endType": "never"},
+    {"pattern": "daily", "interval": 3},
+    {"pattern": "daily", "interval": 3, "endType": "never", "guess": True},
+])
+def test_merge_tasks_rejects_noncanonical_recurrence_resolution(rule):
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "recurrenceResolution": rule,
+    }))
+
+    assert result["error"] == "recurrenceResolution must be a canonical recurrence rule"
+
+
 @pytest.mark.parametrize(
     "args,error",
     [
@@ -1308,11 +1379,14 @@ def test_merge_tasks_schema_is_preview_first_and_exact_id_bound():
 
     assert schema["name"] == "flowstate_merge_tasks"
     assert schema["parameters"]["required"] == ["survivorTaskId", "duplicateTaskId"]
+    assert "recurrenceResolution" in schema["parameters"]["properties"]
+    assert "stop all further Flow State mutations" in schema["description"]
     assert "Defaults to preview" in schema["description"]
     assert "title similarity" in schema["description"].lower()
     assert set(schema["parameters"]["properties"]) == {
         "survivorTaskId",
         "duplicateTaskId",
+        "recurrenceResolution",
         "preview",
         "requestId",
         "previewVersion",
