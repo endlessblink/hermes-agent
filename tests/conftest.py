@@ -360,6 +360,19 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
 
+    # tui_gateway.server resolves its watchdog path at import time. Test files
+    # import that module during collection, before this per-test HERMES_HOME is
+    # installed, so leaving the cached path untouched writes synthetic test
+    # sessions into the user's live watchdog ledger. Redirect the cached path
+    # whenever the gateway module is already loaded.
+    gateway_server = sys.modules.get("tui_gateway.server")
+    if gateway_server is not None:
+        monkeypatch.setattr(
+            gateway_server,
+            "_TURN_WATCHDOG_LOG",
+            str(fake_hermes_home / "logs" / "turn-watchdog.jsonl"),
+        )
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")

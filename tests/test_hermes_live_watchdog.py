@@ -479,3 +479,34 @@ def test_session_not_found_diagnostic_and_error_are_deduplicated(tmp_path, monke
     alerts = home / "logs" / "live-watchdog-alerts.jsonl"
     emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
     assert [row["event"] for row in emitted].count("session_not_found") == 1
+
+
+def test_missing_session_during_idempotent_cleanup_does_not_alert(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    ledger = home / "logs" / "turn-watchdog.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "monotonic": time.time(),
+                "event": "rpc.error",
+                "session_id": "ghost",
+                "session_key": "",
+                "running": False,
+                "payload": {
+                    "error": "session not found",
+                    "method": "session.delete",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(["--home", str(home), "--from-start", "--once"])
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    assert "session_not_found" not in {row["event"] for row in emitted}
