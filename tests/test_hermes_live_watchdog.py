@@ -17,6 +17,15 @@ sys.modules[SPEC.name] = watchdog
 SPEC.loader.exec_module(watchdog)
 
 
+def test_default_monitor_stale_thresholds_cover_the_fifteen_minute_timer_cadence():
+    # The monitor timer runs every 15 minutes with up to one minute of systemd
+    # accuracy drift. Defaults must include additional scheduling grace or a
+    # healthy consumer will be reported stale between successful runs.
+    minimum_with_grace = 20 * 60
+    assert watchdog.DEFAULT_MONITOR_PRODUCER_STALE_SECONDS >= minimum_with_grace
+    assert watchdog.DEFAULT_MONITOR_CONSUMER_STALE_SECONDS >= minimum_with_grace
+
+
 def test_discover_ledgers_includes_profile_ledgers(tmp_path):
     home = tmp_path / ".hermes"
     profile_ledger = home / "profiles" / "film-maker" / "logs" / "turn-watchdog.jsonl"
