@@ -188,6 +188,38 @@ def test_restart_replay_diagnostic_becomes_a_supervisor_incident(tmp_path):
     assert "text" not in json.dumps(alert)
 
 
+def test_restart_replay_incident_logs_without_requiring_a_session_key(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    ledger = home / "logs" / "turn-watchdog.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "event": "diagnostic.event",
+                "monotonic": time.time(),
+                "payload": {
+                    "component": "turn",
+                    "event": "orphan_recovery_started",
+                    "details": {"user_ordinal": 4},
+                },
+                "session_id": "runtime-private",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(["--home", str(home), "--from-start", "--once"])
+
+    assert watchdog.run(args) == 0
+    output = capsys.readouterr().out
+    assert "RESTART_INTERRUPTED_TURN_REPLAYED" in output
+    assert "SESSION_NOT_FOUND" not in output
+
+
 def test_idle_timeout_diagnostic_becomes_an_internal_watchdog_incident(tmp_path):
     alert = watchdog.build_incident_alert(
         {

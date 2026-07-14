@@ -878,6 +878,11 @@ def run(args: argparse.Namespace) -> int:
                                 "[hermes-live-watchdog] STUCK_TURN_AUTOMATICALLY_STOPPED "
                                 f"timeout={incident['timeout_seconds']} ledger={ledger}"
                             )
+                        elif incident["event"] == "restart_interrupted_turn_replayed":
+                            line = (
+                                "[hermes-live-watchdog] RESTART_INTERRUPTED_TURN_REPLAYED "
+                                f"ordinal={incident['user_ordinal']} ledger={ledger}"
+                            )
                         else:
                             line = (
                                 f"[hermes-live-watchdog] SESSION_NOT_FOUND sid={sid[:8]} "
