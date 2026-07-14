@@ -384,6 +384,15 @@ def build_monitor_stale_alert(
     }
 
 
+def monitor_stale_alert_cooldown(args: argparse.Namespace, source: str) -> float:
+    stale_window = (
+        args.monitor_producer_stale_seconds
+        if source == "producer"
+        else args.monitor_consumer_stale_seconds
+    )
+    return max(args.alert_cooldown, stale_window)
+
+
 def run(args: argparse.Namespace) -> int:
     home = Path(args.home).expanduser() if args.home else hermes_home()
     alerts = Path(args.alerts).expanduser() if args.alerts else home / "logs" / "live-watchdog-alerts.jsonl"
@@ -531,7 +540,7 @@ def run(args: argparse.Namespace) -> int:
             event_name = f"personal_assistant_monitor_{source}_stale"
             incident_key = (str(ledger), event_name)
             last_incident = incident_alerted_at.get(incident_key, 0.0)
-            if now - last_incident < args.alert_cooldown:
+            if now - last_incident < monitor_stale_alert_cooldown(args, source):
                 continue
             incident_alerted_at[incident_key] = now
             alert = build_monitor_stale_alert(
