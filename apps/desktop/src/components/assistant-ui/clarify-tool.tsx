@@ -181,7 +181,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
 
   const [draft, setDraft] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [selectedChoice, setSelectedChoice] = useState<string | null>(null)
+  const [selectedChoices, setSelectedChoices] = useState<string[]>([])
   const [otherFocused, setOtherFocused] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
@@ -210,20 +210,21 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   )
 
   const trimmedDraft = draft.trim()
-  // The answer is whichever input is active: a picked choice, or typed text.
-  // Picking a choice no longer fires immediately — it selects, then the user
-  // confirms with Continue (or Enter from the field).
-  const pendingAnswer = selectedChoice ?? (trimmedDraft || null)
+  // The answer is whichever input is active: all picked choices, or typed text.
+  // Choices toggle independently and are submitted together, one per line.
+  const pendingAnswer = selectedChoices.length > 0 ? selectedChoices.join('\n') : trimmedDraft || null
 
   const selectChoice = useCallback((choice: string) => {
-    // Picking a choice and typing are mutually exclusive answers.
+    // Picking choices and typing are mutually exclusive answers.
     setDraft('')
-    setSelectedChoice(choice)
+    setSelectedChoices(current =>
+      current.includes(choice) ? current.filter(selected => selected !== choice) : [...current, choice]
+    )
   }, [])
 
   const submitAnswer = useCallback(() => {
-    if (selectedChoice !== null) {
-      void respond(selectedChoice)
+    if (selectedChoices.length > 0) {
+      void respond(selectedChoices.join('\n'))
 
       return
     }
@@ -231,7 +232,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
     if (trimmedDraft) {
       void respond(trimmedDraft)
     }
-  }, [respond, selectedChoice, trimmedDraft])
+  }, [respond, selectedChoices, trimmedDraft])
 
   const handleTextareaKey = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -321,7 +322,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
     // Typing is its own answer — drop any picked choice so the two inputs can't
     // both look selected.
     if (value.trim()) {
-      setSelectedChoice(null)
+      setSelectedChoices([])
     }
   }
 
@@ -339,11 +340,11 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
           <div className="grid gap-px" role="group">
             {choices.map((choice, index) => (
               <button
-                aria-pressed={selectedChoice === choice}
+                aria-pressed={selectedChoices.includes(choice)}
                 className={cn(
                   OPTION_ROW_CLASS,
                   'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-(--ui-text-primary)',
-                  selectedChoice === choice && 'text-(--ui-text-primary)'
+                  selectedChoices.includes(choice) && 'text-(--ui-text-primary)'
                 )}
                 data-choice
                 disabled={submitting}
@@ -351,7 +352,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
                 onClick={() => selectChoice(choice)}
                 type="button"
               >
-                <KeyBadge char={letterFor(index)} selected={selectedChoice === choice} />
+                <KeyBadge char={letterFor(index)} selected={selectedChoices.includes(choice)} />
                 <span className="flex-1 wrap-anywhere" data-bidi-plaintext="" dir="auto">
                   {choice}
                 </span>
@@ -370,7 +371,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
                 // deselects any picked choice — a chosen option and an active
                 // Other field can never both look selected.
                 onFocus={() => {
-                  setSelectedChoice(null)
+                  setSelectedChoices([])
                   setOtherFocused(true)
                 }}
                 onKeyDown={handleTextareaKey}

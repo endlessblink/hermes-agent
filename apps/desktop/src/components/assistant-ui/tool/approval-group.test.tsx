@@ -386,7 +386,10 @@ describe('flat tool list approval surfacing', () => {
     })
   })
 
-  it('exposes a single selected option with readable theme contrast', async () => {
+  it('selects multiple readable options and submits every selection', async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true })
+
+    $gateway.set({ request } as unknown as HermesGateway)
     setClarifyRequest({
       choices: ['One', 'Two'],
       question: 'Pick one',
@@ -401,11 +404,22 @@ describe('flat tool list approval surfacing', () => {
     fireEvent.click(one)
     fireEvent.click(two)
 
-    expect(one.getAttribute('aria-pressed')).toBe('false')
+    expect(one.getAttribute('aria-pressed')).toBe('true')
     expect(two.getAttribute('aria-pressed')).toBe('true')
-    const selectedBadge = two.querySelector('kbd')
-    expect(selectedBadge?.className).toContain('text-primary-foreground')
-    expect(selectedBadge?.className).not.toContain('text-white')
+
+    for (const option of [one, two]) {
+      expect(option.querySelector('kbd')?.className).toContain('text-primary-foreground')
+      expect(option.querySelector('kbd')?.className).not.toContain('text-white')
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }))
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('clarify.respond', {
+        answer: 'One\nTwo',
+        request_id: 'clarify-request-selection'
+      })
+    })
   })
 
   it('uses an RTL question layout for Hebrew while isolating each mixed-language text run', async () => {
