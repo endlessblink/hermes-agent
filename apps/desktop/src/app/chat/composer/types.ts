@@ -35,6 +35,12 @@ export interface ChatBarProps {
   busy: boolean
   compacting?: boolean
   disabled: boolean
+  /**
+   * Personal Assistant recovery seam: when its one-shot clarify event was
+   * lost during reconnect, send busy text to prompt.submit so the gateway can
+   * resolve the still-pending clarify instead of parking the answer locally.
+   */
+  recoverLostClarifyWhileBusy?: boolean
   focusKey?: string | null
   maxRecordingSeconds?: number
   state: ChatBarState

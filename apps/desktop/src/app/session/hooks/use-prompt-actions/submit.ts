@@ -38,6 +38,7 @@ interface SubmitPromptDeps {
   busyRef: MutableRefObject<boolean>
   copy: Translations['desktop']
   createBackendSessionForSend: (preview?: string | null) => Promise<string | null>
+  ensureSelectedSessionOwner: () => Promise<void>
   requestGateway: GatewayRequest
   selectedStoredSessionIdRef: MutableRefObject<string | null>
   syncAttachmentsForSubmit: (
@@ -60,6 +61,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
     busyRef,
     copy,
     createBackendSessionForSend,
+    ensureSelectedSessionOwner,
     requestGateway,
     selectedStoredSessionIdRef,
     syncAttachmentsForSubmit,
@@ -113,6 +115,18 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       const hasSendable = Boolean(visibleText || terminalContextBlocks || attachments.length || hasImage)
 
       if (!hasSendable || (!options?.allowWhileBusy && !options?.fromQueue && busyRef.current)) {
+        return false
+      }
+
+      // The durable selection owns the gateway route. A profile switch can
+      // leave its transcript mounted while another profile socket is active;
+      // attachment RPCs happen before prompt.submit recovery, so they would
+      // otherwise fail immediately with "session not found".
+      try {
+        await ensureSelectedSessionOwner()
+      } catch (err) {
+        notifyError(err, copy.sessionUnavailable)
+
         return false
       }
 
@@ -293,9 +307,46 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       }
 
       try {
-        const syncedAttachments = await syncAttachmentsForSubmit(sessionId, attachments, {
-          updateComposerAttachments: usingComposerAttachments
-        })
+        let syncedAttachments: ComposerAttachment[]
+
+        try {
+          syncedAttachments = await syncAttachmentsForSubmit(sessionId, attachments, {
+            updateComposerAttachments: usingComposerAttachments
+          })
+        } catch (attachErr) {
+          const storedSessionId = selectedStoredSessionIdRef.current
+
+          if (!storedSessionId || !isSessionNotFoundError(attachErr)) {
+            throw attachErr
+          }
+
+          // Attachment staging is the first gateway call for image/file sends,
+          // so prompt.submit recovery never sees a stale runtime failure. Rebind
+          // the durable selected chat and retry the upload exactly once.
+          const resumed = await requestGateway<{ session_id?: string }>(
+            'session.resume',
+            resumeParamsForSelectedSession(storedSessionId, { source: 'desktop' })
+          )
+
+          const recoveredId = resumed?.session_id
+
+          if (!recoveredId) {
+            throw attachErr
+          }
+
+          const staleSessionId = sessionId
+          activeSessionIdRef.current = recoveredId
+
+          if (staleSessionId !== recoveredId) {
+            dropOptimistic(staleSessionId)
+          }
+
+          sessionId = recoveredId
+          seedOptimistic(recoveredId)
+          syncedAttachments = await syncAttachmentsForSubmit(recoveredId, attachments, {
+            updateComposerAttachments: usingComposerAttachments
+          })
+        }
 
         // Rewrite the optimistic message + prompt text with the synced refs so
         // the gateway receives @file: paths that resolve in its workspace.
@@ -338,31 +389,33 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             if (storedSessionId) {
               let recoveredId: null | string = null
 
-              try {
-                // Re-register the session in the gateway and get a fresh live ID.
-                // Timeouts recover the same way as "session not found": a starved
-                // backend loop (#55578 symptom d) rejects the submit even though
-                // the stored session is fine — resume + retry instead of erroring
-                // out and losing the session binding.
-                const resumed = await requestGateway<{ session_id: string }>(
-                  'session.resume',
-                  resumeParamsForSelectedSession(storedSessionId, { source: 'desktop' })
-                )
+              // A desktop relaunch can briefly start, replace, and reconnect a
+              // pooled profile backend. In that window the first resume returns
+              // a valid runtime id which is invalid again before prompt.submit
+              // reaches it. Allow one additional durable rebind, but keep the
+              // recovery budget bounded so a genuinely missing session fails
+              // visibly instead of looping or minting a split conversation.
+              for (let rebindAttempt = 0; rebindAttempt < 2; rebindAttempt += 1) {
+                try {
+                  const resumed = await requestGateway<{ session_id: string }>(
+                    'session.resume',
+                    resumeParamsForSelectedSession(storedSessionId, { source: 'desktop' })
+                  )
 
-                recoveredId = resumed?.session_id || null
-              } catch (resumeErr) {
-                // A selected stored session must either resume or fail visibly.
-                // Creating a fresh replacement here makes the UI look like the
-                // same chat while the backend has no prior context.
-                submitErr = resumeErr
-              }
+                  recoveredId = resumed?.session_id || null
+                } catch (resumeErr) {
+                  submitErr = resumeErr
 
-              if (!recoveredId && submitErr === null && !options?.fromQueue) {
-                recoveredId = await createBackendSessionForSend(visibleText)
-              }
+                  break
+                }
 
-              if (recoveredId) {
-                const staleSessionId = sessionId
+                if (!recoveredId) {
+                  submitErr = firstErr
+
+                  break
+                }
+
+                const staleSessionId: string = sessionId
 
                 activeSessionIdRef.current = recoveredId
 
@@ -374,11 +427,27 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 seedOptimistic(recoveredId)
                 rewriteOptimistic(recoveredId)
                 rememberContinuationPrompt(recoveredId, text)
-                await withSessionBusyRetry(() =>
-                  requestGateway('prompt.submit', { session_id: recoveredId, text, active_target: activeTarget }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
-                )
-              } else if (submitErr === null) {
-                submitErr = firstErr
+
+                try {
+                  await withSessionBusyRetry(() =>
+                    requestGateway('prompt.submit', { session_id: recoveredId, text, active_target: activeTarget }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                  )
+                  submitErr = null
+
+                  break
+                } catch (retryErr) {
+                  const mayRebindAgain =
+                    rebindAttempt === 0 &&
+                    isSessionNotFoundError(retryErr)
+
+                  if (mayRebindAgain) {
+                    continue
+                  }
+
+                  submitErr = retryErr
+
+                  break
+                }
               }
             } else if (!options?.fromQueue) {
               const staleSessionId = sessionId
@@ -473,6 +542,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       busyRef,
       copy,
       createBackendSessionForSend,
+      ensureSelectedSessionOwner,
       requestGateway,
       selectedStoredSessionIdRef,
       syncAttachmentsForSubmit,

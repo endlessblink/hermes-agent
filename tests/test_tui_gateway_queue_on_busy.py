@@ -61,6 +61,32 @@ def test_busy_interrupt_mode_interrupts_and_queues(monkeypatch):
     assert session["queued_prompt"]["text"] == "redirect"
 
 
+def test_busy_typed_reply_resolves_pending_clarify_instead_of_waiting_in_queue():
+    event = threading.Event()
+    session = _session(personal_assistant=True, running=True)
+    with server._prompt_lock:
+        server._pending["clarify-1"] = ("sid", event)
+        server._pending_prompt_payloads["clarify-1"] = (
+            "clarify.request",
+            {"question": "Which project?"},
+        )
+    try:
+        response = server._handle_busy_submit(
+            "r1", "sid", session, "FlowState — continue there", "ws-1"
+        )
+
+        assert response["result"]["status"] == "clarify_answered"
+        assert event.is_set()
+        assert session.get("queued_prompt") is None
+        with server._prompt_lock:
+            assert server._answers["clarify-1"] == "FlowState — continue there"
+    finally:
+        with server._prompt_lock:
+            server._pending.pop("clarify-1", None)
+            server._pending_prompt_payloads.pop("clarify-1", None)
+            server._answers.pop("clarify-1", None)
+
+
 def test_busy_queue_mode_queues_without_interrupting(monkeypatch):
     monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "queue")
     calls = {"interrupt": 0}

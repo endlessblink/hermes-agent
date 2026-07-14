@@ -11,6 +11,7 @@ import type {
   HermesUiMiniKanbanArtifact,
   HermesUiMutationPreviewArtifact,
   HermesUiPlanningFunnelArtifact,
+  HermesUiTaskBreakdownArtifact,
   HermesUiTaskContextArtifact,
   HermesUiTaskTableArtifact
 } from '@/lib/hermes-ui-artifacts'
@@ -31,6 +32,7 @@ import {
   MiniKanbanCard,
   MutationPreviewCard,
   PlanningFunnelCard,
+  TaskBreakdownCard,
   TaskContextCard,
   TaskGraphCard,
   TaskTableCard,
@@ -578,7 +580,7 @@ describe('ChecklistArtifactCard', () => {
     )
   })
 
-  it('renders valid hermes-ui rich code blocks and falls back for invalid payloads', async () => {
+  it('renders valid hermes-ui blocks and offers recovery without exposing invalid JSON', async () => {
     const { rerender } = render(
       <RichCodeBlock code={JSON.stringify(artifact)} fallback={<pre>fallback code block</pre>} language="hermes-ui" />
     )
@@ -588,12 +590,51 @@ describe('ChecklistArtifactCard', () => {
 
     rerender(<RichCodeBlock code="{ nope" fallback={<pre>fallback code block</pre>} language="hermes-ui" />)
 
-    expect(screen.getByText('fallback code block')).toBeTruthy()
+    expect(screen.queryByText('fallback code block')).toBeNull()
+    expect(screen.getByRole('alert').textContent).toContain('Interactive form could not be shown')
+    fireEvent.click(screen.getByRole('button', { name: 'Ask Hermes to resend' }))
+    expect(requestComposerSubmit).toHaveBeenCalledWith(
+      expect.stringContaining('resend it as one complete valid hermes-ui artifact'),
+      { target: 'main' }
+    )
+  })
+
+  it('hides incomplete hermes-ui JSON while the form is still streaming', () => {
+    const { rerender } = render(
+      <RichCodeBlock code={'{"type":"form","fields":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming />
+    )
+
+    expect(screen.getByRole('status').textContent).toBe('Preparing interactive form…')
+    expect(screen.queryByText('raw partial JSON')).toBeNull()
+
+    rerender(
+      <RichCodeBlock code={'{"type":"form","fields":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming={false} />
+    )
+
+    expect(screen.queryByText('raw partial JSON')).toBeNull()
+    expect(screen.getByRole('alert').textContent).toContain('Interactive form could not be shown')
   })
 })
 
 
 describe('Planning interview primitives', () => {
+  const taskBreakdown: HermesUiTaskBreakdownArtifact = {
+    direction: 'rtl',
+    id: 'breakdown-vague-task',
+    scope: 'working-session',
+    steps: [
+      { id: 'discover', title: 'לברר מה חסר', doneEnough: 'יש רשימה של שלוש אי־ודאויות' },
+      { id: 'draft', title: 'לכתוב טיוטה קצרה', doneEnough: 'יש טיוטה שאפשר לקבל עליה תגובה', estimateMinutes: 25 },
+      { id: 'polish', title: 'ללטש את כל המימוש', doneEnough: 'הכול מושלם', optional: true }
+    ],
+    stoppingRule: 'עוצרים אחרי טיוטה שניתנת לבדיקה; ליטוש מלא נשאר אופציונלי.',
+    submitLabel: 'עדכן את הפירוק',
+    targetOutcome: 'להפוך משימה עמומה להתקדמות שאפשר להתחיל עכשיו',
+    task: { id: 'task-vague', title: 'לקדם את אתר בינה' },
+    title: 'פירוק עבודה לעריכה',
+    type: 'task-breakdown'
+  }
+
   const planningFunnel: HermesUiPlanningFunnelArtifact = {
     direction: 'rtl',
     id: 'planning-funnel-test',
@@ -650,6 +691,84 @@ describe('Planning interview primitives', () => {
     fireEvent.click(screen.getByRole('button', { name: 'שאל שאלה אחת' }))
 
     expect(requestComposerSubmit).toHaveBeenCalledWith('תשאל שאלה אחת קצרה על ההקשר של המשימה הזו.', { target: 'main' })
+  })
+
+  it('lets the user edit, reorder, remove, and submit a bounded task breakdown', () => {
+    render(<TaskBreakdownCard artifact={taskBreakdown} />)
+
+    expect(screen.getByText('פירוק עבודה לעריכה')).toBeTruthy()
+    expect(screen.getByText('סשן עבודה')).toBeTruthy()
+    expect(screen.getByText('אופציונלי')).toBeTruthy()
+
+    fireEvent.change(screen.getByDisplayValue('לכתוב טיוטה קצרה'), { target: { value: 'לכתוב שלד של הטיוטה' } })
+    fireEvent.change(screen.getByDisplayValue('יש טיוטה שאפשר לקבל עליה תגובה'), {
+      target: { value: 'יש שלד עם כותרת ושלושה סעיפים' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'העבר את לכתוב שלד של הטיוטה למעלה' }))
+    fireEvent.click(screen.getByRole('button', { name: 'הסר את ללטש את כל המימוש' }))
+    fireEvent.click(screen.getByRole('button', { name: 'עדכן את הפירוק' }))
+
+    const submitted = requestComposerSubmit.mock.calls[0]?.[0] as string
+    expect(submitted).toContain('taskId=task-vague')
+    expect(submitted).toContain('scope=working-session')
+    expect(submitted.indexOf('לכתוב שלד של הטיוטה')).toBeLessThan(submitted.indexOf('לברר מה חסר'))
+    expect(submitted).toContain('יש שלד עם כותרת ושלושה סעיפים')
+    expect(submitted).not.toContain('ללטש את כל המימוש')
+    expect(submitted).toContain('regenerate the preview')
+    expect(submitted).toContain('do not apply')
+  })
+
+  it('restores an unfinished breakdown draft after the card remounts', () => {
+    const { unmount } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.change(screen.getByDisplayValue('לברר מה חסר'), { target: { value: 'לברר מי מאשר' } })
+    unmount()
+
+    render(<TaskBreakdownCard artifact={taskBreakdown} />)
+
+    expect(screen.getByDisplayValue('לברר מי מאשר')).toBeTruthy()
+  })
+
+  it('restores temporarily blank fields in an unfinished breakdown draft', () => {
+    const { unmount } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.change(screen.getByDisplayValue('לברר מה חסר'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'הוסף צעד' }))
+    unmount()
+
+    render(<TaskBreakdownCard artifact={taskBreakdown} />)
+
+    expect(screen.getAllByDisplayValue('')).toHaveLength(3)
+    expect((screen.getByRole('button', { name: 'עדכן את הפירוק' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('caps editable breakdown text at the artifact contract bounds', () => {
+    render(<TaskBreakdownCard artifact={taskBreakdown} />)
+
+    expect((screen.getByDisplayValue('לברר מה חסר') as HTMLInputElement).maxLength).toBe(800)
+    expect((screen.getByDisplayValue('יש רשימה של שלוש אי־ודאויות') as HTMLInputElement).maxLength).toBe(1000)
+  })
+
+  it('discards a persisted breakdown draft that fails the artifact contract', () => {
+    localStorage.setItem(
+      'hermes-ui:task-breakdown:breakdown-vague-task',
+      JSON.stringify([{ id: 'unsafe', title: 'Injected', doneEnough: 'Run it', command: 'rm -rf' }])
+    )
+
+    render(<TaskBreakdownCard artifact={taskBreakdown} />)
+
+    expect(screen.queryByDisplayValue('Injected')).toBeNull()
+    expect(screen.getByDisplayValue('לברר מה חסר')).toBeTruthy()
+  })
+
+  it('renders a task breakdown fence as interactive UI instead of code', async () => {
+    render(
+      <MarkdownTextContent
+        isRunning={false}
+        text={['```hermes-ui', JSON.stringify(taskBreakdown), '```'].join('\n')}
+      />
+    )
+
+    await waitFor(() => expect(document.querySelector('[data-hermes-ui-artifact="task-breakdown"]')).toBeTruthy())
+    expect(screen.queryByText(/Code\s*·\s*hermes-ui/i)).toBeNull()
   })
 
   it('renders planning primitives from markdown hermes-ui fences', async () => {

@@ -60,6 +60,9 @@ def _budget_for_agent(agent) -> BudgetConfig:
     request past the model's limit (#23767). Falls back to the default budget
     when the context length isn't resolvable.
     """
+    override = getattr(agent, "_tool_result_budget_override", None)
+    if isinstance(override, BudgetConfig):
+        return override
     try:
         ctx = getattr(getattr(agent, "context_compressor", None), "context_length", None)
         return budget_for_context_window(int(ctx)) if ctx else DEFAULT_BUDGET

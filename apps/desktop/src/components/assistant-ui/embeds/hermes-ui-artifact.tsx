@@ -5,6 +5,7 @@ import { type CSSProperties, type ReactNode, useId, useMemo, useState } from 're
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import {
   buildHermesUiFormResponse,
+  HERMES_UI_TASK_BREAKDOWN_LIMITS,
   type HermesUiChecklistArtifact,
   type HermesUiDayTimelineArtifact,
   type HermesUiFlowStateBatchArtifact,
@@ -17,6 +18,7 @@ import {
   type HermesUiMutationPreviewArtifact,
   type HermesUiPlanningFunnelArtifact,
   type HermesUiQuestionnaireArtifact,
+  type HermesUiTaskBreakdownArtifact,
   type HermesUiTaskContextArtifact,
   type HermesUiTaskGraphArtifact,
   type HermesUiTaskPriority,
@@ -27,6 +29,7 @@ import {
   type HermesUiWorkloadBarsArtifact,
   isCanonical24HourTime,
   parseHermesUiArtifact,
+  parseHermesUiTaskBreakdownDraftSteps,
   stableArtifactStorageKey
 } from '@/lib/hermes-ui-artifacts'
 import { readKey, writeKey } from '@/lib/storage'
@@ -82,6 +85,7 @@ function artifactDirection(
     | HermesUiPlanningFunnelArtifact
     | HermesUiQuestionnaireArtifact
     | HermesUiTaskContextArtifact
+    | HermesUiTaskBreakdownArtifact
     | HermesUiTaskGraphArtifact
     | HermesUiTaskTableArtifact
     | HermesUiTaskTriageArtifact
@@ -124,6 +128,16 @@ function artifactDirection(
           ...(artifact.connections || []),
           ...(artifact.waitingOn || []),
           ...(artifact.unknowns || [])
+        ]
+      : []
+
+  const taskBreakdownText =
+    artifact.type === 'task-breakdown'
+      ? [
+          artifact.task.title,
+          artifact.targetOutcome,
+          artifact.stoppingRule,
+          ...artifact.steps.flatMap(step => [step.title, step.doneEnough])
         ]
       : []
 
@@ -176,6 +190,7 @@ function artifactDirection(
     ...planningSessionText,
     ...funnelText,
     ...taskContextText,
+    ...taskBreakdownText,
     ...taskTableText,
     ...kanbanText,
     ...timelineText,
@@ -1327,6 +1342,218 @@ export function TaskContextCard({ artifact }: { artifact: HermesUiTaskContextArt
   )
 }
 
+const BREAKDOWN_SCOPE_LABELS: Record<HermesUiTaskBreakdownArtifact['scope'], { ltr: string; rtl: string }> = {
+  'full-delivery': { ltr: 'Full delivery', rtl: 'מסירה מלאה' },
+  'next-move': { ltr: 'Next move', rtl: 'הצעד הבא' },
+  'working-session': { ltr: 'Working session', rtl: 'סשן עבודה' }
+}
+
+function readTaskBreakdownDraft(
+  storageKey: string,
+  artifact: HermesUiTaskBreakdownArtifact
+): HermesUiTaskBreakdownArtifact['steps'] {
+  const fallback = () => artifact.steps.map(step => ({ ...step }))
+  const raw = readKey(storageKey)
+
+  if (!raw) {return fallback()}
+
+  try {
+    const steps = JSON.parse(raw)
+    const draft = parseHermesUiTaskBreakdownDraftSteps(steps)
+
+    return draft || fallback()
+  } catch {
+    return fallback()
+  }
+}
+
+export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdownArtifact }) {
+  const direction = artifactDirection(artifact)
+  const isRtl = direction === 'rtl'
+  const directionalStyle = { direction, textAlign: isRtl ? 'right' : 'left' } satisfies CSSProperties
+  const storageKey = useMemo(() => stableArtifactStorageKey(artifact), [artifact])
+  const [steps, setSteps] = useState(() => readTaskBreakdownDraft(storageKey, artifact))
+  const [submitted, setSubmitted] = useState(false)
+
+  const replaceSteps = (
+    updater: (current: HermesUiTaskBreakdownArtifact['steps']) => HermesUiTaskBreakdownArtifact['steps']
+  ) => {
+    setSteps(current => {
+      const next = updater(current)
+      writeKey(storageKey, JSON.stringify(next))
+
+      return next
+    })
+  }
+
+  const updateStep = (id: string, patch: Partial<HermesUiTaskBreakdownArtifact['steps'][number]>) => {
+    setSubmitted(false)
+    replaceSteps(current => current.map(step => (step.id === id ? { ...step, ...patch } : step)))
+  }
+
+  const moveStep = (index: number, offset: -1 | 1) => {
+    const target = index + offset
+
+    if (target < 0 || target >= steps.length) {return}
+    setSubmitted(false)
+    replaceSteps(current => {
+      const next = [...current]
+      const [step] = next.splice(index, 1)
+      next.splice(target, 0, step)
+
+      return next
+    })
+  }
+
+  const removeStep = (id: string) => {
+    if (steps.length <= 1) {return}
+    setSubmitted(false)
+    replaceSteps(current => current.filter(step => step.id !== id))
+  }
+
+  const addStep = () => {
+    if (steps.length >= 12) {return}
+    const used = new Set(steps.map(step => step.id))
+    let index = steps.length + 1
+
+    while (used.has(`draft-${index}`)) {index += 1}
+    setSubmitted(false)
+    replaceSteps(current => [
+      ...current,
+      {
+        doneEnough: '',
+        id: `draft-${index}`,
+        title: ''
+      }
+    ])
+  }
+
+  const valid = steps.every(step => step.title.trim() && step.doneEnough.trim())
+
+  const submit = () => {
+    if (!valid) {return}
+
+    const response = [
+      `I revised the task breakdown for taskId=${artifact.task.id}.`,
+      `scope=${artifact.scope}`,
+      artifact.targetOutcome ? `Target outcome: ${artifact.targetOutcome}` : '',
+      artifact.stoppingRule ? `Stopping rule: ${artifact.stoppingRule}` : '',
+      'Ordered steps:',
+      ...steps.map(
+        (step, index) =>
+          `${index + 1}. ${step.title.trim()} | done enough: ${step.doneEnough.trim()}` +
+          (step.estimateMinutes ? ` | estimate: ${step.estimateMinutes} minutes` : '') +
+          (step.optional ? ' | optional' : '')
+      ),
+      'Use this exact revision to regenerate the preview; do not apply or create FlowState subtasks until I explicitly approve that new preview.'
+    ]
+      .filter(Boolean)
+      .join('\n')
+
+    requestComposerSubmit(response, { target: 'main' })
+    setSubmitted(true)
+  }
+
+  const labels = isRtl
+    ? {
+        add: 'הוסף צעד', doneEnough: 'מה נחשב מספיק', down: 'העבר את', optional: 'אופציונלי',
+        remove: 'הסר את', step: 'צעד', stopping: 'כלל עצירה', target: 'תוצאה רצויה', up: 'העבר את'
+      }
+    : {
+        add: 'Add step', doneEnough: 'Done enough', down: 'Move', optional: 'Optional',
+        remove: 'Remove', step: 'Step', stopping: 'Stopping rule', target: 'Target outcome', up: 'Move'
+      }
+
+  return (
+    <section
+      aria-label={artifact.title || artifact.task.title}
+      className={cn('my-3 overflow-hidden rounded-xl border border-border/80 bg-muted/25', isRtl ? 'text-right' : 'text-left')}
+      data-hermes-ui-artifact="task-breakdown"
+      dir={direction}
+      style={directionalStyle}
+    >
+      <div className="border-b border-border/65 px-3 py-2.5">
+        <div className={cn('flex items-start justify-between gap-3', isRtl && 'flex-row-reverse')}>
+          <div className="min-w-0">
+            <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground">
+              {artifact.title || artifact.task.title}
+            </h3>
+            {artifact.title && <div className="mt-1 text-[0.75rem] text-muted-foreground">{artifact.task.title}</div>}
+          </div>
+          <span className="shrink-0 rounded-md border border-border/70 bg-background/45 px-2 py-1 text-[0.68rem] font-medium text-muted-foreground">
+            {BREAKDOWN_SCOPE_LABELS[artifact.scope][isRtl ? 'rtl' : 'ltr']}
+          </span>
+        </div>
+        {artifact.description && <p className="m-0 mt-1 text-[0.72rem] text-muted-foreground">{artifact.description}</p>}
+      </div>
+
+      {(artifact.targetOutcome || artifact.stoppingRule) && (
+        <div className="grid gap-2 border-b border-border/55 px-3 py-2.5 sm:grid-cols-2">
+          {artifact.targetOutcome && (
+            <div className="rounded-md border border-border/55 bg-background/35 px-2.5 py-2">
+              <div className="text-[0.66rem] font-medium text-muted-foreground">{labels.target}</div>
+              <div className="mt-1 text-[0.74rem] leading-relaxed text-foreground">{artifact.targetOutcome}</div>
+            </div>
+          )}
+          {artifact.stoppingRule && (
+            <div className="rounded-md border border-border/55 bg-background/35 px-2.5 py-2">
+              <div className="text-[0.66rem] font-medium text-muted-foreground">{labels.stopping}</div>
+              <div className="mt-1 text-[0.74rem] leading-relaxed text-foreground">{artifact.stoppingRule}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="space-y-2 px-3 py-3">
+        {steps.map((step, index) => (
+          <div className="rounded-lg border border-border/60 bg-background/35 p-2.5" key={step.id}>
+            <div className={cn('mb-1.5 flex items-center justify-between gap-2', isRtl && 'flex-row-reverse')}>
+              <div className={cn('flex items-center gap-1.5', isRtl && 'flex-row-reverse')}>
+                <span className="inline-flex size-5 items-center justify-center rounded-full bg-foreground text-[0.65rem] font-semibold text-background">
+                  {index + 1}
+                </span>
+                <span className="text-[0.68rem] font-medium text-muted-foreground">{labels.step}</span>
+                {step.optional && (
+                  <span className="rounded border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">{labels.optional}</span>
+                )}
+              </div>
+              <div className={cn('flex items-center gap-1', isRtl && 'flex-row-reverse')}>
+                <button aria-label={`${labels.up} ${step.title} ${isRtl ? 'למעלה' : 'up'}`} disabled={index === 0} onClick={() => moveStep(index, -1)} type="button">↑</button>
+                <button aria-label={`${labels.down} ${step.title} ${isRtl ? 'למטה' : 'down'}`} disabled={index === steps.length - 1} onClick={() => moveStep(index, 1)} type="button">↓</button>
+                <button aria-label={`${labels.remove} ${step.title}`} disabled={steps.length === 1} onClick={() => removeStep(step.id)} type="button">×</button>
+              </div>
+            </div>
+            <input
+              aria-label={`${labels.step} ${index + 1}`}
+              className="w-full rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.76rem] text-foreground"
+              maxLength={HERMES_UI_TASK_BREAKDOWN_LIMITS.titleLength}
+              onChange={event => updateStep(step.id, { title: event.target.value })}
+              value={step.title}
+            />
+            <input
+              aria-label={`${labels.doneEnough} ${index + 1}`}
+              className="mt-1.5 w-full rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.72rem] text-foreground"
+              maxLength={HERMES_UI_TASK_BREAKDOWN_LIMITS.doneEnoughLength}
+              onChange={event => updateStep(step.id, { doneEnough: event.target.value })}
+              placeholder={labels.doneEnough}
+              value={step.doneEnough}
+            />
+          </div>
+        ))}
+      </div>
+
+      <div className={cn('flex flex-wrap items-center gap-2 border-t border-border/65 px-3 py-2.5', isRtl && 'justify-end')}>
+        <button className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.72rem]" disabled={steps.length >= 12} onClick={addStep} type="button">
+          {labels.add}
+        </button>
+        <button className="rounded-md bg-foreground px-2.5 py-1 text-[0.72rem] font-medium text-background disabled:opacity-45" disabled={!valid} onClick={submit} type="button">
+          {submitted ? (isRtl ? 'נשלח ל־Hermes' : 'Sent to Hermes') : artifact.submitLabel || (isRtl ? 'עדכן את הפירוק' : 'Update breakdown')}
+        </button>
+      </div>
+    </section>
+  )
+}
+
 function ArtifactShell({
   artifact,
   children,
@@ -1785,6 +2012,10 @@ export default function HermesUiArtifactRenderer({ code }: RichFenceProps) {
 
   if (result.artifact.type === 'task-context') {
     return <TaskContextCard artifact={result.artifact} />
+  }
+
+  if (result.artifact.type === 'task-breakdown') {
+    return <TaskBreakdownCard artifact={result.artifact} />
   }
 
   if (result.artifact.type === 'task-table') {

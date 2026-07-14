@@ -15,13 +15,15 @@ function Harness({
   busy = false,
   onClarify,
   onQueue,
-  onSubmit
+  onSubmit,
+  recoverLostClarifyWhileBusy = false
 }: {
   attachments?: unknown[]
   busy?: boolean
   onClarify?: (text: string) => boolean | Promise<boolean>
   onQueue: () => boolean
   onSubmit: (text: string) => boolean | Promise<boolean>
+  recoverLostClarifyWhileBusy?: boolean
 }) {
   const activeQueueSessionKeyRef = useRef<string | null>('stored-session')
   const draftRef = useRef('')
@@ -61,6 +63,7 @@ function Harness({
     onSubmitClarifyAnswer: onClarify,
     queueCurrentDraft: onQueue,
     queueEdit: null,
+    recoverLostClarifyWhileBusy,
     sendBlocked: busy,
     sessionId: 'runtime-session',
     setComposerText: value => {
@@ -137,6 +140,27 @@ describe('useComposerSubmit clarify routing', () => {
 
     expect(onQueue).toHaveBeenCalledTimes(1)
     expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('sends busy Personal Assistant text to the gateway when clarify client state was lost', async () => {
+    const onQueue = vi.fn(() => true)
+    const onSubmit = vi.fn(() => true)
+
+    const { getByTestId } = render(
+      <Harness busy onQueue={onQueue} onSubmit={onSubmit} recoverLostClarifyWhileBusy />
+    )
+
+    const editor = getByTestId('editor')
+
+    await act(async () => {
+      editor.textContent = 'FlowState — continue there'
+      fireEvent.input(editor)
+      fireEvent.click(getByTestId('submit'))
+    })
+
+    expect(onSubmit).toHaveBeenCalledWith('FlowState — continue there', { allowWhileBusy: true })
+    expect(onQueue).not.toHaveBeenCalled()
+    expect(editor.textContent).toBe('')
   })
 
   it('does not route attachment submits through clarify answers', async () => {

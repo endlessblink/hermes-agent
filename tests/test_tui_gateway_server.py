@@ -5965,6 +5965,17 @@ def test_session_create_lazy_info_reports_desktop_contract(monkeypatch):
     server._sessions.pop(resp["result"]["session_id"], None)
 
 
+def test_live_lazy_session_info_reports_desktop_contract(monkeypatch):
+    """Reusing an already-live lazy session must not look like an old backend."""
+    monkeypatch.setattr(server, "_default_session_cwd", lambda: "/tmp/project")
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+
+    info = server._fallback_session_info({"agent": None})
+
+    assert info["lazy"] is True
+    assert info["desktop_contract"] == server.DESKTOP_BACKEND_CONTRACT
+
+
 def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_db_error", "locking protocol")
@@ -6664,7 +6675,7 @@ def test_turn_progress_ignores_diagnostics_and_terminal(monkeypatch):
 
 
 def test_emit_writes_turn_watchdog_ledger(monkeypatch, tmp_path):
-    session = _session(running=True, cwd="/tmp/project")
+    session = _session(running=True, cwd="/tmp/project", personal_assistant=True)
     session["session_key"] = "key-123"
     session["turn_started_at"] = 10.0
     session["turn_last_progress_at"] = 10.0
@@ -6682,8 +6693,68 @@ def test_emit_writes_turn_watchdog_ledger(monkeypatch, tmp_path):
     rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["event"] == "message.start"
     assert rows[-1]["session_id"] == "sid"
+    assert rows[-1]["personal_assistant"] is True
     assert rows[-1]["session_key"] == "key-123"
     assert rows[-1]["cwd"] == "/tmp/project"
+
+
+def test_turn_watchdog_ledger_preserves_safe_error_details(monkeypatch, tmp_path):
+    session = _session(running=True)
+    server._sessions["sid"] = session
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+
+    try:
+        server._emit(
+            "diagnostic.event",
+            "sid",
+            {
+                "component": "turn",
+                "event": "error",
+                "message": "Turn raised an exception",
+                "details": {
+                    "error_type": "RuntimeError",
+                    "error": "session not found",
+                    "secret": "must not be persisted",
+                },
+            },
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    row = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["payload"]["details"] == {
+        "error_type": "RuntimeError",
+        "error": "session not found",
+    }
+
+
+def test_missing_prompt_session_writes_safe_rpc_watchdog_row(monkeypatch, tmp_path):
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    server._sessions.pop("missing-session", None)
+
+    response = server.handle_request(
+        {
+            "id": "rpc-1",
+            "method": "prompt.submit",
+            "params": {
+                "session_id": "missing-session",
+                "text": "private prompt content must not enter watchdog logs",
+            },
+        }
+    )
+
+    assert response["error"]["message"] == "session not found"
+    row = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "rpc.error"
+    assert row["session_id"] == "missing-session"
+    assert row["payload"] == {
+        "error": "session not found",
+        "method": "prompt.submit",
+    }
+    assert "private prompt content" not in ledger.read_text(encoding="utf-8")
 
 
 def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):

@@ -257,6 +257,31 @@ class TestProjectFacts:
     def test_project_facts_for_none_outside_workspace(self, tmp_path):
         assert cc.project_facts_for(tmp_path) is None
 
+    def test_project_facts_ignore_git_metadata_on_shared_temp_root(self, monkeypatch, tmp_path):
+        shared_temp = tmp_path / "shared-temp"
+        project = shared_temp / "project"
+        (shared_temp / ".git").mkdir(parents=True)
+        project.mkdir()
+        (project / "package.json").write_text(
+            '{"scripts":{"test":"vitest"}}', encoding="utf-8"
+        )
+        (project / "pnpm-lock.yaml").write_text("", encoding="utf-8")
+        monkeypatch.setattr(cc.tempfile, "gettempdir", lambda: str(shared_temp))
+        real_exists = Path.exists
+        monkeypatch.setattr(
+            Path,
+            "exists",
+            lambda path: False
+            if path.name == ".git" and path.parent != shared_temp
+            else real_exists(path),
+        )
+
+        facts = cc.project_facts_for(project)
+
+        assert facts is not None
+        assert facts["root"] == str(project)
+        assert facts["verifyCommands"] == ["pnpm run test"]
+
 
 # ── $HOME dotfiles guard ────────────────────────────────────────────────────
 

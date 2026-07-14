@@ -42,13 +42,28 @@ def test_personal_assistant_manual_starts_anytime_and_preserves_intent(monkeypat
     assert "fixed morning" in submitted[0]["text"]
 
 
-def test_personal_assistant_rejects_non_office_profile(monkeypatch):
+def test_personal_assistant_accepts_explicit_owner_from_another_launch_profile(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "default")
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    submitted = _install_session_stubs(monkeypatch, server, ["pa-cross-profile"])
+
+    response = server._methods["personal_assistant.start"](
+        "r1", {"trigger": "manual", "profile": "office-work"}
+    )
+
+    assert response["result"]["session_id"] == "pa-cross-profile"
+    assert submitted[0]["session_id"] == "pa-cross-profile"
+
+
+def test_personal_assistant_rejects_non_owner_profile(monkeypatch):
     import tui_gateway.server as server
 
     monkeypatch.setattr(server, "_current_profile_name", lambda: "default")
 
     response = server._methods["personal_assistant.start"](
-        "r1", {"trigger": "manual"}
+        "r1", {"trigger": "manual", "profile": "film-maker"}
     )
 
     assert response["error"]["code"] == 4000

@@ -96,6 +96,41 @@ export const branchLaneId = (repoRoot: string, branch?: string): string =>
 /** A session's recency stamp (last activity, falling back to creation). */
 export const sessionRecency = (session: SessionInfo): number => session.last_active || session.started_at || 0
 
+/**
+ * Project overview replaces the ordinary flat list, but cwd-less chats are
+ * intentionally outside the backend project tree. Keep every loose chat beside
+ * the overview so restoring the Projects presentation on a cold start cannot
+ * make them undiscoverable before any stored session has been selected.
+ */
+export function sessionsBesideProjectOverview(
+  sessions: SessionInfo[],
+  projectOverviewActive: boolean
+): SessionInfo[] {
+  if (!projectOverviewActive) {
+    return sessions
+  }
+
+  return sessions.filter(session => !session.cwd?.trim())
+}
+
+/**
+ * Runtime invariant for the Projects presentation. Return only a count so the
+ * diagnostic boundary never needs chat titles, content, or identifiers.
+ */
+export function hiddenLooseSessionCount(
+  loadedSessions: SessionInfo[],
+  renderedSessions: SessionInfo[],
+  projectOverviewActive: boolean
+): number {
+  if (!projectOverviewActive) {
+    return 0
+  }
+
+  const renderedIds = new Set(renderedSessions.map(session => session.id))
+
+  return loadedSessions.filter(session => !session.cwd?.trim() && !renderedIds.has(session.id)).length
+}
+
 /** Default-branch names that pin to the top and read as the repo's trunk. */
 const TRUNK_BRANCHES = new Set(['main', 'master', 'trunk', 'develop'])
 

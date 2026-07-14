@@ -9,6 +9,7 @@ import { setSessionYolo } from '@/lib/yolo-session'
 import { clearQueuedPrompts } from '@/store/composer-queue'
 import { $pinnedSessionIds } from '@/store/layout'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
+import { isPersonalAssistantSession } from '@/store/personal-assistant'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { resolveNewSessionCwd, tombstoneSessions, untombstoneSessions } from '@/store/projects'
 import {
@@ -363,7 +364,9 @@ export function useSessionActions({
         return
       }
 
-      await ensureGatewayProfile(sessionProfile)
+      await ensureGatewayProfile(sessionProfile, {
+        preserveSelectedScope: isPersonalAssistantSession(storedSessionId, storedForProfile?._lineage_root_id)
+      })
 
       // Re-check after the profile-resolve / gateway-swap awaits above: the
       // cache may have changed, and takeWarmCache re-validates belongs-to and

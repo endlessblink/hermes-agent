@@ -2,8 +2,7 @@ import { dispatchNativeNotification } from '@/store/native-notifications'
 import { notify } from '@/store/notifications'
 import {
   $personalAssistantPendingCount,
-  $personalAssistantState,
-  refreshPersonalAssistantState
+  $personalAssistantState
 } from '@/store/personal-assistant'
 
 export interface PersonalAssistantAttentionPayload {
@@ -34,14 +33,15 @@ export async function handlePersonalAssistantAttention(
     seenEpisodes.delete(seenEpisodes.values().next().value as string)
   }
 
-  try {
-    await refreshPersonalAssistantState()
-  } catch {
-    const current = $personalAssistantState.get()
+  // Attention may arrive from the owner profile while the user is working in
+  // another profile. Trust the event counters here: a background refresh would
+  // route the foreground gateway to office-work and hijack the active chat.
+  // The complete owner state is read only after the user explicitly opens the
+  // assistant.
+  const current = $personalAssistantState.get()
 
-    if (current) {
-      $personalAssistantState.set({ ...current, unreadCount: payload.unread_count })
-    }
+  if (current) {
+    $personalAssistantState.set({ ...current, unreadCount: payload.unread_count })
   }
 
   const title = payload.title || 'Personal assistant needs your attention'

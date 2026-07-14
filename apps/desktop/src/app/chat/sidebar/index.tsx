@@ -30,6 +30,7 @@ import {
 import { Tip } from '@/components/ui/tooltip'
 import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { emitDesktopDiagnostic } from '@/lib/desktop-diagnostics'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { profileColor } from '@/lib/profile-color'
 import { sessionMatchesSearch } from '@/lib/session-search'
@@ -69,13 +70,8 @@ import {
   unpinSession
 } from '@/store/layout'
 import { notify } from '@/store/notifications'
+import { $personalAssistantState } from '@/store/personal-assistant'
 import {
-  $personalAssistantPendingCount,
-  $personalAssistantState,
-  personalAssistantAvailable
-} from '@/store/personal-assistant'
-import {
-  $activeGatewayProfile,
   $newChatProfile,
   $profiles,
   $profileScope,
@@ -145,12 +141,14 @@ import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } 
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import {
+  hiddenLooseSessionCount,
   overlayLiveLanes,
   overlayLivePreviews,
   PROJECT_PREVIEW_COUNT,
   ProjectBackRow,
   ProjectMenu,
   projectTreeCwd,
+  sessionsBesideProjectOverview,
   sessionRecency as sessionTime,
   type SidebarProjectTree,
   type SidebarSessionGroup,
@@ -309,9 +307,7 @@ export function ChatSidebar({
   const folders = useStore($sidebarFolders)
   const profiles = useStore($profiles)
   const profileScope = useStore($profileScope)
-  const activeGatewayProfile = useStore($activeGatewayProfile)
   const assistantState = useStore($personalAssistantState)
-  const assistantPendingCount = useStore($personalAssistantPendingCount)
 
   const personalAssistantSelected = Boolean(
     currentView === 'chat' &&
@@ -993,6 +989,39 @@ export function ChatSidebar({
     [agentSessions, folderedKeys, showAllProfiles]
   )
 
+  const mainSectionSessions = useMemo(
+    () => sessionsBesideProjectOverview(displayAgentSessions, Boolean(projectOverview?.length)),
+    [displayAgentSessions, projectOverview]
+  )
+
+  const hiddenLooseCount = useMemo(
+    () => hiddenLooseSessionCount(displayAgentSessions, mainSectionSessions, Boolean(projectOverview?.length)),
+    [displayAgentSessions, mainSectionSessions, projectOverview]
+  )
+
+  const lastHiddenLooseCountRef = useRef(0)
+
+  useEffect(() => {
+    if (hiddenLooseCount === 0) {
+      lastHiddenLooseCountRef.current = 0
+
+      return
+    }
+
+    if (lastHiddenLooseCountRef.current === hiddenLooseCount) {
+      return
+    }
+
+    lastHiddenLooseCountRef.current = hiddenLooseCount
+    emitDesktopDiagnostic({
+      component: 'sidebar',
+      event: 'project_overview_hidden_sessions',
+      message: 'Project overview omitted loaded loose sessions',
+      severity: 'error',
+      details: { hidden_count: hiddenLooseCount, presentation: 'projects' }
+    })
+  }, [hiddenLooseCount])
+
   const folderSections = useMemo(
     () =>
       visibleFolders.map(folder => ({
@@ -1207,9 +1236,7 @@ export function ChatSidebar({
         <SidebarGroup className="shrink-0 p-0 pb-2 pt-[calc(var(--titlebar-height)+0.375rem)]">
           <SidebarGroupContent>
             <SidebarMenu className="gap-px">
-              {SIDEBAR_NAV.filter(
-                item => item.id !== 'personal-assistant' || personalAssistantAvailable(activeGatewayProfile)
-              ).map(item => {
+              {SIDEBAR_NAV.map(item => {
                 const isInteractive = Boolean(item.action) || Boolean(item.route)
 
                 const active =
@@ -1263,10 +1290,8 @@ export function ChatSidebar({
                           <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
                           {item.id === 'personal-assistant' &&
                             assistantState &&
-                            assistantState.unreadCount + (assistantPendingCount ?? 0) > 0 && (
-                              <SidebarMenuBadge>
-                                {assistantState.unreadCount + (assistantPendingCount ?? 0)}
-                              </SidebarMenuBadge>
+                            assistantState.unreadCount > 0 && (
+                              <SidebarMenuBadge>{assistantState.unreadCount}</SidebarMenuBadge>
                             )}
                           {isNewSession && (
                             <KbdGroup
@@ -1560,7 +1585,7 @@ export function ChatSidebar({
                   'min-h-32 flex-1 overflow-hidden p-0',
                   !recentsVirtualizes && 'compact:min-h-0 compact:flex-none compact:overflow-visible'
                 )}
-                sessions={displayAgentSessions}
+                sessions={mainSectionSessions}
                 sortable={!showAllProfiles && agentSessions.length > 1}
                 workingSessionIdSet={workingSessionIdSet}
               />

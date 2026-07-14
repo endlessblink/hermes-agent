@@ -34,6 +34,7 @@ interface UseComposerSubmitArgs {
   onSubmitClarifyAnswer?: (answer: string) => Promise<boolean> | boolean
   queueCurrentDraft: () => boolean
   queueEdit: QueueEditState | null
+  recoverLostClarifyWhileBusy: boolean
   sendBlocked: boolean
   sessionId: string | null | undefined
   setComposerText: (value: string) => void
@@ -73,6 +74,7 @@ export function useComposerSubmit({
   onSubmitClarifyAnswer,
   queueCurrentDraft,
   queueEdit,
+  recoverLostClarifyWhileBusy,
   sendBlocked,
   sessionId,
   setComposerText,
@@ -195,6 +197,16 @@ export function useComposerSubmit({
       // for the current turn to finish, which is how the TUI never behaves.
       if (onSubmitClarifyAnswer && payloadPresent && !attachments.length && text.trim()) {
         dispatchClarifyAnswer(text)
+      } else if (recoverLostClarifyWhileBusy && busy && !attachments.length && text.trim()) {
+        // A reconnect can lose the renderer's one-shot clarify.request while
+        // the Personal Assistant backend remains blocked waiting for it. Send
+        // the typed answer through prompt.submit instead of the local queue;
+        // the gateway's PA-only busy handler resolves a pending clarify, and
+        // otherwise retains its normal interrupt/next-turn behavior.
+        triggerHaptic('submit')
+        resetBrowseState(sessionId)
+        clearDraft()
+        dispatchSubmit(text.trim(), { allowWhileBusy: true })
       } else if (busy && !attachments.length && SLASH_COMMAND_RE.test(text.trim())) {
         triggerHaptic('submit')
         clearDraft()

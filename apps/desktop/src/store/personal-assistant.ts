@@ -1,6 +1,8 @@
 import { atom } from 'nanostores'
 
-import { $gateway } from '@/store/gateway'
+import { gatewayForProfile } from '@/store/gateway'
+
+export const PERSONAL_ASSISTANT_OWNER_PROFILE = 'office-work'
 
 export type PersonalAssistantTrigger = 'manual' | 'scheduled'
 
@@ -62,8 +64,31 @@ export interface AssistantStateOperation {
 export const $personalAssistantState = atom<AssistantState | null>(null)
 export const $personalAssistantPendingCount = atom<number | null>(null)
 
-function gatewayOrThrow() {
-  const gateway = $gateway.get()
+let stateHydration: Promise<AssistantState> | null = null
+
+export function isPersonalAssistantSession(sessionId: string, lineageRootId?: string | null): boolean {
+  const canonicalSessionId = $personalAssistantState.get()?.sessionId
+
+  return Boolean(canonicalSessionId && (sessionId === canonicalSessionId || lineageRootId === canonicalSessionId))
+}
+
+function storePersonalAssistantState(state: AssistantState): AssistantState {
+  const current = $personalAssistantState.get()
+
+  if (current && state.version < current.version) {
+    return current
+  }
+
+  $personalAssistantState.set(state)
+  $personalAssistantPendingCount.set(
+    (state.pendingApprovals?.length ?? 0) + (state.captureProposals?.length ?? 0)
+  )
+
+  return state
+}
+
+async function ownerGateway() {
+  const gateway = await gatewayForProfile(PERSONAL_ASSISTANT_OWNER_PROFILE)
 
   if (!gateway) {
     throw new Error('Hermes gateway is unavailable')
@@ -72,16 +97,15 @@ function gatewayOrThrow() {
   return gateway
 }
 
-export function personalAssistantAvailable(profile: string | null | undefined): boolean {
-  return profile?.trim() === 'office-work'
-}
-
 export async function startPersonalAssistant(
   trigger: PersonalAssistantTrigger
 ): Promise<PersonalAssistantStartResult> {
-  const gateway = gatewayOrThrow()
+  const gateway = await ownerGateway()
 
-  const response = (await gateway.request('personal_assistant.start', { trigger })) as {
+  const response = (await gateway.request('personal_assistant.start', {
+    profile: PERSONAL_ASSISTANT_OWNER_PROFILE,
+    trigger
+  })) as {
     canonical_session_id?: unknown
     session_id?: unknown
     status?: unknown
@@ -104,12 +128,12 @@ export async function startPersonalAssistant(
 }
 
 export async function openPersonalAssistantHome(): Promise<string> {
-  const response = await gatewayOrThrow().request<{
+  const response = await (await ownerGateway()).request<{
     canonical_session_id: string
     session_id: string
     state: AssistantState
     status: 'ready'
-  }>('personal_assistant.home', { profile: 'office-work' })
+  }>('personal_assistant.home', { profile: PERSONAL_ASSISTANT_OWNER_PROFILE })
 
   const destinationSessionId = response.canonical_session_id || response.state.sessionId
 
@@ -117,25 +141,49 @@ export async function openPersonalAssistantHome(): Promise<string> {
     throw new Error('Personal assistant home did not return a session')
   }
 
-  $personalAssistantState.set(response.state)
-  $personalAssistantPendingCount.set(
-    (response.state.pendingApprovals?.length ?? 0) + (response.state.captureProposals?.length ?? 0)
-  )
+  storePersonalAssistantState(response.state)
 
   return destinationSessionId
 }
 
 export async function refreshPersonalAssistantState(): Promise<AssistantState> {
-  const response = await gatewayOrThrow().request<{ state: AssistantState }>('personal_assistant.state.get', {
-    profile: 'office-work'
+  const response = await (await ownerGateway()).request<{ state: AssistantState }>('personal_assistant.state.get', {
+    profile: PERSONAL_ASSISTANT_OWNER_PROFILE
   })
 
-  $personalAssistantState.set(response.state)
-  $personalAssistantPendingCount.set(
-    (response.state.pendingApprovals?.length ?? 0) + (response.state.captureProposals?.length ?? 0)
-  )
+  return storePersonalAssistantState(response.state)
+}
 
-  return response.state
+export async function hydratePersonalAssistantStateWhenReady(
+  gatewayState: string
+): Promise<AssistantState | null> {
+  const current = $personalAssistantState.get()
+
+  if (gatewayState !== 'open' || current) {
+    return current
+  }
+
+  if (!stateHydration) {
+    stateHydration = refreshPersonalAssistantState().finally(() => {
+      stateHydration = null
+    })
+  }
+
+  return stateHydration
+}
+
+export async function acknowledgePersonalAssistantRead(): Promise<AssistantState> {
+  const response = await (await ownerGateway()).request<{ state: AssistantState }>('personal_assistant.read', {
+    profile: PERSONAL_ASSISTANT_OWNER_PROFILE
+  })
+
+  const current = $personalAssistantState.get()
+
+  if (current && response.state.version < current.version) {
+    return refreshPersonalAssistantState()
+  }
+
+  return storePersonalAssistantState(response.state)
 }
 
 export async function patchPersonalAssistantState(
@@ -147,16 +195,11 @@ export async function patchPersonalAssistantState(
     throw new Error('Personal assistant state is not loaded')
   }
 
-  const response = await gatewayOrThrow().request<{ state: AssistantState }>('personal_assistant.state.patch', {
+  const response = await (await ownerGateway()).request<{ state: AssistantState }>('personal_assistant.state.patch', {
     expectedVersion: current.version,
     operations,
-    profile: 'office-work'
+    profile: PERSONAL_ASSISTANT_OWNER_PROFILE
   })
 
-  $personalAssistantState.set(response.state)
-  $personalAssistantPendingCount.set(
-    (response.state.pendingApprovals?.length ?? 0) + (response.state.captureProposals?.length ?? 0)
-  )
-
-  return response.state
+  return storePersonalAssistantState(response.state)
 }

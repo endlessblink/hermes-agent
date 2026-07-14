@@ -6,13 +6,238 @@ import copy
 from datetime import datetime, timezone
 import fcntl
 import json
+import math
 from pathlib import Path
+import re
 from typing import Any, Callable
 from uuid import uuid4
 
 from utils import atomic_json_write
 
 SCHEMA_VERSION = 1
+CONTEXT_LEDGER_LIMIT = 128
+MONITOR_EVENT_BATCH_LIMIT = 32
+MONITOR_EVENT_BYTES_LIMIT = 16_384
+_MONITOR_EVENT_VERSION = 1
+_MONITOR_EVENT_FIELDS = {
+    "id", "version", "kind", "subject", "occurrence", "evidence", "created_at",
+}
+_CONTEXT_ENTRY_FIELDS = {
+    "eventId", "event", "taskIds", "operationIds", "disposition",
+    "episodeId", "firstSeenAt", "updatedAt",
+}
+_MONITOR_DISPOSITIONS = {
+    "pending", "merged", "processing", "retry_wait", "suppressed", "handled", "failed",
+}
+_TERMINAL_MONITOR_DISPOSITIONS = {"suppressed", "handled"}
+_SENSITIVE_KEY_PARTS = ("authorization", "cookie", "password", "secret", "token")
+_TASK_EVENT_KINDS = {"blocker", "changed_high_priority"}
+
+
+def _bounded_identifier(value: Any, label: str, *, limit: int = 160) -> str:
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > limit:
+        raise ValueError(f"monitor {label} must be a non-empty trimmed string up to {limit} characters")
+    return value
+
+
+def _iso_timestamp(value: Any, label: str) -> str:
+    value = _bounded_identifier(value, label, limit=80)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"monitor {label} must be an ISO timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"monitor {label} must include a timezone")
+    return value
+
+
+def _safe_monitor_json(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        raise ValueError("monitor evidence exceeds the maximum depth")
+    if isinstance(value, dict):
+        if len(value) > 50:
+            raise ValueError("monitor evidence object is too large")
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or len(key) > 100:
+                raise ValueError("monitor evidence keys must be bounded strings")
+            normalized = re.sub(r"[^a-z]", "", key.lower())
+            if any(part in normalized for part in _SENSITIVE_KEY_PARTS):
+                raise ValueError(f"monitor evidence contains sensitive field: {key}")
+            result[key] = _safe_monitor_json(item, depth=depth + 1)
+        return result
+    if isinstance(value, list):
+        if len(value) > 50:
+            raise ValueError("monitor evidence list is too large")
+        return [_safe_monitor_json(item, depth=depth + 1) for item in value]
+    if isinstance(value, str):
+        if len(value) > 2_000:
+            raise ValueError("monitor evidence string is too large")
+        return value
+    if isinstance(value, bool) or value is None or isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("monitor evidence numbers must be finite")
+        return value
+    raise ValueError("monitor evidence must contain JSON-safe values")
+
+
+def _validate_monitor_event(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("monitor event must be an object")
+    fields = set(raw)
+    if fields != _MONITOR_EVENT_FIELDS:
+        missing = sorted(_MONITOR_EVENT_FIELDS - fields)
+        unknown = sorted(fields - _MONITOR_EVENT_FIELDS)
+        raise ValueError(
+            f"monitor event fields are invalid; missing={missing}, unknown={unknown}"
+        )
+    event_id = _bounded_identifier(raw.get("id"), "event id")
+    version = raw.get("version")
+    if version != _MONITOR_EVENT_VERSION:
+        raise ValueError(f"unsupported monitor event version: {version}")
+    kind = _bounded_identifier(raw.get("kind"), "kind", limit=100)
+    subject = _bounded_identifier(raw.get("subject"), "subject")
+    occurrence = raw.get("occurrence")
+    if not isinstance(occurrence, int) or isinstance(occurrence, bool) or occurrence < 1:
+        raise ValueError("monitor event occurrence must be a positive integer")
+    evidence = _safe_monitor_json(raw.get("evidence"))
+    if not isinstance(evidence, dict):
+        raise ValueError("monitor event evidence must be an object")
+    event = {
+        "id": event_id,
+        "version": version,
+        "kind": kind,
+        "subject": subject,
+        "occurrence": occurrence,
+        "evidence": evidence,
+        "created_at": _iso_timestamp(raw.get("created_at"), "created_at"),
+    }
+    encoded = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > MONITOR_EVENT_BYTES_LIMIT:
+        raise ValueError("monitor event is too large")
+    return event
+
+
+def validate_monitor_events(events: Any) -> list[dict[str, Any]]:
+    """Validate and copy a bounded batch at the RPC/storage trust boundary."""
+
+    if not isinstance(events, list) or not events:
+        raise ValueError("monitor events must be a non-empty list")
+    if len(events) > MONITOR_EVENT_BATCH_LIMIT:
+        raise ValueError(
+            f"monitor event batch exceeds {MONITOR_EVENT_BATCH_LIMIT} events"
+        )
+    validated: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for raw in events:
+        event = _validate_monitor_event(raw)
+        previous = by_id.get(event["id"])
+        if previous is not None and previous != event:
+            raise ValueError(f"monitor event identity collision: {event['id']}")
+        if previous is None:
+            by_id[event["id"]] = event
+            validated.append(event)
+    return validated
+
+
+def _collect_evidence_ids(event: dict[str, Any]) -> tuple[list[str], list[str]]:
+    task_ids: set[str] = set()
+    operation_ids: set[str] = set()
+
+    def walk(value: Any, parent_key: str = "") -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = re.sub(r"[^a-z]", "", key.lower())
+                if normalized == "operationid" and isinstance(item, str) and item.strip():
+                    operation_ids.add(item.strip()[:160])
+                elif normalized == "operationids" and isinstance(item, list):
+                    operation_ids.update(
+                        candidate.strip()[:160]
+                        for candidate in item
+                        if isinstance(candidate, str) and candidate.strip()
+                    )
+                elif normalized == "taskid" and isinstance(item, str) and item.strip():
+                    task_ids.add(item.strip()[:160])
+                elif normalized == "taskids" and isinstance(item, list):
+                    task_ids.update(
+                        candidate.strip()[:160]
+                        for candidate in item
+                        if isinstance(candidate, str) and candidate.strip()
+                    )
+                elif (
+                    normalized == "id"
+                    and event["kind"] in _TASK_EVENT_KINDS
+                    and isinstance(item, str)
+                    and item.strip()
+                ):
+                    task_ids.add(item.strip()[:160])
+                walk(item, key)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, parent_key)
+
+    walk(event["evidence"])
+    return sorted(task_ids)[:32], sorted(operation_ids)[:32]
+
+
+def _validate_disposition(value: Any) -> str:
+    if value not in _MONITOR_DISPOSITIONS:
+        raise ValueError(
+            "monitor disposition must be one of: "
+            + ", ".join(sorted(_MONITOR_DISPOSITIONS))
+        )
+    return str(value)
+
+
+def _validate_context_entry(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or set(raw) != _CONTEXT_ENTRY_FIELDS:
+        raise ValueError("monitor context ledger entry fields are invalid")
+    event = _validate_monitor_event(raw.get("event"))
+    event_id = _bounded_identifier(raw.get("eventId"), "event id")
+    if event_id != event["id"]:
+        raise ValueError("monitor context ledger event identity mismatch")
+    task_ids = raw.get("taskIds")
+    operation_ids = raw.get("operationIds")
+    if not isinstance(task_ids, list) or len(task_ids) > 32:
+        raise ValueError("monitor context ledger task ids are invalid")
+    if not isinstance(operation_ids, list) or len(operation_ids) > 32:
+        raise ValueError("monitor context ledger operation ids are invalid")
+    safe_task_ids = sorted({_bounded_identifier(value, "task id") for value in task_ids})
+    safe_operation_ids = sorted(
+        {_bounded_identifier(value, "operation id") for value in operation_ids}
+    )
+    episode_id = raw.get("episodeId")
+    if episode_id is not None:
+        episode_id = _bounded_identifier(episode_id, "episode id")
+    return {
+        "eventId": event_id,
+        "event": event,
+        "taskIds": safe_task_ids,
+        "operationIds": safe_operation_ids,
+        "disposition": _validate_disposition(raw.get("disposition")),
+        "episodeId": episode_id,
+        "firstSeenAt": _iso_timestamp(raw.get("firstSeenAt"), "firstSeenAt"),
+        "updatedAt": _iso_timestamp(raw.get("updatedAt"), "updatedAt"),
+    }
+
+
+def _safe_context_ledger(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in raw[-CONTEXT_LEDGER_LIMIT:]:
+        try:
+            entry = _validate_context_entry(value)
+        except ValueError:
+            continue
+        if entry["eventId"] in seen:
+            continue
+        seen.add(entry["eventId"])
+        safe.append(entry)
+    return safe
 
 
 def _default() -> dict[str, Any]:
@@ -29,6 +254,7 @@ def _default() -> dict[str, Any]:
             "notes": [],
         },
         "episode_summaries": [],
+        "context_ledger": [],
         "pending_approvals": [],
         "pending_proposals": [],
         "sync_status": {"status": "unknown", "updated_at": None, "detail": None},
@@ -64,6 +290,7 @@ class PersonalAssistantStateStore:
         if isinstance(raw, dict):
             state.update(raw)
         state["schema_version"] = SCHEMA_VERSION
+        state["context_ledger"] = _safe_context_ledger(state.get("context_ledger"))
         return state
 
     def read(self) -> dict[str, Any]:
@@ -127,6 +354,143 @@ class PersonalAssistantStateStore:
 
         state = self.update(mutate)
         return state, copy.deepcopy(result)
+
+    def merge_monitor_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        disposition: str,
+        episode_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically merge exact structured monitor events into bounded context.
+
+        Event identity is authoritative: replaying the same object is safe, while
+        reusing an id for different evidence is rejected rather than silently
+        replacing the evidence the assistant previously saw.
+        """
+
+        disposition = _validate_disposition(disposition)
+        if episode_id is not None:
+            episode_id = _bounded_identifier(episode_id, "episode id")
+        validated = validate_monitor_events(events)
+
+        def mutate(state: dict[str, Any]) -> None:
+            ledger = _safe_context_ledger(state.get("context_ledger"))
+            by_id = {entry["eventId"]: entry for entry in ledger}
+            new_events: list[dict[str, Any]] = []
+            for event in validated:
+                existing = by_id.get(event["id"])
+                if existing is not None:
+                    if existing["event"] != event:
+                        raise ValueError(f"monitor event identity collision: {event['id']}")
+                    if existing["disposition"] in _TERMINAL_MONITOR_DISPOSITIONS:
+                        if existing["disposition"] != disposition:
+                            raise ValueError(
+                                f"monitor event is already terminal: {event['id']}"
+                            )
+                        continue
+                    existing["disposition"] = disposition
+                    if episode_id is not None:
+                        existing["episodeId"] = episode_id
+                    existing["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                    continue
+                new_events.append(event)
+
+            overflow = len(ledger) + len(new_events) - CONTEXT_LEDGER_LIMIT
+            if overflow > 0:
+                terminal_indexes = [
+                    index
+                    for index, entry in enumerate(ledger)
+                    if entry["disposition"] in _TERMINAL_MONITOR_DISPOSITIONS
+                ]
+                if len(terminal_indexes) < overflow:
+                    raise ValueError(
+                        "monitor context ledger is full of active entries"
+                    )
+                evict = set(terminal_indexes[:overflow])
+                ledger = [entry for index, entry in enumerate(ledger) if index not in evict]
+
+            now = datetime.now(timezone.utc).isoformat()
+            for event in new_events:
+                task_ids, operation_ids = _collect_evidence_ids(event)
+                ledger.append(
+                    {
+                        "eventId": event["id"],
+                        "event": copy.deepcopy(event),
+                        "taskIds": task_ids,
+                        "operationIds": operation_ids,
+                        "disposition": disposition,
+                        "episodeId": episode_id,
+                        "firstSeenAt": now,
+                        "updatedAt": now,
+                    }
+                )
+            state["context_ledger"] = ledger
+
+        return self.update(mutate)
+
+    def mark_monitor_events(
+        self,
+        event_ids: list[str],
+        *,
+        disposition: str,
+        episode_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically update disposition and episode binding for known events."""
+
+        disposition = _validate_disposition(disposition)
+        if episode_id is not None:
+            episode_id = _bounded_identifier(episode_id, "episode id")
+        if not isinstance(event_ids, list) or not event_ids:
+            raise ValueError("monitor event ids must be a non-empty list")
+        if len(event_ids) > MONITOR_EVENT_BATCH_LIMIT:
+            raise ValueError(
+                f"monitor event id batch exceeds {MONITOR_EVENT_BATCH_LIMIT} events"
+            )
+        ids = list(dict.fromkeys(_bounded_identifier(value, "event id") for value in event_ids))
+
+        def mutate(state: dict[str, Any]) -> None:
+            ledger = _safe_context_ledger(state.get("context_ledger"))
+            by_id = {entry["eventId"]: entry for entry in ledger}
+            missing = [event_id for event_id in ids if event_id not in by_id]
+            if missing:
+                raise ValueError(f"monitor event not found: {missing[0]}")
+            for event_id in ids:
+                entry = by_id[event_id]
+                current = entry["disposition"]
+                if current in _TERMINAL_MONITOR_DISPOSITIONS and current != disposition:
+                    raise ValueError(f"monitor event is already terminal: {event_id}")
+            now = datetime.now(timezone.utc).isoformat()
+            for event_id in ids:
+                entry = by_id[event_id]
+                entry["disposition"] = disposition
+                if episode_id is not None:
+                    entry["episodeId"] = episode_id
+                entry["updatedAt"] = now
+            state["context_ledger"] = ledger
+
+        return self.update(mutate)
+
+    def monitor_event_ids(
+        self, *, dispositions: set[str] | None = None
+    ) -> set[str]:
+        if dispositions is not None:
+            if not isinstance(dispositions, set):
+                raise ValueError("monitor dispositions filter must be a set")
+            filters = {_validate_disposition(value) for value in dispositions}
+        else:
+            filters = None
+        return {
+            entry["eventId"]
+            for entry in self.read().get("context_ledger", [])
+            if filters is None or entry["disposition"] in filters
+        }
+
+    def has_monitor_event(
+        self, event_id: str, *, dispositions: set[str] | None = None
+    ) -> bool:
+        event_id = _bounded_identifier(event_id, "event id")
+        return event_id in self.monitor_event_ids(dispositions=dispositions)
 
     def patch(
         self,
@@ -258,5 +622,6 @@ def public_state(state: dict[str, Any]) -> dict[str, Any]:
         ),
         "unreadCount": int(state.get("unreadCount") or 0),
         "episodes": copy.deepcopy(state.get("episode_summaries") or []),
+        "contextLedger": copy.deepcopy(_safe_context_ledger(state.get("context_ledger"))),
         "source": copy.deepcopy(state.get("durableSource") or {"kind": "obsidian", "version": 0, "hash": None}),
     }

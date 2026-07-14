@@ -281,6 +281,7 @@ if (typeof window !== 'undefined') {
 }
 
 let preferredProfileScope: string | null = null
+let preservedProfileScopeActivation: string | null = null
 
 // Profile for the NEXT new chat (chosen via the new-chat picker). null = primary
 // / default, so single-profile users are unaffected.
@@ -315,10 +316,11 @@ let _lastRoutedProfile: string | null = null
 $activeGatewayProfile.subscribe(value => {
   const key = normalizeProfileKey(value)
   const hasRoutedBefore = _lastRoutedProfile !== null
+  const preserveVisibleScope = preservedProfileScopeActivation === key
 
   setApiRequestProfile(key)
 
-  if (hasRoutedBefore && (preferredProfileScope === null || preferredProfileScope === key)) {
+  if (hasRoutedBefore && !preserveVisibleScope && (preferredProfileScope === null || preferredProfileScope === key)) {
     $selectedProfileScope.set(key)
     persistSelectedProfileScope(key)
 
@@ -374,7 +376,10 @@ async function syncConnectionToActiveProfile(profile: string): Promise<void> {
 // their sockets — so their sessions keep streaming concurrently. A null/empty
 // target means "no explicit profile" → keep the current gateway (a plain new
 // chat stays put; single-profile users never leave the primary).
-export async function ensureGatewayProfile(profile: string | null | undefined): Promise<void> {
+export async function ensureGatewayProfile(
+  profile: string | null | undefined,
+  options: { preserveSelectedScope?: boolean } = {}
+): Promise<void> {
   if (profile == null || !String(profile).trim()) {
     // "No explicit profile" = use the current gateway. But if an explicit swap
     // (e.g. the user just picked a profile in the switcher) is still in flight,
@@ -408,7 +413,18 @@ export async function ensureGatewayProfile(profile: string | null | undefined): 
     // ensureGatewayForProfile opens (or reuses) the target's socket and points
     // the active gateway at it — without closing the profile you came from.
     await ensureGatewayForProfile(target)
-    $activeGatewayProfile.set(target)
+    const priorPreservedActivation = preservedProfileScopeActivation
+
+    if (options.preserveSelectedScope) {
+      preservedProfileScopeActivation = target
+    }
+
+    try {
+      $activeGatewayProfile.set(target)
+    } finally {
+      preservedProfileScopeActivation = priorPreservedActivation
+    }
+
     // The active backend just changed; resync $connection so remote-aware
     // paths (image.attach_bytes vs image.attach, /api/fs/*, /api/media) follow.
     await syncConnectionToActiveProfile(target)

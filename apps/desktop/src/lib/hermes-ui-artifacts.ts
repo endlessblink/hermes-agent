@@ -195,6 +195,39 @@ export interface HermesUiPlanningFunnelArtifact {
   steps: HermesUiPlanningFunnelStep[]
 }
 
+export type HermesUiTaskBreakdownScope = 'next-move' | 'working-session' | 'full-delivery'
+
+export interface HermesUiTaskBreakdownStep {
+  id: string
+  title: string
+  doneEnough: string
+  estimateMinutes?: number
+  optional?: boolean
+}
+
+export interface HermesUiTaskBreakdownArtifact {
+  type: 'task-breakdown'
+  direction?: 'auto' | 'ltr' | 'rtl'
+  id?: string
+  title?: string
+  description?: string
+  task: {
+    id: string
+    title: string
+  }
+  scope: HermesUiTaskBreakdownScope
+  targetOutcome?: string
+  stoppingRule?: string
+  steps: HermesUiTaskBreakdownStep[]
+  submitLabel?: string
+}
+
+export const HERMES_UI_TASK_BREAKDOWN_LIMITS = {
+  doneEnoughLength: 1000,
+  stepCount: 12,
+  titleLength: 800
+} as const
+
 export interface HermesUiTaskContextArtifact {
   type: 'task-context'
   direction?: 'auto' | 'ltr' | 'rtl'
@@ -412,6 +445,7 @@ export type HermesUiArtifact =
   | HermesUiMiniKanbanArtifact
   | HermesUiMutationPreviewArtifact
   | HermesUiPlanningFunnelArtifact
+  | HermesUiTaskBreakdownArtifact
   | HermesUiTaskContextArtifact
   | HermesUiTaskGraphArtifact
   | HermesUiTaskTableArtifact
@@ -451,6 +485,7 @@ const MAX_PLANNING_TASK_IDS = 5
 const MAX_RATIONALE_LENGTH = 280
 const MAX_NEXT_BLOCK_ACTIONS = 3
 const MAX_FUNNEL_STEPS = 6
+const MAX_BREAKDOWN_STEPS = HERMES_UI_TASK_BREAKDOWN_LIMITS.stepCount
 const MAX_CONTEXT_ITEMS = 6
 const MAX_TASK_TABLE_COLUMNS = 8
 const MAX_TASK_TABLE_ROWS = 7
@@ -539,6 +574,23 @@ const SAFE_WORKLOAD_BAR_KEYS = new Set(['id', 'label', 'max', 'note', 'tone', 'v
 const SAFE_TASK_GRAPH_KEYS = new Set(['description', 'direction', 'edges', 'id', 'nodes', 'title', 'type'])
 const SAFE_TASK_GRAPH_NODE_KEYS = new Set(['id', 'kind', 'label'])
 const SAFE_TASK_GRAPH_EDGE_KEYS = new Set(['label', 'source', 'target'])
+
+const SAFE_TASK_BREAKDOWN_KEYS = new Set([
+  'description',
+  'direction',
+  'id',
+  'scope',
+  'steps',
+  'stoppingRule',
+  'submitLabel',
+  'targetOutcome',
+  'task',
+  'title',
+  'type'
+])
+
+const SAFE_TASK_BREAKDOWN_TASK_KEYS = new Set(['id', 'title'])
+const SAFE_TASK_BREAKDOWN_STEP_KEYS = new Set(['doneEnough', 'estimateMinutes', 'id', 'optional', 'title'])
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
 const TIME_ONLY_RE = /^([01]\d|2[0-3]):[0-5]\d$/
 
@@ -1518,6 +1570,161 @@ function parseScheduledTime(value: unknown, field: string): HermesUiArtifactPars
   }
 
   return text
+}
+
+function parseTaskBreakdownSteps(
+  value: unknown,
+  allowEmptyEditableFields: boolean
+): HermesUiArtifactParseFailure | HermesUiTaskBreakdownStep[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { error: 'task-breakdown steps are required', ok: false }
+  }
+
+  if (value.length > MAX_BREAKDOWN_STEPS) {
+    return { error: 'task-breakdown has too many steps', ok: false }
+  }
+
+  const seenIds = new Set<string>()
+  const steps: HermesUiTaskBreakdownStep[] = []
+
+  for (const [index, rawStep] of value.entries()) {
+    if (!isRecord(rawStep)) {return { error: `steps[${index}] must be an object`, ok: false }}
+
+    const unsupportedStep = hasUnsupportedKeys(rawStep, SAFE_TASK_BREAKDOWN_STEP_KEYS, `steps[${index}]`)
+
+    if (unsupportedStep) {return unsupportedStep}
+
+    const id = normalizeText(rawStep.id, MAX_ITEM_ID_LENGTH, `steps[${index}].id`)
+
+    if (typeof id !== 'string') {return id}
+
+    if (!id) {return { error: `steps[${index}].id is required`, ok: false }}
+
+    if (seenIds.has(id)) {return { error: `Duplicate step id: ${id}`, ok: false }}
+    seenIds.add(id)
+
+    const title = normalizeText(
+      rawStep.title,
+      HERMES_UI_TASK_BREAKDOWN_LIMITS.titleLength,
+      `steps[${index}].title`
+    )
+
+    if (typeof title !== 'string') {return title}
+
+    if (!title && !allowEmptyEditableFields) {
+      return { error: `steps[${index}].title is required`, ok: false }
+    }
+
+    if (rawStep.doneEnough === undefined || rawStep.doneEnough === null) {
+      return { error: `steps[${index}].doneEnough is required`, ok: false }
+    }
+
+    const doneEnough = normalizeText(
+      rawStep.doneEnough,
+      HERMES_UI_TASK_BREAKDOWN_LIMITS.doneEnoughLength,
+      `steps[${index}].doneEnough`
+    )
+
+    if (typeof doneEnough !== 'string') {return doneEnough}
+
+    if (!doneEnough && !allowEmptyEditableFields) {
+      return { error: `steps[${index}].doneEnough is required`, ok: false }
+    }
+
+    let estimateMinutes: number | undefined
+
+    if (rawStep.estimateMinutes !== undefined) {
+      if (typeof rawStep.estimateMinutes !== 'number' || !Number.isInteger(rawStep.estimateMinutes) || rawStep.estimateMinutes < 1 || rawStep.estimateMinutes > 480) {
+        return { error: `steps[${index}].estimateMinutes must be an integer from 1 to 480`, ok: false }
+      }
+
+      estimateMinutes = rawStep.estimateMinutes
+    }
+
+    if (rawStep.optional !== undefined && typeof rawStep.optional !== 'boolean') {
+      return { error: `steps[${index}].optional must be a boolean`, ok: false }
+    }
+
+    steps.push({ doneEnough, estimateMinutes, id, optional: rawStep.optional as boolean | undefined, title })
+  }
+
+  return steps
+}
+
+export function parseHermesUiTaskBreakdownDraftSteps(value: unknown): HermesUiTaskBreakdownStep[] | null {
+  const result = parseTaskBreakdownSteps(value, true)
+
+  return Array.isArray(result) ? result : null
+}
+
+function parseTaskBreakdownArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
+  const unsupported = hasUnsupportedKeys(parsed, SAFE_TASK_BREAKDOWN_KEYS, 'task-breakdown')
+
+  if (unsupported) {
+    return unsupported
+  }
+
+  const base = parseBaseFields(parsed)
+
+  if (!base.ok) {
+    return base
+  }
+
+  if (!isRecord(parsed.task)) {
+    return { error: 'task-breakdown task is required', ok: false }
+  }
+
+  const unsupportedTask = hasUnsupportedKeys(parsed.task, SAFE_TASK_BREAKDOWN_TASK_KEYS, 'task')
+
+  if (unsupportedTask) {
+    return unsupportedTask
+  }
+
+  const taskId = normalizeText(parsed.task.id, MAX_ITEM_ID_LENGTH, 'task.id')
+
+  if (typeof taskId !== 'string') {return taskId}
+
+  if (!taskId) {return { error: 'task.id is required', ok: false }}
+
+  const taskTitle = normalizeText(parsed.task.title, MAX_LABEL_LENGTH, 'task.title')
+
+  if (typeof taskTitle !== 'string') {return taskTitle}
+
+  if (!taskTitle) {return { error: 'task.title is required', ok: false }}
+
+  if (parsed.scope !== 'next-move' && parsed.scope !== 'working-session' && parsed.scope !== 'full-delivery') {
+    return { error: 'scope must be next-move, working-session, or full-delivery', ok: false }
+  }
+
+  const steps = parseTaskBreakdownSteps(parsed.steps, false)
+
+  if (!Array.isArray(steps)) {
+    return steps
+  }
+
+  const targetOutcome = optionalText(parsed.targetOutcome, MAX_ITEM_DESCRIPTION_LENGTH, 'targetOutcome')
+
+  if (targetOutcome && typeof targetOutcome !== 'string') {return targetOutcome}
+  const stoppingRule = optionalText(parsed.stoppingRule, MAX_ITEM_DESCRIPTION_LENGTH, 'stoppingRule')
+
+  if (stoppingRule && typeof stoppingRule !== 'string') {return stoppingRule}
+  const submitLabel = optionalText(parsed.submitLabel, MAX_ACTION_LABEL_LENGTH, 'submitLabel')
+
+  if (submitLabel && typeof submitLabel !== 'string') {return submitLabel}
+
+  return {
+    artifact: {
+      ...base.fields,
+      scope: parsed.scope,
+      steps,
+      stoppingRule,
+      submitLabel,
+      targetOutcome,
+      task: { id: taskId, title: taskTitle },
+      type: 'task-breakdown'
+    },
+    ok: true
+  }
 }
 
 function parsePlanningFunnelStepStatus(value: unknown): HermesUiArtifactParseFailure | HermesUiPlanningFunnelStepStatus | undefined {
@@ -2989,6 +3196,10 @@ export function parseHermesUiArtifact(source: string): HermesUiArtifactParseResu
     return parsePlanningFunnelArtifact(parsed)
   }
 
+  if (parsed.type === 'task-breakdown') {
+    return parseTaskBreakdownArtifact(parsed)
+  }
+
   if (parsed.type === 'task-context') {
     return parseTaskContextArtifact(parsed)
   }
@@ -3087,7 +3298,7 @@ export function buildHermesUiFormResponse(
   }
 }
 
-export function stableArtifactStorageKey(artifact: HermesUiChecklistArtifact | HermesUiFormArtifact | HermesUiQuestionnaireArtifact): string {
+export function stableArtifactStorageKey(artifact: HermesUiArtifact): string {
   const identity = artifact.id ? normalizeIdentity(artifact.id) : ''
   const suffix = identity || stableHash(stableStringify(artifact))
 

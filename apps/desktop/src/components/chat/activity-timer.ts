@@ -30,14 +30,28 @@ export function formatElapsed(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-export function useElapsedSeconds(active = true, timerKey?: string): number {
-  const start = useRef(startedAt(timerKey))
+function resolvedStart(timerKey?: string, explicitStartedAtMs?: number | null): number {
+  if (typeof explicitStartedAtMs === 'number' && Number.isFinite(explicitStartedAtMs)) {
+    return explicitStartedAtMs
+  }
+
+  return startedAt(timerKey)
+}
+
+export function useElapsedSeconds(
+  active = true,
+  timerKey?: string,
+  explicitStartedAtMs?: number | null
+): number {
+  const start = useRef(resolvedStart(timerKey, explicitStartedAtMs))
   const lastKey = useRef(timerKey)
+  const lastExplicitStart = useRef(explicitStartedAtMs)
   const [elapsed, setElapsed] = useState(() => Math.max(0, Math.floor((Date.now() - start.current) / 1000)))
 
-  if (lastKey.current !== timerKey) {
-    start.current = startedAt(timerKey)
+  if (lastKey.current !== timerKey || lastExplicitStart.current !== explicitStartedAtMs) {
+    start.current = resolvedStart(timerKey, explicitStartedAtMs)
     lastKey.current = timerKey
+    lastExplicitStart.current = explicitStartedAtMs
   }
 
   useEffect(() => {
@@ -45,16 +59,14 @@ export function useElapsedSeconds(active = true, timerKey?: string): number {
       return
     }
 
-    if (timerKey) {
-      start.current = startedAt(timerKey)
-    }
+    start.current = resolvedStart(timerKey, explicitStartedAtMs)
 
     const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - start.current) / 1000)))
     tick()
     const id = window.setInterval(tick, 1000)
 
     return () => window.clearInterval(id)
-  }, [active, timerKey])
+  }, [active, explicitStartedAtMs, timerKey])
 
   return elapsed
 }

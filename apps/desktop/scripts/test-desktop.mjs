@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url'
 import { listPackage } from '@electron/asar'
 
 import PACKAGE_JSON from '../package.json' with { type: 'json' }
+import {
+  desktopExecutableName,
+  desktopTestLaunchArgs,
+  supportsDesktopBundleValidation
+} from './desktop-test-platform.mjs'
 
 const MODE = process.argv[2] || 'help'
 const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
@@ -22,7 +27,7 @@ const APP = (() => {
     const appPath = path.join(RELEASE_ROOT, `mac-${ARCH}`, 'Hermes.app')
     return {
       appPath,
-      binary: path.join(appPath, 'Contents', 'MacOS', 'Hermes'),
+      binary: path.join(appPath, 'Contents', 'MacOS', desktopExecutableName(PLATFORM)),
       resourcesPath: path.join(appPath, 'Contents', 'Resources'),
       asarPath: path.join(appPath, 'Contents', 'Resources', 'app.asar'),
       unpackedDistIndex: path.join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', 'dist', 'index.html')
@@ -32,7 +37,7 @@ const APP = (() => {
     const unpacked = path.join(RELEASE_ROOT, 'win-unpacked')
     return {
       appPath: unpacked,
-      binary: path.join(unpacked, 'Hermes.exe'),
+      binary: path.join(unpacked, desktopExecutableName(PLATFORM)),
       resourcesPath: path.join(unpacked, 'resources'),
       asarPath: path.join(unpacked, 'resources', 'app.asar'),
       unpackedDistIndex: path.join(unpacked, 'resources', 'app.asar.unpacked', 'dist', 'index.html')
@@ -42,7 +47,7 @@ const APP = (() => {
   const unpacked = path.join(RELEASE_ROOT, 'linux-unpacked')
   return {
     appPath: unpacked,
-    binary: path.join(unpacked, 'hermes'),
+    binary: path.join(unpacked, desktopExecutableName(PLATFORM)),
     resourcesPath: path.join(unpacked, 'resources'),
     asarPath: path.join(unpacked, 'resources', 'app.asar'),
     unpackedDistIndex: path.join(unpacked, 'resources', 'app.asar.unpacked', 'dist', 'index.html')
@@ -106,13 +111,8 @@ function expectedNativeDepPaths() {
 }
 
 function ensurePlatformBuilds() {
-  if (PLATFORM === 'darwin') return
-  if (PLATFORM === 'win32') return
-  die(
-    `Desktop bundle validation is only wired for darwin / win32 today; platform=${PLATFORM} ` +
-      `is not yet supported. The thin-installer story for Linux ships in Phase 2 alongside ` +
-      `install.sh's stage protocol.`
-  )
+  if (supportsDesktopBundleValidation(PLATFORM)) return
+  die(`Desktop bundle validation is not supported on platform=${PLATFORM}.`)
 }
 
 function ensurePackagedApp() {
@@ -188,9 +188,9 @@ function openApp() {
     run('open', ['-n', APP.appPath])
   } else if (PLATFORM === 'win32') {
     // Spawn detached so the test script exits while the app keeps running.
-    spawn(APP.binary, [], { detached: true, stdio: 'ignore' }).unref()
+    spawn(APP.binary, desktopTestLaunchArgs(PLATFORM), { detached: true, stdio: 'ignore' }).unref()
   } else {
-    spawn(APP.binary, [], { detached: true, stdio: 'ignore' }).unref()
+    spawn(APP.binary, desktopTestLaunchArgs(PLATFORM), { detached: true, stdio: 'ignore' }).unref()
   }
 }
 
@@ -265,7 +265,7 @@ function launchFresh() {
   delete env.HERMES_DESKTOP_HERMES
   delete env.HERMES_DESKTOP_HERMES_ROOT
 
-  const child = spawn(APP.binary, [], {
+  const child = spawn(APP.binary, desktopTestLaunchArgs(PLATFORM), {
     cwd: os.homedir(),
     detached: true,
     env,
@@ -404,7 +404,7 @@ function help() {
   npm run test:desktop:fresh     # build packaged app, launch with temp userData + HERMES_HOME
   npm run test:desktop:dmg       # (macOS only) build DMG and open it
   npm run test:desktop:nsis      # (win32 only) build NSIS installer
-  npm run test:desktop:all       # build installer, validate app payload, print paths
+  npm run test:desktop:all       # build package, validate app payload, print paths without launching it
 
 Fast rerun (skip rebuild if the packaged app already exists):
   HERMES_DESKTOP_SKIP_BUILD=1 npm run test:desktop:fresh

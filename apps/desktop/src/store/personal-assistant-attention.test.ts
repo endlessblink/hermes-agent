@@ -1,5 +1,5 @@
 import { atom } from 'nanostores'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const dispatchNativeNotification = vi.fn()
 const notify = vi.fn()
@@ -17,8 +17,16 @@ vi.mock('@/store/personal-assistant', () => ({
 
 const { handlePersonalAssistantAttention } = await import('./personal-assistant-attention')
 
+beforeEach(() => {
+  dispatchNativeNotification.mockClear()
+  notify.mockClear()
+  refreshPersonalAssistantState.mockClear()
+  $personalAssistantState.set({ unreadCount: 0 })
+  $personalAssistantPendingCount.set(null)
+})
+
 describe('handlePersonalAssistantAttention', () => {
-  it('refreshes state and publishes view actions without opening the home', async () => {
+  it('updates payload counters without owner refresh or foreground profile switching', async () => {
     const openHome = vi.fn()
 
     await handlePersonalAssistantAttention(
@@ -32,7 +40,8 @@ describe('handlePersonalAssistantAttention', () => {
       openHome
     )
 
-    expect(refreshPersonalAssistantState).toHaveBeenCalledTimes(1)
+    expect(refreshPersonalAssistantState).not.toHaveBeenCalled()
+    expect($personalAssistantState.get()).toEqual({ unreadCount: 2 })
     expect($personalAssistantPendingCount.get()).toBe(1)
     expect(openHome).not.toHaveBeenCalled()
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ action: expect.objectContaining({ label: 'View' }) }))

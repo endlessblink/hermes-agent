@@ -130,6 +130,11 @@ class TestPersonalAssistantGuidance:
         assert "end-of-day boundary" in stable
         assert "protectively defer" in stable
         assert "matching context" in stable
+        assert "consequential unknowns" in stable
+        assert "next-move, session, or full-delivery" in stable
+        assert "stopping evidence" in stable
+        assert "Optional work" in stable
+        assert "morning routine" in stable
 
     def test_absent_without_personal_assistant_tools(self):
         stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_list_tasks"]))
@@ -147,6 +152,12 @@ class TestDesktopQuestionnaireGuidance:
         assert "plain Markdown list" in stable
         assert "revise" in stable
         assert "long-text" in stable
+        assert '`type: "task-breakdown"`' in stable
+        assert "editable ordered steps" in stable
+        assert "stopping evidence" in stable
+        assert "regenerate the preview" in stable
+        assert "exact preview" in stable
+        assert "flowstate_subtask_batch" in stable
 
     def test_injected_for_desktop_env(self, monkeypatch):
         monkeypatch.setenv("HERMES_DESKTOP", "1")

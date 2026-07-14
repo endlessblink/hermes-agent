@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { textPart } from '@/lib/chat-messages'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
+import * as profileStore from '@/store/profile'
 import {
   $busy,
   $connection,
@@ -1079,6 +1080,108 @@ describe('usePromptActions file attachment sync', () => {
     })
   })
 
+  it('routes a selected session to its owning profile before uploading an attachment', async () => {
+    // A transcript can stay selected while another profile's gateway is live.
+    // Uploading against that socket produces "session not found" even though
+    // the durable chat still exists. Resolve the selected row's owner before
+    // the first attachment RPC so the send continues the visible conversation.
+    $connection.set({ mode: 'local' } as never)
+    setSessions([
+      sessionInfo({
+        id: 'stored-open-arthouse',
+        profile: 'open-arthouse',
+        title: 'Existing poster conversation'
+      })
+    ])
+    profileStore.$activeGatewayProfile.set('default')
+
+    const ensureOwner = vi.spyOn(profileStore, 'ensureGatewayProfile').mockResolvedValue()
+    const calls: string[] = []
+
+    const requestGateway = vi.fn(async (method: string) => {
+      calls.push(method)
+
+      if (method === 'file.attach') {
+        return { attached: true, ref_text: '@file:data/report.txt' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        activeSessionId="runtime-open-arthouse"
+        activeSessionIdRefValue="runtime-open-arthouse"
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId="stored-open-arthouse"
+      />
+    )
+
+    expect(await handle!.submitText('continue', { attachments: [fileAttachment()] })).toBe(true)
+    expect(ensureOwner).toHaveBeenCalledWith('open-arthouse')
+    expect(ensureOwner.mock.invocationCallOrder[0]).toBeLessThan(requestGateway.mock.invocationCallOrder[0]!)
+    expect(calls).toEqual(['file.attach', 'prompt.submit'])
+  })
+
+  it('resumes the selected durable session and retries when attachment upload reports session not found', async () => {
+    $connection.set({ mode: 'local' } as never)
+    setSessions([sessionInfo({ id: 'stored-archived', profile: 'open-arthouse' })])
+    profileStore.$activeGatewayProfile.set('open-arthouse')
+
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    let attachAttempts = 0
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'file.attach') {
+        attachAttempts += 1
+
+        if (attachAttempts === 1) {
+          throw new Error('session not found')
+        }
+
+        return { attached: true, ref_text: '@file:data/report.txt' } as never
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: 'runtime-recovered' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        activeSessionId="runtime-stale"
+        activeSessionIdRefValue="runtime-stale"
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId="stored-archived"
+      />
+    )
+
+    expect(await handle!.submitText('continue', { attachments: [fileAttachment()] })).toBe(true)
+    expect(calls.map(call => call.method)).toEqual([
+      'file.attach',
+      'session.resume',
+      'file.attach',
+      'prompt.submit'
+    ])
+    expect(calls[1]?.params).toEqual({
+      session_id: 'stored-archived',
+      profile: 'open-arthouse',
+      source: 'desktop'
+    })
+    expect(calls[2]?.params).toMatchObject({ session_id: 'runtime-recovered' })
+    expect(calls[3]?.params).toMatchObject({ session_id: 'runtime-recovered' })
+  })
+
   it('passes a path-less @file: ref straight through (no path = nothing to upload)', async () => {
     // Submit-layer contract: only attachments that carry a `path` are upload
     // candidates. A path-less ref (an @-mention/context ref or pasted text)
@@ -1170,6 +1273,38 @@ describe('usePromptActions eager-upload races', () => {
     $composerAttachments.set([])
     $connection.set(null)
     vi.restoreAllMocks()
+  })
+
+  it('routes to the selected session owner before an eager file upload', async () => {
+    setSessions(() => [sessionInfo({ id: 'stored-film', profile: 'film-maker' })])
+    profileStore.$activeGatewayProfile.set('default')
+    $connection.set({ mode: 'local' } as never)
+    const ensureOwner = vi.spyOn(profileStore, 'ensureGatewayProfile').mockResolvedValue()
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'file.attach') {
+        return { attached: true, ref_text: '@file:data/poster.png' } as never
+      }
+
+      return {} as never
+    })
+
+    render(
+      <Harness
+        onReady={() => undefined}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId="stored-film"
+      />
+    )
+
+    $composerAttachments.set([
+      { id: 'file:poster.png', kind: 'file', label: 'poster.png', path: '/home/me/poster.png' }
+    ])
+
+    await waitFor(() => expect(requestGateway).toHaveBeenCalledWith('file.attach', expect.any(Object)))
+    expect(ensureOwner).toHaveBeenCalledWith('film-maker')
+    expect(ensureOwner.mock.invocationCallOrder[0]).toBeLessThan(requestGateway.mock.invocationCallOrder[0]!)
   })
 
   it('joins an in-flight eager upload at submit instead of staging the file twice', async () => {
@@ -1276,6 +1411,87 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
     expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, profile: 'default', source: 'desktop' })
     expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after wake' })
+  })
+
+  it('rebinds once more when a backend relaunch invalidates the first recovered runtime before retry', async () => {
+    // Desktop startup can replace a just-started profile backend while the
+    // selected durable chat is being restored. The first resume then succeeds,
+    // but its runtime id is already stale by the time prompt.submit retries.
+    // Keep the retry bounded while allowing that relaunch race to settle.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    let submitAttempts = 0
+    let resumeAttempts = 0
+
+    const attachment: ComposerAttachment = {
+      id: 'file:relaunch.png',
+      kind: 'file',
+      label: 'relaunch.png',
+      path: '/home/alice/relaunch.png',
+      refText: '@file:`/home/alice/relaunch.png`'
+    }
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'file.attach') {
+        return { attached: true, ref_text: '@file:data/relaunch.png' } as never
+      }
+
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+
+        if (submitAttempts < 3) {
+          throw new Error('session not found')
+        }
+
+        return {} as never
+      }
+
+      if (method === 'session.resume') {
+        resumeAttempts += 1
+
+        return { session_id: `rt-recovered-${resumeAttempts}` } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(
+      await handle!.submitText('message during backend relaunch', { attachments: [attachment] })
+    ).toBe(true)
+    expect(calls.map(c => c.method)).toEqual([
+      'file.attach',
+      'prompt.submit',
+      'session.resume',
+      'prompt.submit',
+      'session.resume',
+      'prompt.submit'
+    ])
+    expect(calls.filter(call => call.method === 'file.attach')).toHaveLength(1)
+    expect(calls[4]?.params).toEqual({
+      session_id: STORED_SESSION_ID,
+      profile: 'default',
+      source: 'desktop'
+    })
+    expect(calls[5]?.params).toEqual({
+      session_id: 'rt-recovered-2',
+      text: '@file:data/relaunch.png\n\nmessage during backend relaunch'
+    })
+    expect(calls.filter(call => call.method === 'prompt.submit').map(call => call.params?.text)).toEqual([
+      '@file:data/relaunch.png\n\nmessage during backend relaunch',
+      '@file:data/relaunch.png\n\nmessage during backend relaunch',
+      '@file:data/relaunch.png\n\nmessage during backend relaunch'
+    ])
   })
 
   it('resumes the stored session and retries once when session.interrupt reports "session not found"', async () => {
@@ -1520,6 +1736,8 @@ describe('usePromptActions sleep/wake session recovery', () => {
 
   it('passes the selected stored session profile when recovering a stale runtime id', async () => {
     setSessions(() => [sessionInfo({ id: STORED_SESSION_ID, profile: 'film-maker' })])
+    profileStore.$activeGatewayProfile.set('default')
+    const ensureOwner = vi.spyOn(profileStore, 'ensureGatewayProfile').mockResolvedValue()
 
     const calls: { method: string; params?: Record<string, unknown> }[] = []
     let submitAttempts = 0
@@ -1557,6 +1775,7 @@ describe('usePromptActions sleep/wake session recovery', () => {
     const ok = await handle!.submitText('message after profile switch')
 
     expect(ok).toBe(true)
+    expect(ensureOwner).toHaveBeenCalledWith('film-maker')
     expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
     expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, profile: 'film-maker', source: 'desktop' })
     expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after profile switch' })
