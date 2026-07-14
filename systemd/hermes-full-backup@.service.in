@@ -1,0 +1,13 @@
+[Unit]
+Description=Hermes full %i backup
+After=default.target
+
+[Service]
+Type=oneshot
+Environment="HERMES_HOME=@HERMES_HOME@"
+WorkingDirectory=@REPO_ROOT@
+ExecStart="@PYTHON@" "@REPO_ROOT@/scripts/hermes_full_backup_rotation.py" --kind %i --home "@HERMES_HOME@" --output-root "@BACKUP_ROOT@"
+SuccessExitStatus=75
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

@@ -110,6 +110,15 @@ class TestShouldExclude:
         from hermes_cli.backup import _should_exclude
         assert _should_exclude(Path("backups/pre-update-2026-04-27-063400.zip"))
 
+    def test_excludes_state_snapshots_dir(self):
+        """Full archives capture live state and must not re-archive snapshots."""
+        from hermes_cli.backup import _should_exclude
+
+        assert _should_exclude(Path("state-snapshots/snapshot-1/state.db"))
+        assert _should_exclude(
+            Path("profiles/life-advisor/state-snapshots/snapshot-1/state.db")
+        )
+
     def test_excludes_sqlite_sidecars(self):
         """SQLite WAL/SHM/journal sidecars must not ship alongside the
         safe-copied .db — pairing a fresh snapshot with stale sidecar state
