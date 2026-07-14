@@ -164,9 +164,134 @@ def test_personal_assistant_toolset_exposes_state_parity_tools():
 
     assert set(get_toolset("personal_assistant")["tools"]) == {
         "personal_assistant_get_state",
+        "personal_assistant_reconcile_inventory",
         "personal_assistant_propose_capture",
         "personal_assistant_state_change",
     }
+
+
+def test_inventory_reconciliation_returns_exact_counts_only_from_complete_sources():
+    import tools.personal_assistant_tool as pat
+
+    result = json.loads(
+        pat._handle_reconcile_inventory(
+            {
+                "inventoryQuestion": "Which tasks still need characterization?",
+                "sources": [
+                    {
+                        "sourceId": "notion:bina-tasks",
+                        "scope": "open rows owned by Noam",
+                        "capturedAt": "2026-07-14T15:00:00Z",
+                        "complete": True,
+                        "items": [
+                            {
+                                "id": "page-1",
+                                "title": "First",
+                                "classification": "uncharacterized",
+                                "evidence": "project is empty",
+                            },
+                            {
+                                "id": "page-2",
+                                "title": "Second",
+                                "classification": "characterized",
+                                "evidence": "project and next action are explicit",
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )["result"]
+
+    assert result["verified"] is True
+    assert result["exactTotal"] == 2
+    assert result["exactUncharacterized"] == 1
+    assert result["sources"][0]["observedTotal"] == 2
+
+
+def test_inventory_reconciliation_refuses_exact_count_for_partial_or_unknown_evidence():
+    import tools.personal_assistant_tool as pat
+
+    result = json.loads(
+        pat._handle_reconcile_inventory(
+            {
+                "inventoryQuestion": "How many tasks remain?",
+                "sources": [
+                    {
+                        "sourceId": "obsidian:task-notes",
+                        "scope": "task notes found by current search",
+                        "capturedAt": "2026-07-14T15:00:00Z",
+                        "complete": False,
+                        "items": [
+                            {
+                                "id": "note-1",
+                                "title": "Found task",
+                                "classification": "unknown",
+                                "evidence": "note lacks a stable project field",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )["result"]
+
+    assert result["verified"] is False
+    assert result["exactTotal"] is None
+    assert result["exactUncharacterized"] is None
+    assert result["observedTotal"] == 1
+    assert result["blockingReasons"] == [
+        "source obsidian:task-notes is partial",
+        "1 item has unknown characterization",
+    ]
+
+
+def test_inventory_reconciliation_surfaces_cross_source_conflicts():
+    import tools.personal_assistant_tool as pat
+
+    result = json.loads(
+        pat._handle_reconcile_inventory(
+            {
+                "inventoryQuestion": "How many tasks remain?",
+                "sources": [
+                    {
+                        "sourceId": "notion:tasks",
+                        "scope": "open tasks",
+                        "capturedAt": "2026-07-14T15:00:00Z",
+                        "complete": True,
+                        "items": [
+                            {
+                                "id": "page-1",
+                                "canonicalId": "task-1",
+                                "title": "Task",
+                                "classification": "characterized",
+                                "evidence": "project exists",
+                            }
+                        ],
+                    },
+                    {
+                        "sourceId": "obsidian:ledger",
+                        "scope": "linked task records",
+                        "capturedAt": "2026-07-14T15:01:00Z",
+                        "complete": True,
+                        "items": [
+                            {
+                                "id": "note-9",
+                                "canonicalId": "task-1",
+                                "title": "Task",
+                                "classification": "uncharacterized",
+                                "evidence": "ledger says project missing",
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+    )["result"]
+
+    assert result["verified"] is False
+    assert result["exactTotal"] is None
+    assert result["conflicts"][0]["canonicalId"] == "task-1"
 
 
 def test_tool_registration_is_scoped_to_office_work(monkeypatch, tmp_path):

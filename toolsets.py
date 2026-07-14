@@ -298,6 +298,7 @@ TOOLSETS = {
         "description": "Persistent office-work assistant state, capture proposals, and approved state edits",
         "tools": [
             "personal_assistant_get_state",
+            "personal_assistant_reconcile_inventory",
             "personal_assistant_propose_capture",
             "personal_assistant_state_change",
         ],

@@ -140,6 +140,9 @@ class TestPersonalAssistantGuidance:
         assert "explicitly approves" in stable
         assert "exact live FlowState read is authoritative" in stable
         assert "notes, memory, and past sessions as context only" in stable
+        assert "personal_assistant_reconcile_inventory" in stable
+        assert "source scope, capture time, stable item IDs" in stable
+        assert "do not state or imply an exact combined count" in stable
 
     def test_absent_without_personal_assistant_tools(self):
         stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_list_tasks"]))

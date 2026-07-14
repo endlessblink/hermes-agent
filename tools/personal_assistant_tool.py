@@ -233,10 +233,195 @@ def _handle_state_change(args: dict, **kwargs) -> str:
         return _error(exc)
 
 
+def _handle_reconcile_inventory(args: dict, **kwargs) -> str:
+    """Reconcile cross-system task counts without promoting partial evidence."""
+    question = str(args.get("inventoryQuestion") or "").strip()[:1000]
+    sources = args.get("sources")
+    if not question:
+        return _error("inventoryQuestion is required")
+    if not isinstance(sources, list) or not sources:
+        return _error("sources must be a non-empty list")
+    if len(sources) > 20:
+        return _error("sources may contain at most 20 items")
+    if len(json.dumps(sources, ensure_ascii=False).encode("utf-8")) > 524288:
+        return _error("sources payload may contain at most 524288 bytes")
+
+    source_rows: list[dict[str, Any]] = []
+    reconciled: dict[str, dict[str, Any]] = {}
+    conflicts: list[dict[str, Any]] = []
+    blocking_reasons: list[str] = []
+    unknown_count = 0
+
+    for raw_source in sources:
+        if not isinstance(raw_source, dict):
+            return _error("each source must be an object")
+        source_id = str(raw_source.get("sourceId") or "").strip()[:300]
+        scope = str(raw_source.get("scope") or "").strip()[:1000]
+        captured_at = str(raw_source.get("capturedAt") or "").strip()[:100]
+        complete = raw_source.get("complete")
+        items = raw_source.get("items")
+        if not source_id or not scope or not captured_at:
+            return _error("each source requires sourceId, scope, and capturedAt")
+        if not isinstance(complete, bool):
+            return _error(f"source {source_id} complete must be boolean")
+        if not isinstance(items, list):
+            return _error(f"source {source_id} items must be a list")
+        if len(items) > 500:
+            return _error(f"source {source_id} may contain at most 500 items")
+
+        source_unknown = 0
+        source_uncharacterized = 0
+        seen_source_ids: set[str] = set()
+        for raw_item in items:
+            if not isinstance(raw_item, dict):
+                return _error(f"source {source_id} items must be objects")
+            item_id = str(raw_item.get("id") or "").strip()[:500]
+            title = str(raw_item.get("title") or "").strip()[:1000]
+            classification = str(raw_item.get("classification") or "").strip()
+            evidence = str(raw_item.get("evidence") or "").strip()[:2000]
+            canonical_id = str(raw_item.get("canonicalId") or "").strip()[:500]
+            if not item_id or not title or not evidence:
+                return _error(
+                    f"source {source_id} items require id, title, and evidence"
+                )
+            if item_id in seen_source_ids:
+                return _error(f"source {source_id} contains duplicate item id {item_id}")
+            seen_source_ids.add(item_id)
+            if classification not in {
+                "characterized", "uncharacterized", "unknown"
+            }:
+                return _error(
+                    "classification must be characterized, uncharacterized, or unknown"
+                )
+            if classification == "unknown":
+                source_unknown += 1
+                unknown_count += 1
+            elif classification == "uncharacterized":
+                source_uncharacterized += 1
+
+            key = canonical_id or f"{source_id}:{item_id}"
+            candidate = {
+                "canonicalId": key,
+                "classification": classification,
+                "sourceId": source_id,
+                "itemId": item_id,
+                "title": title,
+            }
+            existing = reconciled.get(key)
+            if existing is None:
+                reconciled[key] = candidate
+            elif existing["classification"] != classification:
+                conflicts.append(
+                    {
+                        "canonicalId": key,
+                        "classifications": [
+                            existing["classification"],
+                            classification,
+                        ],
+                        "sources": [existing["sourceId"], source_id],
+                    }
+                )
+
+        source_rows.append(
+            {
+                "sourceId": source_id,
+                "scope": scope,
+                "capturedAt": captured_at,
+                "complete": complete,
+                "observedTotal": len(items),
+                "observedUncharacterized": source_uncharacterized,
+                "unknown": source_unknown,
+            }
+        )
+        if not complete:
+            blocking_reasons.append(f"source {source_id} is partial")
+
+    if unknown_count:
+        noun = "item has" if unknown_count == 1 else "items have"
+        blocking_reasons.append(
+            f"{unknown_count} {noun} unknown characterization"
+        )
+    if conflicts:
+        blocking_reasons.append(
+            f"{len(conflicts)} canonical item has conflicting classifications"
+            if len(conflicts) == 1
+            else f"{len(conflicts)} canonical items have conflicting classifications"
+        )
+
+    verified = not blocking_reasons
+    exact_uncharacterized = sum(
+        1
+        for item in reconciled.values()
+        if item["classification"] == "uncharacterized"
+    )
+    return _result(
+        {
+            "inventoryQuestion": question,
+            "verified": verified,
+            "exactTotal": len(reconciled) if verified else None,
+            "exactUncharacterized": exact_uncharacterized if verified else None,
+            "observedTotal": len(reconciled),
+            "observedUncharacterized": exact_uncharacterized,
+            "sources": source_rows,
+            "conflicts": conflicts,
+            "blockingReasons": blocking_reasons,
+        }
+    )
+
+
 GET_STATE_SCHEMA = {
     "name": "personal_assistant_get_state",
     "description": "Read the persistent office-work assistant's current working picture and pending decisions.",
     "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+RECONCILE_INVENTORY_SCHEMA = {
+    "name": "personal_assistant_reconcile_inventory",
+    "description": (
+        "Reconcile task inventory evidence from FlowState, Notion, Obsidian, or other sources. "
+        "This is the required proof gate before stating a cross-source task count as exact. "
+        "Partial sources, unknown characterization, or conflicting canonical IDs return no exact count."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "inventoryQuestion": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "sources": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "sourceId": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "scope": {"type": "string", "minLength": 1, "maxLength": 1000},
+                        "capturedAt": {"type": "string", "minLength": 1, "maxLength": 100},
+                        "complete": {"type": "boolean"},
+                        "items": {
+                            "type": "array",
+                            "maxItems": 500,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string", "minLength": 1, "maxLength": 500},
+                                    "canonicalId": {"type": "string", "maxLength": 500},
+                                    "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+                                    "classification": {
+                                        "type": "string",
+                                        "enum": ["characterized", "uncharacterized", "unknown"],
+                                    },
+                                    "evidence": {"type": "string", "minLength": 1, "maxLength": 2000},
+                                },
+                                "required": ["id", "title", "classification", "evidence"],
+                            },
+                        },
+                    },
+                    "required": ["sourceId", "scope", "capturedAt", "complete", "items"],
+                },
+            },
+        },
+        "required": ["inventoryQuestion", "sources"],
+    },
 }
 
 PROPOSE_CAPTURE_SCHEMA = {
@@ -303,6 +488,11 @@ STATE_CHANGE_SCHEMA = {
 
 for _name, _schema, _handler in (
     ("personal_assistant_get_state", GET_STATE_SCHEMA, _handle_get_state),
+    (
+        "personal_assistant_reconcile_inventory",
+        RECONCILE_INVENTORY_SCHEMA,
+        _handle_reconcile_inventory,
+    ),
     ("personal_assistant_propose_capture", PROPOSE_CAPTURE_SCHEMA, _handle_propose_capture),
     ("personal_assistant_state_change", STATE_CHANGE_SCHEMA, _handle_state_change),
 ):

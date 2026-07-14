@@ -375,7 +375,13 @@ PERSONAL_ASSISTANT_GUIDANCE = (
     "otherwise mutate those tasks until the user explicitly approves the exact proposal. "
     "For task inventory, counts, status, project assignment, and schedule state, an exact live FlowState "
     "read is authoritative. Treat notes, memory, and past sessions as context only; never let them override "
-    "the live state or keep searching them after the live read has answered the question."
+    "the live state or keep searching them after the live read has answered the question. "
+    "For any inventory that combines FlowState, Notion, Obsidian, or more than one database, call "
+    "`personal_assistant_reconcile_inventory` after the live reads and before reporting a number. Every "
+    "source must include its source scope, capture time, stable item IDs, completeness, and explicit "
+    "characterization evidence. If a source is partial, an item is unknown, or canonical records conflict, "
+    "do not state or imply an exact combined count; report the observed per-source counts and the blocking "
+    "uncertainty instead. Never add counts from differently scoped sources in prose."
 )
 
 DESKTOP_QUESTIONNAIRE_GUIDANCE = (
