@@ -753,12 +753,16 @@ describe('overlayLivePreviews', () => {
 })
 
 describe('sessionsBesideProjectOverview', () => {
-  it('keeps cwd-less sessions discoverable when a restart restores Projects before a stored session selection', () => {
+  it('keeps every loaded chat directly visible beside the project overview', () => {
     const selected = makeSession(null, { id: 'selected-post-chat', title: 'Post about my new website' })
     const unrelated = makeSession(null, { id: 'other-loose-chat' })
     const projectOwned = makeSession('/www/app', { id: 'project-chat' })
 
-    expect(sessionsBesideProjectOverview([selected, unrelated, projectOwned], true)).toEqual([selected, unrelated])
+    expect(sessionsBesideProjectOverview([selected, unrelated, projectOwned], true)).toEqual([
+      selected,
+      unrelated,
+      projectOwned
+    ])
   })
 
   it('leaves the ordinary flat session list unchanged outside the project overview', () => {

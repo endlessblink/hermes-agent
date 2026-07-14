@@ -12,6 +12,7 @@ if the UI or turn thread is wedged, this still leaves a forensic alert trail.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -19,6 +20,8 @@ import signal
 import subprocess
 import sys
 import time
+from urllib.error import URLError
+from urllib.request import urlopen
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +63,283 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def flowstate_config_path() -> Path:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "flow-state" / "local-api.json"
+
+
+def flowstate_health_ok(port: int) -> bool:
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1.5) as response:
+            return response.status == 200
+    except (OSError, URLError, ValueError):
+        return False
+
+
+def flowstate_app_running() -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "FlowState.AppImage|/flowstate( |$)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except Exception:
+        return True
+    return result.returncode == 0
+
+
+def launch_flowstate_app() -> bool:
+    executable = Path.home() / ".local" / "bin" / "FlowState.AppImage"
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        return False
+    env = os.environ.copy()
+    env.setdefault("DISPLAY", ":0")
+    try:
+        subprocess.Popen(
+            [str(executable), "--no-sandbox", "--ozone-platform=x11", "--disable-gpu"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def classify_flowstate_recovery(
+    *,
+    status: str,
+    health_ok: bool,
+    config: dict[str, Any],
+    app_running: bool,
+) -> dict[str, str]:
+    """Choose only allowlisted repairs; authentication and live restarts fail closed."""
+
+    if status == "not_signed_in":
+        return {
+            "action": "none",
+            "outcome": "auth_required",
+            "reason": "flowstate_sign_in_required",
+        }
+    if health_ok:
+        return {
+            "action": "none",
+            "outcome": "already_healthy",
+            "reason": "flowstate_health_recovered",
+        }
+    port = config.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
+        return {
+            "action": "none",
+            "outcome": "manual_required",
+            "reason": "flowstate_config_invalid",
+        }
+    if app_running:
+        return {
+            "action": "none",
+            "outcome": "manual_required",
+            "reason": "flowstate_running_but_unhealthy",
+        }
+    if config.get("enabled") is False:
+        return {
+            "action": "enable_and_launch",
+            "outcome": "repair_started",
+            "reason": "flowstate_local_api_disabled",
+        }
+    if config.get("enabled") is True:
+        return {
+            "action": "launch",
+            "outcome": "repair_started",
+            "reason": "flowstate_app_absent",
+        }
+    return {
+        "action": "none",
+        "outcome": "manual_required",
+        "reason": "flowstate_config_invalid",
+    }
+
+
+def _write_flowstate_config(path: Path, config: dict[str, Any]) -> bool:
+    try:
+        mode = path.stat().st_mode & 0o777
+        temporary = path.with_suffix(path.suffix + ".hermes-repair")
+        temporary.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except OSError:
+        return False
+    return True
+
+
+def _record_flowstate_recovery_event(
+    home: Path,
+    profile: str,
+    result: dict[str, Any],
+) -> None:
+    safe = {
+        "ts": utc_now(),
+        "component": "improvement_supervisor",
+        "event": "flowstate_connector_recovery",
+        "profile": str(profile)[:80],
+        "action": str(result.get("action") or "none")[:80],
+        "outcome": str(result.get("outcome") or "unknown")[:80],
+        "reason": str(result.get("reason") or "unknown")[:120],
+    }
+    safe["event_id"] = hashlib.sha256(
+        json.dumps(safe, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    path = (
+        home
+        / "profiles"
+        / profile
+        / "state"
+        / "improvement-supervisor"
+        / "runtime-events.jsonl"
+    )
+    append_jsonl(path, safe)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _record_restart_recovery_event(home: Path, profile: str) -> None:
+    result = {
+        "action": "replay",
+        "outcome": "repaired",
+        "reason": "durable_pending_turn_matched",
+    }
+    safe = {
+        "ts": utc_now(),
+        "component": "improvement_supervisor",
+        "event": "restart_interrupted_turn_replayed",
+        "profile": str(profile)[:80],
+        **result,
+    }
+    safe["event_id"] = hashlib.sha256(
+        json.dumps(safe, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    path = (
+        home
+        / "profiles"
+        / profile
+        / "state"
+        / "improvement-supervisor"
+        / "runtime-events.jsonl"
+    )
+    append_jsonl(path, safe)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _record_turn_timeout_recovery_event(home: Path, profile: str) -> None:
+    safe = {
+        "ts": utc_now(),
+        "component": "improvement_supervisor",
+        "event": "stuck_turn_automatically_stopped",
+        "profile": str(profile)[:80],
+        "action": "interrupt",
+        "outcome": "repaired",
+        "reason": "turn_idle_timeout",
+    }
+    safe["event_id"] = hashlib.sha256(
+        json.dumps(safe, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    path = (
+        home
+        / "profiles"
+        / profile
+        / "state"
+        / "improvement-supervisor"
+        / "runtime-events.jsonl"
+    )
+    append_jsonl(path, safe)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def attempt_flowstate_recovery(
+    *,
+    home: Path,
+    profile: str,
+    status: str,
+    verify_attempts: int = 5,
+) -> dict[str, str]:
+    config_path = flowstate_config_path()
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    port = config.get("port") if isinstance(config.get("port"), int) else 5577
+    decision = classify_flowstate_recovery(
+        status=str(status or ""),
+        health_ok=flowstate_health_ok(port),
+        config=config,
+        app_running=flowstate_app_running(),
+    )
+    action = decision["action"]
+    if action == "enable_and_launch":
+        repaired_config = dict(config)
+        repaired_config["enabled"] = True
+        if not _write_flowstate_config(config_path, repaired_config):
+            decision = {
+                "action": action,
+                "outcome": "repair_failed",
+                "reason": "flowstate_config_write_failed",
+            }
+        elif not launch_flowstate_app():
+            decision = {
+                "action": action,
+                "outcome": "repair_failed",
+                "reason": "flowstate_launch_failed",
+            }
+    elif action == "launch" and not launch_flowstate_app():
+        decision = {
+            "action": action,
+            "outcome": "repair_failed",
+            "reason": "flowstate_launch_failed",
+        }
+    if decision["outcome"] == "repair_started":
+        for _ in range(max(1, verify_attempts)):
+            if flowstate_health_ok(port):
+                decision = {
+                    "action": action,
+                    "outcome": "repaired",
+                    "reason": "flowstate_health_verified",
+                }
+                break
+            time.sleep(1)
+        else:
+            decision = {
+                "action": action,
+                "outcome": "repair_failed",
+                "reason": "flowstate_health_verification_failed",
+            }
+    _record_flowstate_recovery_event(home, profile, decision)
+    return decision
+
+
+def profile_for_monitor_ledger(home: Path, ledger: Path, fallback: str) -> str:
+    try:
+        relative = ledger.relative_to(home / "profiles")
+    except ValueError:
+        return fallback
+    return relative.parts[0] if len(relative.parts) >= 3 else fallback
 
 
 def process_snapshot() -> list[str]:
@@ -133,6 +413,8 @@ class TurnState:
 def is_terminal(row: dict[str, Any]) -> bool:
     event = str(row.get("event") or "")
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    if event == "session.info" and row.get("running") is False:
+        return True
     if event in {"message.complete", "rpc.error"}:
         return True
     if event == "diagnostic.event" and payload.get("component") == "turn":
@@ -259,6 +541,36 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
 
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    if (
+        row.get("event") == "diagnostic.event"
+        and payload.get("component") == "turn"
+        and payload.get("event") == "idle_timeout"
+    ):
+        return {
+            "ts": utc_now(),
+            "severity": "info",
+            "component": "live_watchdog",
+            "event": "stuck_turn_automatically_stopped",
+            "message": "Hermes safely stopped a silent turn so the chat can continue",
+            "timeout_seconds": float(details.get("timeout_seconds") or 0),
+            "last_progress_event": str(details.get("last_progress_event") or "")[:80],
+            "ledger": str(ledger),
+        }
+    if (
+        row.get("event") == "diagnostic.event"
+        and payload.get("component") == "turn"
+        and payload.get("event") == "orphan_recovery_started"
+    ):
+        ordinal = details.get("user_ordinal")
+        return {
+            "ts": utc_now(),
+            "severity": "info",
+            "component": "live_watchdog",
+            "event": "restart_interrupted_turn_replayed",
+            "message": "Hermes safely replayed a restart-interrupted turn",
+            "user_ordinal": int(ordinal) if isinstance(ordinal, int) else -1,
+            "ledger": str(ledger),
+        }
     if row.get("component") == "personal_assistant_monitor" and row.get("event") in {
         "connector_failure",
         "dead_letter",
@@ -489,6 +801,37 @@ def run(args: argparse.Namespace) -> int:
                     last_incident = incident_alerted_at.get(incident_key, 0.0)
                     if now - last_incident >= args.alert_cooldown:
                         incident_alerted_at[incident_key] = now
+                        if incident["event"] == "personal_assistant_monitor_connector_failure":
+                            recovery = attempt_flowstate_recovery(
+                                home=home,
+                                profile=profile_for_monitor_ledger(
+                                    home,
+                                    ledger,
+                                    args.monitor_profile,
+                                ),
+                                status=str(incident.get("status") or ""),
+                            )
+                            incident["recovery_action"] = recovery["action"]
+                            incident["recovery_outcome"] = recovery["outcome"]
+                            incident["recovery_reason"] = recovery["reason"]
+                        elif incident["event"] == "restart_interrupted_turn_replayed":
+                            _record_restart_recovery_event(
+                                home,
+                                profile_for_monitor_ledger(
+                                    home,
+                                    ledger,
+                                    args.monitor_profile,
+                                ),
+                            )
+                        elif incident["event"] == "stuck_turn_automatically_stopped":
+                            _record_turn_timeout_recovery_event(
+                                home,
+                                profile_for_monitor_ledger(
+                                    home,
+                                    ledger,
+                                    args.monitor_profile,
+                                ),
+                            )
                         append_jsonl(alerts, incident)
                         latest.write_text(
                             json.dumps(incident, ensure_ascii=False, indent=2, sort_keys=True),
@@ -504,6 +847,11 @@ def run(args: argparse.Namespace) -> int:
                                 "[hermes-live-watchdog] PERSONAL_ASSISTANT_MONITOR "
                                 f"event={incident['event']} status={incident['status']} "
                                 f"count={incident['count']} ledger={ledger}"
+                            )
+                        elif incident["event"] == "stuck_turn_automatically_stopped":
+                            line = (
+                                "[hermes-live-watchdog] STUCK_TURN_AUTOMATICALLY_STOPPED "
+                                f"timeout={incident['timeout_seconds']} ledger={ledger}"
                             )
                         else:
                             line = (
@@ -613,7 +961,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--from-start", dest="from_end", action="store_false", help="Read existing ledger rows first")
     parser.add_argument("--from-end", dest="from_end", action="store_true", help="Only watch new ledger rows")
     parser.set_defaults(from_end=True)
-    parser.add_argument("--notify", action="store_true", help="Send desktop notifications with notify-send")
+    parser.add_argument(
+        "--notify",
+        action="store_false",
+        dest="notify",
+        default=False,
+        help="Deprecated compatibility flag; watchdog incidents are internal-only",
+    )
     parser.add_argument("--once", action="store_true", help="Process available rows once and exit")
     return parser.parse_args(argv)
 

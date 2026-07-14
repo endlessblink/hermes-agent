@@ -569,6 +569,28 @@ export function useSessionActions({
           }),
           storedSessionId
         )
+
+        const recovery = resumed.recoverable_turn
+
+        if (
+          recovery?.kind === 'restart_interrupted' &&
+          recovery.text.trim() &&
+          Number.isInteger(recovery.user_ordinal) &&
+          recovery.user_ordinal >= 0
+        ) {
+          await requestGateway('prompt.submit', {
+            recovery_kind: 'restart_interrupted',
+            session_id: resumed.session_id,
+            text: recovery.text,
+            truncate_before_user_ordinal: recovery.user_ordinal
+          })
+          resumedRunning = true
+          updateSessionState(
+            resumed.session_id,
+            state => ({ ...state, busy: true, awaitingResponse: true, interrupted: false }),
+            storedSessionId
+          )
+        }
       } catch (err) {
         if (!isCurrentResume()) {
           return

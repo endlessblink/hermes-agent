@@ -54,6 +54,89 @@ def capture(server):
 # ── JSON-RPC envelope ────────────────────────────────────────────────
 
 
+def test_recoverable_turn_requires_matching_pending_marker(server):
+    marker = server._pending_turn_marker("retry this", now=123.0)
+
+    assert server._recoverable_pending_turn(
+        [{"role": "user", "content": "retry this"}],
+        {"pending_turn": marker},
+    ) == {
+        "kind": "restart_interrupted",
+        "text": "retry this",
+        "user_ordinal": 0,
+    }
+
+
+def test_recoverable_turn_fails_closed_for_mismatch_or_assistant_tail(server):
+    marker = server._pending_turn_marker("retry this", now=123.0)
+
+    assert server._recoverable_pending_turn(
+        [{"role": "user", "content": "different"}],
+        {"pending_turn": marker},
+    ) is None
+
+
+def test_recoverable_turn_accepts_matching_user_before_tool_trail(server):
+    marker = server._pending_turn_marker("retry this", now=123.0)
+
+    assert server._recoverable_pending_turn(
+        [
+            {"role": "user", "content": "retry this"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "function": {"name": "lookup"}}],
+                "finish_reason": "tool_calls",
+            },
+            {"role": "tool", "content": "saved tool result", "tool_call_id": "call-1"},
+        ],
+        {"pending_turn": marker},
+    ) == {
+        "kind": "restart_interrupted",
+        "text": "retry this",
+        "user_ordinal": 0,
+    }
+
+
+def test_recoverable_turn_rejects_completed_assistant_after_matching_user(server):
+    marker = server._pending_turn_marker("retry this", now=123.0)
+
+    assert server._recoverable_pending_turn(
+        [
+            {"role": "user", "content": "retry this"},
+            {"role": "assistant", "content": "finished", "finish_reason": "stop"},
+        ],
+        {"pending_turn": marker},
+    ) is None
+    assert server._recoverable_pending_turn(
+        [
+            {"role": "user", "content": "retry this"},
+            {"role": "assistant", "content": "started"},
+        ],
+        {"pending_turn": marker},
+    ) is None
+
+
+def test_recoverable_turn_accepts_unanswered_tail_after_orphan_reap(server):
+    assert server._recoverable_pending_turn(
+        [{"role": "user", "content": "retry this"}],
+        {},
+        end_reason="ws_orphan_reap",
+    ) == {
+        "kind": "restart_interrupted",
+        "text": "retry this",
+        "user_ordinal": 0,
+    }
+
+
+def test_recoverable_turn_does_not_reclaim_claimed_orphan(server):
+    assert server._recoverable_pending_turn(
+        [{"role": "user", "content": "retry this"}],
+        {"pending_turn": {"state": "claimed"}},
+        end_reason="ws_orphan_reap",
+    ) is None
+
+
 def test_unknown_method(server):
     resp = server.handle_request({"id": "1", "method": "bogus"})
     assert resp["error"]["code"] == -32601

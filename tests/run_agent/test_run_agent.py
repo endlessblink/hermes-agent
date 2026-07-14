@@ -4010,6 +4010,57 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_personal_assistant_silent_timeout_compacts_in_place_before_retry(self, agent):
+        self._setup_agent(agent)
+        agent.compression_enabled = True
+        agent.compression_in_place = True
+        agent._single_attempt_silent_timeout = True
+        agent.session_id = "same-conversation"
+        history = [
+            {
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": f"preserved message {index}",
+            }
+            for index in range(20)
+        ]
+        response = _mock_response(content="Recovered answer", finish_reason="stop")
+        calls = {"api": 0}
+
+        def api_call(_kwargs):
+            calls["api"] += 1
+            if calls["api"] == 1:
+                raise TimeoutError(
+                    "Non-streaming API call timed out after 60s with no response "
+                    "(threshold: 60s)"
+                )
+            return response
+
+        def compact(messages, system_message, **kwargs):
+            assert kwargs["force"] is True
+            assert agent.session_id == "same-conversation"
+            agent._last_compaction_in_place = True
+            return [
+                {"role": "user", "content": "[CONTEXT COMPACTION] preserved summary"},
+                messages[-1],
+            ], system_message
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=api_call),
+            patch.object(agent, "_compress_context", side_effect=compact) as compress_mock,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "finish the pending request",
+                conversation_history=history,
+            )
+
+        assert result["final_response"] == "Recovered answer"
+        assert calls["api"] == 2
+        assert compress_mock.call_count == 1
+        assert agent.session_id == "same-conversation"
+
     def test_ollama_small_runtime_context_fails_before_api_call(self, agent, caplog):
         self._setup_agent(agent)
         agent.model = "qwen3.5:9b"

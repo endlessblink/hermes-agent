@@ -12,6 +12,7 @@ exactly as before.
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -59,6 +60,105 @@ def _seed(db, sid, title, n=8):
 
 
 class TestInPlaceCompaction:
+    def test_silent_timeout_preserves_full_history_and_pending_turn(self):
+        """The complete recovery chain stays on one durable conversation."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "20260714_184500_recovery"
+            _seed(db, sid, "Personal assistant")
+            history = db.get_messages_as_conversation(sid)
+            agent = _make_agent(db, sid, in_place=True)
+            agent._cached_system_prompt = "You are helpful."
+            agent._use_prompt_caching = False
+            agent.tool_delay = 0
+            agent.compression_enabled = True
+            agent._single_attempt_silent_timeout = True
+            agent._disable_streaming = True
+            agent.save_trajectories = False
+            pending = "finish the exact pending request"
+            db.patch_working_state(
+                sid,
+                {
+                    "active_task": pending,
+                    "pending_turn": {
+                        "prompt_hash": "durable-proof",
+                        "started_at": 1,
+                        "state": "running",
+                    },
+                },
+                source="test",
+            )
+
+            def compact(messages, current_tokens=None, focus_topic=None, force=False):
+                assert force is True
+                assert messages[-1]["role"] == "user"
+                assert messages[-1]["content"] == pending
+                return [
+                    {"role": "user", "content": "[CONTEXT COMPACTION] durable summary"},
+                    dict(messages[-1]),
+                ]
+
+            agent.context_compressor.compress = compact
+            agent.context_compressor._last_compress_aborted = False
+            agent.context_compressor._last_summary_error = None
+            agent.context_compressor.compression_count = 1
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content="Recovered answer",
+                            reasoning_content=None,
+                            tool_calls=None,
+                        ),
+                    )
+                ],
+                model="test/model",
+                usage=None,
+            )
+            calls = {"api": 0}
+
+            def api_call(_kwargs):
+                calls["api"] += 1
+                if calls["api"] == 1:
+                    raise TimeoutError(
+                        "Non-streaming API call timed out after 60s with no response "
+                        "(threshold: 60s)"
+                    )
+                return response
+
+            with (
+                patch.object(agent, "_interruptible_api_call", side_effect=api_call),
+                patch.object(agent, "_save_trajectory"),
+                patch.object(agent, "_cleanup_task_resources"),
+            ):
+                result = agent.run_conversation(pending, conversation_history=history)
+
+            assert result["final_response"] == "Recovered answer"
+            assert calls["api"] == 2
+            assert agent.session_id == sid
+            assert db.get_session(sid)["end_reason"] is None
+            assert db._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE parent_session_id = ?", (sid,)
+            ).fetchone()[0] == 0
+
+            all_rows = db.get_messages(sid, include_inactive=True)
+            archived = [row for row in all_rows if not row.get("active", 1)]
+            assert len(archived) == 9
+            assert {row["content"] for row in archived} == {
+                *(f"msg {index}" for index in range(8)),
+                pending,
+            }
+            live = db.get_messages_as_conversation(sid)
+            assert any(message.get("content") == pending for message in live)
+            assert live[-1]["content"] == "Recovered answer"
+            state = db.get_working_state(sid)
+            assert state.get("pending_turn") is None
+            assert state.get("active_task") == pending
+            assert state.get("status") == "answered"
+
     def test_in_place_keeps_same_session_id(self):
         """In-place mode: id unchanged, no child row, no rename, history kept."""
         from hermes_state import SessionDB
@@ -264,6 +364,44 @@ class TestCompactedTurnsStaySearchable:
     rewind/undo rows (active=0, compacted=0) must stay hidden. The two share
     the active flag but are distinguished by the compacted flag."""
 
+    def test_interrupted_tool_trail_is_archived_searchable_and_same_session(self):
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "20260714_interrupted"
+            db.create_session(sid, "cli", model="test/model")
+            db.append_message(session_id=sid, role="user", content="earlier request")
+            db.append_message(session_id=sid, role="assistant", content="earlier answer")
+            db.append_message(session_id=sid, role="user", content="ZEBRARECOVERY pending request")
+            db.append_message(
+                session_id=sid,
+                role="assistant",
+                content="",
+                tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "lookup"}}],
+                finish_reason="tool_calls",
+            )
+            db.append_message(
+                session_id=sid,
+                role="tool",
+                content="ZEBRATOOL preserved result",
+                tool_call_id="call-1",
+            )
+
+            archived_count = db.archive_interrupted_turn(sid, 1)
+
+            assert archived_count == 3
+            assert [row["content"] for row in db.get_messages_as_conversation(sid)] == [
+                "earlier request",
+                "earlier answer",
+            ]
+            all_rows = db.get_messages(sid, include_inactive=True)
+            assert len(all_rows) == 5
+            assert sum(not row["active"] and row["compacted"] for row in all_rows) == 3
+            assert len(db.search_messages("ZEBRARECOVERY")) == 1
+            assert len(db.search_messages("ZEBRATOOL")) == 1
+            assert db.get_session(sid)["parent_session_id"] is None
+
     def test_compacted_turns_found_by_default_search(self):
         from hermes_state import SessionDB
 
@@ -317,4 +455,3 @@ class TestCompactedTurnsStaySearchable:
                 "ZEBRAWORD", role_filter=["user", "assistant"], include_inactive=True
             )
             assert len(recovered) == 1
-

@@ -3,6 +3,7 @@ import concurrent.futures
 import contextlib
 import contextvars
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -1884,6 +1885,99 @@ def _session_db(session: dict):
                 db.close()
 
 
+def _pending_turn_marker(text: str, *, now: float | None = None) -> dict:
+    """Privacy-safe proof that an accepted prompt has not settled yet."""
+    return {
+        "prompt_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "started_at": float(time.time() if now is None else now),
+        "state": "running",
+    }
+
+
+def _clear_pending_turn_marker(session: dict, *, source: str) -> None:
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        return
+    with _session_db(session) as db:
+        if db is None:
+            return
+        try:
+            db.patch_working_state(session_key, {"pending_turn": None}, source=source)
+        except Exception:
+            logger.debug("pending-turn marker clear failed", exc_info=True)
+
+
+def _recoverable_pending_turn(
+    history: list,
+    working_state: dict,
+    *,
+    end_reason: str | None = None,
+) -> dict | None:
+    """Return a one-row replay only when durable state proves it is safe."""
+    marker = working_state.get("pending_turn") if isinstance(working_state, dict) else None
+    if not history:
+        return None
+    legacy_orphan = not isinstance(marker, dict) and end_reason == "ws_orphan_reap"
+    if not legacy_orphan and (
+        not isinstance(marker, dict) or marker.get("state") != "running"
+    ):
+        return None
+    if legacy_orphan:
+        candidate_index = len(history) - 1
+        tail = history[candidate_index]
+        if not isinstance(tail, dict) or tail.get("role") != "user":
+            return None
+        text = tail.get("content")
+        if not isinstance(text, str) or not text.strip():
+            return None
+    else:
+        expected = marker.get("prompt_hash")
+        if not isinstance(expected, str):
+            return None
+        candidate_index = -1
+        text = ""
+        for index in range(len(history) - 1, -1, -1):
+            message = history[index]
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if (
+                isinstance(content, str)
+                and content.strip()
+                and hashlib.sha256(content.encode("utf-8")).hexdigest() == expected
+            ):
+                candidate_index = index
+                text = content
+                break
+        if candidate_index < 0:
+            return None
+
+        # A pending marker may survive a process death after tool calls/results
+        # were persisted. That trail is unfinished and safe to replay. Fail
+        # closed if another user turn or a completed assistant answer followed.
+        for message in history[candidate_index + 1 :]:
+            if not isinstance(message, dict):
+                return None
+            role = message.get("role")
+            if role == "tool":
+                continue
+            if role != "assistant":
+                return None
+            if message.get("finish_reason") == "stop":
+                return None
+            if not message.get("tool_calls") and str(message.get("content") or "").strip():
+                return None
+    return {
+        "kind": "restart_interrupted",
+        "text": text,
+        "user_ordinal": sum(
+            1
+            for message in history[:candidate_index]
+            if isinstance(message, dict) and message.get("role") == "user"
+        ),
+    }
+
+
 def _persist_session_git_meta(session: dict, cwd: str) -> None:
     """Resolve + persist a session's git branch / repo root WITHOUT blocking.
 
@@ -3404,6 +3498,8 @@ def _apply_personal_assistant_runtime_policy(session: dict) -> None:
     )
     agent._force_codex_ttfb_watchdog = True
     agent._codex_ttfb_timeout_seconds = 60
+    agent._single_attempt_silent_timeout = True
+    agent.compression_in_place = True
     existing = str(getattr(agent, "ephemeral_system_prompt", "") or "").strip()
     if _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY not in existing:
         agent.ephemeral_system_prompt = "\n\n".join(
@@ -7016,6 +7112,30 @@ def _(rid, params: dict) -> dict:
         # not replay the unanswered call forever (#29086).
         prefix = display_history[: max(0, len(display_history) - len(raw_history))]
         history = sanitize_replay_history(raw_history)
+        get_working_state = getattr(db, "get_working_state", None)
+        recovery_state = get_working_state(target) if callable(get_working_state) else {}
+        recoverable_turn = _recoverable_pending_turn(
+            raw_history,
+            recovery_state,
+            end_reason=str(found.get("end_reason") or ""),
+        )
+        if recoverable_turn is not None:
+            try:
+                db.patch_working_state(
+                    target,
+                    {
+                        "pending_turn": {
+                            "prompt_hash": hashlib.sha256(
+                                recoverable_turn["text"].encode("utf-8")
+                            ).hexdigest(),
+                            "claimed_at": time.time(),
+                            "state": "claimed",
+                        }
+                    },
+                    source="session_resume_recovery_claim",
+                )
+            except Exception:
+                logger.debug("pending-turn recovery claim failed", exc_info=True)
         # Restore the model/provider/reasoning/tier this chat last used so the
         # deferred build (and the info below) match the eager path — without them
         # the build drops the provider ("No LLM provider configured").
@@ -7043,25 +7163,32 @@ def _(rid, params: dict) -> dict:
         _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
 
         messages = _history_to_messages(display_history)
-        return _ok(
-            rid,
-            {
-                "session_id": sid,
-                "resumed": target,
-                "message_count": len(messages),
-                "messages": messages,
-                "info": _lazy_resume_info(
-                    cwd,
-                    model=model_override.get("model") or "",
-                    provider=overrides.get("provider_override") or "",
-                ),
-                "inflight": None,
-                "running": False,
-                "session_key": target,
-                "started_at": record["created_at"],
-                "status": "idle",
-            },
-        )
+        payload = {
+            "session_id": sid,
+            "resumed": target,
+            "message_count": len(messages),
+            "messages": messages,
+            "info": _lazy_resume_info(
+                cwd,
+                model=model_override.get("model") or "",
+                provider=overrides.get("provider_override") or "",
+            ),
+            "inflight": None,
+            "running": False,
+            "session_key": target,
+            "started_at": record["created_at"],
+            "status": "idle",
+        }
+        if recoverable_turn is not None:
+            payload["recoverable_turn"] = recoverable_turn
+            _emit_turn_diagnostic(
+                sid,
+                record,
+                "orphan_recovery_detected",
+                "A restart-interrupted user turn is safe to replay",
+                details={"user_ordinal": recoverable_turn["user_ordinal"]},
+            )
+        return _ok(rid, payload)
 
     # Build the agent OUTSIDE the lock — _make_agent can block for seconds
     # (MCP discovery, prompt/skill build, AIAgent construction). Holding
@@ -9446,6 +9573,7 @@ def _(rid, params: dict) -> dict:
     with session["history_lock"]:
         session["_turn_cancel_requested"] = True
         session["queued_prompt"] = None
+    _clear_pending_turn_marker(session, source="session_interrupt")
     if not run_thread_alive:
         with session["history_lock"]:
             if session.get("running"):
@@ -9786,20 +9914,47 @@ def _(rid, params: dict) -> dict:
             if ordinal < 0 or ordinal >= len(user_indices):
                 return _err(rid, 4018, "target user message is no longer in session history")
             truncated = history[: user_indices[ordinal]]
-            session["history"] = truncated
-            session["history_version"] = int(session.get("history_version", 0)) + 1
             if (db := _get_db()) is not None:
                 try:
-                    db.replace_messages(session["session_key"], truncated)
+                    if params.get("recovery_kind") == "restart_interrupted":
+                        db.archive_interrupted_turn(session["session_key"], ordinal)
+                    else:
+                        db.replace_messages(session["session_key"], truncated)
                 except Exception as exc:
-                    print(f"[tui_gateway] prompt.submit: replace_messages failed: {exc}", file=sys.stderr)
+                    print(f"[tui_gateway] prompt.submit: transcript rewind failed: {exc}", file=sys.stderr)
+                    return _err(rid, 5008, "could not preserve the interrupted turn")
+            session["history"] = truncated
+            session["history_version"] = int(session.get("history_version", 0)) + 1
         session["running"] = True
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
         _start_inflight_turn(session, text)
 
+    if (
+        params.get("recovery_kind") == "restart_interrupted"
+        and truncate_user_ordinal is not None
+    ):
+        _emit_turn_diagnostic(
+            sid,
+            session,
+            "orphan_recovery_started",
+            "Restart-interrupted turn replay started",
+            details={"user_ordinal": int(truncate_user_ordinal)},
+        )
+
     # Persist the DB row lazily, now that the user has actually sent a message.
     _ensure_session_db_row(session)
+    if isinstance(text, str) and text.strip():
+        with _session_db(session) as scoped_db:
+            if scoped_db is not None:
+                try:
+                    scoped_db.patch_working_state(
+                        session["session_key"],
+                        {"pending_turn": _pending_turn_marker(text)},
+                        source="prompt_submit",
+                    )
+                except Exception:
+                    logger.debug("pending-turn marker write failed", exc_info=True)
     # A branch becomes real here: copy its parent's transcript into the row so it
     # resumes with full context (the agent won't persist the seed itself).
     _persist_branch_seed(session)
@@ -10227,14 +10382,13 @@ def _compression_watchdog_timeout_seconds() -> float:
 
 
 def _turn_idle_watchdog_timeout_seconds() -> float:
-    # Normal turns can legitimately wait on user approvals, long tools, or
-    # provider-side work. The out-of-band live watchdog records and alerts on
-    # silence without killing work. Keep in-band interruption opt-in only.
-    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "0")
+    # Active tools and approval waits are protected below. For every other turn
+    # state, bounded recovery is safer than leaving Desktop permanently busy.
+    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "60")
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 0.0
+        return 60.0
 
 
 def _record_turn_watchdog_event(
@@ -10395,7 +10549,7 @@ def _emit_turn_idle_timeout_terminal(sid: str, session: dict, timeout_seconds: f
             not session.get("running")
             or session.get("_turn_terminal_emitted")
             or session.get("compression_started_at")
-            or last_progress_event == "approval.request"
+            or last_progress_event in {"approval.request", "tool.start"}
         ):
             return False
         session["_turn_terminal_emitted"] = True
@@ -10404,6 +10558,7 @@ def _emit_turn_idle_timeout_terminal(sid: str, session: dict, timeout_seconds: f
         started_at = float(session.get("turn_started_at") or time.time())
         last_progress_at = float(session.get("turn_last_progress_at") or started_at)
         _clear_inflight_turn(session)
+    _clear_pending_turn_marker(session, source="turn_idle_timeout")
     agent = session.get("agent")
     if hasattr(agent, "interrupt"):
         try:
@@ -10579,7 +10734,7 @@ def _start_turn_idle_watchdog(sid: str, session: dict) -> threading.Event | None
                 last_progress_event = str(session.get("turn_last_progress_event") or "")
             now = time.time()
             idle_elapsed = now - last_progress_at
-            if last_progress_event == "approval.request":
+            if last_progress_event in {"approval.request", "tool.start"}:
                 continue
             if idle_elapsed >= timeout_seconds:
                 _emit_turn_idle_timeout_terminal(sid, session, timeout_seconds)
@@ -10616,6 +10771,17 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         session["turn_last_progress_event"] = "prompt.submit"
         if not isinstance(session.get("inflight_turn"), dict):
             _start_inflight_turn(session, text)
+    if isinstance(text, str) and text.strip():
+        with _session_db(session) as scoped_db:
+            if scoped_db is not None:
+                try:
+                    scoped_db.patch_working_state(
+                        session["session_key"],
+                        {"pending_turn": _pending_turn_marker(text)},
+                        source="prompt_submit_run",
+                    )
+                except Exception:
+                    logger.debug("pending-turn run marker write failed", exc_info=True)
     agent = session["agent"]
     if hasattr(agent, "clear_interrupt"):
         try:
@@ -10750,6 +10916,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
 
             def _stream(delta):
                 with session["history_lock"]:
+                    if (
+                        not session.get("running")
+                        or session.get("_turn_terminal_emitted")
+                    ):
+                        return
                     _append_inflight_delta(session, delta)
                 payload = {"text": delta}
                 if streamer and (r := streamer.feed(delta)) is not None:

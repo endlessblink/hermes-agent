@@ -141,6 +141,13 @@ def _patch_completed_turn_working_state(
         return
     user_text = _state_text(original_user_message, 800)
     try:
+        # Clear before interrupted/failed early returns: an intentional Stop
+        # must never remain eligible for replay after a later backend restart.
+        db.patch_working_state(
+            session_id,
+            {"pending_turn": None},
+            source="turn_finalizer",
+        )
         if user_text and _SUPERSESSION_RE.search(user_text):
             db.patch_working_state(
                 session_id,

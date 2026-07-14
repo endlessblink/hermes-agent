@@ -1,6 +1,34 @@
 import { describe, expect, it } from 'vitest'
 
-import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
+import {
+  orderByIds,
+  reconcileOrderIds,
+  resolveManualSessionOrderIds,
+  sameIds,
+  sessionsForSidebarScope
+} from './order'
+
+describe('sessionsForSidebarScope', () => {
+  const sessions = [
+    { id: 'content-live', profile: 'content-creator', _lineage_root_id: 'content-root' },
+    { id: 'content-other', profile: 'content-creator' },
+    { id: 'office-chat', profile: 'office-work' }
+  ]
+
+  it('always retains the active chat when restored sidebar scope belongs to another profile', () => {
+    expect(sessionsForSidebarScope(sessions, 'office-work', 'content-live').map(row => row.id)).toEqual([
+      'content-live',
+      'office-chat'
+    ])
+  })
+
+  it('retains a continuation when the selected route points at its lineage root', () => {
+    expect(sessionsForSidebarScope(sessions, 'office-work', 'content-root').map(row => row.id)).toEqual([
+      'content-live',
+      'office-chat'
+    ])
+  })
+})
 
 describe('resolveManualSessionOrderIds', () => {
   it('clears legacy auto-seeded order until the user manually reorders sessions', () => {

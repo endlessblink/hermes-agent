@@ -137,7 +137,13 @@ import { SidebarCronJobsSection } from './cron-jobs-section'
 import { FolderNameDialog } from './folder-dialogs'
 import { filterUnfiledSessions, resolveFolderSessions, visibleFoldersForScope } from './folders'
 import { SidebarLoadMoreRow } from './load-more-row'
-import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds } from './order'
+import {
+  orderByIds,
+  reconcileOrderIds,
+  resolveManualSessionOrderIds,
+  sameIds,
+  sessionsForSidebarScope
+} from './order'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import {
@@ -395,10 +401,10 @@ export function ChatSidebar({
   // scope === their only profile, so nothing is filtered out.
   const visibleSessions = useMemo(
     () =>
-      (showAllProfiles ? sessions : sessions.filter(s => normalizeProfileKey(s.profile) === profileScope)).filter(
+      (showAllProfiles ? sessions : sessionsForSidebarScope(sessions, profileScope, activeSidebarSessionId)).filter(
         session => isOpenableSessionListRow(session) && session.id !== assistantState?.sessionId
       ),
-    [assistantState?.sessionId, sessions, showAllProfiles, profileScope]
+    [activeSidebarSessionId, assistantState?.sessionId, sessions, showAllProfiles, profileScope]
   )
 
   // Agent session order is pinned to creation time (started_at), NOT activity —

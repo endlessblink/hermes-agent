@@ -366,6 +366,40 @@ describe('resumeSession failure recovery', () => {
     expect(resumeParams).toMatchObject({ source: 'desktop' })
   })
 
+  it('replays one safely recoverable restart-interrupted turn without duplicating its user row', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        return {
+          recoverable_turn: {
+            kind: 'restart_interrupted',
+            text: 'retry this',
+            user_ordinal: 0
+          },
+          session_id: 'runtime-1',
+          resumed: params?.session_id,
+          messages: [{ content: 'retry this', role: 'user', timestamp: 1 }],
+          info: {}
+        } as never
+      }
+
+      return {} as never
+    })
+
+    vi.mocked(getSessionMessages).mockResolvedValue({
+      messages: [{ content: 'retry this', role: 'user', timestamp: 1 }],
+      session_id: 'stored-1'
+    } as never)
+
+    await runResume(requestGateway)
+
+    expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      recovery_kind: 'restart_interrupted',
+      session_id: 'runtime-1',
+      text: 'retry this',
+      truncate_before_user_ordinal: 0
+    })
+  })
+
   it('arms the failure latch when resume succeeds with an empty transcript for a non-empty stored session', async () => {
     setSessions([storedSession({ message_count: 4 })])
 

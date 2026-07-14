@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import subprocess
@@ -5222,6 +5223,76 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_restart_recovery_archives_incomplete_turn_without_replacing_history(monkeypatch):
+    """Restart replay must preserve the interrupted trail instead of deleting it."""
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            return {
+                "final_response": "recovered",
+                "messages": [
+                    *(conversation_history or []),
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "recovered"},
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    original_history = [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "earlier reply"},
+        {"role": "user", "content": "retry this"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "content": "saved tool result", "tool_call_id": "call-1"},
+    ]
+    server._sessions["sid"] = _session(agent=_Agent(), history=original_history)
+
+    class _StubDb:
+        def __init__(self):
+            self.archived = []
+            self.replaced = []
+
+        def archive_interrupted_turn(self, session_id, user_ordinal):
+            self.archived.append((session_id, user_ordinal))
+
+        def replace_messages(self, session_id, messages):
+            self.replaced.append((session_id, list(messages)))
+
+    stub_db = _StubDb()
+
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_emit", lambda *a: None)
+        monkeypatch.setattr(server, "_get_db", lambda: stub_db)
+
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "retry this",
+                    "recovery_kind": "restart_interrupted",
+                    "truncate_before_user_ordinal": 1,
+                },
+            }
+        )
+
+        assert response.get("result"), response
+        assert stub_db.archived == [("session-key", 1)]
+        assert stub_db.replaced == []
+    finally:
+        server._sessions.pop("sid", None)
+
+
 # ---------------------------------------------------------------------------
 # session.interrupt must only cancel pending prompts owned by the calling
 # session — it must not blast-resolve clarify/sudo/secret prompts on
@@ -5351,6 +5422,62 @@ def test_run_prompt_submit_registers_turn_thread_for_interrupt(monkeypatch):
         assert calls["interrupted"] is True
     finally:
         server._sessions.pop("sid", None)
+
+
+def test_run_prompt_submit_drops_stream_fragments_after_terminal_settlement(monkeypatch):
+    emitted: list[tuple[str, str, dict]] = []
+    session: dict
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+        def is_alive(self):
+            return False
+
+    def run_conversation(_message, *, stream_callback, **_kwargs):
+        session["_turn_terminal_emitted"] = True
+        session["running"] = False
+        stream_callback("late fragment from the retired worker")
+        return {"error": "stopped", "failed": True, "final_response": ""}
+
+    agent = types.SimpleNamespace(
+        api_mode="",
+        clear_interrupt=lambda: None,
+        context_compressor=None,
+        model="test-model",
+        provider="test-provider",
+        run_conversation=run_conversation,
+    )
+    session = _session(agent=agent, running=True, cwd="/tmp/project")
+    server._sessions["sid"] = session
+
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "_session_db", lambda _session: contextlib.nullcontext(None))
+    monkeypatch.setattr(server, "_set_session_context", lambda *args, **kwargs: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_sync_agent_model_with_config", lambda *args: None)
+    monkeypatch.setattr(server, "_register_session_cwd", lambda _session: None)
+    monkeypatch.setattr(server, "_start_compression_watchdog", lambda *args: None)
+    monkeypatch.setattr(server, "_start_turn_idle_watchdog", lambda *args: None)
+    monkeypatch.setattr(server, "_emit_turn_diagnostic", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"running": False})
+
+    try:
+        server._run_prompt_submit("1", "sid", session, "hello")
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert [payload for event, _sid, payload in emitted if event == "message.delta"] == []
 
 
 def test_interrupt_drops_queued_prompt_for_session():
@@ -6531,10 +6658,10 @@ def test_compression_watchdog_bad_env_uses_desktop_default(monkeypatch):
     assert server._compression_watchdog_timeout_seconds() == 12.0
 
 
-def test_turn_idle_watchdog_default_is_alert_only(monkeypatch):
+def test_turn_idle_watchdog_default_automatically_unblocks_chat(monkeypatch):
     monkeypatch.delenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", raising=False)
 
-    assert server._turn_idle_watchdog_timeout_seconds() == 0.0
+    assert server._turn_idle_watchdog_timeout_seconds() == 60.0
 
 
 def test_turn_idle_watchdog_env_override(monkeypatch):
@@ -6546,7 +6673,7 @@ def test_turn_idle_watchdog_env_override(monkeypatch):
 def test_turn_idle_watchdog_bad_env_uses_default(monkeypatch):
     monkeypatch.setenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "bad")
 
-    assert server._turn_idle_watchdog_timeout_seconds() == 0.0
+    assert server._turn_idle_watchdog_timeout_seconds() == 60.0
 
 
 def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):
@@ -6653,6 +6780,27 @@ def test_turn_idle_watchdog_does_not_interrupt_approval_wait(monkeypatch):
     assert session["running"] is True
     assert not session.get("_turn_terminal_emitted")
     assert [e for e in emitted if e[0] == "message.complete"] == []
+
+
+def test_turn_idle_watchdog_does_not_interrupt_an_active_tool(monkeypatch):
+    calls = {"interrupted": False}
+    agent = types.SimpleNamespace(
+        interrupt=lambda: calls.__setitem__("interrupted", True),
+        context_compressor=None,
+    )
+    session = _session(agent=agent, running=True, cwd="/tmp/project")
+    session["turn_started_at"] = time.time() - 180
+    session["turn_last_progress_at"] = time.time() - 150
+    session["turn_last_progress_event"] = "tool.start"
+    server._sessions["sid"] = session
+
+    try:
+        assert server._emit_turn_idle_timeout_terminal("sid", session, 60) is False
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert calls["interrupted"] is False
+    assert session["running"] is True
 
 
 def test_turn_progress_ignores_diagnostics_and_terminal(monkeypatch):

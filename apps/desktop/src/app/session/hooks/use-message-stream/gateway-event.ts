@@ -69,6 +69,7 @@ interface GatewayEventDeps {
   flushQueuedDeltas: (sessionId?: string) => void
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
+  sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>>
   sessionInterrupted: (sessionId: string) => boolean
   updateSessionState: (
     sessionId: string,
@@ -98,6 +99,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
     flushQueuedDeltas,
     queryClient,
     refreshHermesConfig,
+    sessionStateByRuntimeIdRef,
     sessionInterrupted,
     updateSessionState,
     upsertToolCall
@@ -208,6 +210,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
                 ...state,
                 awaitingResponse: false,
                 busy,
+                messages: state.messages.map(message =>
+                  message.pending ? { ...message, pending: false } : message
+                ),
                 pendingBranchGroup: null,
                 streamId: null,
                 turnStartedAt: null
@@ -263,7 +268,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           setTurnStartedAt(Date.now())
         }
       } else if (event.type === 'message.delta') {
-        if (sessionId) {
+        const liveState = sessionId ? sessionStateByRuntimeIdRef.current.get(sessionId) : undefined
+
+        if (sessionId && (liveState?.busy || liveState?.awaitingResponse)) {
           appendAssistantDelta(sessionId, coerceGatewayText(payload?.text))
         }
       } else if (event.type === 'thinking.delta') {
@@ -757,6 +764,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       nativeSubagentSessionsRef,
       queryClient,
       refreshHermesConfig,
+      sessionStateByRuntimeIdRef,
       sessionInterrupted,
       updateSessionState,
       upsertToolCall

@@ -13,6 +13,7 @@ a thin dispatcher that delegates to a platform-provided callback.
 
 import json
 from typing import List, Optional, Callable
+import unicodedata
 
 
 # Maximum number of predefined choices the agent can offer.
@@ -53,6 +54,33 @@ def _flatten_choice(c) -> str:
     return str(c).strip()
 
 
+def _choice_identity(value: str) -> str:
+    """Return a display-independent identity for duplicate detection."""
+    return unicodedata.normalize("NFC", value)
+
+
+def normalize_choices(choices) -> tuple[List[str], int]:
+    """Flatten and deduplicate choices while preserving first spelling/order.
+
+    The duplicate count intentionally excludes blank or malformed values: it
+    describes only choices that would otherwise render as repeated answer rows.
+    """
+    normalized: List[str] = []
+    seen: set[str] = set()
+    duplicate_count = 0
+    for raw in choices:
+        display = _flatten_choice(raw)
+        if not display:
+            continue
+        identity = _choice_identity(display)
+        if identity in seen:
+            duplicate_count += 1
+            continue
+        seen.add(identity)
+        normalized.append(display)
+    return normalized, duplicate_count
+
+
 def clarify_tool(
     question: str,
     choices: Optional[List[str]] = None,
@@ -86,7 +114,7 @@ def clarify_tool(
         # user-facing text here — the single platform-agnostic entry point —
         # so the CLI panel, Discord buttons, and Telegram list all render clean
         # text and the resolved answer is never a raw Python dict repr.
-        choices = [s for s in (_flatten_choice(c) for c in choices) if s]
+        choices, _duplicate_count = normalize_choices(choices)
         if len(choices) > MAX_CHOICES:
             choices = choices[:MAX_CHOICES]
         if not choices:

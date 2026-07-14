@@ -37,6 +37,16 @@ def test_monitor_stale_alerts_do_not_repeat_faster_than_the_stale_window():
     )
 
 
+def test_desktop_notification_flag_is_a_compatibility_noop():
+    assert watchdog.parse_args([]).notify is False
+    assert watchdog.parse_args(["--notify"]).notify is False
+
+
+def test_idle_session_info_clears_stale_turn_state():
+    assert watchdog.is_terminal({"event": "session.info", "running": False}) is True
+    assert watchdog.is_terminal({"event": "session.info", "running": True}) is False
+
+
 def test_discover_ledgers_includes_profile_ledgers(tmp_path):
     home = tmp_path / ".hermes"
     profile_ledger = home / "profiles" / "film-maker" / "logs" / "turn-watchdog.jsonl"
@@ -142,6 +152,118 @@ def test_monitor_connector_failure_alert_is_privacy_safe(tmp_path, monkeypatch):
     serialized = json.dumps(alert)
     assert "evidence" not in serialized
     assert "taskId" not in serialized
+
+
+def test_flowstate_recovery_requires_sign_in_instead_of_restarting():
+    decision = watchdog.classify_flowstate_recovery(
+        status="not_signed_in",
+        health_ok=False,
+        config={"enabled": True, "port": 5577, "token": "secret"},
+        app_running=False,
+    )
+
+    assert decision == {
+        "action": "none",
+        "outcome": "auth_required",
+        "reason": "flowstate_sign_in_required",
+    }
+
+
+def test_restart_replay_diagnostic_becomes_a_supervisor_incident(tmp_path):
+    alert = watchdog.build_incident_alert(
+        {
+            "session_id": "runtime-private",
+            "event": "diagnostic.event",
+            "payload": {
+                "component": "turn",
+                "event": "orphan_recovery_started",
+                "details": {"user_ordinal": 4},
+            },
+        },
+        tmp_path / "turn-watchdog.jsonl",
+    )
+
+    assert alert["event"] == "restart_interrupted_turn_replayed"
+    assert alert["user_ordinal"] == 4
+    assert "text" not in json.dumps(alert)
+
+
+def test_idle_timeout_diagnostic_becomes_an_internal_watchdog_incident(tmp_path):
+    alert = watchdog.build_incident_alert(
+        {
+            "session_id": "runtime-private",
+            "event": "diagnostic.event",
+            "payload": {
+                "component": "turn",
+                "event": "idle_timeout",
+                "details": {"timeout_seconds": 60, "last_progress_event": "tool.complete"},
+            },
+        },
+        tmp_path / "turn-watchdog.jsonl",
+    )
+
+    assert alert["event"] == "stuck_turn_automatically_stopped"
+    assert alert["timeout_seconds"] == 60
+    assert "session_id" not in alert
+
+
+def test_flowstate_recovery_launches_absent_app_when_api_is_enabled():
+    decision = watchdog.classify_flowstate_recovery(
+        status="unavailable",
+        health_ok=False,
+        config={"enabled": True, "port": 5577, "token": "secret"},
+        app_running=False,
+    )
+
+    assert decision == {
+        "action": "launch",
+        "outcome": "repair_started",
+        "reason": "flowstate_app_absent",
+    }
+
+
+def test_flowstate_recovery_fails_closed_for_running_but_unhealthy_app():
+    decision = watchdog.classify_flowstate_recovery(
+        status="unavailable",
+        health_ok=False,
+        config={"enabled": True, "port": 5577, "token": "secret"},
+        app_running=True,
+    )
+
+    assert decision["action"] == "none"
+    assert decision["outcome"] == "manual_required"
+
+
+def test_successful_flowstate_launch_is_verified_and_emits_safe_improvement_event(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    config_path = tmp_path / "local-api.json"
+    config_path.write_text(
+        json.dumps({"enabled": True, "port": 5577, "token": "do-not-persist"}),
+        encoding="utf-8",
+    )
+    health = iter([False, False, True])
+    launched = []
+    monkeypatch.setattr(watchdog, "flowstate_config_path", lambda: config_path)
+    monkeypatch.setattr(watchdog, "flowstate_health_ok", lambda _port: next(health))
+    monkeypatch.setattr(watchdog, "flowstate_app_running", lambda: False)
+    monkeypatch.setattr(watchdog, "launch_flowstate_app", lambda: launched.append(True) or True)
+    monkeypatch.setattr(watchdog.time, "sleep", lambda _seconds: None)
+
+    result = watchdog.attempt_flowstate_recovery(
+        home=home,
+        profile="office-work",
+        status="unavailable",
+        verify_attempts=3,
+    )
+
+    assert launched == [True]
+    assert result["outcome"] == "repaired"
+    events = home / "profiles" / "office-work" / "state" / "improvement-supervisor" / "runtime-events.jsonl"
+    persisted = events.read_text(encoding="utf-8")
+    assert "flowstate_connector_recovery" in persisted
+    assert "do-not-persist" not in persisted
 
 
 def test_stale_monitor_consumer_heartbeat_alerts(tmp_path, monkeypatch):

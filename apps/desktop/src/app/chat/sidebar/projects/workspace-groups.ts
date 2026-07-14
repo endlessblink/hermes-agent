@@ -97,20 +97,16 @@ export const branchLaneId = (repoRoot: string, branch?: string): string =>
 export const sessionRecency = (session: SessionInfo): number => session.last_active || session.started_at || 0
 
 /**
- * Project overview replaces the ordinary flat list, but cwd-less chats are
- * intentionally outside the backend project tree. Keep every loose chat beside
- * the overview so restoring the Projects presentation on a cold start cannot
- * make them undiscoverable before any stored session has been selected.
+ * A project overview is an additional navigation aid, never a replacement for
+ * the chat list. Keep every loaded chat directly visible beside it so project
+ * membership, preview limits, stale metadata, or a restored presentation mode
+ * cannot make a conversation disappear from the sidebar.
  */
 export function sessionsBesideProjectOverview(
   sessions: SessionInfo[],
-  projectOverviewActive: boolean
+  _projectOverviewActive: boolean
 ): SessionInfo[] {
-  if (!projectOverviewActive) {
-    return sessions
-  }
-
-  return sessions.filter(session => !session.cwd?.trim())
+  return sessions
 }
 
 /**

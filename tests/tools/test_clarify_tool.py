@@ -10,6 +10,7 @@ from tools.clarify_tool import (
     MAX_CHOICES,
     CLARIFY_SCHEMA,
     _flatten_choice,
+    normalize_choices,
 )
 
 
@@ -122,6 +123,46 @@ class TestClarifyToolChoicesValidation:
 
         clarify_tool("Pick", choices=[1, 2, 3], callback=mock_callback)  # type: ignore
         assert choices_received == ["1", "2", "3"]
+
+    def test_duplicate_choices_are_repaired_before_callback_and_result(self):
+        received = []
+
+        def mock_callback(question: str, choices: Optional[List[str]]) -> str:
+            received.append(choices)
+            return "אותה אפשרות"
+
+        result = json.loads(
+            clarify_tool(
+                "בחרו אפשרות",
+                choices=["אותה אפשרות", "אותה אפשרות"],
+                callback=mock_callback,
+            )
+        )
+
+        assert received == [["אותה אפשרות"]]
+        assert result["choices_offered"] == ["אותה אפשרות"]
+
+    def test_canonically_equivalent_unicode_choices_preserve_first_spelling(self):
+        choices, removed = normalize_choices(
+            ["  Café option ", "Cafe\u0301 option", "אפשרות אחרת"]
+        )
+
+        assert choices == ["Café option", "אפשרות אחרת"]
+        assert removed == 1
+
+    def test_case_and_internal_whitespace_can_be_semantically_distinct(self):
+        choices, removed = normalize_choices(
+            ["Feature", "feature", "two spaces", "two  spaces"]
+        )
+
+        assert choices == ["Feature", "feature", "two spaces", "two  spaces"]
+        assert removed == 0
+
+    def test_distinct_choices_keep_original_order(self):
+        choices, removed = normalize_choices(["First", "Second", "Third"])
+
+        assert choices == ["First", "Second", "Third"]
+        assert removed == 0
 
 
 class TestClarifyToolCallbackHandling:

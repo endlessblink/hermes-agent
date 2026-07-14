@@ -79,6 +79,20 @@ logger = logging.getLogger(__name__)
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
 
+def _stop_retrying_silent_timeout(agent: Any, error: Exception) -> bool:
+    """Return whether a latency-sensitive turn should compact before retrying.
+
+    A provider connection that produced no response before the local stale-call
+    watchdog fired should not be replayed unchanged. The caller compacts the
+    durable conversation in place, preserving the archived transcript and
+    working state under the same conversation id, then retries the pending turn.
+    """
+    if not bool(getattr(agent, "_single_attempt_silent_timeout", False)):
+        return False
+    message = str(error).lower()
+    return "timed out after" in message and "with no response" in message
+
+
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
     parts = []
@@ -3117,6 +3131,47 @@ def run_conversation(
                         "failed": True,
                         "compaction_disabled": True,
                     }
+
+                # A latency-sensitive Desktop turn that produced no response
+                # for the full watchdog window must not replay the identical
+                # oversized request two more times. Use the normal compressor
+                # immediately. Personal Assistant policy forces in-place mode,
+                # so the durable session id, full archived transcript, working
+                # state, active task, pending user turn, cwd, and title remain
+                # attached to the same conversation.
+                if _stop_retrying_silent_timeout(agent, api_error):
+                    if not getattr(agent, "compression_enabled", True):
+                        max_retries = retry_count
+                        _retry.primary_recovery_attempted = True
+                    else:
+                        compression_attempts += 1
+                        original_len = len(messages)
+                        original_tokens = estimate_messages_tokens_rough(messages)
+                        messages, active_system_prompt = agent._compress_context(
+                            messages,
+                            system_message,
+                            approx_tokens=approx_tokens,
+                            task_id=effective_task_id,
+                            force=True,
+                        )
+                        conversation_history = conversation_history_after_compression(
+                            agent, messages
+                        )
+                        new_tokens = estimate_messages_tokens_rough(messages)
+                        approx_tokens = new_tokens
+                        compacted = (
+                            len(messages) < original_len
+                            or (new_tokens > 0 and new_tokens < original_tokens * 0.95)
+                        )
+                        if compacted:
+                            agent._buffer_status(
+                                "🗜️ The provider stopped responding. Context was preserved "
+                                "and compacted in this conversation; retrying the pending turn."
+                            )
+                            _retry.restart_with_compressed_messages = True
+                            break
+                        max_retries = retry_count
+                        _retry.primary_recovery_attempted = True
 
                 # ── Anthropic Sonnet long-context tier gate ───────────
                 # Anthropic returns HTTP 429 "Extra usage is required for

@@ -469,6 +469,7 @@ export function useMessageStream({
       })
 
       const replyReadyId = completedState.storedSessionId ?? sessionId
+
       const replyReadyProfile =
         $sessions
           .get()
@@ -539,6 +540,7 @@ export function useMessageStream({
     flushQueuedDeltas,
     queryClient,
     refreshHermesConfig,
+    sessionStateByRuntimeIdRef,
     sessionInterrupted,
     updateSessionState,
     upsertToolCall

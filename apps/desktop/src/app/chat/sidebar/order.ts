@@ -1,3 +1,33 @@
+type SidebarScopedSession = {
+  id: string
+  profile?: null | string
+  _lineage_root_id?: null | string
+}
+
+const profileKey = (value: null | string | undefined): string => value?.trim() || 'default'
+
+/**
+ * Apply the sidebar profile scope without ever hiding the selected chat.
+ * Route restoration and native profile-scope restoration are asynchronous, so
+ * they may briefly disagree after boot; the active row is the continuity
+ * anchor and must survive that race (including a continuation selected by its
+ * lineage-root id).
+ */
+export function sessionsForSidebarScope<T extends SidebarScopedSession>(
+  sessions: T[],
+  scope: string,
+  activeSessionId: null | string
+): T[] {
+  const active = activeSessionId?.trim() || ''
+  const normalizedScope = profileKey(scope)
+
+  return sessions.filter(
+    session =>
+      profileKey(session.profile) === normalizedScope ||
+      Boolean(active && (session.id === active || session._lineage_root_id === active))
+  )
+}
+
 /** New ids first, then ids still present in the persisted order. */
 export function reconcileFreshFirst(currentIds: string[], orderIds: string[]): string[] {
   const current = new Set(currentIds)

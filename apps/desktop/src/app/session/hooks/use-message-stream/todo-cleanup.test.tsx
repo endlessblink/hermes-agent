@@ -164,7 +164,21 @@ describe('useMessageStream turn-end todo cleanup', () => {
   it('settles a running turn when session.info reports the backend is no longer running', async () => {
     await mountStream()
 
-    act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
+    stateByRuntimeId.set(SID, {
+      ...createClientSessionState(),
+      awaitingResponse: true,
+      busy: true,
+      messages: [
+        {
+          id: 'assistant-pending',
+          parts: [],
+          pending: true,
+          role: 'assistant'
+        }
+      ],
+      streamId: 'assistant-pending',
+      turnStartedAt: Date.now()
+    })
     expect(stateByRuntimeId.get(SID)?.busy).toBe(true)
     expect(stateByRuntimeId.get(SID)?.awaitingResponse).toBe(true)
 
@@ -181,6 +195,7 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.busy).toBe(false)
     expect(state?.awaitingResponse).toBe(false)
     expect(state?.turnStartedAt).toBeNull()
+    expect(state?.messages.at(-1)?.pending).toBe(false)
   })
 
   it('treats message.complete with error status as a failed turn', async () => {
@@ -202,6 +217,35 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.turnStartedAt).toBeNull()
     expect(state?.messages.at(-1)?.pending).toBe(false)
     expect(state?.messages.at(-1)?.error).toBe('Context length exceeded and cannot compress further.')
+  })
+
+  it('ignores assistant deltas that arrive after a terminal turn event', async () => {
+    await mountStream()
+
+    act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
+    act(() =>
+      handleEvent!({
+        payload: { status: 'error', text: 'The turn stopped and the chat is ready.' },
+        session_id: SID,
+        type: 'message.complete'
+      })
+    )
+    act(() =>
+      handleEvent!({
+        payload: { text: 'late fragment from the retired worker' },
+        session_id: SID,
+        type: 'message.delta'
+      })
+    )
+
+    await new Promise(resolve => window.setTimeout(resolve, 20))
+
+    const state = stateByRuntimeId.get(SID)
+    const serializedMessages = JSON.stringify(state?.messages ?? [])
+
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(serializedMessages).not.toContain('late fragment from the retired worker')
   })
 
   it('ignores recoverable Codex OAuth refresh errors while the turn is retrying', async () => {

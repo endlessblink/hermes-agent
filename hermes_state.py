@@ -3988,6 +3988,57 @@ class SessionDB:
 
         return self._execute_write(_do)
 
+    def archive_interrupted_turn(self, session_id: str, user_ordinal: int) -> int:
+        """Soft-archive an unfinished turn so it remains stored and searchable.
+
+        ``user_ordinal`` addresses the active user messages in chronological
+        order. The matching user row and every active row after it are removed
+        from live model context but retained as compacted history for audit and
+        full-text search. This is the non-destructive restart-recovery analogue
+        of ``replace_messages``.
+        """
+        if user_ordinal < 0:
+            raise ValueError("user ordinal must be non-negative")
+
+        def _do(conn):
+            target = conn.execute(
+                "SELECT id FROM messages "
+                "WHERE session_id = ? AND active = 1 AND role = 'user' "
+                "ORDER BY id LIMIT 1 OFFSET ?",
+                (session_id, user_ordinal),
+            ).fetchone()
+            if target is None:
+                raise ValueError(
+                    f"active user ordinal {user_ordinal} not found in session {session_id}"
+                )
+            target_id = target[0]
+            cursor = conn.execute(
+                "UPDATE messages SET active = 0, compacted = 1 "
+                "WHERE session_id = ? AND active = 1 AND id >= ?",
+                (session_id, target_id),
+            )
+            active_rows = conn.execute(
+                "SELECT tool_calls FROM messages WHERE session_id = ? AND active = 1",
+                (session_id,),
+            ).fetchall()
+            tool_call_count = 0
+            for row in active_rows:
+                raw = row[0]
+                if not raw:
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                except (TypeError, ValueError):
+                    parsed = None
+                tool_call_count += len(parsed) if isinstance(parsed, list) else 1
+            conn.execute(
+                "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
+                (len(active_rows), tool_call_count, session_id),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_do)
+
 
     def get_messages(
         self,
