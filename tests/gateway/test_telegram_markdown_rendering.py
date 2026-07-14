@@ -1,5 +1,5 @@
 from gateway.config import PlatformConfig
-from gateway.platforms.telegram import TelegramAdapter, _contains_bidi_mark
+from plugins.platforms.telegram.adapter import TelegramAdapter, _contains_bidi_mark
 
 
 def _adapter() -> TelegramAdapter:

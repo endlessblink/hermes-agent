@@ -199,9 +199,12 @@ def test_tool_handlers_return_json_and_redact_errors(
     assert denied["reason"] == "path_traversal"
 
 
-def test_tool_registration_schema_available():
+def test_tool_registration_schema_available(monkeypatch):
     import tools.vault_tools  # noqa: F401
     from model_tools import get_tool_definitions
+    import tools.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "_check_fn_cached", lambda _fn: True)
 
     definitions = get_tool_definitions(enabled_toolsets=["obsidian_vault"], quiet_mode=True)
     names = {item["function"]["name"] for item in definitions}

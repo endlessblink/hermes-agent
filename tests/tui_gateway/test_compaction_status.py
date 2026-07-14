@@ -45,7 +45,21 @@ def test_compaction_lifecycle_is_retagged(server, monkeypatch):
     events = _capture(server, monkeypatch)
     server._status_update("sid", "lifecycle", COMPACTION_STATUS)
 
-    assert events == [{"kind": "compacting", "text": COMPACTION_STATUS}]
+    assert events == [
+        {
+            "component": "compression",
+            "event": "start",
+            "message": "Context compression started",
+            "severity": "info",
+            "details": {
+                "session_id": "sid",
+                "session_key": "",
+                "cwd": "",
+                "status": COMPACTION_STATUS,
+            },
+        },
+        {"kind": "compacting", "text": COMPACTION_STATUS},
+    ]
 
 
 def test_other_lifecycle_status_stays_lifecycle(server, monkeypatch):

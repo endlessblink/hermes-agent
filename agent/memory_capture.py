@@ -126,12 +126,12 @@ def _statement_facts(messages) -> list[MechanicalFact]:
         mid = _msg_id(msg)
         # Corrections first — highest signal, must not be missed even if the
         # sentence also happens to match a preference pattern.
-        if any(p.search(content) for p in _CORRECTION_RE):
+        if any(p.search(content) for p in _DECISION_RE):
+            facts.append(MechanicalFact(content[:_MAX_CONTENT], "project", mid))
+        elif any(p.search(content) for p in _CORRECTION_RE):
             facts.append(MechanicalFact(content[:_MAX_CONTENT], "correction", mid))
         elif any(p.search(content) for p in _PREFERENCE_RE):
             facts.append(MechanicalFact(content[:_MAX_CONTENT], "user_pref", mid))
-        elif any(p.search(content) for p in _DECISION_RE):
-            facts.append(MechanicalFact(content[:_MAX_CONTENT], "project", mid))
     return facts
 
 
