@@ -1,5 +1,5 @@
 from gateway.run import _extract_choice_prompt_from_text
-from gateway.platforms.telegram import _choice_reply_keyboard_rows
+from plugins.platforms.telegram.adapter import _choice_reply_keyboard_rows
 
 
 HEBREW_CHOICES = [

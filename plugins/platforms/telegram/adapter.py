@@ -301,6 +301,59 @@ def check_telegram_requirements() -> bool:
 # when it appears outside a code span or fenced code block.
 _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')
 
+_BIDI_MARK_RE = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_HEBREW_RE = re.compile("[\u0590-\u05ff]")
+_LTR_TOKEN_RE = re.compile(
+    r"(?<![\w`])(?:/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+|"
+    r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+(?:/[A-Za-z0-9._-]+)*|"
+    r"[A-Za-z][A-Za-z0-9_-]*)(?![\w`])"
+)
+_LTR_PROTECTED_RE = re.compile(
+    r"(```[\s\S]*?```|`[^`\n]+`|\[[^\]]+\]\([^\s)]+\)|"
+    r"https?://[^\s]+|\*\*[^*\n]+\*\*|\*[^*\n]+\*)"
+)
+
+
+def _contains_bidi_mark(text: str) -> bool:
+    """Return whether text contains an invisible bidi control character."""
+    return bool(_BIDI_MARK_RE.search(text))
+
+
+def _wrap_ltr_tokens_on_hebrew_lines(text: str) -> str:
+    """Wrap bare LTR identifiers on Hebrew lines in Markdown code spans.
+
+    Code, links, URLs, and explicit emphasis are preserved.  Code spans give
+    mixed-direction Telegram text a stable visual boundary without injecting
+    invisible bidi controls into content users may copy.
+    """
+    parts = _LTR_PROTECTED_RE.split(text)
+    rendered: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if _LTR_PROTECTED_RE.fullmatch(part):
+            rendered.append(part)
+            continue
+        lines = part.splitlines(keepends=True)
+        for line in lines:
+            if _HEBREW_RE.search(line):
+                line = _LTR_TOKEN_RE.sub(lambda match: f"`{match.group(0)}`", line)
+            rendered.append(line)
+    return "".join(rendered)
+
+
+def _choice_reply_keyboard_rows(choices: list[str]) -> list[list[str]]:
+    """Build exact-text reply rows with explicit aggregate fallbacks."""
+    normalized = [str(choice).strip() for choice in choices if str(choice).strip()]
+    rows = [[choice] for choice in normalized]
+    has_aggregate = any(
+        re.search(r"(?:כל האפשרויות|הכול|הכל|שילוב|כמה אפשרויות)", choice)
+        for choice in normalized
+    )
+    if not has_aggregate:
+        rows.extend([["כל האפשרויות"], ["כמה אפשרויות — אכתוב"]])
+    return rows
+
 
 def _escape_mdv2(text: str) -> str:
     """Escape Telegram MarkdownV2 special characters with a preceding backslash."""
@@ -6556,6 +6609,8 @@ class TelegramAdapter(BasePlatformAdapter):
         # 0) Rewrite GFM-style pipe tables into Telegram-friendly row groups
         #    before the normal MarkdownV2 conversions run.
         text = _wrap_markdown_tables(text)
+        text = _wrap_ltr_tokens_on_hebrew_lines(text)
+        text = re.sub(r"^\s*[-*]\s+", "• ", text, flags=re.MULTILINE)
 
         # 1) Protect fenced code blocks (``` ... ```)
         #    Per MarkdownV2 spec, \ and ` inside pre/code must be escaped.

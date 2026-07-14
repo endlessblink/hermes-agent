@@ -14,27 +14,53 @@ import threading
 import pytest
 import yaml
 
-pytest.importorskip("mcp.server.fastmcp")
+pytest.importorskip("mcp")
 
 
 def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
     profile_home = tmp_path / "profile-home"
     profile_home.mkdir()
     marker = "profile-local-61922"
-    server = tmp_path / "fastmcp_probe.py"
+    server = tmp_path / "mcp_probe.py"
     server.write_text(
         textwrap.dedent(
             f"""
-            from mcp.server.fastmcp import FastMCP
+            import json
+            import sys
 
-            mcp = FastMCP("profileprobe")
-
-            @mcp.tool()
-            def hermes_61922_profile_probe() -> str:
-                return {marker!r}
-
-            if __name__ == "__main__":
-                mcp.run(transport="stdio")
+            for line in sys.stdin:
+                message = json.loads(line)
+                request_id = message.get("id")
+                if request_id is None:
+                    continue
+                method = message.get("method")
+                if method == "initialize":
+                    result = {{
+                        "protocolVersion": message["params"]["protocolVersion"],
+                        "capabilities": {{"tools": {{}}}},
+                        "serverInfo": {{"name": "profileprobe", "version": "1"}},
+                    }}
+                elif method == "tools/list":
+                    result = {{
+                        "tools": [{{
+                            "name": "hermes_61922_profile_probe",
+                            "description": {marker!r},
+                            "inputSchema": {{"type": "object", "properties": {{}}}},
+                        }}]
+                    }}
+                elif method == "ping":
+                    result = {{}}
+                else:
+                    response = {{
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {{"code": -32601, "message": "Method not found"}},
+                    }}
+                    print(json.dumps(response), flush=True)
+                    continue
+                print(json.dumps({{
+                    "jsonrpc": "2.0", "id": request_id, "result": result
+                }}), flush=True)
             """
         ),
         encoding="utf-8",
@@ -58,6 +84,7 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
     for key in list(env):
         if key.endswith("_API_KEY") or key.endswith("_TOKEN"):
             env.pop(key)
+    env["HOME"] = str(tmp_path)
     env["HERMES_HOME"] = str(profile_home)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
     env["HERMES_SLASH_WATCHDOG_GRACE_S"] = "0"
@@ -78,15 +105,16 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
         env=env,
         cwd=tmp_path,
     )
-    output: queue.Queue[str] = queue.Queue()
     try:
         assert proc.stdin is not None
         assert proc.stdout is not None
         stdout = proc.stdout
+        output: queue.Queue[str] = queue.Queue()
         threading.Thread(
             target=lambda: output.put(stdout.readline()),
             daemon=True,
         ).start()
+        expected = "mcp__profileprobe__hermes_61922_profile_probe"
         proc.stdin.write(json.dumps({"id": 1, "command": "/tools"}) + "\n")
         proc.stdin.flush()
         try:
@@ -95,7 +123,7 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
             pytest.fail("slash worker produced no /tools response within 10 seconds")
         response = json.loads(line)
         assert response["ok"] is True
-        assert "mcp__profileprobe__hermes_61922_profile_probe" in response["output"]
+        assert expected in response["output"]
     finally:
         proc.terminate()
         try:

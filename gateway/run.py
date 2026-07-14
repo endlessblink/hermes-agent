@@ -70,6 +70,46 @@ _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _GATEWAY_PROXY_SSE_BUFFER_MAX_CHARS = 16 * 1024 * 1024
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+_CHOICE_OPTION_RE = re.compile(
+    r"^\s*(?:[•*-]\s+|(?:\d+|[\u05d0-\u05ea])[.)]\s+)(.+?)\s*$"
+)
+
+
+def _extract_choice_prompt_from_text(text: str) -> tuple[str, list[str]] | None:
+    """Extract a question followed by two or more labeled choices.
+
+    This intentionally requires question punctuation, so ordinary bulleted
+    explanations are not promoted into an interactive prompt.
+    """
+    lines = str(text or "").splitlines()
+    for start, line in enumerate(lines):
+        match = _CHOICE_OPTION_RE.match(line)
+        if match is None:
+            continue
+
+        choices: list[str] = []
+        end = start
+        while end < len(lines):
+            option_match = _CHOICE_OPTION_RE.match(lines[end])
+            if option_match is None:
+                break
+            choice = option_match.group(1).strip()
+            if choice:
+                choices.append(choice)
+            end += 1
+        if len(choices) < 2:
+            continue
+
+        question_index = start - 1
+        while question_index >= 0 and not lines[question_index].strip():
+            question_index -= 1
+        if question_index < 0:
+            continue
+        question = lines[question_index].strip()
+        if not question.endswith(("?", "？")):
+            continue
+        return question, choices
+    return None
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not gateway chats
