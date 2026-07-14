@@ -4,6 +4,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from tui_gateway import server
 
@@ -290,6 +291,63 @@ def test_flowstate_recovery_launches_absent_app_when_api_is_enabled():
         "outcome": "repair_started",
         "reason": "flowstate_app_absent",
     }
+
+
+def test_flowstate_process_probe_ignores_defunct_and_child_processes(monkeypatch):
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "Z    [flowstate] <defunct>\n"
+                "S    /tmp/.mount_FlowSt123/flowstate --type=zygote --no-sandbox\n"
+                "S    /tmp/.mount_FlowSt123/flowstate --type=renderer --no-sandbox\n"
+            ),
+        ),
+    )
+
+    assert watchdog.flowstate_app_running() is False
+
+
+def test_flowstate_process_probe_accepts_only_a_live_primary_process(monkeypatch):
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="Sl   /tmp/.mount_FlowSt123/flowstate --no-sandbox --ozone-platform=x11\n",
+        ),
+    )
+
+    assert watchdog.flowstate_app_running() is True
+
+
+def test_flowstate_launch_uses_desktop_wrapper_and_current_xauthority(tmp_path, monkeypatch):
+    launcher = tmp_path / ".local" / "bin" / "FlowState-launch.sh"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    xauthority = runtime_dir / "xauth_current"
+    xauthority.write_text("cookie", encoding="utf-8")
+    launched = []
+    monkeypatch.setattr(watchdog.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+    monkeypatch.delenv("XAUTHORITY", raising=False)
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "Popen",
+        lambda command, **kwargs: launched.append((command, kwargs)) or SimpleNamespace(pid=1),
+    )
+
+    assert watchdog.launch_flowstate_app() is True
+    command, kwargs = launched[0]
+    assert command == [str(launcher)]
+    assert kwargs["env"]["DISPLAY"] == ":0"
+    assert kwargs["env"]["XAUTHORITY"] == str(xauthority)
+    assert kwargs["start_new_session"] is True
 
 
 def test_flowstate_recovery_fails_closed_for_running_but_unhealthy_app():

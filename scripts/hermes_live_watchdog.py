@@ -95,26 +95,60 @@ def flowstate_health_ok(port: int) -> bool:
 def flowstate_app_running() -> bool:
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "FlowState.AppImage|/flowstate( |$)"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ["ps", "-eo", "stat=,args="],
+            capture_output=True,
+            text=True,
             timeout=2,
             check=False,
         )
     except Exception:
         return True
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    for raw_line in result.stdout.splitlines():
+        parts = raw_line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        state, command = parts
+        if state.startswith("Z") or "--type=" in command:
+            continue
+        if "FlowState.AppImage" in command:
+            return True
+        if "/tmp/.mount_FlowSt" in command and "/flowstate" in command:
+            return True
+    return False
+
+
+def _current_xauthority(env: dict[str, str]) -> str | None:
+    configured = env.get("XAUTHORITY")
+    if configured and Path(configured).is_file():
+        return configured
+    runtime_dir = Path(env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    try:
+        candidates = [path for path in runtime_dir.glob("xauth_*") if path.is_file()]
+        return str(max(candidates, key=lambda path: path.stat().st_mtime)) if candidates else None
+    except OSError:
+        return None
 
 
 def launch_flowstate_app() -> bool:
-    executable = Path.home() / ".local" / "bin" / "FlowState.AppImage"
-    if not executable.is_file() or not os.access(executable, os.X_OK):
+    bin_dir = Path.home() / ".local" / "bin"
+    wrapper = bin_dir / "FlowState-launch.sh"
+    executable = bin_dir / "FlowState.AppImage"
+    if wrapper.is_file() and os.access(wrapper, os.X_OK):
+        command = [str(wrapper)]
+    elif executable.is_file() and os.access(executable, os.X_OK):
+        command = [str(executable), "--no-sandbox", "--ozone-platform=x11", "--disable-gpu"]
+    else:
         return False
     env = os.environ.copy()
     env.setdefault("DISPLAY", ":0")
+    xauthority = _current_xauthority(env)
+    if xauthority:
+        env["XAUTHORITY"] = xauthority
     try:
         subprocess.Popen(
-            [str(executable), "--no-sandbox", "--ozone-platform=x11", "--disable-gpu"],
+            command,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
