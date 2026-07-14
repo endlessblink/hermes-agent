@@ -4,6 +4,8 @@ import type { SessionCreateResponse } from '@/types/hermes'
 type GatewayRequest = <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
 type ProfileSessionProbe = (sessionId: string, profile: string) => Promise<SessionInfo>
 
+const SAVED_TURN_RECOVERY_COOLDOWN_MS = 5 * 60 * 1_000
+
 export type CompressionContinuationResponse = SessionCreateResponse & {
   continued_from_session_id?: string
   dropoff_message_count?: number
@@ -135,6 +137,10 @@ export function storedSessionIdForCompressionContinuation(parentStoredSessionId:
   return parentStoredSessionId
 }
 
+export function canAutoRecoverSavedTurn(lastAttemptAt: number | undefined, now = Date.now()): boolean {
+  return lastAttemptAt === undefined || now - lastAttemptAt > SAVED_TURN_RECOVERY_COOLDOWN_MS
+}
+
 export function compressionRecoveryTarget(
   parentStoredSessionId: string,
   sessions: SessionInfo[],
@@ -181,6 +187,7 @@ export async function recoverSameSessionFromCompression(
   params: ContinueFromDropoffParams
 ): Promise<CompressionContinuationResponse> {
   const resumed = await requestGateway<CompressionContinuationResponse>('session.resume', {
+    claim_recoverable_turn: true,
     ...(params.profile ? { profile: params.profile } : {}),
     session_id: params.parentSessionId,
     source: 'desktop'

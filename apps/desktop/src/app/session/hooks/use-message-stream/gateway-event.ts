@@ -64,7 +64,10 @@ interface GatewayEventDeps {
   appendAssistantDelta: (sessionId: string, delta: string) => void
   appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean) => void
   completeAssistantMessage: (sessionId: string, text: string) => void
-  continueFromCompressionExhausted?: (sessionId: string, errorMessage: string) => Promise<void> | void
+  continueFromCompressionExhausted?: (
+    sessionId: string,
+    errorMessage: string
+  ) => boolean | Promise<boolean | void> | void
   failAssistantMessage: (sessionId: string, errorMessage: string) => void
   flushQueuedDeltas: (sessionId?: string) => void
   queryClient: QueryClient
@@ -343,7 +346,13 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           const errorMessage = finalText || payload?.message || 'Hermes reported an error'
 
           if (payload?.compression_exhausted || payload?.same_session_recovery) {
-            void continueFromCompressionExhausted?.(sessionId, errorMessage)
+            const recovery = continueFromCompressionExhausted?.(sessionId, errorMessage)
+
+            void Promise.resolve(recovery).then(recovered => {
+              if (recovered === false) {
+                failAssistantMessage(sessionId, errorMessage)
+              }
+            })
 
             updateSessionState(sessionId, state => ({
               ...state,

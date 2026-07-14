@@ -24,7 +24,11 @@ const todo = (id: string, status: TodoItem['status']): TodoItem => ({ content: `
 
 let handleEvent: ((event: RpcEvent) => void) | null = null
 let stateByRuntimeId: Map<string, ClientSessionState>
-let continueFromCompressionExhausted: (sessionId: string, errorMessage: string) => Promise<void>
+
+let continueFromCompressionExhausted: (
+  sessionId: string,
+  errorMessage: string
+) => boolean | Promise<boolean | void> | void
 
 function Harness() {
   const activeSessionIdRef = useRef<string | null>(SID)
@@ -372,6 +376,30 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.busy).toBe(false)
     expect(state?.awaitingResponse).toBe(false)
     expect(state?.messages.at(-1)?.error).toBeUndefined()
+  })
+
+  it('shows the saved turn failure when automatic recovery is refused', async () => {
+    continueFromCompressionExhausted = vi.fn(async () => false)
+    await mountStream()
+
+    act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
+    act(() =>
+      handleEvent!({
+        payload: {
+          same_session_recovery: true,
+          status: 'error',
+          text: 'The saved turn could not be recovered automatically.'
+        },
+        session_id: SID,
+        type: 'message.complete'
+      })
+    )
+
+    await waitFor(() =>
+      expect(stateByRuntimeId.get(SID)?.messages.at(-1)?.error).toBe(
+        'The saved turn could not be recovered automatically.'
+      )
+    )
   })
 
   it('forwards gateway diagnostic events to desktop diagnostics', async () => {

@@ -5,6 +5,7 @@ import type { SessionInfo } from '@/hermes'
 import {
   activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
+  canAutoRecoverSavedTurn,
   compressionRecoveryTarget,
   profileRestoreSessionId,
   recoverSameSessionFromCompression,
@@ -259,7 +260,12 @@ describe('recoverSameSessionFromCompression', () => {
 
     expect(continued.session_id).toBe('recovered-runtime')
     expect(calls.map(call => call.method)).toEqual(['session.resume', 'prompt.submit'])
-    expect(calls[0]?.params).toEqual({ profile: 'bina', session_id: 'parent-stored', source: 'desktop' })
+    expect(calls[0]?.params).toEqual({
+      claim_recoverable_turn: true,
+      profile: 'bina',
+      session_id: 'parent-stored',
+      source: 'desktop'
+    })
     expect(calls[1]?.params).toMatchObject({
       recovery_kind: 'restart_interrupted',
       session_id: 'recovered-runtime',
@@ -278,5 +284,19 @@ describe('recoverSameSessionFromCompression', () => {
     }
 
     await expect(recoverSameSessionFromCompression(requestGateway, params)).rejects.toThrow('provider failed')
+  })
+})
+
+describe('canAutoRecoverSavedTurn', () => {
+  it('allows the first recovery attempt', () => {
+    expect(canAutoRecoverSavedTurn(undefined, 1_000)).toBe(true)
+  })
+
+  it('blocks another automatic attempt during the recovery cooldown', () => {
+    expect(canAutoRecoverSavedTurn(1_000, 1_000 + 5 * 60 * 1_000)).toBe(false)
+  })
+
+  it('allows another attempt after the recovery cooldown', () => {
+    expect(canAutoRecoverSavedTurn(1_000, 1_001 + 5 * 60 * 1_000)).toBe(true)
   })
 })

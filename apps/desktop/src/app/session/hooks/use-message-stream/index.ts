@@ -34,7 +34,10 @@ import { completionErrorText, delegateTaskPayloads, STREAM_DELTA_FLUSH_MS } from
 
 interface MessageStreamOptions {
   activeSessionIdRef: MutableRefObject<string | null>
-  continueFromCompressionExhausted?: (sessionId: string, errorMessage: string) => Promise<void> | void
+  continueFromCompressionExhausted?: (
+    sessionId: string,
+    errorMessage: string
+  ) => boolean | Promise<boolean | void> | void
   hydrateFromStoredSession: (
     attempts?: number,
     storedSessionId?: string | null,

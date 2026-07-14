@@ -7067,6 +7067,9 @@ def _(rid, params: dict) -> dict:
     personal_assistant = is_truthy_value(
         params.get("personal_assistant", False)
     ) or canonical_personal_assistant
+    claim_recoverable_turn = is_truthy_value(
+        params.get("claim_recoverable_turn", False)
+    )
 
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home
@@ -7105,19 +7108,20 @@ def _(rid, params: dict) -> dict:
                     )
                     payload["message_count"] = len(raw_recovery_history)
                     payload["recoverable_turn"] = recoverable_turn
-                    db.patch_working_state(
-                        target,
-                        {
-                            "pending_turn": {
-                                "prompt_hash": hashlib.sha256(
-                                    recoverable_turn["text"].encode("utf-8")
-                                ).hexdigest(),
-                                "claimed_at": time.time(),
-                                "state": "claimed",
-                            }
-                        },
-                        source="live_session_resume_recovery_claim",
-                    )
+                    if claim_recoverable_turn:
+                        db.patch_working_state(
+                            target,
+                            {
+                                "pending_turn": {
+                                    "prompt_hash": hashlib.sha256(
+                                        recoverable_turn["text"].encode("utf-8")
+                                    ).hexdigest(),
+                                    "claimed_at": time.time(),
+                                    "state": "claimed",
+                                }
+                            },
+                            source="live_session_resume_recovery_claim",
+                        )
             except Exception:
                 logger.debug("live pending-turn recovery probe failed", exc_info=True)
         # A lazy watch session never owns a run loop, so its payload's running
@@ -7237,7 +7241,7 @@ def _(rid, params: dict) -> dict:
             recovery_state,
             end_reason=str(found.get("end_reason") or ""),
         )
-        if recoverable_turn is not None:
+        if recoverable_turn is not None and claim_recoverable_turn:
             try:
                 db.patch_working_state(
                     target,

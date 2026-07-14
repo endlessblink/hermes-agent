@@ -128,6 +128,7 @@ import { CommandPalette } from './command-palette'
 import {
   activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
+  canAutoRecoverSavedTurn,
   compressionRecoveryTarget,
   recoverSameSessionFromCompression,
   resolveProfileRestoreSessionId,
@@ -236,6 +237,7 @@ export function DesktopController() {
   const busyRef = useRef(false)
   const creatingSessionRef = useRef(false)
   const messagingTranscriptSignatureRef = useRef(new Map<string, string>())
+  const savedTurnRecoveryAtRef = useRef(new Map<string, number>())
 
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
@@ -757,8 +759,23 @@ export function DesktopController() {
       const parentStoredSessionId = selectedStoredSessionIdRef.current
 
       if (!parentStoredSessionId) {
-        return
+        return false
       }
+
+      const recoveryStartedAt = Date.now()
+      const lastRecoveryAt = savedTurnRecoveryAtRef.current.get(parentStoredSessionId)
+
+      if (!canAutoRecoverSavedTurn(lastRecoveryAt, recoveryStartedAt)) {
+        notify({
+          kind: 'error',
+          title: 'Automatic recovery stopped',
+          message: 'Hermes already retried this saved turn. You can retry it manually without being trapped in a loop.'
+        })
+
+        return false
+      }
+
+      savedTurnRecoveryAtRef.current.set(parentStoredSessionId, recoveryStartedAt)
 
       let nextRuntimeId: string | null = null
       let nextStoredId: string | null = null
@@ -817,6 +834,8 @@ export function DesktopController() {
           nextStoredId
         )
 
+        return true
+
       } catch (err) {
         setBusy(false)
         setAwaitingResponse(false)
@@ -839,6 +858,8 @@ export function DesktopController() {
           title: 'Continuation failed',
           message: err instanceof Error ? err.message : String(err)
         })
+
+        return false
       }
     },
     [

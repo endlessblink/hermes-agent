@@ -1056,6 +1056,18 @@ def test_live_session_resume_rehydrates_saved_pending_turn(monkeypatch, tmp_path
         response = server.handle_request(
             {"id": "1", "method": "session.resume", "params": {"session_id": "stored"}}
         )
+        unclaimed_state = db.get_working_state("stored")
+        claimed_response = server.handle_request(
+            {
+                "id": "2",
+                "method": "session.resume",
+                "params": {
+                    "claim_recoverable_turn": True,
+                    "session_id": "stored",
+                },
+            }
+        )
+        claimed_state = db.get_working_state("stored")
     finally:
         server._sessions.clear()
         server._sessions.update(previous_sessions)
@@ -1067,6 +1079,9 @@ def test_live_session_resume_rehydrates_saved_pending_turn(monkeypatch, tmp_path
         "text": "finish the report",
         "user_ordinal": 0,
     }
+    assert unclaimed_state["pending_turn"]["state"] == "running"
+    assert claimed_response["result"]["recoverable_turn"] == response["result"]["recoverable_turn"]
+    assert claimed_state["pending_turn"]["state"] == "claimed"
     assert live["history"][0]["role"] == "user"
     assert live["history"][0]["content"] == "finish the report"
 
