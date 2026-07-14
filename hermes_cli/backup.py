@@ -52,6 +52,7 @@ _EXCLUDED_DIRS = {
     ".git",             # nested git dirs (profiles shouldn't have these, but safety)
     "node_modules",     # js deps — reinstalled on demand
     "backups",          # prior auto-backups — don't nest backups exponentially
+    "state-snapshots",  # prior point-in-time copies — live state is captured below
     "checkpoints",      # session-local trajectory caches — regenerated per-session,
                         # session-hash-keyed so they don't port to another machine anyway
     # Python dependency trees (plugin / MCP-server venvs under HERMES_HOME) —
