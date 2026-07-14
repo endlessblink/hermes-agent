@@ -100,7 +100,7 @@ def _task_metadata(raw: Any) -> list[dict[str, Any]]:
         return []
     allowed = (
         "id", "title", "status", "priority", "dueDate", "scheduledDate",
-        "scheduledTime", "duration", "progress", "blocked", "blocker",
+        "scheduledTime", "duration", "progress", "blocked", "blocker", "projectId",
     )
     tasks = []
     for value in raw[:100]:
@@ -218,6 +218,40 @@ def _candidate_events(
         emit("material_schedule_drift", {"minutes": after_drift})
 
     old_tasks = {str(task["id"]): task for task in previous.get("tasks", [])}
+
+    project_metadata_was_known = not old_tasks or any(
+        "projectId" in task for task in old_tasks.values()
+    )
+
+    old_uncategorized = {
+        task_id
+        for task_id, task in old_tasks.items()
+        if "projectId" in task and task.get("projectId") in (None, "")
+    }
+    current_uncategorized = [
+        task
+        for task in current.get("tasks", [])
+        if "projectId" in task and task.get("projectId") in (None, "")
+    ]
+    if project_metadata_was_known and len(current_uncategorized) > len(old_uncategorized):
+        added = [
+            {
+                "taskId": str(task["id"]),
+                "title": str(task.get("title") or "")[:200],
+            }
+            for task in current_uncategorized
+            if str(task["id"]) not in old_uncategorized
+        ]
+        emit(
+            "uncategorized_tasks",
+            {
+                "count": len(current_uncategorized),
+                "added": added,
+                "action": "suggest_preview",
+            },
+            subject="flowstate:uncategorized",
+        )
+
     for task in current.get("tasks", []):
         task_id = str(task["id"])
         old = old_tasks.get(task_id)
@@ -735,8 +769,10 @@ def fetch_flowstate_context(request=None) -> dict[str, Any]:
         from tools.flowstate_tool import _request
 
         request = _request
-    context = request("GET", "/api/assistant/context")
-    task_payload = request("GET", "/api/tasks?status=open&limit=25")
+    context = request("GET", "/api/assistant/context", allow_stale_cache=False)
+    task_payload = request(
+        "GET", "/api/tasks?status=open&limit=25", allow_stale_cache=False
+    )
     if not isinstance(context, Mapping) or not isinstance(task_payload, Mapping):
         raise ConnectorResponseError("invalid FlowState response shape")
     tasks = task_payload.get("tasks")

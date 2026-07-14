@@ -87,6 +87,59 @@ def test_high_priority_events_require_an_existing_task_to_transition_into_high(t
     assert event["subject"] == "task:promoted"
 
 
+def test_more_uncategorized_tasks_emit_one_preview_only_organization_candidate(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        {
+            "tasks": [
+                {"id": "assigned", "title": "Already filed", "projectId": "project-1"},
+                {"id": "existing-loose", "title": "Existing loose task", "projectId": None},
+            ]
+        },
+        now=NOW,
+    )
+
+    result = run_monitor_check(
+        tmp_path,
+        {
+            "tasks": [
+                {"id": "assigned", "title": "Already filed", "projectId": "project-1"},
+                {"id": "existing-loose", "title": "Existing loose task", "projectId": None},
+                {"id": "new-loose", "title": "Needs a home", "projectId": None},
+            ]
+        },
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert result == {"status": "checked", "candidate_count": 1}
+    event = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+    assert event is not None
+    assert event["kind"] == "uncategorized_tasks"
+    assert event["subject"] == "flowstate:uncategorized"
+    assert event["evidence"] == {
+        "count": 2,
+        "added": [{"taskId": "new-loose", "title": "Needs a home"}],
+        "action": "suggest_preview",
+    }
+
+
+def test_project_metadata_schema_introduction_does_not_emit_uncategorized_backlog(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        {"tasks": [{"id": "existing", "title": "Existing task"}]},
+        now=NOW,
+    )
+
+    result = run_monitor_check(
+        tmp_path,
+        {"tasks": [{"id": "existing", "title": "Existing task", "projectId": None}]},
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert result == {"status": "checked", "candidate_count": 0}
+    assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16)) is None
+
+
 def test_schedule_drift_emits_on_threshold_crossing_or_material_jump_only(tmp_path):
     run_monitor_check(tmp_path, {"scheduleDriftMinutes": 29}, now=NOW)
 
@@ -466,8 +519,8 @@ def test_cli_notifies_only_when_new_candidates_are_added(tmp_path):
 def test_fetch_flowstate_context_uses_one_testable_seam_and_validates_shapes():
     seen = []
 
-    def request(method, path):
-        seen.append((method, path))
+    def request(method, path, **kwargs):
+        seen.append((method, path, kwargs))
         if path == "/api/assistant/context":
             return {"taskPressure": {"overdue": 1}}
         return {"tasks": [{"id": "task-1", "title": "One"}]}
@@ -477,8 +530,8 @@ def test_fetch_flowstate_context_uses_one_testable_seam_and_validates_shapes():
     assert result["taskPressure"] == {"overdue": 1}
     assert result["tasks"] == [{"id": "task-1", "title": "One"}]
     assert seen == [
-        ("GET", "/api/assistant/context"),
-        ("GET", "/api/tasks?status=open&limit=25"),
+        ("GET", "/api/assistant/context", {"allow_stale_cache": False}),
+        ("GET", "/api/tasks?status=open&limit=25", {"allow_stale_cache": False}),
     ]
 
 

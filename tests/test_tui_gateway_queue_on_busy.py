@@ -87,6 +87,34 @@ def test_busy_typed_reply_resolves_pending_clarify_instead_of_waiting_in_queue()
             server._answers.pop("clarify-1", None)
 
 
+def test_desktop_reconnect_reply_resolves_lost_clarify_without_parallel_turn():
+    event = threading.Event()
+    session = _session(
+        agent=types.SimpleNamespace(platform="desktop"),
+        personal_assistant=False,
+        running=True,
+    )
+    with server._prompt_lock:
+        server._pending["clarify-desktop"] = ("sid", event)
+        server._pending_prompt_payloads["clarify-desktop"] = (
+            "clarify.request",
+            {"question": "Which task?"},
+        )
+    try:
+        response = server._handle_busy_submit(
+            "r1", "sid", session, "Use the first task", "ws-1"
+        )
+
+        assert response["result"]["status"] == "clarify_answered"
+        assert event.is_set()
+        assert session.get("queued_prompt") is None
+    finally:
+        with server._prompt_lock:
+            server._pending.pop("clarify-desktop", None)
+            server._pending_prompt_payloads.pop("clarify-desktop", None)
+            server._answers.pop("clarify-desktop", None)
+
+
 def test_busy_queue_mode_queues_without_interrupting(monkeypatch):
     monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "queue")
     calls = {"interrupt": 0}

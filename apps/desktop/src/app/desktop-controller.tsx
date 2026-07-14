@@ -27,6 +27,7 @@ import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, textPa
 import { storedSessionIdForNotification } from '../lib/session-ids'
 import { isMessagingSource } from '../lib/session-source'
 import { latestSessionTodos } from '../lib/todos'
+import { setClarifyRequest } from '../store/clarify'
 import { setCronFocusJobId } from '../store/cron'
 import { startDailyAssistantScheduler } from '../store/daily-assistant-scheduler'
 import {
@@ -75,6 +76,7 @@ import {
   refreshActiveProfile
 } from '../store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '../store/projects'
+import { clearAllPrompts } from '../store/prompts'
 import { $reviewOpen, REVIEW_PANE_ID } from '../store/review'
 import {
   $activeSessionId,
@@ -125,6 +127,7 @@ import {
 import { ChatSidebar } from './chat/sidebar'
 import { CommandPalette } from './command-palette'
 import {
+  activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
   continueFromDropoffWithStaleRuntimeRecovery,
   resolveProfileRestoreSessionId,
@@ -321,11 +324,42 @@ export function DesktopController() {
         LIVE_BUSY_RECONCILE_TIMEOUT_MS
       )
 
+      const row = activeRuntimeSessionRow(result?.sessions, runtimeSessionId)
       const status = activeRuntimeSessionStatus(result?.sessions, runtimeSessionId)
 
-      if (!shouldSettleBusyFromLiveStatus(status)) {
+      if (status === 'waiting' && row?.pending_prompt?.kind === 'clarify') {
+        const pending = row.pending_prompt
+
+        if (pending.request_id && pending.question) {
+          setClarifyRequest({
+            choices: Array.isArray(pending.choices) ? pending.choices : null,
+            question: pending.question,
+            requestId: pending.request_id,
+            sessionId: runtimeSessionId
+          })
+          updateSessionState(runtimeSessionId, state => ({
+            ...state,
+            awaitingResponse: false,
+            busy: true,
+            needsInput: true
+          }))
+        }
+
         return
       }
+
+      if (!shouldSettleBusyFromLiveStatus(status)) {
+        if (status === 'working') {
+          clearAllPrompts(runtimeSessionId)
+          updateSessionState(runtimeSessionId, state =>
+            state.needsInput ? { ...state, needsInput: false } : state
+          )
+        }
+
+        return
+      }
+
+      clearAllPrompts(runtimeSessionId)
 
       updateSessionState(runtimeSessionId, state =>
         state.busy

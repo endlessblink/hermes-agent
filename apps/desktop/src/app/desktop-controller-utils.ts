@@ -20,6 +20,12 @@ interface ContinueFromDropoffParams {
 
 export interface LiveSessionStatusRow {
   id?: string
+  pending_prompt?: {
+    choices?: string[]
+    kind?: string
+    question?: string
+    request_id?: string
+  }
   session_key?: string
   status?: string
 }
@@ -125,17 +131,24 @@ export function storedSessionIdForCompressionContinuation(parentStoredSessionId:
   return parentStoredSessionId
 }
 
+export function activeRuntimeSessionRow(
+  rows: LiveSessionStatusRow[] | null | undefined,
+  runtimeSessionId: string | null | undefined
+): LiveSessionStatusRow | null {
+  const id = runtimeSessionId?.trim()
+
+  if (!id) {
+    return null
+  }
+
+  return rows?.find(item => item?.id === id) ?? null
+}
+
 export function activeRuntimeSessionStatus(
   rows: LiveSessionStatusRow[] | null | undefined,
   runtimeSessionId: string | null | undefined
 ): string {
-  const id = runtimeSessionId?.trim()
-
-  if (!id) {
-    return ''
-  }
-
-  const row = rows?.find(item => item?.id === id)
+  const row = activeRuntimeSessionRow(rows, runtimeSessionId)
 
   return typeof row?.status === 'string' ? row.status : ''
 }

@@ -368,7 +368,14 @@ PERSONAL_ASSISTANT_GUIDANCE = (
     "review in that home. Include only user-supported evidence and the narrowest useful wording. Do not "
     "silently save an inference as durable truth. Use `personal_assistant_get_state` when current outcomes "
     "or commitments would materially affect your answer. Use `personal_assistant_state_change` only to "
-    "preview a change or to apply the exact scope the user explicitly approved."
+    "preview a change or to apply the exact scope the user explicitly approved. "
+    "When live reads reveal uncategorized or unassigned FlowState tasks, proactively surface a compact, "
+    "preview-only organization proposal instead of ignoring the growing backlog. Suggest likely projects "
+    "or categories with the task IDs and leave uncertain items unchanged. Never assign, move, merge, or "
+    "otherwise mutate those tasks until the user explicitly approves the exact proposal. "
+    "For task inventory, counts, status, project assignment, and schedule state, an exact live FlowState "
+    "read is authoritative. Treat notes, memory, and past sessions as context only; never let them override "
+    "the live state or keep searching them after the live read has answered the question."
 )
 
 DESKTOP_QUESTIONNAIRE_GUIDANCE = (
@@ -389,6 +396,10 @@ DESKTOP_QUESTIONNAIRE_GUIDANCE = (
     "optional work visibly separate. Treat the artifact as a preview: if the user edits or revises it, "
     "regenerate the preview. Call `flowstate_subtask_batch` only after the user explicitly approves the exact preview; "
     "never apply an earlier version or infer approval from editing or submitting a revision."
+    " When the user explicitly asks to render, show, or build an in-chat list, table, card, form, UI, or HTML "
+    "view, fulfill the request in that same response with the closest supported `hermes-ui` artifact. Use "
+    "`task-table` for task lists. A task table needs `type: \"task-table\"`, \"columns\" and \"rows\"; "
+    "each row needs an `id` and `title`. Do not merely offer or promise to render it in a later turn."
     " When asking approval for a plan or mutation that contains assumptions, always include both the explicit "
     "approval control and an optional `long-text` revise field. A revision regenerates the preview and must not "
     "apply the old proposal. Never present a checkbox-only approval when the user may need to correct context."

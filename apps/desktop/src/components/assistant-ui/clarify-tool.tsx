@@ -52,7 +52,13 @@ const letterFor = (index: number): string => String.fromCharCode(65 + index)
 // Choice and "Other" rows share a layout; only color differs. Mirrors a tool
 // row's compact rhythm so the panel reads as part of the transcript.
 const OPTION_ROW_CLASS =
-  'flex w-full items-start gap-2 rounded-[0.25rem] px-1.5 py-1 text-left disabled:cursor-not-allowed disabled:opacity-50'
+  'flex w-full items-start gap-2 rounded-[0.25rem] px-1.5 py-1 text-start disabled:cursor-not-allowed disabled:opacity-50'
+
+const RTL_TEXT_RE = /[\u0590-\u05ff\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/
+
+function clarifyDirection(question: string, choices: readonly string[]): 'ltr' | 'rtl' {
+  return RTL_TEXT_RE.test([question, ...choices].join('\n')) ? 'rtl' : 'ltr'
+}
 
 // Content-sizing freeform field (CSS `field-sizing` — same primitive as the
 // commit bar and search field): starts at one line, grows with what's typed,
@@ -143,6 +149,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   )
 
   const hasChoices = choices.length > 0
+  const direction = clarifyDirection(question, choices)
 
   const [draft, setDraft] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -272,6 +279,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
       <ClarifyShell
         aria-label={copy.loadingQuestion}
         className="grid min-h-12 place-items-center px-2.5 py-3"
+        dir={direction}
         role="status"
       >
         <Loader2 aria-hidden className="size-4 animate-spin text-(--ui-text-tertiary)" />
@@ -290,9 +298,9 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   }
 
   return (
-    <ClarifyShell className="grid gap-2 px-2.5 py-2">
+    <ClarifyShell className="grid gap-2 px-2.5 py-2" dir={direction}>
       <div className="flex items-start gap-2">
-        <span className="flex-1 whitespace-pre-wrap font-medium leading-(--conversation-line-height)" data-bidi-plaintext="">
+        <span className="flex-1 whitespace-pre-wrap font-medium leading-(--conversation-line-height)" data-bidi-plaintext="" dir="auto">
           {question}
         </span>
         <MessageQuestion aria-hidden className="mt-px size-4 shrink-0 text-(--ui-text-tertiary)" />
@@ -315,7 +323,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
                 type="button"
               >
                 <KeyBadge char={letterFor(index)} selected={selectedChoice === choice} />
-                <span className="flex-1 wrap-anywhere" data-bidi-plaintext="">
+                <span className="flex-1 wrap-anywhere" data-bidi-plaintext="" dir="auto">
                   {choice}
                 </span>
               </button>

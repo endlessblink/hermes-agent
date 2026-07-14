@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { SessionInfo } from '@/hermes'
 
 import {
+  activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
   continueFromDropoffWithStaleRuntimeRecovery,
   profileRestoreSessionId,
@@ -45,6 +46,35 @@ describe('storedSessionIdForCompressionContinuation', () => {
 })
 
 describe('live session status reconciliation', () => {
+  it('preserves a pending clarify payload so reconnect can restore the question', () => {
+    expect(
+      activeRuntimeSessionRow(
+        [
+          {
+            id: 'active-runtime',
+            status: 'waiting',
+            pending_prompt: {
+              choices: ['A', 'B'],
+              kind: 'clarify',
+              question: 'Which task first?',
+              request_id: 'clarify-1'
+            }
+          }
+        ],
+        'active-runtime'
+      )
+    ).toEqual({
+      id: 'active-runtime',
+      status: 'waiting',
+      pending_prompt: {
+        choices: ['A', 'B'],
+        kind: 'clarify',
+        question: 'Which task first?',
+        request_id: 'clarify-1'
+      }
+    })
+  })
+
   it('finds the active runtime session status by live id', () => {
     expect(
       activeRuntimeSessionStatus(

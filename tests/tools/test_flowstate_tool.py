@@ -515,6 +515,141 @@ def test_unavailable_error_mentions_local_api(monkeypatch):
     assert "Flow State Local Task API is unavailable" in result["error"]
 
 
+def test_safe_task_read_falls_back_to_profile_scoped_atomic_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(fst, "_flowstate_cache_root", lambda: tmp_path / "profile-a")
+    seen = {}
+    live_payload = {"ok": True, "tasks": [{"id": "task-1", "title": "Plan"}]}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, live_payload),
+    )
+
+    assert json.loads(fst._handle_list_tasks({}))["result"] == live_payload
+    cache_files = list((tmp_path / "profile-a").glob("*.json"))
+    assert len(cache_files) == 1
+    assert list((tmp_path / "profile-a").glob("*.tmp")) == []
+
+    def _offline(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
+    cached = json.loads(fst._handle_list_tasks({}))["result"]
+
+    assert cached["tasks"] == live_payload["tasks"]
+    assert cached["_hermesReadThrough"]["source"] == "profile-cache"
+    assert cached["_hermesReadThrough"]["stale"] is True
+    assert cached["_hermesReadThrough"]["path"] == "/api/tasks"
+    assert cached["_hermesReadThrough"]["cachedAt"].endswith("Z")
+    assert "token-123" not in cache_files[0].read_text(encoding="utf-8")
+
+
+def test_read_through_snapshot_isolated_by_api_identity(monkeypatch, tmp_path):
+    monkeypatch.setattr(fst, "_flowstate_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, {"ok": True, "tasks": [{"id": "private-task"}]}),
+    )
+    assert "result" in json.loads(fst._handle_list_tasks({}))
+
+    monkeypatch.setattr(fst, "_FLOW_STATE_API_TOKEN", "different-user-token")
+
+    def _offline(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert "error" in result
+    assert "private-task" not in json.dumps(result)
+
+
+def test_read_through_snapshot_expires_instead_of_becoming_unbounded_authority(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(fst, "_flowstate_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, {"ok": True, "tasks": [{"id": "stale-task"}]}),
+    )
+    assert "result" in json.loads(fst._handle_list_tasks({}))
+
+    cache_path = next(tmp_path.glob("*.json"))
+    record = json.loads(cache_path.read_text(encoding="utf-8"))
+    record["cachedAt"] = "1970-01-01T00:00:00Z"
+    cache_path.write_text(json.dumps(record), encoding="utf-8")
+
+    def _offline(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert "error" in result
+    assert "stale-task" not in json.dumps(result)
+
+
+def test_authoritative_read_can_bypass_an_available_stale_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(fst, "_flowstate_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, {"ok": True, "taskPressure": {"overdue": 2}}),
+    )
+    assert fst._request("GET", "/api/assistant/context")["ok"] is True
+
+    def _offline(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        fst._request("GET", "/api/assistant/context", allow_stale_cache=False)
+
+
+def test_mutation_never_replays_or_queues_from_read_through_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(fst, "_flowstate_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, {"ok": True, "tasks": [{"id": "task-1"}]}),
+    )
+    assert "result" in json.loads(fst._handle_list_tasks({}))
+    cache_before = {path.name: path.read_bytes() for path in tmp_path.glob("*.json")}
+
+    def _offline(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
+    result = json.loads(fst._handle_create_task({"title": "Must not queue"}))
+
+    assert "error" in result
+    assert "unavailable" in result["error"].lower()
+    assert {path.name: path.read_bytes() for path in tmp_path.glob("*.json")} == cache_before
+    assert list(tmp_path.glob("*queue*")) == []
+
+
+def test_volatile_timer_read_does_not_use_stale_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(fst, "_flowstate_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, {"ok": True, "timer": {"id": "timer-1"}}),
+    )
+    assert "result" in json.loads(fst._handle_current_timer({}))
+    assert list(tmp_path.glob("*.json")) == []
+
+    def _offline(req, timeout):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
+    result = json.loads(fst._handle_current_timer({}))
+
+    assert "error" in result
+    assert "timer-1" not in json.dumps(result)
+
+
 def test_availability_allows_running_default_sidecar_without_token(monkeypatch):
     monkeypatch.setattr(fst, "_FLOW_STATE_API_TOKEN", "")
     seen = {}

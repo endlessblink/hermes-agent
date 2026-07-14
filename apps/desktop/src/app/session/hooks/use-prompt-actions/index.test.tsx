@@ -1012,6 +1012,48 @@ describe('usePromptActions restoreToMessage', () => {
     )
     expect((lastState.messages as { id: string }[]).map(m => m.id)).toEqual(['u1'])
   })
+
+  it('continues from surviving history when compression removed the restore target', async () => {
+    let submitAttempts = 0
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+
+        if (submitAttempts === 1 && params?.truncate_before_user_ordinal !== undefined) {
+          throw new Error('target user message is no longer in session history')
+        }
+      }
+
+      return {} as never
+    })
+
+    let lastState: Record<string, unknown> = {}
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => (lastState = state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        seedMessages={$messages.get()}
+      />
+    )
+
+    await handle!.restoreToMessage('u1')
+
+    expect(submitAttempts).toBe(2)
+    expect(requestGateway).toHaveBeenLastCalledWith(
+      'prompt.submit',
+      {
+        session_id: RUNTIME_SESSION_ID,
+        text: 'first prompt'
+      },
+      1_800_000
+    )
+    expect((lastState.messages as { id: string }[]).map(m => m.id)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    expect(lastState.busy).toBe(true)
+  })
 })
 
 describe('usePromptActions file attachment sync', () => {

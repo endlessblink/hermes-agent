@@ -64,6 +64,11 @@ import {
   withSessionBusyRetry
 } from './utils'
 
+const isStaleRewindTargetError = (error: unknown): boolean =>
+  /no longer in session history|not in session history/i.test(
+    error instanceof Error ? error.message : String(error)
+  )
+
 interface HandoffResult {
   ok: boolean
   error?: string
@@ -964,6 +969,24 @@ export function usePromptActions({
       try {
         await submitRewindPrompt(sessionId, text, truncateBeforeUserOrdinal, busyRef.current || $busy.get())
       } catch (err) {
+        let surfaced = err
+
+        if (truncateBeforeUserOrdinal !== undefined && isStaleRewindTargetError(err)) {
+          try {
+            await submitRewindPrompt(sessionId, text, undefined, false)
+            updateSessionState(sessionId, state => ({
+              ...state,
+              busy: true,
+              awaitingResponse: true,
+              messages
+            }))
+
+            return
+          } catch (retryErr) {
+            surfaced = retryErr
+          }
+        }
+
         // The rewind never landed (e.g. the gateway stayed busy past the retry
         // deadline). Roll the optimistic truncation back to the full original
         // history so the UI doesn't desync from what's persisted — leaving it
@@ -977,7 +1000,7 @@ export function usePromptActions({
           awaitingResponse: false,
           messages
         }))
-        throw err
+        throw surfaced
       }
     },
     [activeSessionId, activeSessionIdRef, busyRef, submitRewindPrompt, updateSessionState]
@@ -1032,9 +1055,6 @@ export function usePromptActions({
         messages: [...state.messages.slice(0, sourceIndex), editedMessage]
       }))
 
-      const isStaleTargetError = (err: unknown) =>
-        /no longer in session history|not in session history/i.test(err instanceof Error ? err.message : String(err))
-
       try {
         await submitRewindPrompt(
           sessionId,
@@ -1045,7 +1065,7 @@ export function usePromptActions({
       } catch (err) {
         let surfaced = err
 
-        if (!isFailedTurn && isStaleTargetError(err)) {
+        if (!isFailedTurn && isStaleRewindTargetError(err)) {
           try {
             // Already interrupted on the first attempt — submit as a plain resend.
             await submitRewindPrompt(sessionId, text, undefined, false)

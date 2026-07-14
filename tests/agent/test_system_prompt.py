@@ -135,6 +135,11 @@ class TestPersonalAssistantGuidance:
         assert "stopping evidence" in stable
         assert "Optional work" in stable
         assert "morning routine" in stable
+        assert "uncategorized or unassigned FlowState tasks" in stable
+        assert "preview-only organization proposal" in stable
+        assert "explicitly approves" in stable
+        assert "exact live FlowState read is authoritative" in stable
+        assert "notes, memory, and past sessions as context only" in stable
 
     def test_absent_without_personal_assistant_tools(self):
         stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_list_tasks"]))
@@ -158,6 +163,11 @@ class TestDesktopQuestionnaireGuidance:
         assert "regenerate the preview" in stable
         assert "exact preview" in stable
         assert "flowstate_subtask_batch" in stable
+        assert "closest supported `hermes-ui` artifact" in stable
+        assert "Use `task-table` for task lists" in stable
+        assert "Do not merely offer or promise" in stable
+        assert '"columns" and "rows"' in stable
+        assert 'each row needs an `id` and `title`' in stable
 
     def test_injected_for_desktop_env(self, monkeypatch):
         monkeypatch.setenv("HERMES_DESKTOP", "1")

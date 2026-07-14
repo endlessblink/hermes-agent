@@ -4192,6 +4192,7 @@ def _start_personal_assistant(rid, params: dict) -> dict:
         runtime_context["assistant_home"] = {
             "outcomes": state.get("outcomes", []),
             "commitments": state.get("commitments", []),
+            "preferences": state.get("preferences", []),
             "capacity": state.get("capacity", {}),
             "focus": state.get("focus"),
             "blockers": state.get("blockers", []),
@@ -6199,9 +6200,13 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any)
     # but a reconnect can lose the one-shot clarify event while the backend is
     # still blocked in ``_block``.  Treat typed text as the answer at the
     # backend seam too, so it cannot sit queued behind a five-minute clarify
-    # timeout.  Scope this recovery to Personal Assistant sessions; ordinary
-    # busy chats retain their configured queue/interrupt behavior.
-    if session.get("personal_assistant") and isinstance(text, str) and text.strip():
+    # timeout.  Apply it to Personal Assistant sessions and desktop chats: both
+    # use a one-shot graphical prompt that can be lost across a reconnect.
+    agent_platform = str(
+        getattr(session.get("agent"), "platform", "") or ""
+    ).strip().lower()
+    recover_lost_clarify = session.get("personal_assistant") or agent_platform == "desktop"
+    if recover_lost_clarify and isinstance(text, str) and text.strip():
         with _prompt_lock:
             for request_id, (owner_sid, event) in list(_pending.items()):
                 pending = _pending_prompt_payloads.get(request_id)
@@ -7231,6 +7236,30 @@ def _session_pending_kind(sid: str) -> str:
     return ""
 
 
+def _session_pending_prompt(sid: str) -> dict | None:
+    """Return the safe, replayable part of a pending interactive prompt."""
+    with _prompt_lock:
+        for rid, (owner_sid, _ev) in list(_pending.items()):
+            if owner_sid != sid:
+                continue
+            event, payload = _pending_prompt_payloads.get(
+                rid, ("input.request", {})
+            )
+            kind = str(event).removesuffix(".request")
+            result = {"kind": kind, "request_id": rid}
+            if kind == "clarify":
+                question = payload.get("question")
+                choices = payload.get("choices")
+                if isinstance(question, str):
+                    result["question"] = question
+                if isinstance(choices, list):
+                    result["choices"] = [
+                        item for item in choices if isinstance(item, str)
+                    ]
+            return result
+    return None
+
+
 def _session_live_status(sid: str, session: dict) -> str:
     if _session_pending_kind(sid):
         return "waiting"
@@ -7274,7 +7303,7 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
         preview = inflight.get("assistant") or inflight.get("user") or preview
         preview = " ".join(str(preview).split())[:160]
     now = time.time()
-    return {
+    result = {
         "current": sid == current_sid,
         "id": sid,
         "last_active": float(session.get("last_active") or session.get("created_at") or now),
@@ -7286,6 +7315,10 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
         "status": status,
         "title": _session_live_title(session, key),
     }
+    pending_prompt = _session_pending_prompt(sid)
+    if pending_prompt is not None:
+        result["pending_prompt"] = pending_prompt
+    return result
 
 
 def _session_lookup_key(session: dict, *, fallback: str = "") -> str:

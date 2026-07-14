@@ -6864,6 +6864,58 @@ def test_session_active_list_reports_live_sessions(monkeypatch):
     assert rows["sid-b"]["preview"] == "writing code"
 
 
+def test_session_active_list_replays_pending_clarify_after_reconnect(monkeypatch):
+    """The live snapshot must carry the one-shot prompt a reconnect missed."""
+
+    previous_sessions = dict(server._sessions)
+    previous_pending = dict(server._pending)
+    previous_payloads = dict(server._pending_prompt_payloads)
+    server._sessions.clear()
+    server._pending.clear()
+    server._pending_prompt_payloads.clear()
+    server._sessions["sid-waiting"] = _session(
+        agent=types.SimpleNamespace(model="model-a"),
+        history=[{"role": "user", "content": "plan my day"}],
+        running=True,
+        session_key="key-waiting",
+    )
+    event = server.threading.Event()
+    server._pending["clarify-1"] = ("sid-waiting", event)
+    server._pending_prompt_payloads["clarify-1"] = (
+        "clarify.request",
+        {
+            "request_id": "clarify-1",
+            "question": "Which task first?",
+            "choices": ["A", "B"],
+        },
+    )
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.active_list",
+                "params": {"current_session_id": "sid-waiting"},
+            }
+        )
+    finally:
+        server._sessions.clear()
+        server._sessions.update(previous_sessions)
+        server._pending.clear()
+        server._pending.update(previous_pending)
+        server._pending_prompt_payloads.clear()
+        server._pending_prompt_payloads.update(previous_payloads)
+
+    row = response["result"]["sessions"][0]
+    assert row["status"] == "waiting"
+    assert row["pending_prompt"] == {
+        "choices": ["A", "B"],
+        "kind": "clarify",
+        "question": "Which task first?",
+        "request_id": "clarify-1",
+    }
+
+
 def test_session_active_list_excludes_finalized_sessions(monkeypatch):
     """#38950: a finalized-but-not-yet-popped session must not inflate the count.
 

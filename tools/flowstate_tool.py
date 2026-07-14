@@ -4,14 +4,17 @@ Registers Hermes-callable tools that talk to Flow State's localhost Local Task
 API. Flow State remains the source of truth; Hermes is only a client.
 """
 
+import hashlib
 import json
 import logging
 import os
 import re
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,8 @@ _CANONICAL_UPDATE_FIELDS = {
     "previewExpiresAt",
 }
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_READ_THROUGH_CACHE_VERSION = 1
+_READ_THROUGH_CACHE_MAX_AGE_SECONDS = 300
 
 
 class _FlowStateApiError(RuntimeError):
@@ -80,6 +85,122 @@ def _headers(token: str = "") -> Dict[str, str]:
     return headers
 
 
+def _flowstate_cache_root() -> Path:
+    """Return the active profile's private FlowState read-through cache."""
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "cache" / "flowstate-read-through"
+
+
+def _cacheable_read_path(path: str) -> bool:
+    parsed_path = urllib.parse.urlsplit(path).path
+    return parsed_path == "/api/assistant/context" or (
+        parsed_path == "/api/tasks"
+        or parsed_path == "/api/tasks/search"
+        or (
+            parsed_path.startswith("/api/tasks/")
+            and not parsed_path.endswith("/done-for-now")
+            and not parsed_path.endswith("/merge")
+            and not parsed_path.endswith("/delete")
+            and not parsed_path.endswith("/batch")
+        )
+    )
+
+
+def _cache_identity(base_url: str, token: str) -> str:
+    # The digest separates profiles/users/API targets without persisting a
+    # credential or exposing one in a filename or tool result.
+    return hashlib.sha256(f"{base_url}\0{token}".encode("utf-8")).hexdigest()
+
+
+def _cache_path(base_url: str, token: str, path: str) -> Path:
+    identity = _cache_identity(base_url, token)
+    request_key = hashlib.sha256(f"{identity}\0{path}".encode("utf-8")).hexdigest()
+    return _flowstate_cache_root() / f"{request_key}.json"
+
+
+def _write_read_snapshot(
+    base_url: str,
+    token: str,
+    path: str,
+    payload: Dict[str, Any],
+) -> None:
+    if not _cacheable_read_path(path):
+        return
+    root = _flowstate_cache_root()
+    target = _cache_path(base_url, token, path)
+    record = {
+        "version": _READ_THROUGH_CACHE_VERSION,
+        "identity": _cache_identity(base_url, token),
+        "path": path,
+        "cachedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "payload": payload,
+    }
+    temp_name: Optional[str] = None
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=root,
+            prefix=f".{target.stem}-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_name = handle.name
+            json.dump(record, handle, ensure_ascii=False, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, target)
+    except (OSError, TypeError, ValueError):
+        logger.warning("FlowState read-through snapshot write failed", exc_info=False)
+        if temp_name:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+
+
+def _read_cached_snapshot(
+    base_url: str,
+    token: str,
+    path: str,
+) -> Optional[Dict[str, Any]]:
+    if not _cacheable_read_path(path):
+        return None
+    try:
+        record = json.loads(_cache_path(base_url, token, path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    expected_identity = _cache_identity(base_url, token)
+    if not (
+        isinstance(record, dict)
+        and record.get("version") == _READ_THROUGH_CACHE_VERSION
+        and record.get("identity") == expected_identity
+        and record.get("path") == path
+        and isinstance(record.get("cachedAt"), str)
+        and isinstance(record.get("payload"), dict)
+    ):
+        return None
+    try:
+        cached_at = datetime.fromisoformat(record["cachedAt"].replace("Z", "+00:00"))
+        age_seconds = (datetime.now(timezone.utc) - cached_at).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if age_seconds < 0 or age_seconds > _READ_THROUGH_CACHE_MAX_AGE_SECONDS:
+        return None
+    payload = dict(record["payload"])
+    payload["_hermesReadThrough"] = {
+        "source": "profile-cache",
+        "stale": True,
+        "cachedAt": record["cachedAt"],
+        "path": path,
+    }
+    return payload
+
+
 def _is_valid_date_or_due_filter(value: str) -> bool:
     return value in _VALID_DUE_FILTERS or bool(_DATE_ONLY_RE.match(value))
 
@@ -113,7 +234,13 @@ def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
     )
 
 
-def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _request(
+    method: str,
+    path: str,
+    body: Optional[Dict[str, Any]] = None,
+    *,
+    allow_stale_cache: bool = True,
+) -> Dict[str, Any]:
     base_url, token = _get_config()
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -128,11 +255,19 @@ def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> D
     except urllib.error.HTTPError as exc:
         raise _compact_http_error(exc) from exc
     except urllib.error.URLError as exc:
+        if method == "GET" and allow_stale_cache:
+            cached = _read_cached_snapshot(base_url, token, path)
+            if cached is not None:
+                return cached
         raise RuntimeError(
             f"Flow State Local Task API is unavailable at {base_url}. "
             "Open Flow State and enable Local Task API, then check FLOW_STATE_API_URL."
         ) from exc
     except TimeoutError as exc:
+        if method == "GET" and allow_stale_cache:
+            cached = _read_cached_snapshot(base_url, token, path)
+            if cached is not None:
+                return cached
         raise RuntimeError(f"Flow State Local Task API timed out at {base_url}.") from exc
 
     try:
@@ -143,6 +278,8 @@ def _request(method: str, path: str, body: Optional[Dict[str, Any]] = None) -> D
         raise RuntimeError(str(payload["error"]))
     if not isinstance(payload, dict):
         raise RuntimeError("Flow State Local Task API returned an unexpected response.")
+    if method == "GET":
+        _write_read_snapshot(base_url, token, path, payload)
     return payload
 
 

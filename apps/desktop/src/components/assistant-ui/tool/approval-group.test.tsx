@@ -108,7 +108,10 @@ function groupedPendingMessage(): ThreadMessage {
   } as ThreadMessage
 }
 
-function groupedPendingClarifyMessage(): ThreadMessage {
+function groupedPendingClarifyMessage(
+  question = 'Pick one',
+  choices: string[] = ['One', 'Two']
+): ThreadMessage {
   return {
     id: 'assistant-group-clarify',
     role: 'assistant',
@@ -133,8 +136,8 @@ function groupedPendingClarifyMessage(): ThreadMessage {
         type: 'tool-call',
         toolCallId: 'clarify-1',
         toolName: 'clarify',
-        args: { choices: ['One', 'Two'], question: 'Pick one' },
-        argsText: JSON.stringify({ choices: ['One', 'Two'], question: 'Pick one' })
+        args: { choices, question },
+        argsText: JSON.stringify({ choices, question })
       }
     ],
     status: { type: 'running' },
@@ -349,6 +352,31 @@ describe('flat tool list approval surfacing', () => {
     expect(screen.getByText('Choose the planning surface')).toBeTruthy()
     expect(screen.getByText('Use FlowState')).toBeTruthy()
     expect(screen.queryByText('Asked a question')).toBeNull()
+  })
+
+  it('uses an RTL question layout for Hebrew while isolating each mixed-language text run', async () => {
+    setClarifyRequest({
+      choices: ['להוסיף אותה לפרויקט FlowState', 'Keep it in Inbox'],
+      question: 'איך תרצה לארגן את המשימה?',
+      requestId: 'clarify-request-hebrew',
+      sessionId: 'sess-1'
+    })
+
+    const choices = ['להוסיף אותה לפרויקט FlowState', 'Keep it in Inbox']
+    const question = 'איך תרצה לארגן את המשימה?'
+    const { container } = render(<GroupHarness message={groupedPendingClarifyMessage(question, choices)} />)
+
+    const shell = await waitFor(() => {
+      const value = container.querySelector('[data-slot="clarify-inline"]')
+      expect(value).not.toBeNull()
+
+      return value
+    })
+
+    expect(shell?.getAttribute('dir')).toBe('rtl')
+    expect(screen.getByText('איך תרצה לארגן את המשימה?').getAttribute('dir')).toBe('auto')
+    expect(screen.getByText('להוסיף אותה לפרויקט FlowState').getAttribute('dir')).toBe('auto')
+    expect(screen.getByText('Keep it in Inbox').getAttribute('dir')).toBe('auto')
   })
 
   it('sends an empty clarify answer when Skip is clicked', async () => {

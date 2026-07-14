@@ -93,6 +93,56 @@ def test_starts_append_episodes_to_one_canonical_session(monkeypatch, tmp_path):
     assert [item["trigger"] for item in state["episodes"]] == ["manual", "review"]
 
 
+def test_start_reinjects_durable_preferences_after_canonical_resume(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    state = store.read()
+    store.patch(
+        "edit",
+        {},
+        expected_version=state["version"],
+        operations=[
+            {
+                "op": "upsert",
+                "section": "preferences",
+                "id": "task-shape",
+                "value": {"title": "להגיש משימות כ־10+2"},
+            }
+        ],
+    )
+    store.set_canonical_session("assistant-home")
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: server._ok(
+            rid,
+            {
+                "session_id": "assistant-live",
+                "session_key": "assistant-home",
+                "message_count": 4,
+            },
+        ),
+    )
+    submitted = []
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, params: submitted.append(params)
+        or server._ok(rid, {"status": "streaming"}),
+    )
+
+    response = server._methods["personal_assistant.start"](
+        "r1", {"trigger": "manual", "userIntent": "continue"}
+    )
+
+    assert response["result"]["status"] == "launched"
+    assert '"preferences": [{"id": "task-shape", "title": "להגיש משימות כ־10+2"}]' in submitted[0]["text"]
+
+
 def test_personal_assistant_prompt_sets_a_fast_foreground_contract():
     import tui_gateway.server as server
 
