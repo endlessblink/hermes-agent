@@ -1,0 +1,9 @@
+name: improvement-supervisor
+version: 1.0.0
+description: "Repair proven-safe runtime defects, then record private evidence-backed improvement incidents. Never edits code or deploys."
+author: "Hermes Agent"
+hooks:
+  - post_tool_call
+  - api_request_error
+  - post_llm_call
+  - on_session_end

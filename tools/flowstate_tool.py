@@ -40,6 +40,11 @@ _CANONICAL_UPDATE_FIELDS = {
     "previewExpiresAt",
 }
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_SCOPE_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
 _READ_THROUGH_CACHE_VERSION = 1
 _READ_THROUGH_CACHE_MAX_AGE_SECONDS = 300
 
@@ -47,10 +52,11 @@ _READ_THROUGH_CACHE_MAX_AGE_SECONDS = 300
 class _FlowStateApiError(RuntimeError):
     """Safe, typed Local Task API error with no request credentials attached."""
 
-    def __init__(self, message: str, *, code: str, status: int):
+    def __init__(self, message: str, *, code: str, status: int, action: Optional[str] = None):
         super().__init__(message)
         self.code = code
         self.status = status
+        self.action = action
 
 
 def _get_env_value(key: str) -> Optional[str]:
@@ -94,6 +100,8 @@ def _flowstate_cache_root() -> Path:
 
 def _cacheable_read_path(path: str) -> bool:
     parsed_path = urllib.parse.urlsplit(path).path
+    if parsed_path == "/api/tasks/inventory":
+        return False
     return parsed_path == "/api/assistant/context" or (
         parsed_path == "/api/tasks"
         or parsed_path == "/api/tasks/search"
@@ -206,6 +214,7 @@ def _is_valid_date_or_due_filter(value: str) -> bool:
 
 
 def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
+    action = None
     try:
         raw = exc.read().decode("utf-8", errors="replace")
         payload = json.loads(raw) if raw else {}
@@ -216,6 +225,11 @@ def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
         else:
             message = error
             code = payload.get("code") if isinstance(payload, dict) else None
+            if not code and error in {
+                "signed_out", "reauth_required", "sidecar_auth_bridge_failed",
+            }:
+                code = error
+        action = payload.get("action") if isinstance(payload, dict) else None
     except Exception:
         message = None
         code = None
@@ -224,13 +238,16 @@ def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
     if exc.code == 401:
         message = "Flow State Local Task API rejected the bearer token. Check FLOW_STATE_API_TOKEN."
         code = code or "unauthorized"
-    if exc.code == 503:
-        message = "Flow State Local Task API is running but is not signed in."
-        code = code or "not_signed_in"
+    if exc.code == 503 and code not in {
+        "signed_out", "reauth_required", "sidecar_auth_bridge_failed",
+    }:
+        message = "Flow State Local Task API is temporarily unavailable."
+        code = code or "flowstate_unavailable"
     return _FlowStateApiError(
         str(message),
         code=str(code or f"http_{exc.code}"),
         status=exc.code,
+        action=str(action) if action else None,
     )
 
 
@@ -296,7 +313,58 @@ def _tool_error(message: str) -> str:
 def _typed_tool_error(exc: _FlowStateApiError) -> str:
     from tools.registry import tool_error
 
-    return tool_error(str(exc), code=exc.code, status=exc.status)
+    extra = {"code": exc.code, "status": exc.status}
+    if exc.action:
+        extra["action"] = exc.action
+    return tool_error(str(exc), **extra)
+
+
+def _validated_inventory_receipt(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Fail closed before a model can treat malformed inventory as exact."""
+    try:
+        captured_at = str(payload["capturedAt"])
+        captured = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        items = payload["items"]
+        page = payload["page"]
+        ids = [item["id"] for item in items]
+        valid = (
+            payload.get("source") == "flowstate"
+            and isinstance(payload.get("scope"), str) and bool(payload["scope"].strip())
+            and payload.get("scopeKind") in {"personal", "workspace"}
+            and bool(_SCOPE_FINGERPRINT_RE.fullmatch(str(payload.get("scopeFingerprint") or "")))
+            and isinstance(payload.get("appVersion"), str) and bool(payload["appVersion"])
+            and captured.utcoffset() is not None
+            and payload.get("fresh") is True
+            and isinstance(payload.get("complete"), bool)
+            and isinstance(items, list)
+            and all(isinstance(item, dict) for item in items)
+            and all(isinstance(task_id, str) and _UUID_RE.fullmatch(task_id) for task_id in ids)
+            and len(ids) == len(set(ids))
+            and isinstance(page, dict)
+            and isinstance(page.get("hasMore"), bool)
+        )
+        if payload.get("complete") is True:
+            valid = valid and (
+                isinstance(payload.get("changeSequence"), int)
+                and not isinstance(payload.get("changeSequence"), bool)
+                and payload["changeSequence"] >= 0
+                and isinstance(payload.get("total"), int)
+                and not isinstance(payload.get("total"), bool)
+                and payload["total"] == len(ids)
+                and page.get("hasMore") is False
+                and page.get("nextCursor") is None
+            )
+        else:
+            valid = valid and "total" not in payload
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise _FlowStateApiError(
+            "Flow State returned an invalid inventory receipt; no exact count is available.",
+            code="invalid_inventory_receipt",
+            status=502,
+        )
+    return payload
 
 
 def _check_flowstate_available() -> bool:
@@ -334,33 +402,41 @@ def _handle_list_tasks(args: dict, **kw) -> str:
     due = args.get("due")
     limit = args.get("limit")
 
-    params = urllib.parse.urlencode(
-        {
-            key: value
-            for key, value in {
-                "status": status,
-                "due": due,
-                "limit": limit,
-            }.items()
-            if value not in (None, "")
-        }
-    )
-
     if status not in (None, "") and status not in _VALID_STATUS_FILTERS:
         return _tool_error("status must be todo|open|done")
     if due not in (None, "") and not _is_valid_date_or_due_filter(str(due)):
         return _tool_error("due must be today|overdue|open|YYYY-MM-DD")
+    use_inventory = status in (None, "", "todo", "open") and due in (None, "")
+    max_limit = 100 if use_inventory else 25
     if limit not in (None, ""):
         try:
             n = int(limit)
         except (TypeError, ValueError):
-            return _tool_error("limit must be an integer from 1 to 25")
-        if n < 1 or n > 25:
-            return _tool_error("limit must be an integer from 1 to 25")
+            return _tool_error(f"limit must be an integer from 1 to {max_limit}")
+        if n < 1 or n > max_limit:
+            return _tool_error(f"limit must be an integer from 1 to {max_limit}")
+        limit = n
 
     try:
+        if use_inventory:
+            params = urllib.parse.urlencode({"limit": limit} if limit not in (None, "") else {})
+            suffix = f"?{params}" if params else ""
+            payload = _request(
+                "GET", f"/api/tasks/inventory{suffix}", allow_stale_cache=False,
+            )
+            return _tool_result(_validated_inventory_receipt(payload))
+        params = urllib.parse.urlencode(
+            {
+                key: value
+                for key, value in {"status": status, "due": due, "limit": limit}.items()
+                if value not in (None, "")
+            }
+        )
         suffix = f"?{params}" if params else ""
         return _tool_result(_request("GET", f"/api/tasks{suffix}"))
+    except _FlowStateApiError as exc:
+        logger.error("flowstate_list_tasks API error: status=%s code=%s", exc.status, exc.code)
+        return _typed_tool_error(exc)
     except Exception as exc:
         logger.error("flowstate_list_tasks error: %s", exc)
         return _tool_error(str(exc))
@@ -368,24 +444,44 @@ def _handle_list_tasks(args: dict, **kw) -> str:
 
 def _handle_search_tasks(args: dict, **kw) -> str:
     query = str(args.get("query") or "").strip()
-    if not query:
-        return _tool_error("query is required")
-
     limit = args.get("limit")
-    params: Dict[str, Any] = {"q": query}
+    params: Dict[str, Any] = {}
     if limit not in (None, ""):
         if isinstance(limit, bool):
-            return _tool_error("limit must be an integer from 1 to 25")
+            return _tool_error("limit must be an integer from 1 to 100")
         try:
             limit = int(limit)
         except (TypeError, ValueError):
-            return _tool_error("limit must be an integer from 1 to 25")
-        if limit < 1 or limit > 25:
-            return _tool_error("limit must be an integer from 1 to 25")
+            return _tool_error("limit must be an integer from 1 to 100")
+        if limit < 1 or limit > 100:
+            return _tool_error("limit must be an integer from 1 to 100")
         params["limit"] = limit
 
+    browse_intent = (
+        not query
+        or query == "*"
+        or (args.get("status") in {"open", "todo"} and len(query) <= 1)
+    )
+    unknown = set(args) - {"query", "limit", "status"}
+    if unknown or ("status" in args and args.get("status") not in {"open", "todo"}):
+        return _tool_error("search accepts only query and limit; use flowstate_list_tasks for filters")
+
+    if browse_intent:
+        path = f"/api/tasks/inventory?{urllib.parse.urlencode(params)}"
+    else:
+        if params.get("limit", 25) > 25:
+            return _tool_error("exact title search limit must be an integer from 1 to 25")
+        params = {"q": query, **params}
+        path = f"/api/tasks/search?{urllib.parse.urlencode(params)}"
+
     try:
-        return _tool_result(_request("GET", f"/api/tasks/search?{urllib.parse.urlencode(params)}"))
+        payload = _request("GET", path, allow_stale_cache=not browse_intent)
+        if browse_intent:
+            payload = _validated_inventory_receipt(payload)
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error("flowstate_search_tasks API error: status=%s code=%s", exc.status, exc.code)
+        return _typed_tool_error(exc)
     except Exception as exc:
         logger.error("flowstate_search_tasks error: %s", exc)
         return _tool_error(str(exc))
@@ -927,17 +1023,20 @@ FLOWSTATE_HEALTH_SCHEMA = {
 FLOWSTATE_LIST_TASKS_SCHEMA = {
     "name": "flowstate_list_tasks",
     "description": (
-        "List Flow State tasks. Flow State is the user's personal task app; "
+        "List Flow State tasks. With no due filter and open/todo status, this returns the complete "
+        "live open-task inventory with explicit completeness, freshness, total, and receipt metadata. "
+        "Flow State is the user's personal task app; "
         "it is not a project name. Use returned task ids for later updates. "
         "Do not answer FlowState list/check requests with Markdown, JSON, or "
         "a hermes-ui/task-triage artifact instead of this tool."
     ),
     "parameters": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "status": {"type": "string", "description": "Optional: todo, open, or done."},
             "due": {"type": "string", "description": "Optional: today, overdue, open, or YYYY-MM-DD."},
-            "limit": {"type": "integer", "description": "Optional result cap, 1-25."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Optional page size, 1-25."},
         },
         "required": [],
     },
@@ -948,13 +1047,19 @@ FLOWSTATE_SEARCH_TASKS_SCHEMA = {
     "name": "flowstate_search_tasks",
     "description": (
         "Search the signed-in user's Flow State tasks by title through the read-only Local Task API. "
+        "If no exact title text is known, omit query to browse open tasks safely instead of guessing. "
+        "Title search is not a wildcard, list-all, counting, or pagination substitute. "
         "Use this before proposing a mutation when the exact task id is not already known. The response "
         "preserves FlowState's exact task identifiers so similar titles are never treated as duplicates."
     ),
     "parameters": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
-            "query": {"type": "string", "description": "Non-empty title search text."},
+            "query": {
+                "type": "string",
+                "description": "Optional exact title search text; omit to browse open tasks.",
+            },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
@@ -962,7 +1067,7 @@ FLOWSTATE_SEARCH_TASKS_SCHEMA = {
                 "description": "Optional result cap, 1-25.",
             },
         },
-        "required": ["query"],
+        "required": [],
     },
 }
 

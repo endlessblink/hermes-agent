@@ -67,6 +67,17 @@ test('buildDesktopBackendEnv extends PYTHONPATH and backend PATH together', () =
   assert.ok(env.PATH.includes('/opt/homebrew/bin'))
 })
 
+test('buildDesktopBackendEnv identifies the Electron parent for orphan cleanup', () => {
+  const env = buildDesktopBackendEnv({
+    desktopParentPid: 4242,
+    currentEnv: { PATH: '/usr/bin' },
+    platform: 'linux',
+    pathModule: path.posix
+  })
+
+  assert.equal(env.HERMES_DESKTOP_PARENT_PID, '4242')
+})
+
 test('normalizeHermesHomeRoot maps profile homes back to the global Hermes root', () => {
   assert.equal(
     normalizeHermesHomeRoot('/Users/test/.hermes/profiles/oracle', { pathModule: path.posix }),

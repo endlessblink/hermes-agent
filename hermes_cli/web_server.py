@@ -154,6 +154,41 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     provider.start(stop_event, interval=interval)
 
 
+def _desktop_parent_pid() -> int | None:
+    try:
+        pid = int(os.environ.get("HERMES_DESKTOP_PARENT_PID") or "")
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 1 else None
+
+
+def _desktop_parent_alive(parent_pid: int) -> bool:
+    if os.getppid() != parent_pid:
+        return False
+    try:
+        os.kill(parent_pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    return True
+
+
+def _run_desktop_parent_watchdog(
+    stop_event: "threading.Event",
+    parent_pid: int,
+    *,
+    parent_alive=None,
+    exit_process=None,
+) -> None:
+    alive = parent_alive or _desktop_parent_alive
+    exit_now = exit_process or os._exit
+    while not stop_event.wait(2.0):
+        if alive(parent_pid):
+            continue
+        _log.warning("Electron parent %s is gone; stopping orphaned Desktop backend", parent_pid)
+        exit_now(0)
+        return
+
+
 def _warm_gateway_module() -> None:
     try:
         import hermes_cli.gateway  # noqa: F401
@@ -194,6 +229,7 @@ async def _lifespan(app: "FastAPI"):
     # dashboard` is unaffected — it relies on its own gateway.
     cron_stop: "threading.Event | None" = None
     cron_thread: "threading.Thread | None" = None
+    parent_watchdog_stop: "threading.Event | None" = None
     if os.getenv("HERMES_DESKTOP") == "1":
         cron_stop = threading.Event()
         cron_thread = threading.Thread(
@@ -203,6 +239,15 @@ async def _lifespan(app: "FastAPI"):
             name="desktop-cron-ticker",
         )
         cron_thread.start()
+        parent_pid = _desktop_parent_pid()
+        if parent_pid is not None:
+            parent_watchdog_stop = threading.Event()
+            threading.Thread(
+                target=_run_desktop_parent_watchdog,
+                args=(parent_watchdog_stop, parent_pid),
+                daemon=True,
+                name="desktop-parent-watchdog",
+            ).start()
 
     # Reap idle/dead keep-alive PTY sessions in the background (30-min TTL).
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))
@@ -214,6 +259,8 @@ async def _lifespan(app: "FastAPI"):
         await PTY_REGISTRY.close_all()
         if cron_stop is not None:
             cron_stop.set()
+        if parent_watchdog_stop is not None:
+            parent_watchdog_stop.set()
 
 
 def _get_event_state(app: "FastAPI"):

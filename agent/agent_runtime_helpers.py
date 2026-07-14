@@ -2722,6 +2722,69 @@ def looks_like_codex_intermediate_ack(
     return user_targets_workspace or assistant_targets_workspace
 
 
+def looks_like_unfinished_action_response(
+    user_message: Any,
+    assistant_content: str,
+) -> bool:
+    """Detect an attempted final answer that explicitly leaves an action undone.
+
+    This is deliberately narrower than general intent classification. It only
+    fires when the latest user message contains a concrete action verb *and*
+    the assistant admits that the requested work was not completed. Explicit
+    permission, policy, or credential blockers remain terminal so the runtime
+    cannot loop forever on work it has no authority to perform.
+    """
+    from agent.codex_responses_adapter import _summarize_user_message_for_log
+
+    user_text = _summarize_user_message_for_log(user_message).strip().lower()
+    assistant_text = (assistant_content or "").strip().lower()
+    if not user_text or not assistant_text:
+        return False
+
+    action_patterns = (
+        r"\b(?:create|make|build|implement|fix|update|write|generate|run|execute|deploy)\b",
+        r"(?:^|\s)(?:צור|תיצור|כתוב|תכתוב|עדכן|תעדכן|תקן|תתקן|בנה|תבנה|הפק|תפיק|הרץ|תריץ|בצע)(?:\s|$)",
+    )
+    if not any(re.search(pattern, user_text) for pattern in action_patterns):
+        return False
+
+    blocker_markers = (
+        "permission denied",
+        "access denied",
+        "denied by policy",
+        "requires approval",
+        "requires authorization",
+        "missing credentials",
+        "missing credential",
+        "חסרה הרשאה",
+        "אין הרשאה",
+        "הגישה נדחתה",
+        "נדרשת הרשאה",
+    )
+    if any(marker in assistant_text for marker in blocker_markers):
+        return False
+
+    unfinished_markers = (
+        "i did not complete",
+        "i didn't complete",
+        "i could not complete",
+        "i couldn't complete",
+        "i was not able to complete",
+        "i wasn't able to complete",
+        "i did not create",
+        "i didn't create",
+        "not completed yet",
+        "not created yet",
+        "לא הספקתי",
+        "לא הצלחתי להשלים",
+        "לא השלמתי",
+        "לא יצרתי",
+        "לא נוצר",
+        "לא הושלם",
+    )
+    return any(marker in assistant_text for marker in unfinished_markers)
+
+
 def intent_ack_continuation_mode(agent) -> str:
     """Classify the resolved intent-ack continuation mode for this turn.
 
@@ -3233,6 +3296,7 @@ __all__ = [
     "repair_tool_call",
     "sanitize_api_messages",
     "looks_like_codex_intermediate_ack",
+    "looks_like_unfinished_action_response",
     "copy_reasoning_content_for_api",
     "cleanup_dead_connections",
     "extract_api_error_context",

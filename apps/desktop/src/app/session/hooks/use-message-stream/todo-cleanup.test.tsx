@@ -248,6 +248,43 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(serializedMessages).not.toContain('late fragment from the retired worker')
   })
 
+  it('ignores tool activity that arrives after a terminal turn event', async () => {
+    await mountStream()
+
+    act(() => handleEvent!({ payload: undefined, session_id: SID, type: 'message.start' }))
+    act(() =>
+      handleEvent!({
+        payload: { status: 'complete', text: 'The requested work is complete.' },
+        session_id: SID,
+        type: 'message.complete'
+      })
+    )
+
+    const messagesAtCompletion = JSON.stringify(stateByRuntimeId.get(SID)?.messages ?? [])
+
+    act(() =>
+      handleEvent!({
+        payload: { name: 'execute_code', tool_id: 'late-tool' },
+        session_id: SID,
+        type: 'tool.start'
+      })
+    )
+    act(() =>
+      handleEvent!({
+        payload: { name: 'execute_code', result: { ok: true }, tool_id: 'late-tool' },
+        session_id: SID,
+        type: 'tool.complete'
+      })
+    )
+
+    const state = stateByRuntimeId.get(SID)
+
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(state?.messages.some(message => message.pending)).toBe(false)
+    expect(JSON.stringify(state?.messages ?? [])).toBe(messagesAtCompletion)
+  })
+
   it('ignores recoverable Codex OAuth refresh errors while the turn is retrying', async () => {
     await mountStream()
 

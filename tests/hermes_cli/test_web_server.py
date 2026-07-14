@@ -7201,3 +7201,21 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
+
+    def test_parent_watchdog_exits_when_electron_parent_is_gone(self):
+        from hermes_cli.web_server import _run_desktop_parent_watchdog
+
+        exits = []
+
+        class _StopAfterOneCheck:
+            def wait(self, _timeout):
+                return False
+
+        _run_desktop_parent_watchdog(
+            _StopAfterOneCheck(),
+            4242,
+            parent_alive=lambda _pid: False,
+            exit_process=exits.append,
+        )
+
+        assert exits == [0]

@@ -466,6 +466,14 @@ class TestSkillView:
         assert "not found" in result["error"].lower()
         assert "available_skills" in result
 
+    def test_repeated_namespace_falls_back_to_bare_local_skill(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "minimalist-ui")
+            raw = skill_view("minimalist-ui:minimalist-ui")
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["name"] == "minimalist-ui"
+
     def test_view_reference_file(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             skill_dir = _make_skill(tmp_path, "my-skill")

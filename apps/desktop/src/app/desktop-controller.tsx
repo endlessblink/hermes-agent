@@ -128,6 +128,7 @@ import { CommandPalette } from './command-palette'
 import {
   activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
+  compressionRecoveryTarget,
   recoverSameSessionFromCompression,
   resolveProfileRestoreSessionId,
   shouldSettleBusyFromLiveStatus,
@@ -749,10 +750,13 @@ export function DesktopController() {
 
   const continueFromCompressionExhausted = useCallback(
     async (failedRuntimeSessionId: string, errorMessage: string) => {
-      const prompt = consumeContinuationPrompt(failedRuntimeSessionId)
+      // The server's durable pending-turn marker is authoritative. The local
+      // prompt cache is only a best-effort cleanup aid and can be empty after a
+      // Desktop restart or a restored chat.
+      consumeContinuationPrompt(failedRuntimeSessionId)
       const parentStoredSessionId = selectedStoredSessionIdRef.current
 
-      if (!prompt || !parentStoredSessionId) {
+      if (!parentStoredSessionId) {
         return
       }
 
@@ -760,12 +764,17 @@ export function DesktopController() {
       let nextStoredId: string | null = null
 
       try {
+        const recoveryTarget = compressionRecoveryTarget(
+          parentStoredSessionId,
+          $sessions.get(),
+          $activeGatewayProfile.get() || undefined
+        )
+
         const continued = await recoverSameSessionFromCompression(requestGateway, {
           cwd: $currentCwd.get().trim() || undefined,
           error: errorMessage,
-          parentSessionId: parentStoredSessionId,
-          pendingPrompt: prompt,
-          profile: $activeGatewayProfile.get() || undefined,
+          parentSessionId: recoveryTarget.sessionId,
+          profile: recoveryTarget.profile,
           runtimeSessionId: failedRuntimeSessionId
         })
 

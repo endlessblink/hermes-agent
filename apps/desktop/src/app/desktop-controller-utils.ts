@@ -18,7 +18,6 @@ interface ContinueFromDropoffParams {
   cwd?: string
   error: string
   parentSessionId: string
-  pendingPrompt: string
   profile?: string
   runtimeSessionId: string
 }
@@ -136,6 +135,21 @@ export function storedSessionIdForCompressionContinuation(parentStoredSessionId:
   return parentStoredSessionId
 }
 
+export function compressionRecoveryTarget(
+  parentStoredSessionId: string,
+  sessions: SessionInfo[],
+  fallbackProfile: string | undefined
+): { profile: string | undefined; sessionId: string } {
+  const saved = sessions
+    .filter(session => session.id === parentStoredSessionId || session._lineage_root_id === parentStoredSessionId)
+    .sort((a, b) => sessionRecency(b) - sessionRecency(a))[0]
+
+  return {
+    profile: saved?.profile || fallbackProfile,
+    sessionId: saved?.id || parentStoredSessionId
+  }
+}
+
 export function activeRuntimeSessionRow(
   rows: LiveSessionStatusRow[] | null | undefined,
   runtimeSessionId: string | null | undefined
@@ -168,7 +182,8 @@ export async function recoverSameSessionFromCompression(
 ): Promise<CompressionContinuationResponse> {
   const resumed = await requestGateway<CompressionContinuationResponse>('session.resume', {
     ...(params.profile ? { profile: params.profile } : {}),
-    session_id: params.parentSessionId
+    session_id: params.parentSessionId,
+    source: 'desktop'
   })
 
   const recoveredRuntimeId = resumed.session_id?.trim()

@@ -122,6 +122,33 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
   })
 }
 
+export function messagesBeforeRecoveryReplay(
+  messages: ChatMessage[],
+  recovery: { kind: 'continue_interrupted' | 'restart_interrupted'; text: string; user_ordinal: number }
+): ChatMessage[] {
+  if (recovery.kind === 'continue_interrupted') {
+    const replayText = recovery.text.trim()
+
+    return messages.filter(message => message.role !== 'user' || chatMessageText(message).trim() !== replayText)
+  }
+
+  let userOrdinal = 0
+
+  for (let index = 0; index < messages.length; index += 1) {
+    if (messages[index]?.role !== 'user') {
+      continue
+    }
+
+    if (userOrdinal === recovery.user_ordinal) {
+      return messages.slice(0, index)
+    }
+
+    userOrdinal += 1
+  }
+
+  return messages
+}
+
 export interface BranchMessage {
   content: string
   role: ChatMessage['role']

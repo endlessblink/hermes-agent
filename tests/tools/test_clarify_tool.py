@@ -295,6 +295,14 @@ class TestClarifySchema:
         choices_spec = CLARIFY_SCHEMA["parameters"]["properties"]["choices"]
         assert choices_spec.get("maxItems") == MAX_CHOICES
 
+    def test_schema_explicitly_describes_single_choice(self):
+        description = CLARIFY_SCHEMA["description"].lower()
+        choices_description = CLARIFY_SCHEMA["parameters"]["properties"]["choices"]["description"].lower()
+
+        assert "single choice" in description
+        assert "exactly one" in choices_description
+        assert "multiple choice" not in description
+
     def test_max_choices_is_four(self):
         """MAX_CHOICES constant should be 4."""
         assert MAX_CHOICES == 4

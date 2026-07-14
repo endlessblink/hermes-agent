@@ -56,6 +56,7 @@ import {
   type BranchMessage,
   chatMessageArraysEquivalent,
   isSessionGoneError,
+  messagesBeforeRecoveryReplay,
   patchSessionWorkspace,
   reconcileResumeMessages,
   resolveStoredSession,
@@ -558,32 +559,39 @@ export function useSessionActions({
 
         resumedRunning = Boolean((resumed as { running?: boolean }).running)
 
+        const recovery = resumed.recoverable_turn
+
+        const validRecovery =
+          (recovery?.kind === 'restart_interrupted' || recovery?.kind === 'continue_interrupted') &&
+          recovery.text.trim() &&
+          Number.isInteger(recovery.user_ordinal) &&
+          recovery.user_ordinal >= 0
+            ? recovery
+            : null
+
+        const visibleMessages = validRecovery
+          ? messagesBeforeRecoveryReplay(messagesForView, validRecovery)
+          : messagesForView
+
         updateSessionState(
           resumed.session_id,
           state => ({
             ...state,
             ...(runtimeInfo ?? {}),
-            messages: messagesForView,
+            messages: visibleMessages,
             busy: resumedRunning,
             awaitingResponse: resumedRunning
           }),
           storedSessionId
         )
 
-        const recovery = resumed.recoverable_turn
-
-        if (
-          (recovery?.kind === 'restart_interrupted' || recovery?.kind === 'continue_interrupted') &&
-          recovery.text.trim() &&
-          Number.isInteger(recovery.user_ordinal) &&
-          recovery.user_ordinal >= 0
-        ) {
+        if (validRecovery) {
           await requestGateway('prompt.submit', {
-            recovery_kind: recovery.kind,
+            recovery_kind: validRecovery.kind,
             session_id: resumed.session_id,
-            text: recovery.text,
-            ...(recovery.kind === 'restart_interrupted' && {
-              truncate_before_user_ordinal: recovery.user_ordinal
+            text: validRecovery.text,
+            ...(validRecovery.kind === 'restart_interrupted' && {
+              truncate_before_user_ordinal: validRecovery.user_ordinal
             })
           })
           resumedRunning = true

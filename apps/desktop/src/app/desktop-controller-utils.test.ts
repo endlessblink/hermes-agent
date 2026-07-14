@@ -5,6 +5,7 @@ import type { SessionInfo } from '@/hermes'
 import {
   activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
+  compressionRecoveryTarget,
   profileRestoreSessionId,
   recoverSameSessionFromCompression,
   resolveProfileRestoreSessionId,
@@ -42,6 +43,39 @@ describe('sameCronSignature', () => {
 describe('storedSessionIdForCompressionContinuation', () => {
   it('keeps the visible conversation anchored to the parent stored session', () => {
     expect(storedSessionIdForCompressionContinuation('parent-stored')).toBe('parent-stored')
+  })
+})
+
+describe('compressionRecoveryTarget', () => {
+  it('uses the saved conversation profile instead of a transient post-relaunch profile', () => {
+    const sessions = [
+      {
+        ...session('life-session', 'Life advice'),
+        last_active: 200,
+        profile: 'life-advisor'
+      }
+    ] as SessionInfo[]
+
+    expect(compressionRecoveryTarget('life-session', sessions, 'default')).toEqual({
+      profile: 'life-advisor',
+      sessionId: 'life-session'
+    })
+  })
+
+  it('follows a visible lineage root to its current saved child', () => {
+    const sessions = [
+      {
+        ...session('current-child', 'Continued chat'),
+        _lineage_root_id: 'old-parent',
+        last_active: 300,
+        profile: 'life-advisor'
+      }
+    ] as SessionInfo[]
+
+    expect(compressionRecoveryTarget('old-parent', sessions, 'default')).toEqual({
+      profile: 'life-advisor',
+      sessionId: 'current-child'
+    })
   })
 })
 
@@ -193,12 +227,11 @@ describe('recoverSameSessionFromCompression', () => {
     cwd: '/work',
     error: 'Context length exceeded',
     parentSessionId: 'parent-stored',
-    pendingPrompt: 'continue',
     profile: 'bina',
     runtimeSessionId: 'stale-runtime'
   }
 
-  it('resumes and replays on the stored parent without creating a child session', async () => {
+  it('resumes from durable server state without requiring a volatile desktop prompt', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
 
     const requestGateway = async <T,>(method: string, requestParams?: Record<string, unknown>): Promise<T> => {
@@ -226,7 +259,7 @@ describe('recoverSameSessionFromCompression', () => {
 
     expect(continued.session_id).toBe('recovered-runtime')
     expect(calls.map(call => call.method)).toEqual(['session.resume', 'prompt.submit'])
-    expect(calls[0]?.params).toEqual({ profile: 'bina', session_id: 'parent-stored' })
+    expect(calls[0]?.params).toEqual({ profile: 'bina', session_id: 'parent-stored', source: 'desktop' })
     expect(calls[1]?.params).toMatchObject({
       recovery_kind: 'restart_interrupted',
       session_id: 'recovered-runtime',

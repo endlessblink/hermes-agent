@@ -6720,6 +6720,28 @@ def test_turn_idle_watchdog_bad_env_uses_default(monkeypatch):
     assert server._turn_idle_watchdog_timeout_seconds() == 90.0
 
 
+def test_compression_completion_restarts_turn_idle_budget(monkeypatch):
+    session = {
+        "history_lock": threading.RLock(),
+        "running": True,
+        "compression_started_at": 100.0,
+        "compression_last_heartbeat_at": 100.0,
+        "compression_status_text": "Summarizing thread",
+        "turn_last_progress_at": 25.0,
+        "turn_last_progress_event": "tool.complete",
+    }
+    monkeypatch.setitem(server._sessions, "sid", session)
+    monkeypatch.setattr(server.time, "time", lambda: 125.0)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_emit_diagnostic_event", lambda *args, **kwargs: None)
+
+    server._status_update("sid", "compression_complete", "Compression complete")
+
+    assert session["turn_last_progress_at"] == 125.0
+    assert session["turn_last_progress_event"] == "compression.complete"
+    assert "compression_started_at" not in session
+
+
 def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):
     calls = {"interrupted": False}
     agent = types.SimpleNamespace(

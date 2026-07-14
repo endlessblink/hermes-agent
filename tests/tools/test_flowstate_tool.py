@@ -36,6 +36,26 @@ def _capturing_urlopen(seen, payload):
     return _urlopen
 
 
+def _inventory_payload(items=None, **overrides):
+    items = items or []
+    payload = {
+        "source": "flowstate",
+        "scope": "all open tasks visible to the authenticated user",
+        "scopeKind": "personal",
+        "scopeFingerprint": "0123456789abcdef",
+        "capturedAt": "2026-07-14T12:00:00.000Z",
+        "appVersion": "1.4.260",
+        "fresh": True,
+        "complete": True,
+        "changeSequence": 7,
+        "total": len(items),
+        "items": items,
+        "page": {"limit": 100, "nextCursor": None, "hasMore": False},
+    }
+    payload.update(overrides)
+    return payload
+
+
 @pytest.fixture(autouse=True)
 def flowstate_config(monkeypatch):
     monkeypatch.setattr(fst, "_FLOW_STATE_API_URL", "http://127.0.0.1:5577")
@@ -56,6 +76,17 @@ def test_list_tasks_sends_query_and_bearer_header(monkeypatch):
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks?status=open&due=today&limit=5"
     assert seen["method"] == "GET"
     assert seen["headers"]["Authorization"] == "Bearer token-123"
+
+
+def test_list_open_tasks_uses_complete_inventory_boundary(monkeypatch):
+    seen = {}
+    payload = _inventory_payload()
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, payload))
+
+    result = json.loads(fst._handle_list_tasks({"status": "open", "limit": 100}))
+
+    assert result["result"] == payload
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/inventory?limit=100"
 
 
 def test_search_tasks_uses_encoded_query_and_preserves_exact_results(monkeypatch):
@@ -85,11 +116,9 @@ def test_search_tasks_uses_encoded_query_and_preserves_exact_results(monkeypatch
 @pytest.mark.parametrize(
     "args,error",
     [
-        ({}, "query is required"),
-        ({"query": "   "}, "query is required"),
-        ({"query": "laundry", "limit": 0}, "limit must be an integer from 1 to 25"),
-        ({"query": "laundry", "limit": 26}, "limit must be an integer from 1 to 25"),
-        ({"query": "laundry", "limit": "many"}, "limit must be an integer from 1 to 25"),
+        ({"query": "laundry", "limit": 0}, "limit must be an integer from 1 to 100"),
+        ({"query": "laundry", "limit": 101}, "limit must be an integer from 1 to 100"),
+        ({"query": "laundry", "limit": "many"}, "limit must be an integer from 1 to 100"),
     ],
 )
 def test_search_tasks_validates_query_and_limit_without_calling_api(args, error):
@@ -97,6 +126,67 @@ def test_search_tasks_validates_query_and_limit_without_calling_api(args, error)
 
     assert result["error"] == error
     assert "token-123" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("query", [None, "", "   ", "*"])
+def test_search_tasks_without_exact_query_browses_open_tasks_instead_of_failing(
+    monkeypatch,
+    query,
+):
+    seen = {}
+    payload = _inventory_payload()
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_search_tasks({"query": query, "limit": 25}))
+
+    assert result["result"] == payload
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/inventory?limit=25"
+
+
+def test_search_tasks_bounds_broad_model_search_without_failing(monkeypatch):
+    seen = {}
+    payload = _inventory_payload()
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, payload))
+
+    result = json.loads(fst._handle_search_tasks({"query": "א", "limit": 50, "status": "open"}))
+
+    assert result["result"] == payload
+    assert seen["url"].endswith("/api/tasks/inventory?limit=50")
+
+
+@pytest.mark.parametrize("code,action", [
+    ("signed_out", None),
+    ("reauth_required", "sign_in_again"),
+    ("sidecar_auth_bridge_failed", "restart_or_sign_in_again"),
+])
+def test_inventory_preserves_typed_auth_failures(monkeypatch, code, action):
+    def _raise(req, timeout):
+        body = {"error": code}
+        if action: body["action"] = action
+        raise urllib.error.HTTPError(
+            req.full_url, 503, "Unavailable", {}, io.BytesIO(json.dumps(body).encode())
+        )
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert result["code"] == code
+    assert result.get("action") == action
+
+
+def test_inventory_rejects_false_complete_receipt(monkeypatch):
+    payload = _inventory_payload(total=61, items=[])
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert result["code"] == "invalid_inventory_receipt"
+    assert "61" not in json.dumps(result)
 
 
 def test_create_task_omits_empty_project_id(monkeypatch):
@@ -515,10 +605,10 @@ def test_unavailable_error_mentions_local_api(monkeypatch):
     assert "Flow State Local Task API is unavailable" in result["error"]
 
 
-def test_safe_task_read_falls_back_to_profile_scoped_atomic_snapshot(monkeypatch, tmp_path):
+def test_complete_inventory_never_falls_back_to_a_cached_scope(monkeypatch, tmp_path):
     monkeypatch.setattr(fst, "_flowstate_cache_root", lambda: tmp_path / "profile-a")
     seen = {}
-    live_payload = {"ok": True, "tasks": [{"id": "task-1", "title": "Plan"}]}
+    live_payload = _inventory_payload()
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
@@ -526,22 +616,15 @@ def test_safe_task_read_falls_back_to_profile_scoped_atomic_snapshot(monkeypatch
     )
 
     assert json.loads(fst._handle_list_tasks({}))["result"] == live_payload
-    cache_files = list((tmp_path / "profile-a").glob("*.json"))
-    assert len(cache_files) == 1
-    assert list((tmp_path / "profile-a").glob("*.tmp")) == []
+    assert list((tmp_path / "profile-a").glob("*.json")) == []
 
     def _offline(req, timeout):
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
-    cached = json.loads(fst._handle_list_tasks({}))["result"]
-
-    assert cached["tasks"] == live_payload["tasks"]
-    assert cached["_hermesReadThrough"]["source"] == "profile-cache"
-    assert cached["_hermesReadThrough"]["stale"] is True
-    assert cached["_hermesReadThrough"]["path"] == "/api/tasks"
-    assert cached["_hermesReadThrough"]["cachedAt"].endswith("Z")
-    assert "token-123" not in cache_files[0].read_text(encoding="utf-8")
+    result = json.loads(fst._handle_list_tasks({}))
+    assert "error" in result
+    assert "result" not in result
 
 
 def test_read_through_snapshot_isolated_by_api_identity(monkeypatch, tmp_path):
@@ -551,7 +634,7 @@ def test_read_through_snapshot_isolated_by_api_identity(monkeypatch, tmp_path):
         "urlopen",
         _capturing_urlopen({}, {"ok": True, "tasks": [{"id": "private-task"}]}),
     )
-    assert "result" in json.loads(fst._handle_list_tasks({}))
+    assert "result" in json.loads(fst._handle_list_tasks({"due": "today"}))
 
     monkeypatch.setattr(fst, "_FLOW_STATE_API_TOKEN", "different-user-token")
 
@@ -559,7 +642,7 @@ def test_read_through_snapshot_isolated_by_api_identity(monkeypatch, tmp_path):
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
-    result = json.loads(fst._handle_list_tasks({}))
+    result = json.loads(fst._handle_list_tasks({"due": "today"}))
 
     assert "error" in result
     assert "private-task" not in json.dumps(result)
@@ -574,7 +657,7 @@ def test_read_through_snapshot_expires_instead_of_becoming_unbounded_authority(
         "urlopen",
         _capturing_urlopen({}, {"ok": True, "tasks": [{"id": "stale-task"}]}),
     )
-    assert "result" in json.loads(fst._handle_list_tasks({}))
+    assert "result" in json.loads(fst._handle_list_tasks({"due": "today"}))
 
     cache_path = next(tmp_path.glob("*.json"))
     record = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -585,7 +668,7 @@ def test_read_through_snapshot_expires_instead_of_becoming_unbounded_authority(
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
-    result = json.loads(fst._handle_list_tasks({}))
+    result = json.loads(fst._handle_list_tasks({"due": "today"}))
 
     assert "error" in result
     assert "stale-task" not in json.dumps(result)
@@ -615,7 +698,7 @@ def test_mutation_never_replays_or_queues_from_read_through_cache(monkeypatch, t
         "urlopen",
         _capturing_urlopen({}, {"ok": True, "tasks": [{"id": "task-1"}]}),
     )
-    assert "result" in json.loads(fst._handle_list_tasks({}))
+    assert "result" in json.loads(fst._handle_list_tasks({"due": "today"}))
     cache_before = {path.name: path.read_bytes() for path in tmp_path.glob("*.json")}
 
     def _offline(req, timeout):
@@ -1206,12 +1289,17 @@ def test_timer_diagnostics_schema_is_read_only_and_verification_focused():
     assert schema["parameters"] == {"type": "object", "properties": {}, "required": []}
 
 
-def test_search_tasks_schema_is_read_only_and_requires_a_query():
+def test_search_tasks_schema_is_read_only_and_supports_safe_browsing():
     schema = fst.FLOWSTATE_SEARCH_TASKS_SCHEMA
 
     assert schema["name"] == "flowstate_search_tasks"
     assert "read-only" in schema["description"].lower()
-    assert schema["parameters"]["required"] == ["query"]
+    assert schema["parameters"]["required"] == []
+    assert "omit" in schema["description"].lower()
+    assert "open tasks" in schema["description"].lower()
+    assert "not" in schema["description"].lower()
+    assert "pagination" in schema["description"].lower()
+    assert schema["parameters"]["properties"]["limit"]["maximum"] == 25
     assert set(schema["parameters"]["properties"]) == {"query", "limit"}
 
 

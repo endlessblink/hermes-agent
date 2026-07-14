@@ -143,6 +143,10 @@ class TestPersonalAssistantGuidance:
         assert "personal_assistant_reconcile_inventory" in stable
         assert "source scope, capture time, stable item IDs" in stable
         assert "do not state or imply an exact combined count" in stable
+        assert "complete=true" in stable
+        assert "fresh=true" in stable
+        assert "Never replace a failed or partial FlowState inventory" in stable
+        assert "terminal code, ledger files, date-range brute force" in stable
 
     def test_absent_without_personal_assistant_tools(self):
         stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_list_tasks"]))

@@ -6,6 +6,7 @@ import type { SessionInfo } from '@/types/hermes'
 import {
   chatMessageArraysEquivalent,
   isSessionGoneError,
+  messagesBeforeRecoveryReplay,
   reconcileResumeMessages,
   sessionMatchesStoredId,
   sessionShouldHaveTranscript,
@@ -85,5 +86,42 @@ describe('reconcileResumeMessages', () => {
 
     const [out] = reconcileResumeMessages(next, previous)
     expect(out.parts.some(p => p.type === 'reasoning')).toBe(true)
+  })
+})
+
+describe('messagesBeforeRecoveryReplay', () => {
+  it('removes the interrupted user turn and its partial tail before replaying it', () => {
+    const messages = [
+      msg('u0', 'user', 'keep me'),
+      msg('a0', 'assistant', 'done'),
+      msg('u1', 'user', 'create the HTML'),
+      msg('a1', 'assistant', 'partial work')
+    ]
+
+    expect(
+      messagesBeforeRecoveryReplay(messages, {
+        kind: 'restart_interrupted',
+        text: 'create the HTML',
+        user_ordinal: 1
+      }).map(message => message.id)
+    ).toEqual(['u0', 'a0'])
+  })
+
+  it('removes an older internal continuation row before adding its replacement', () => {
+    const continuation = 'Continue the interrupted request above using the saved tool results.'
+
+    const messages = [
+      msg('u0', 'user', 'create the HTML'),
+      msg('u1', 'user', continuation),
+      msg('a1', 'assistant', 'partial work')
+    ]
+
+    expect(
+      messagesBeforeRecoveryReplay(messages, {
+        kind: 'continue_interrupted',
+        text: continuation,
+        user_ordinal: 0
+      }).map(message => message.id)
+    ).toEqual(['u0', 'a1'])
   })
 })

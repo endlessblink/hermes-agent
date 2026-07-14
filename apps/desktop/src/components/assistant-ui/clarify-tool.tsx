@@ -90,7 +90,7 @@ function KeyBadge({ char, preview, selected }: { char: string; preview?: boolean
     <Kbd
       className={cn(
         'mt-px',
-        selected && 'border-primary bg-primary text-white shadow-none',
+        selected && 'border-primary bg-primary text-primary-foreground shadow-none',
         !selected && preview && 'border-primary text-primary shadow-none'
       )}
       size="sm"
@@ -102,15 +102,43 @@ function KeyBadge({ char, preview, selected }: { char: string; preview?: boolean
 
 export const ClarifyTool = (props: ToolCallMessagePartProps) => {
   const messageRunning = useAuiState(selectMessageRunning)
+  const messageId = useAuiState(state => state.message.id)
   const request = useStore($clarifyRequest)
   const fromArgs = useMemo(() => readClarifyArgs(props.args), [props.args])
+
+  const latestMatchingClarifyMessageId = useAuiState(state => {
+    if (!request?.question) {
+      return null
+    }
+
+    for (let index = state.thread.messages.length - 1; index >= 0; index -= 1) {
+      const message = state.thread.messages[index]
+      const content = Array.isArray(message.content) ? message.content : []
+
+      const matches = content.some(part => {
+        if (part.type !== 'tool-call' || part.toolName !== 'clarify') {
+          return false
+        }
+
+        return readClarifyArgs(part.args).question === request.question
+      })
+
+      if (matches) {
+        return message.id
+      }
+    }
+
+    return null
+  })
 
   // The gateway can emit tool.complete before the renderer has received or
   // reconciled the matching clarify.request. A pending request in the store is
   // the source of truth for "the agent is blocked on user input"; keep the
   // interactive panel visible until that request is answered or cleared.
   const hasLiveMatchingRequest = Boolean(
-    request && (!fromArgs.question || !request.question || fromArgs.question === request.question)
+    request &&
+      messageId === latestMatchingClarifyMessageId &&
+      (!fromArgs.question || !request.question || fromArgs.question === request.question)
   )
 
   const isPending = (messageRunning && props.result === undefined) || hasLiveMatchingRequest
@@ -311,6 +339,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
           <div className="grid gap-px" role="group">
             {choices.map((choice, index) => (
               <button
+                aria-pressed={selectedChoice === choice}
                 className={cn(
                   OPTION_ROW_CLASS,
                   'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-(--ui-text-primary)',

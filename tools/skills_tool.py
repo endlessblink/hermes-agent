@@ -1057,10 +1057,17 @@ def skill_view(
                     ensure_ascii=False,
                 )
             # Plugin itself not found — fall through to flat-tree scan.
+            # Models occasionally repeat a bare local skill as a qualified
+            # name (``minimalist-ui:minimalist-ui``). With no matching plugin,
+            # that spelling is unambiguous: resolve the installed bare skill
+            # instead of turning a recoverable naming slip into a failed tool
+            # turn and another large-context model call.
+            if namespace == bare:
+                name = bare
             # Categorized local skills also use `category:skill` in config and
             # gateway prompts, so preserve that form and translate it to the
             # on-disk `category/skill` path during the local scan below.
-            if bare:
+            elif bare:
                 local_category_name = f"{namespace}/{bare}"
 
         from agent.skill_utils import get_external_skills_dirs

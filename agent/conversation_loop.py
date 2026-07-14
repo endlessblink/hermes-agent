@@ -623,6 +623,7 @@ def run_conversation(
     interrupted = False
     failed = False
     codex_ack_continuations = 0
+    unfinished_action_continuations = 0
     length_continue_retries = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
@@ -5240,6 +5241,52 @@ def run_conversation(
                     )
                 ):
                     messages.pop()
+
+                try:
+                    from agent.agent_runtime_helpers import (
+                        looks_like_unfinished_action_response,
+                    )
+
+                    _unfinished_action = (
+                        bool(agent.valid_tool_names)
+                        and unfinished_action_continuations < 2
+                        and looks_like_unfinished_action_response(
+                            original_user_message,
+                            final_response,
+                        )
+                    )
+                except Exception:
+                    logger.debug(
+                        "unfinished-action stop-loop check failed",
+                        exc_info=True,
+                    )
+                    _unfinished_action = False
+
+                if _unfinished_action:
+                    unfinished_action_continuations += 1
+                    final_msg["finish_reason"] = "unfinished_action_continue"
+                    final_msg["_unfinished_action_synthetic"] = True
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[System: The latest user asked you to perform an action, "
+                            "but your proposed answer explicitly says it is unfinished. "
+                            "Continue now using the tool results already collected. Do "
+                            "not re-audit, summarize, or stop at preparation. Complete "
+                            "and verify the requested deliverable. If a real permission, "
+                            "policy, or credential blocker remains after a safe attempt, "
+                            "state that exact blocker and its evidence.]"
+                        ),
+                        "_unfinished_action_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    logger.info(
+                        "unfinished action response withheld; continuing (%d/2)",
+                        unfinished_action_continuations,
+                    )
+                    final_response = None
+                    continue
 
                 try:
                     from agent.verification_stop import (

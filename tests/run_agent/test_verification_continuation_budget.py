@@ -5,8 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from run_agent import AIAgent
-
 
 def _response(content="composed report"):
     message = SimpleNamespace(content=content, tool_calls=None)
@@ -20,6 +18,8 @@ def _response(content="composed report"):
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    from run_agent import AIAgent
+
     with (
         patch("run_agent.get_tool_definitions", return_value=[]),
         patch("run_agent.check_toolset_requirements", return_value={}),
@@ -144,3 +144,28 @@ def test_later_verified_response_supersedes_pending_report(agent, monkeypatch):
     assert result["turn_exit_reason"] == "text_response(finish_reason=stop)"
     assert result["completed"] is True
     agent._handle_max_iterations.assert_not_called()
+
+
+def test_explicit_noncompletion_continues_until_requested_action_is_done(agent, monkeypatch):
+    agent.max_iterations = 2
+    agent.iteration_budget.max_total = 2
+    agent.valid_tool_names = ["terminal"]
+    answers = iter([
+        _response("לא הספקתי להשלים את כתיבת קובץ ה-HTML בפועל בסבב הכלים הזה."),
+        _response("יצרתי את קובץ ה-HTML המעודכן ואימתתי שהוא נפתח בהצלחה."),
+    ])
+    agent._interruptible_api_call = lambda _kwargs: next(answers)
+    monkeypatch.setenv("HERMES_VERIFY_ON_STOP", "0")
+
+    with (
+        patch("hermes_cli.plugins.has_hook", return_value=False),
+        patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+    ):
+        result = agent.run_conversation("צור את הHTML המעודכן")
+
+    assert result["final_response"].startswith("יצרתי את קובץ ה-HTML")
+    assert result["completed"] is True
+    assert any(
+        message.get("_unfinished_action_synthetic") is True
+        for message in result["messages"]
+    )

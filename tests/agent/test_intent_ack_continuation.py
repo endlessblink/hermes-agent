@@ -18,6 +18,7 @@ from agent.agent_runtime_helpers import (
     intent_ack_continuation_enabled,
     intent_ack_continuation_mode,
     looks_like_codex_intermediate_ack,
+    looks_like_unfinished_action_response,
 )
 
 
@@ -180,4 +181,32 @@ def test_long_response_is_not_treated_as_an_ack():
     msgs = [{"role": "user", "content": REPRO_USER}]
     assert not looks_like_codex_intermediate_ack(
         a, REPRO_USER, long_ack, msgs, require_workspace=False
+    )
+
+
+def test_hebrew_create_request_does_not_end_on_explicit_noncompletion():
+    assert looks_like_unfinished_action_response(
+        "צור את הHTML המעודכן",
+        "לא הספקתי להשלים את כתיבת קובץ ה-HTML בפועל בסבב הכלים הזה.",
+    )
+
+
+def test_completed_action_response_is_not_retried():
+    assert not looks_like_unfinished_action_response(
+        "צור את הHTML המעודכן",
+        "יצרתי את קובץ ה-HTML המעודכן ואימתתי שהוא נפתח בהצלחה.",
+    )
+
+
+def test_question_with_honest_unknown_is_not_mistaken_for_unfinished_action():
+    assert not looks_like_unfinished_action_response(
+        "למה הקובץ לא נוצר?",
+        "לא הצלחתי לקבוע מהלוגים בלבד; חסרה שגיאת הכתיבה המקורית.",
+    )
+
+
+def test_real_external_blocker_is_not_retried_forever():
+    assert not looks_like_unfinished_action_response(
+        "deploy the update",
+        "I could not deploy because production access was denied by policy.",
     )

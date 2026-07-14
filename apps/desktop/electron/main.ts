@@ -1611,6 +1611,7 @@ function unwrapWindowsVenvHermesCommand(command, backendArgs) {
     args: ['-m', 'hermes_cli.main', ...backendArgs],
     bootstrap: false,
     env: buildDesktopBackendEnv({
+      desktopParentPid: process.pid,
       hermesHome: HERMES_HOME,
       pythonPathEntries: [...(directoryExists(root) ? [root] : []), ...getVenvSitePackagesEntries(venvRoot)],
       venvRoot
@@ -3469,6 +3470,7 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
     command,
     args: ['-m', 'hermes_cli.main', ...backendArgs],
     env: buildDesktopBackendEnv({
+      desktopParentPid: process.pid,
       hermesHome: HERMES_HOME,
       pythonPathEntries: [root, ...getVenvSitePackagesEntries(venvRoot)],
       venvRoot
@@ -3493,6 +3495,7 @@ function createActiveBackend(backendArgs) {
     command,
     args: ['-m', 'hermes_cli.main', ...backendArgs],
     env: buildDesktopBackendEnv({
+      desktopParentPid: process.pid,
       hermesHome: HERMES_HOME,
       pythonPathEntries: [ACTIVE_HERMES_ROOT, ...getVenvSitePackagesEntries(VENV_ROOT)],
       venvRoot: VENV_ROOT

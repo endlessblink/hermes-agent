@@ -263,9 +263,9 @@ function failedOnlyMessage(): ThreadMessage {
   } as ThreadMessage
 }
 
-function GroupHarness({ message }: { message: ThreadMessage }) {
+function GroupHarness({ message, messages = [message] }: { message: ThreadMessage; messages?: ThreadMessage[] }) {
   const runtime = useExternalStoreRuntime<ThreadMessage>({
-    messages: [message],
+    messages,
     isRunning: message.status?.type === 'running',
     onNew: async () => {}
   })
@@ -352,6 +352,60 @@ describe('flat tool list approval surfacing', () => {
     expect(screen.getByText('Choose the planning surface')).toBeTruthy()
     expect(screen.getByText('Use FlowState')).toBeTruthy()
     expect(screen.queryByText('Asked a question')).toBeNull()
+  })
+
+  it('revives only the latest matching clarify card after an interrupted turn', async () => {
+    setClarifyRequest({
+      choices: ['One', 'Two'],
+      question: 'Pick one',
+      requestId: 'clarify-request-recovered',
+      sessionId: 'sess-1'
+    })
+
+    const older = {
+      ...completedClarifyWithPendingRequestMessage(),
+      id: 'assistant-older-clarify',
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'clarify-older',
+          toolName: 'clarify',
+          args: { choices: ['One', 'Two'], question: 'Pick one' },
+          argsText: JSON.stringify({ choices: ['One', 'Two'], question: 'Pick one' }),
+          result: { choices_offered: ['One', 'Two'], question: 'Pick one', user_response: '' }
+        }
+      ]
+    } as ThreadMessage
+
+    const latest = { ...older, id: 'assistant-latest-clarify' }
+
+    const { container } = render(<GroupHarness message={latest} messages={[older, latest]} />)
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('[data-slot="clarify-inline"]')).toHaveLength(1)
+    })
+  })
+
+  it('exposes a single selected option with readable theme contrast', async () => {
+    setClarifyRequest({
+      choices: ['One', 'Two'],
+      question: 'Pick one',
+      requestId: 'clarify-request-selection',
+      sessionId: 'sess-1'
+    })
+
+    render(<GroupHarness message={groupedPendingClarifyMessage()} />)
+
+    const one = await screen.findByRole('button', { name: /One/ })
+    const two = screen.getByRole('button', { name: /Two/ })
+    fireEvent.click(one)
+    fireEvent.click(two)
+
+    expect(one.getAttribute('aria-pressed')).toBe('false')
+    expect(two.getAttribute('aria-pressed')).toBe('true')
+    const selectedBadge = two.querySelector('kbd')
+    expect(selectedBadge?.className).toContain('text-primary-foreground')
+    expect(selectedBadge?.className).not.toContain('text-white')
   })
 
   it('uses an RTL question layout for Hebrew while isolating each mixed-language text run', async () => {

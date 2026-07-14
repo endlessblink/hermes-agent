@@ -1218,6 +1218,11 @@ def _status_update(sid: str, kind: str, text: str | None = None):
                     "elapsed_seconds": round(time.time() - float(started_at), 3),
                 },
             )
+        # Compression is real forward progress. Restart the turn-idle budget
+        # before exposing the post-compression model call; otherwise an old
+        # pre-compression tool timestamp can make the watchdog fire
+        # immediately after a successful summary.
+        _mark_turn_progress(sid, "compression.complete")
         _clear_compression_tracking(session)
         out_kind = "status"
     if out_kind == "compacting":

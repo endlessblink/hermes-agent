@@ -436,6 +436,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           return
         }
 
+        const sessionState = sessionStateByRuntimeIdRef.current.get(sessionId)
+
+        // A retired worker can finish after its terminal event. Never let its
+        // late tool activity create a fresh pending assistant row that keeps a
+        // completed chat visually stuck on "Thinking".
+        if (sessionState && !sessionState.busy && !sessionState.awaitingResponse) {
+          return
+        }
+
         flushQueuedDeltas(sessionId)
         upsertToolCall(sessionId, toTodoPayload(payload) ?? payload, 'running', event.type)
 
@@ -444,10 +453,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
       } else if (event.type === 'tool.complete') {
         if (sessionId) {
-          flushQueuedDeltas(sessionId)
-          upsertToolCall(sessionId, toTodoPayload(payload) ?? payload, 'complete', event.type)
+          const sessionState = sessionStateByRuntimeIdRef.current.get(sessionId)
+          const acceptsTurnActivity = !sessionState || sessionState.busy || sessionState.awaitingResponse
 
-          if (isActiveEvent) {
+          if (acceptsTurnActivity) {
+            flushQueuedDeltas(sessionId)
+            upsertToolCall(sessionId, toTodoPayload(payload) ?? payload, 'complete', event.type)
+          }
+
+          if (isActiveEvent && acceptsTurnActivity) {
             setPetActivity({ toolRunning: false })
           }
 

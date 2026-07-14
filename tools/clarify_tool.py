@@ -155,7 +155,7 @@ CLARIFY_SCHEMA = {
     "description": (
         "Ask the user a question when you need clarification, feedback, or a "
         "decision before proceeding. Supports two modes:\n\n"
-        "1. **Multiple choice** — provide up to 4 choices. The user picks one "
+        "1. **Single choice** — provide up to 4 choices. The user picks exactly one "
         "or types their own answer via a 5th 'Other' option.\n"
         "2. **Open-ended** — omit choices entirely. The user types a free-form "
         "response.\n\n"
@@ -192,9 +192,11 @@ CLARIFY_SCHEMA = {
                 "description": (
                     "REQUIRED whenever you are presenting selectable options: "
                     "each distinct option is its own array element (up to 4). "
-                    "The UI renders these as pickable rows and auto-appends an "
+                    "The UI renders these as pickable rows, accepts exactly one "
+                    "selected answer, and auto-appends an "
                     "'Other (type your answer)' option. Omit this parameter "
-                    "entirely ONLY for a genuinely open-ended free-text question."
+                    "entirely ONLY for a genuinely open-ended free-text question. "
+                    "Never tell the user they can select several or multiple options."
                 ),
             },
         },
