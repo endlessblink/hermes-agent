@@ -714,6 +714,7 @@ def _sanitize_connector_failure(value: Mapping[str, Any] | None) -> dict[str, st
     safe_details = {
         "authentication": "FlowState rejected monitor authentication.",
         "not_signed_in": "FlowState is running without a signed-in user.",
+        "signed_out": "FlowState is signed out.",
         "timeout": "FlowState did not respond before the monitor timeout.",
         "connection_refused": "The FlowState Local Task API refused the connection.",
         "invalid_response": "FlowState returned a response the monitor could not validate.",
@@ -732,6 +733,10 @@ def classify_connector_failure(exc: BaseException) -> dict[str, str]:
     if status == 401 or code in {"unauthorized", "authentication", "invalid_token"}:
         return _sanitize_connector_failure(
             {"category": "authentication", "code": code or "unauthorized"}
+        )
+    if code == "signed_out":
+        return _sanitize_connector_failure(
+            {"category": "signed_out", "code": "signed_out"}
         )
     if status == 503 or code == "not_signed_in":
         return _sanitize_connector_failure(
@@ -762,6 +767,32 @@ def classify_connector_failure(exc: BaseException) -> dict[str, str]:
             {"category": "invalid_response", "code": "invalid_shape"}
         )
     return _sanitize_connector_failure({"category": "unavailable", "code": "connector_error"})
+
+
+def _is_temporary_connector_failure(exc: BaseException) -> bool:
+    """Separate expected connector downtime from monitor implementation bugs."""
+
+    if getattr(exc, "status", None) in {401, 503}:
+        return True
+    if str(getattr(exc, "code", "") or "").lower() in {
+        "unauthorized",
+        "authentication",
+        "invalid_token",
+        "not_signed_in",
+        "signed_out",
+    }:
+        return True
+    if isinstance(
+        exc,
+        (TimeoutError, urllib.error.URLError, json.JSONDecodeError, ConnectorResponseError),
+    ):
+        return True
+    cause = getattr(exc, "__cause__", None)
+    return (
+        isinstance(cause, BaseException)
+        and cause is not exc
+        and _is_temporary_connector_failure(cause)
+    )
 
 
 def fetch_flowstate_context(request=None) -> dict[str, Any]:
@@ -797,7 +828,7 @@ def main(argv: list[str] | None = None, *, fetch_context=None) -> int:
             connector_failure=failure,
         )
         print(json.dumps({"status": "offline", "connector_error": failure}), file=sys.stderr)
-        return 1
+        return 75 if _is_temporary_connector_failure(exc) else 1
     result = run_cli_monitor_check(args.profile_home, context)
     return 0 if result["status"] == "checked" else 1
 

@@ -63,6 +63,7 @@ import {
   shouldRemoveAppBundle,
   uninstallArgsForMode
 } from './desktop-uninstall'
+import { createDiagnosticsRecorder } from './diagnostics'
 import { installEmbedReferer } from './embed-referer'
 import { readDirForIpc } from './fs-read-dir'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
@@ -93,8 +94,6 @@ import {
   resolveTimeoutMs,
   TEXT_PREVIEW_SOURCE_MAX_BYTES
 } from './hardening'
-import { createDiagnosticsRecorder } from './diagnostics'
-import { dirtyUpdateResult, isDirtyStatus } from './update-dirty'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import {
@@ -106,6 +105,7 @@ import {
 } from './session-windows'
 import { nativeOverlayWidth as computeNativeOverlayWidth, macTitleBarOverlayHeight } from './titlebar-overlay-width'
 import { resolveBehindCount, shouldCountCommits } from './update-count'
+import { dirtyUpdateResult, isDirtyStatus } from './update-dirty'
 import { readLiveUpdateMarker, writeUpdateMarker } from './update-marker'
 import { runRebuildWithRetry } from './update-rebuild'
 import {
@@ -131,7 +131,9 @@ import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './work
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 
 function guardStandardStream(stream: any, name: string) {
-  if (!stream || typeof stream.on !== 'function') return
+  if (!stream || typeof stream.on !== 'function') {
+    return
+  }
 
   stream.on('error', (error: any) => {
     if (error && error.code === 'EPIPE') {
@@ -1098,7 +1100,9 @@ function markRendererHeartbeat(details = {}) {
 }
 
 function startRendererHeartbeatMonitor() {
-  if (rendererHeartbeatTimer) return
+  if (rendererHeartbeatTimer) {
+    return
+  }
   rendererHeartbeatTimer = setInterval(() => {
     if (!mainWindow || mainWindow.isDestroyed() || lastRendererHeartbeatAt === null) {
       return
@@ -1118,7 +1122,9 @@ function startRendererHeartbeatMonitor() {
       details: { silenceMs }
     })
   }, 10_000)
-  if (typeof rendererHeartbeatTimer.unref === 'function') rendererHeartbeatTimer.unref()
+  if (typeof rendererHeartbeatTimer.unref === 'function') {
+    rendererHeartbeatTimer.unref()
+  }
 }
 
 function openExternalUrl(rawUrl) {
@@ -2392,11 +2398,17 @@ let updateInFlight = false
 let isQuittingForHandoff = false
 
 async function dirtyUpdateGuard(updateRoot) {
-  if (!directoryExists(path.join(updateRoot, '.git'))) return null
+  if (!directoryExists(path.join(updateRoot, '.git'))) {
+    return null
+  }
 
   const dirty = await runGit(['status', '--porcelain'], { cwd: updateRoot })
-  if (dirty.code !== 0) return null
-  if (!isDirtyStatus(dirty.stdout)) return null
+  if (dirty.code !== 0) {
+    return null
+  }
+  if (!isDirtyStatus(dirty.stdout)) {
+    return null
+  }
 
   return dirtyUpdateResult(updateRoot)
 }
@@ -3914,8 +3926,12 @@ function isHermesBackendTimeout(error: any) {
 
 function shouldRetryLocalPooledBackend(profile: any, connection: any, error: any) {
   const key = profile && String(profile).trim() ? String(profile).trim() : null
-  if (!key || key === primaryProfileKey()) return false
-  if (!isHermesBackendTimeout(error)) return false
+  if (!key || key === primaryProfileKey()) {
+    return false
+  }
+  if (!isHermesBackendTimeout(error)) {
+    return false
+  }
   return connection?.mode === 'local' && connection?.source === 'local'
 }
 

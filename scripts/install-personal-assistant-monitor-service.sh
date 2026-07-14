@@ -58,6 +58,7 @@ Description=Hermes personal assistant FlowState monitor
 [Service]
 Type=oneshot
 TimeoutStartSec=45s
+SuccessExitStatus=75
 WorkingDirectory=$escaped_repo
 ExecStart="$escaped_python" -m agent.personal_assistant_monitor --profile-home "$escaped_profile"
 EOF

@@ -6850,7 +6850,18 @@ def test_turn_idle_watchdog_timeout_marks_turn_terminal(monkeypatch):
     assert complete[-1][2]["retryable"] is True
 
 
-def test_turn_idle_watchdog_does_not_interrupt_approval_wait(monkeypatch):
+@pytest.mark.parametrize(
+    "wait_event",
+    [
+        "approval.request",
+        "clarify.request",
+        "terminal.read.request",
+        "sudo.request",
+        "secret.request",
+        "input.request",
+    ],
+)
+def test_turn_idle_watchdog_does_not_interrupt_user_wait(monkeypatch, wait_event):
     calls = {"interrupted": False}
     agent = types.SimpleNamespace(
         interrupt=lambda: calls.__setitem__("interrupted", True),
@@ -6859,7 +6870,7 @@ def test_turn_idle_watchdog_does_not_interrupt_approval_wait(monkeypatch):
     session = _session(agent=agent, running=True, cwd="/tmp/project")
     session["turn_started_at"] = time.time() - 180
     session["turn_last_progress_at"] = time.time() - 150
-    session["turn_last_progress_event"] = "approval.request"
+    session["turn_last_progress_event"] = wait_event
     server._sessions["sid"] = session
 
     emitted: list[tuple[str, str, dict]] = []
@@ -6946,6 +6957,47 @@ def test_emit_writes_turn_watchdog_ledger(monkeypatch, tmp_path):
     assert rows[-1]["personal_assistant"] is True
     assert rows[-1]["session_key"] == "key-123"
     assert rows[-1]["cwd"] == "/tmp/project"
+
+
+def test_turn_watchdog_ledger_records_turn_and_producer_identity(monkeypatch, tmp_path):
+    session = _session(running=True)
+    session["watchdog_turn_id"] = "turn-123"
+    server._sessions["sid"] = session
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    monkeypatch.setattr(server, "_process_start_ticks", lambda _pid: 987)
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+
+    try:
+        server._emit("message.start", "sid")
+    finally:
+        server._sessions.pop("sid", None)
+
+    row = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["turn_id"] == "turn-123"
+    assert row["producer_pid"] == os.getpid()
+    assert row["producer_start_ticks"] == 987
+
+
+def test_blocking_prompt_records_wait_and_explicit_resume(monkeypatch, tmp_path):
+    session = _session(running=True)
+    session["watchdog_turn_id"] = "turn-wait"
+    server._sessions["sid"] = session
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    monkeypatch.setattr(threading.Event, "wait", lambda _self, timeout=None: True)
+
+    try:
+        server._block("clarify.request", "sid", {"question": "safe"})
+    finally:
+        server._sessions.pop("sid", None)
+
+    events = [
+        json.loads(line)["event"]
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events == ["clarify.request", "clarify.resume"]
 
 
 def test_turn_watchdog_ledger_preserves_safe_error_details(monkeypatch, tmp_path):

@@ -774,7 +774,9 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
 
         runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
-        auth_fn = getattr(runner, "_is_user_authorized", None)
+        auth_fn = getattr(runner, "_is_user_authorized_for_inbound_source", None)
+        if not callable(auth_fn):
+            auth_fn = getattr(runner, "_is_user_authorized", None)
         if callable(auth_fn):
             try:
                 from gateway.session import SessionSource
@@ -929,7 +931,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 pass
 
         runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
-        auth_fn = getattr(runner, "_is_user_authorized", None)
+        auth_fn = getattr(runner, "_is_user_authorized_for_inbound_source", None)
+        if not callable(auth_fn):
+            auth_fn = getattr(runner, "_is_user_authorized", None)
         if callable(auth_fn):
             # Only make an early decision via the runner when an allowlist
             # actually exists; otherwise unknown DMs must reach the pairing

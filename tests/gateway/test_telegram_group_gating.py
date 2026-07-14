@@ -36,6 +36,10 @@ def _make_adapter(
         extra["exclusive_bot_mentions"] = exclusive_bot_mentions
     if ignored_threads is not None:
         extra["ignored_threads"] = ignored_threads
+    else:
+        # Keep unit tests isolated from TELEGRAM_IGNORED_THREADS populated by
+        # gateway.run's live-config bridge during order-dependent suite runs.
+        extra["ignored_threads"] = []
     if allowed_topics is not None:
         extra["allowed_topics"] = allowed_topics
     else:

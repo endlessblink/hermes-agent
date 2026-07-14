@@ -12,7 +12,9 @@ function diagnosticsBackupPath(filePath, n) {
 }
 
 function planDiagnosticsRotation(filePath, size, maxBytes = DEFAULT_MAX_BYTES, backupCount = DEFAULT_BACKUP_COUNT) {
-  if (size < maxBytes) return []
+  if (size < maxBytes) {
+    return []
+  }
   const ops = [['rm', diagnosticsBackupPath(filePath, backupCount)]]
   for (let i = backupCount - 1; i >= 1; i--) {
     ops.push(['mv', diagnosticsBackupPath(filePath, i), diagnosticsBackupPath(filePath, i + 1)])
@@ -79,8 +81,11 @@ function createDiagnosticsRecorder(options: any) {
 
     for (const [op, src, dst] of planDiagnosticsRotation(filePath, size, maxBytes, backupCount)) {
       try {
-        if (op === 'rm') fs.rmSync(src, { force: true })
-        else fs.renameSync(src, dst)
+        if (op === 'rm') {
+          fs.rmSync(src, { force: true })
+        } else {
+          fs.renameSync(src, dst)
+        }
       } catch {
         // Diagnostics must never crash the shell.
       }
