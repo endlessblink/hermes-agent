@@ -11,13 +11,15 @@ which cannot see dotdirs -- got exactly one repo back, and inspected
 The repo path was present in the recovery preamble the whole time, as prose.
 """
 
+from pathlib import Path
+
 import pytest
 
 from agent.lane_resolver import echoes_recovery_reason, render_lane_block, resolve_lane
 
 
-HOME = "/home/endlessblink"
-REPO = "/home/endlessblink/.hermes/hermes-agent"
+HOME = str(Path.home())
+REPO = str(Path.home() / ".hermes" / "hermes-agent")
 PROMPT_FILE = "/tmp/codex-flowstate-primitives-prompt.md"
 
 
@@ -29,7 +31,7 @@ def _history():
             "role": "assistant",
             "content": (
                 "מעולה. הרצתי שוב את Codex מכאן.\n\nתהליך רץ:\n`proc_c96b639969e3`\n\n"
-                "הפקודה:\n\n```bash\ncodex exec --cd /home/endlessblink/.hermes/hermes-agent "
+                f"הפקודה:\n\n```bash\ncodex exec --cd {REPO} "
                 f"--sandbox workspace-write - < {PROMPT_FILE}\n```"
             ),
         },
@@ -37,7 +39,7 @@ def _history():
             "role": "user",
             "content": (
                 "[IMPORTANT: Background process proc_c96b639969e3 exited (exit code 1).\n"
-                "Command: codex exec --cd /home/endlessblink/.hermes/hermes-agent "
+                f"Command: codex exec --cd {REPO} "
                 f"--sandbox workspace-write - < {PROMPT_FILE}\n"
                 "Output:\n 401 Unauthorized, url: wss://api.openai.com/v1/responses"
             ),
@@ -65,14 +67,14 @@ class TestTranscriptEvidence:
 
     def test_transcript_beats_session_cwd(self):
         """Even a real repo cwd loses to an explicit agent launch command."""
-        lane = resolve_lane(_history(), session_cwd="/home/endlessblink/html-video")
+        lane = resolve_lane(_history(), session_cwd=f"{HOME}/html-video")
         assert lane.repo_path == REPO
 
     def test_most_recent_launch_wins(self):
         history = _history() + [
-            {"role": "assistant", "content": "```bash\ncodex exec --cd /home/endlessblink/other-repo -\n```"}
+            {"role": "assistant", "content": f"```bash\ncodex exec --cd {HOME}/other-repo -\n```"}
         ]
-        assert resolve_lane(history, session_cwd=HOME).repo_path == "/home/endlessblink/other-repo"
+        assert resolve_lane(history, session_cwd=HOME).repo_path == f"{HOME}/other-repo"
 
     @pytest.mark.parametrize(
         "command,expected",
