@@ -269,7 +269,11 @@ def test_canonical_cold_resume_restores_personal_assistant_policy_without_ui_fla
             return None
 
         def resolve_resume_session_id(self, session_id):
-            return session_id
+            return (
+                "canonical-assistant-continuation"
+                if session_id == "canonical-assistant"
+                else session_id
+            )
 
         def reopen_session(self, session_id):
             return None
@@ -290,7 +294,7 @@ def test_canonical_cold_resume_restores_personal_assistant_policy_without_ui_fla
     response = server._methods["session.resume"](
         "r1",
         {
-            "session_id": "canonical-assistant",
+            "session_id": "canonical-assistant-continuation",
             "source": "desktop",
         },
     )

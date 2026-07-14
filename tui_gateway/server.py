@@ -3532,6 +3532,33 @@ def _personal_assistant_store(profile: str):
     return PersonalAssistantStateStore(_personal_assistant_profile_home(profile))
 
 
+def _is_canonical_personal_assistant_session(
+    session_id: str, profile: str | None, db=None
+) -> bool:
+    """Recognize the durable assistant home even when Desktop omits its UI hint."""
+    effective_profile = str(profile or _current_profile_name()).strip()
+    if effective_profile != _PERSONAL_ASSISTANT_OWNER_PROFILE or not session_id:
+        return False
+    try:
+        canonical = str(
+            _personal_assistant_store(_PERSONAL_ASSISTANT_OWNER_PROFILE)
+            .read()
+            .get("canonical_session_id")
+            or ""
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+    if canonical == session_id:
+        return True
+    resolve_tip = getattr(db, "resolve_resume_session_id", None)
+    if not callable(resolve_tip):
+        return False
+    try:
+        return str(resolve_tip(canonical) or "") == session_id
+    except Exception:
+        return False
+
+
 def _personal_assistant_service(profile: str):
     """Build the Obsidian-backed service when the profile has vault config."""
     from agent.personal_assistant_obsidian import PersonalAssistantObsidianAdapter
@@ -6965,6 +6992,10 @@ def _(rid, params: dict) -> dict:
         else:
             return _err(rid, 4007, "session not found")
 
+    canonical_personal_assistant = _is_canonical_personal_assistant_session(
+        target, profile, db
+    )
+
     # Follow the compression-continuation chain to the live tip so a resume on
     # a rotated-out parent id binds to the descendant that actually holds the
     # post-compression turns. Auto-compression ends the session and forks a
@@ -6985,7 +7016,9 @@ def _(rid, params: dict) -> dict:
             target = tip
             found = db.get_session(target) or found
 
-    personal_assistant = is_truthy_value(params.get("personal_assistant", False))
+    personal_assistant = is_truthy_value(
+        params.get("personal_assistant", False)
+    ) or canonical_personal_assistant
 
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home
@@ -10478,7 +10511,18 @@ def _record_turn_watchdog_event(
 
 
 def _mark_turn_progress(sid: str, event: str) -> None:
-    if event in {"diagnostic.event", "session.info", "message.complete"}:
+    # Spinner, lifecycle, and private-reasoning pulses can continue forever
+    # while Desktop remains visibly wedged. They are liveness noise, not useful
+    # progress. Visible answer output and completed tool work still reset the
+    # bounded recovery clock.
+    if event in {
+        "diagnostic.event",
+        "message.complete",
+        "reasoning.delta",
+        "session.info",
+        "status.update",
+        "thinking.delta",
+    }:
         return
     session = _sessions.get(sid)
     if not session:
