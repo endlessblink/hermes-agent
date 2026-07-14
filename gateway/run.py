@@ -7098,9 +7098,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 else:
                     logger.warning("No adapter available for %s", _pval)
                 continue
+
+            # Establish explicit shared-profile aliases before connect() starts
+            # polling, so the first inbound update has its target adapter and
+            # PairingStore ready.
+            self._bind_primary_shared_adapter_routes(platform, adapter)
             
             # Set up message + fatal error handlers
-            adapter.set_message_handler(self._handle_message)
+            adapter.set_message_handler(
+                self._handle_routed_message
+                if self._has_profile_routes_for(platform)
+                else self._handle_message
+            )
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -8313,15 +8322,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _agent, context="shutdown idle-cache"
                     )
 
+            _disconnected_adapter_ids = set()
             for platform, adapter in list(self.adapters.items()):
                 await self._bounded_adapter_teardown(adapter, platform)
+                _disconnected_adapter_ids.add(id(adapter))
 
             # Disconnect secondary-profile adapters (multiplex mode).
             for _prof, _amap in list(getattr(self, "_profile_adapters", {}).items()):
                 for platform, adapter in list(_amap.items()):
+                    if id(adapter) in _disconnected_adapter_ids:
+                        continue
                     await self._bounded_adapter_teardown(
                         adapter, platform, profile=_prof
                     )
+                    _disconnected_adapter_ids.add(id(adapter))
                 _amap.clear()
             if hasattr(self, "_profile_adapters"):
                 self._profile_adapters.clear()
@@ -8546,7 +8560,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if fp is not None:
                 claimed[(_plat, fp)] = active
 
-        for profile_name, profile_home in profiles_to_serve(multiplex=True):
+        selected_profiles = getattr(
+            self.config, "multiplex_served_profiles", None
+        )
+        profiles = profiles_to_serve(
+            multiplex=True,
+            served_profiles=selected_profiles,
+        )
+        if selected_profiles is not None:
+            served_names = {name for name, _home in profiles}
+            unknown = sorted(set(selected_profiles) - served_names)
+            if unknown:
+                logger.warning(
+                    "Ignoring unknown gateway.multiplex_served_profiles: %s",
+                    ", ".join(unknown),
+                )
+        for profile_name, profile_home in profiles:
             if profile_name == active:
                 continue  # handled by the primary startup loop
             try:
@@ -8628,6 +8657,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if fp is not None:
                 owner = claimed.get((platform, fp))
                 if owner is not None:
+                    shared_owner = self._shared_adapter_owner(
+                        platform, owner, profile_name
+                    )
+                    if shared_owner is not None:
+                        profile_map[platform] = shared_owner
+                        logger.info(
+                            "Profile '%s' shares the single %s adapter owned by "
+                            "profile '%s' via gateway.profile_routes",
+                            profile_name,
+                            platform.value,
+                            owner,
+                        )
+                        await self._safe_adapter_disconnect(adapter, platform)
+                        continue
                     logger.error(
                         "Profile '%s' and '%s' both configure %s with the same "
                         "credential — refusing to start the duplicate (a single "
@@ -8670,12 +8713,180 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Return a message handler that stamps source.profile then delegates."""
         async def _handler(event):
             try:
-                if getattr(event, "source", None) is not None and not event.source.profile:
-                    event.source.profile = profile_name
+                source = getattr(event, "source", None)
+                if source is not None and (
+                    getattr(getattr(self, "config", None), "multiplex_profiles", False)
+                    or not source.profile
+                ):
+                    source.profile = profile_name
             except Exception:
                 pass
+            if (
+                getattr(getattr(self, "config", None), "multiplex_profiles", False)
+                and getattr(event, "source", None) is not None
+            ):
+                with _profile_runtime_scope(
+                    self._resolve_profile_home_for_source(event.source)
+                ):
+                    return await self._handle_message(event)
             return await self._handle_message(event)
         return _handler
+
+    def _platform_profile_routes(self, platform: Optional[Platform]) -> Dict[str, Any]:
+        """Return a platform's normalized profile-routing table."""
+        if not platform or not getattr(self.config, "multiplex_profiles", False):
+            return {}
+        all_routes = getattr(self.config, "profile_routes", None)
+        if not isinstance(all_routes, dict):
+            return {}
+        routes = all_routes.get(platform.value)
+        return routes if isinstance(routes, dict) else {}
+
+    def _has_profile_routes_for(self, platform: Optional[Platform]) -> bool:
+        return bool(self._platform_profile_routes(platform))
+
+    def _bind_primary_shared_adapter_routes(
+        self,
+        platform: Platform,
+        adapter: BasePlatformAdapter,
+    ) -> None:
+        """Pre-bind one primary adapter to every explicitly routed profile."""
+        referenced = self._profiles_referenced_by_routes(platform)
+        if not referenced:
+            return
+        try:
+            from hermes_cli.profiles import profiles_to_serve
+            known = {
+                name for name, _home in profiles_to_serve(
+                    multiplex=True,
+                    served_profiles=getattr(
+                        self.config, "multiplex_served_profiles", None
+                    ),
+                )
+                if isinstance(name, str) and name
+            }
+        except Exception:
+            known = set()
+        known.update({"default", self._active_profile_name()})
+        from gateway.pairing import PairingStore
+        for profile in referenced:
+            if profile not in known:
+                logger.error(
+                    "Profile route for %s references unknown profile %r; "
+                    "that route will fail closed",
+                    platform.value,
+                    profile,
+                )
+                continue
+            if profile in {"default", self._active_profile_name()}:
+                continue
+            self._profile_adapters.setdefault(profile, {})[platform] = adapter
+            if profile not in self.pairing_stores:
+                self.pairing_stores[profile] = PairingStore(profile=profile)
+
+    def _profiles_referenced_by_routes(self, platform: Platform) -> set[str]:
+        routes = self._platform_profile_routes(platform)
+        profiles: set[str] = set()
+        default = routes.get("default")
+        if isinstance(default, str) and default.strip():
+            profiles.add(default.strip())
+        chats = routes.get("chats")
+        if isinstance(chats, dict):
+            profiles.update(
+                value.strip()
+                for value in chats.values()
+                if isinstance(value, str) and value.strip()
+            )
+        topics = routes.get("topics")
+        if isinstance(topics, dict):
+            for topic_map in topics.values():
+                if isinstance(topic_map, dict):
+                    profiles.update(
+                        value.strip()
+                        for value in topic_map.values()
+                        if isinstance(value, str) and value.strip()
+                    )
+        return profiles
+
+    def _shared_adapter_owner(
+        self,
+        platform: Platform,
+        owner_profile: str,
+        target_profile: str,
+    ) -> Optional[BasePlatformAdapter]:
+        """Resolve an explicitly routed same-credential adapter, if configured."""
+        if target_profile not in self._profiles_referenced_by_routes(platform):
+            return None
+        if owner_profile in {"default", self._active_profile_name()}:
+            return self.adapters.get(platform)
+        return (self._profile_adapters.get(owner_profile) or {}).get(platform)
+
+    def _resolve_inbound_profile(self, source: SessionSource) -> Optional[str]:
+        """Resolve topic, then chat, then default for one inbound source."""
+        routes = self._platform_profile_routes(getattr(source, "platform", None))
+        if not routes:
+            existing = (getattr(source, "profile", None) or "").strip()
+            return existing or None
+
+        def _lookup(mapping: Any, key: str) -> Any:
+            if not isinstance(mapping, dict):
+                return None
+            if key in mapping:
+                return mapping[key]
+            return next(
+                (value for candidate, value in mapping.items() if str(candidate) == key),
+                None,
+            )
+
+        chat_id = str(getattr(source, "chat_id", "") or "")
+        thread_id = getattr(source, "thread_id", None)
+        topics = routes.get("topics")
+        if thread_id is not None and isinstance(topics, dict):
+            topic_map = _lookup(topics, chat_id)
+            if isinstance(topic_map, dict):
+                target = _lookup(topic_map, str(thread_id))
+                if isinstance(target, str) and target.strip():
+                    return target.strip()
+        chats = routes.get("chats")
+        if isinstance(chats, dict):
+            target = _lookup(chats, chat_id)
+            if isinstance(target, str) and target.strip():
+                return target.strip()
+        target = routes.get("default")
+        return target.strip() if isinstance(target, str) and target.strip() else None
+
+    def _routed_profile_is_known(self, profile: str) -> bool:
+        if profile in {"default", self._active_profile_name()}:
+            return True
+        return profile in (getattr(self, "_profile_adapters", None) or {})
+
+    def _is_user_authorized_for_inbound_source(self, source: SessionSource) -> bool:
+        """Route and profile-scope authorization for shared adapters."""
+        if not self._has_profile_routes_for(getattr(source, "platform", None)):
+            return self._is_user_authorized(source)
+        profile = self._resolve_inbound_profile(source)
+        if not profile or not self._routed_profile_is_known(profile):
+            return False
+        source.profile = profile
+        with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+            return self._is_user_authorized(source)
+
+    async def _handle_routed_message(self, event: MessageEvent) -> Optional[str]:
+        """Stamp and scope a shared-adapter event before hooks, auth, or sessions."""
+        source = getattr(event, "source", None)
+        if source is None:
+            return None
+        profile = self._resolve_inbound_profile(source)
+        if not profile or not self._routed_profile_is_known(profile):
+            logger.error(
+                "Dropping %s message: profile route resolved to unknown profile %r",
+                getattr(getattr(source, "platform", None), "value", "unknown"),
+                profile,
+            )
+            return None
+        source.profile = profile
+        with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+            return await self._handle_message(event)
 
     @staticmethod
     def _adapter_credential_fingerprint(adapter: Any) -> Optional[str]:
@@ -9010,9 +9221,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Rate-limit ALL pairing responses (code or rejection) to
                 # prevent spamming the user with repeated messages when
                 # multiple DMs arrive in quick succession.
-                if self.pairing_store._is_rate_limited(platform_name, source.user_id):
+                pairing_store = self._pairing_store_for(source)
+                if pairing_store._is_rate_limited(platform_name, source.user_id):
                     return None
-                code = self.pairing_store.generate_code(
+                code = pairing_store.generate_code(
                     platform_name, source.user_id, source.user_name or ""
                 )
                 if code:
@@ -9034,7 +9246,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "Please try again later!"
                         )
                     # Record rate limit so subsequent messages are silently ignored
-                    self.pairing_store._record_rate_limit(platform_name, source.user_id)
+                    pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
         
         # Intercept messages that are responses to a pending /update prompt.

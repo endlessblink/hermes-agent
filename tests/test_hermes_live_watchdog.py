@@ -490,7 +490,7 @@ def test_hidden_sidebar_session_diagnostics_are_deduplicated(tmp_path, monkeypat
     assert events.count("sidebar_sessions_hidden") == 1
 
 
-def test_profile_ledger_stuck_turn_writes_shared_alert(tmp_path, monkeypatch):
+def test_profile_ledger_approval_wait_never_writes_stuck_alert(tmp_path, monkeypatch):
     monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
     home = tmp_path / ".hermes"
     ledger = home / "profiles" / "film-maker" / "logs" / "turn-watchdog.jsonl"
@@ -532,10 +532,114 @@ def test_profile_ledger_stuck_turn_writes_shared_alert(tmp_path, monkeypatch):
 
     alerts = home / "logs" / "live-watchdog-alerts.jsonl"
     rows = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
-    assert rows[-1]["event"] == "turn_stuck"
-    assert rows[-1]["session_id"] == "sid-profile"
-    assert rows[-1]["last_event"] == "approval.request"
-    assert rows[-1]["ledger"] == str(ledger)
+    events = [row["event"] for row in rows]
+    assert "turn_stuck" not in events
+    assert "personal_assistant_turn_stuck" not in events
+
+
+def test_all_interactive_request_events_enter_waiting_state():
+    for event in (
+        "clarify.request",
+        "approval.request",
+        "terminal.read.request",
+        "sudo.request",
+        "secret.request",
+        "input.request",
+    ):
+        state = watchdog.TurnState(session_id="sid")
+        state.update({"event": event, "monotonic": 10})
+        assert state.waiting is True, event
+
+
+def test_explicit_resume_leaves_waiting_and_restarts_progress_clock():
+    state = watchdog.TurnState(session_id="sid")
+    state.update({"event": "clarify.request", "monotonic": 10})
+
+    state.update({"event": "clarify.resume", "monotonic": 20})
+
+    assert state.waiting is False
+    assert state.last_progress_at == 20
+    assert state.last_event == "clarify.resume"
+
+
+def test_turn_state_key_separates_ledgers_sessions_and_turns(tmp_path):
+    ledger_a = tmp_path / "a.jsonl"
+    ledger_b = tmp_path / "b.jsonl"
+    base = {"session_id": "sid", "turn_id": "turn-1"}
+
+    assert watchdog.turn_state_key(ledger_a, base) != watchdog.turn_state_key(
+        ledger_b, base
+    )
+    assert watchdog.turn_state_key(ledger_a, base) != watchdog.turn_state_key(
+        ledger_a, {**base, "turn_id": "turn-2"}
+    )
+
+
+def test_dead_producer_emits_one_orphan_incident_instead_of_stuck(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    monkeypatch.setattr(watchdog, "producer_identity_alive", lambda _pid, _ticks: False)
+    home = tmp_path / ".hermes"
+    ledger = home / "logs" / "turn-watchdog.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps(
+            {
+                "monotonic": time.time() - 90,
+                "event": "message.start",
+                "session_id": "sid-orphan",
+                "session_key": "key-orphan",
+                "turn_id": "turn-orphan",
+                "producer_pid": 123,
+                "producer_start_ticks": 456,
+                "running": True,
+                "turn_started_at": time.time() - 120,
+                "payload": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(
+        ["--home", str(home), "--idle-seconds", "1", "--from-start", "--once"]
+    )
+    assert watchdog.run(args) == 0
+
+    rows = [
+        json.loads(line)
+        for line in (home / "logs" / "live-watchdog-alerts.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["event"] for row in rows].count("turn_orphaned") == 1
+    assert "turn_stuck" not in {row["event"] for row in rows}
+
+
+def test_pid_reuse_is_not_treated_as_the_original_producer(monkeypatch):
+    monkeypatch.setattr(watchdog, "process_start_ticks", lambda _pid: 999)
+
+    assert watchdog.producer_identity_alive(123, 456) is False
+
+
+def test_flowstate_signed_out_requires_auth_and_uses_extended_backoff():
+    decision = watchdog.classify_flowstate_recovery(
+        status="signed_out",
+        health_ok=False,
+        config={"enabled": True, "port": 5577},
+        app_running=False,
+    )
+    args = watchdog.parse_args(["--alert-cooldown", "1"])
+    incident = {
+        "event": "personal_assistant_monitor_connector_failure",
+        "status": "signed_out",
+    }
+
+    assert decision == {
+        "action": "none",
+        "outcome": "auth_required",
+        "reason": "flowstate_sign_in_required",
+    }
+    assert watchdog.incident_cooldown_seconds(args, incident) >= 20 * 60
 
 
 def test_personal_assistant_stuck_turn_is_classified(tmp_path, monkeypatch):
@@ -612,6 +716,49 @@ def test_post_completion_review_summary_does_not_rearm_stuck_turn(tmp_path, monk
     alerts = home / "logs" / "live-watchdog-alerts.jsonl"
     events = [json.loads(line)["event"] for line in alerts.read_text(encoding="utf-8").splitlines()]
     assert "personal_assistant_turn_stuck" not in events
+    assert "turn_stuck" not in events
+
+
+def test_legacy_terminal_row_without_turn_timestamp_clears_session_state(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    home = tmp_path / ".hermes"
+    ledger = home / "logs" / "turn-watchdog.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in (
+                {
+                    "event": "message.start",
+                    "monotonic": time.time() - 90,
+                    "session_id": "legacy-sid",
+                    "running": True,
+                    "turn_started_at": time.time() - 120,
+                },
+                {
+                    "event": "session.info",
+                    "monotonic": time.time() - 89,
+                    "session_id": "legacy-sid",
+                    "running": False,
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(
+        ["--home", str(home), "--idle-seconds", "1", "--from-start", "--once"]
+    )
+    assert watchdog.run(args) == 0
+
+    events = {
+        json.loads(line)["event"]
+        for line in (home / "logs" / "live-watchdog-alerts.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    }
     assert "turn_stuck" not in events
 
 

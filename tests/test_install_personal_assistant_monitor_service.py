@@ -11,6 +11,7 @@ def test_monitor_service_is_bounded_and_activation_remains_explicit():
 
     assert "Type=oneshot" in installer
     assert "TimeoutStartSec=45s" in installer
+    assert "SuccessExitStatus=75" in installer
     assert "OnUnitActiveSec=15min" in installer
     assert "Installed but not enabled" in installer
     assert "systemctl --user enable --now" not in installer

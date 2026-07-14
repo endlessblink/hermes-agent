@@ -33,6 +33,20 @@ DEFAULT_ALERT_COOLDOWN_SECONDS = 60.0
 DEFAULT_MONITOR_PRODUCER_STALE_SECONDS = 20 * 60.0
 DEFAULT_MONITOR_CONSUMER_STALE_SECONDS = 20 * 60.0
 LEDGER_REFRESH_SECONDS = 10.0
+FLOWSTATE_AUTH_ALERT_BACKOFF_SECONDS = 20 * 60.0
+WAIT_REQUEST_EVENTS = frozenset(
+    {
+        "clarify.request",
+        "approval.request",
+        "terminal.read.request",
+        "sudo.request",
+        "secret.request",
+        "input.request",
+    }
+)
+WAIT_RESUME_EVENTS = frozenset(
+    event.removesuffix(".request") + ".resume" for event in WAIT_REQUEST_EVENTS
+)
 
 
 def hermes_home() -> Path:
@@ -121,7 +135,7 @@ def classify_flowstate_recovery(
 ) -> dict[str, str]:
     """Choose only allowlisted repairs; authentication and live restarts fail closed."""
 
-    if status == "not_signed_in":
+    if status in {"not_signed_in", "signed_out"}:
         return {
             "action": "none",
             "outcome": "auth_required",
@@ -384,6 +398,7 @@ def desktop_notify(title: str, body: str) -> None:
 @dataclass
 class TurnState:
     session_id: str
+    turn_id: str = ""
     session_key: str = ""
     cwd: str = ""
     started_at: float = 0.0
@@ -393,6 +408,9 @@ class TurnState:
     personal_assistant: bool = False
     payload: dict[str, Any] = field(default_factory=dict)
     last_alert_at: float = 0.0
+    waiting: bool = False
+    producer_pid: int = 0
+    producer_start_ticks: int = 0
 
     def update(self, row: dict[str, Any]) -> None:
         # Ledger timestamps are Unix time despite the historical ``monotonic``
@@ -413,6 +431,49 @@ class TurnState:
         self.personal_assistant = bool(
             row.get("personal_assistant", self.personal_assistant)
         )
+        self.turn_id = str(row.get("turn_id") or self.turn_id)
+        try:
+            self.producer_pid = int(row.get("producer_pid") or self.producer_pid)
+            self.producer_start_ticks = int(
+                row.get("producer_start_ticks") or self.producer_start_ticks
+            )
+        except (TypeError, ValueError):
+            pass
+        if self.last_event in WAIT_REQUEST_EVENTS:
+            self.waiting = True
+        elif self.last_event in WAIT_RESUME_EVENTS:
+            self.waiting = False
+
+
+def turn_state_key(ledger: Path, row: dict[str, Any]) -> tuple[str, str, str]:
+    """Identify one turn without colliding across profiles or session reuse."""
+
+    sid = str(row.get("session_id") or "")
+    turn_id = str(row.get("turn_id") or "")
+    if not turn_id:
+        turn_id = f"legacy:{row.get('turn_started_at') or ''}"
+    return (str(ledger), sid, turn_id)
+
+
+def process_start_ticks(pid: int) -> int | None:
+    """Return Linux process start ticks, guarding against recycled PIDs."""
+
+    if pid <= 0:
+        return None
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        return int(fields[21])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def producer_identity_alive(pid: int, expected_start_ticks: int) -> bool:
+    if pid <= 0:
+        return False
+    current = process_start_ticks(pid)
+    if current is None:
+        return False
+    return expected_start_ticks <= 0 or current == expected_start_ticks
 
 
 def is_terminal(row: dict[str, Any]) -> bool:
@@ -541,6 +602,23 @@ def build_alert(
     }
 
 
+def build_orphan_alert(state: TurnState, ledger: Path) -> dict[str, Any]:
+    return {
+        "ts": utc_now(),
+        "severity": "error",
+        "component": "live_watchdog",
+        "event": "turn_orphaned",
+        "message": "Hermes turn producer exited before the turn completed",
+        "session_id": state.session_id,
+        "session_key": state.session_key,
+        "turn_id": state.turn_id,
+        "last_event": state.last_event,
+        "waiting": state.waiting,
+        "ledger": str(ledger),
+        "processes": process_snapshot(),
+    }
+
+
 def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | None:
     """Classify terminal failures that should alert without waiting for idle."""
 
@@ -597,18 +675,23 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
         "dead_letter",
     }:
         event = str(row["event"])
+        status = str(row.get("status") or "unknown")[:64]
+        auth_required = status in {"not_signed_in", "signed_out"}
         return {
             "ts": utc_now(),
             "severity": "error",
             "component": "live_watchdog",
             "event": f"personal_assistant_monitor_{event}",
             "message": (
-                "Hermes personal-assistant monitor cannot reach FlowState"
+                "Sign in to FlowState to resume personal-assistant monitoring"
+                if auth_required
+                else "Hermes personal-assistant monitor cannot reach FlowState"
                 if event == "connector_failure"
                 else "Hermes personal-assistant monitor exhausted delivery retries"
             ),
             "source": str(row.get("source") or "unknown")[:64],
-            "status": str(row.get("status") or "unknown")[:64],
+            "status": status,
+            "action_required": "flowstate_sign_in" if auth_required else "inspect_connector",
             "count": max(0, int(row.get("count") or 0)),
             "ledger": str(ledger),
             "processes": process_snapshot(),
@@ -732,12 +815,23 @@ def monitor_stale_alert_cooldown(args: argparse.Namespace, source: str) -> float
     return max(args.alert_cooldown, stale_window)
 
 
+def incident_cooldown_seconds(
+    args: argparse.Namespace, incident: dict[str, Any]
+) -> float:
+    if (
+        incident.get("event") == "personal_assistant_monitor_connector_failure"
+        and incident.get("status") in {"not_signed_in", "signed_out"}
+    ):
+        return max(args.alert_cooldown, FLOWSTATE_AUTH_ALERT_BACKOFF_SECONDS)
+    return args.alert_cooldown
+
+
 def run(args: argparse.Namespace) -> int:
     home = Path(args.home).expanduser() if args.home else hermes_home()
     alerts = Path(args.alerts).expanduser() if args.alerts else home / "logs" / "live-watchdog-alerts.jsonl"
     latest = alerts.with_suffix(".latest.json")
-    states: dict[str, TurnState] = {}
-    state_ledgers: dict[str, Path] = {}
+    states: dict[tuple[str, str, str], TurnState] = {}
+    state_ledgers: dict[tuple[str, str, str], Path] = {}
     incident_alerted_at: dict[tuple[str, str], float] = {}
     monitor_heartbeats: dict[tuple[Path, str], float] = {}
     monitor_heartbeat_seen: set[tuple[Path, str]] = set()
@@ -820,7 +914,7 @@ def run(args: argparse.Namespace) -> int:
                 if incident is not None:
                     incident_key = (sid or "desktop", str(incident["event"]))
                     last_incident = incident_alerted_at.get(incident_key, 0.0)
-                    if now - last_incident >= args.alert_cooldown:
+                    if now - last_incident >= incident_cooldown_seconds(args, incident):
                         incident_alerted_at[incident_key] = now
                         if incident["event"] == "personal_assistant_monitor_connector_failure":
                             recovery = attempt_flowstate_recovery(
@@ -899,17 +993,26 @@ def run(args: argparse.Namespace) -> int:
                             desktop_notify(title, line)
                 if not sid:
                     continue
+                state_key = turn_state_key(ledger, row)
                 if is_terminal(row):
-                    states.pop(sid, None)
-                    state_ledgers.pop(sid, None)
+                    terminal_keys = [state_key]
+                    if not row.get("turn_id"):
+                        terminal_keys = [
+                            key
+                            for key in states
+                            if key[0] == str(ledger) and key[1] == sid
+                        ] or terminal_keys
+                    for terminal_key in terminal_keys:
+                        states.pop(terminal_key, None)
+                        state_ledgers.pop(terminal_key, None)
                     continue
                 if not is_progress(row):
                     continue
-                state = states.get(sid)
+                state = states.get(state_key)
                 if state is None:
                     state = TurnState(session_id=sid)
-                    states[sid] = state
-                state_ledgers[sid] = ledger
+                    states[state_key] = state
+                state_ledgers[state_key] = ledger
                 state.update(row)
 
         for (ledger, source), heartbeat_at in list(monitor_heartbeats.items()):
@@ -947,7 +1050,27 @@ def run(args: argparse.Namespace) -> int:
             if args.notify:
                 desktop_notify("Hermes personal assistant monitor is stale", line)
 
-        for sid, state in list(states.items()):
+        for state_key, state in list(states.items()):
+            ledger = state_ledgers.get(state_key) or Path("")
+            if state.producer_pid and not producer_identity_alive(
+                state.producer_pid, state.producer_start_ticks
+            ):
+                alert = build_orphan_alert(state, ledger)
+                append_jsonl(alerts, alert)
+                latest.write_text(
+                    json.dumps(alert, ensure_ascii=False, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                print(
+                    f"[hermes-live-watchdog] ORPHAN sid={state.session_id[:8]} "
+                    f"key={state.session_key} last={state.last_event} ledger={ledger}",
+                    flush=True,
+                )
+                states.pop(state_key, None)
+                state_ledgers.pop(state_key, None)
+                continue
+            if state.waiting:
+                continue
             last = state.last_progress_at or state.started_at
             idle = now - last
             elapsed = now - (state.started_at or last)
@@ -956,7 +1079,6 @@ def run(args: argparse.Namespace) -> int:
             if now - state.last_alert_at < args.alert_cooldown:
                 continue
             state.last_alert_at = now
-            ledger = state_ledgers.get(sid) or Path("")
             alert = build_alert(state, idle, elapsed, args.idle_seconds, ledger)
             append_jsonl(alerts, alert)
             latest.write_text(
@@ -964,7 +1086,7 @@ def run(args: argparse.Namespace) -> int:
                 encoding="utf-8",
             )
             line = (
-                f"[hermes-live-watchdog] STUCK sid={sid[:8]} "
+                f"[hermes-live-watchdog] STUCK sid={state.session_id[:8]} "
                 f"key={state.session_key} idle={idle:.1f}s last={state.last_event} ledger={ledger}"
             )
             print(line, flush=True)

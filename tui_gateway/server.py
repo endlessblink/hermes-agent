@@ -2234,6 +2234,7 @@ def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
         _emit(event, sid, payload)
         ev.wait(timeout=timeout)
     finally:
+        _emit(event.removesuffix(".request") + ".resume", sid, {"request_id": rid})
         with _prompt_lock:
             _pending.pop(rid, None)
             _pending_prompt_payloads.pop(rid, None)
@@ -10513,6 +10514,18 @@ def _turn_idle_watchdog_timeout_seconds() -> float:
         return 90.0
 
 
+_TURN_WAIT_EVENTS = frozenset(
+    {
+        "approval.request",
+        "clarify.request",
+        "terminal.read.request",
+        "sudo.request",
+        "secret.request",
+        "input.request",
+    }
+)
+
+
 def _record_turn_watchdog_event(
     sid: str, event: str, payload: dict | None = None
 ) -> None:
@@ -10531,6 +10544,17 @@ def _record_turn_watchdog_event(
         "diagnostic.event",
         "error",
         "approval.request",
+        "approval.resume",
+        "clarify.request",
+        "clarify.resume",
+        "terminal.read.request",
+        "terminal.read.resume",
+        "sudo.request",
+        "sudo.resume",
+        "secret.request",
+        "secret.resume",
+        "input.request",
+        "input.resume",
         "tool.start",
         "tool.complete",
         "tool.error",
@@ -10573,11 +10597,15 @@ def _record_turn_watchdog_event(
                 if details.get(key) is not None
             }
 
+    producer_pid = os.getpid()
     row = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "monotonic": round(now, 3),
         "event": event,
         "session_id": sid,
+        "turn_id": session.get("watchdog_turn_id") or "",
+        "producer_pid": producer_pid,
+        "producer_start_ticks": _process_start_ticks(producer_pid),
         "session_key": session.get("session_key") or "",
         "cwd": session.get("cwd") or "",
         "running": bool(session.get("running")),
@@ -10624,6 +10652,14 @@ def _mark_turn_progress(sid: str, event: str) -> None:
             session["turn_last_progress_event"] = event
     except Exception:
         pass
+
+
+def _process_start_ticks(pid: int) -> int | None:
+    try:
+        fields = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8").split()
+        return int(fields[21])
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _turn_terminal_emitted(session: dict) -> bool:
@@ -10682,7 +10718,7 @@ def _emit_turn_idle_timeout_terminal(sid: str, session: dict, timeout_seconds: f
             not session.get("running")
             or session.get("_turn_terminal_emitted")
             or session.get("compression_started_at")
-            or last_progress_event in {"approval.request", "tool.start"}
+            or last_progress_event in (_TURN_WAIT_EVENTS | {"tool.start"})
         ):
             return False
         session["_turn_terminal_emitted"] = True
@@ -10870,7 +10906,7 @@ def _start_turn_idle_watchdog(sid: str, session: dict) -> threading.Event | None
                 last_progress_event = str(session.get("turn_last_progress_event") or "")
             now = time.time()
             idle_elapsed = now - last_progress_at
-            if last_progress_event in {"approval.request", "tool.start"}:
+            if last_progress_event in (_TURN_WAIT_EVENTS | {"tool.start"}):
                 continue
             if idle_elapsed >= timeout_seconds:
                 _emit_turn_idle_timeout_terminal(sid, session, timeout_seconds)
@@ -10902,6 +10938,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         session["_turn_terminal_emitted"] = False
         _clear_compression_tracking(session)
         now = time.time()
+        session["watchdog_turn_id"] = uuid.uuid4().hex
         session["turn_started_at"] = now
         session["turn_last_progress_at"] = now
         session["turn_last_progress_event"] = "prompt.submit"
@@ -12314,14 +12351,17 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.approval import resolve_gateway_approval
 
+        resolved = resolve_gateway_approval(
+            session["session_key"],
+            params.get("choice", "deny"),
+            resolve_all=params.get("all", False),
+        )
+        if resolved:
+            _emit("approval.resume", params.get("session_id", ""), {})
         return _ok(
             rid,
             {
-                "resolved": resolve_gateway_approval(
-                    session["session_key"],
-                    params.get("choice", "deny"),
-                    resolve_all=params.get("all", False),
-                )
+                "resolved": resolved
             },
         )
     except Exception as e:

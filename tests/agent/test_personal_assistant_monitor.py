@@ -548,6 +548,11 @@ def test_fetch_flowstate_context_uses_one_testable_seam_and_validates_shapes():
             "not_signed_in",
             "not_signed_in",
         ),
+        (
+            _ConnectorHttpError("Bearer signout-secret", code="signed_out", status=503),
+            "signed_out",
+            "signed_out",
+        ),
         (TimeoutError("Bearer timeout-secret"), "timeout", "timeout"),
         (
             urllib.error.URLError(ConnectionRefusedError("Bearer refused-secret")),
@@ -570,7 +575,7 @@ def test_cli_connector_failures_are_typed_persisted_redacted_and_nonzero(
         fetch_context=fail,
     )
 
-    assert exit_code != 0
+    assert exit_code == 75
     state_path = profile_home / "state" / "personal-assistant-monitor" / "state.json"
     stored_text = state_path.read_text(encoding="utf-8")
     stored = json.loads(stored_text)
@@ -583,6 +588,7 @@ def test_cli_connector_failures_are_typed_persisted_redacted_and_nonzero(
     assert "invalid-secret" not in combined
     assert "auth-secret" not in combined
     assert "signin-secret" not in combined
+    assert "signout-secret" not in combined
     health_text = (
         profile_home / "logs" / "personal-assistant-monitor.jsonl"
     ).read_text(encoding="utf-8")
@@ -596,3 +602,10 @@ def test_cli_connector_failures_are_typed_persisted_redacted_and_nonzero(
         "ts": health["ts"],
     }
     assert "secret" not in health_text
+
+
+def test_cli_unexpected_monitor_crash_keeps_failure_exit(tmp_path):
+    def crash():
+        raise RuntimeError("unexpected monitor bug")
+
+    assert main(["--profile-home", str(tmp_path)], fetch_context=crash) == 1
