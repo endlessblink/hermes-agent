@@ -104,14 +104,54 @@ def _process_uses_file(pid: int | None, expected: Path) -> bool:
         return False
 
 
-def _gateway_commit(pid: int | None) -> str | None:
+def _first_process_arg(pid: int) -> str | None:
+    """Read only argv[0], never the remaining potentially sensitive arguments."""
+
+    try:
+        with (Path("/proc") / str(pid) / "cmdline").open("rb") as handle:
+            value = bytearray()
+            while len(value) < 4096:
+                byte = handle.read(1)
+                if not byte or byte == b"\0":
+                    break
+                value.extend(byte)
+    except OSError:
+        return None
+    if not value:
+        return None
+    return value.decode("utf-8", errors="strict")
+
+
+def _gateway_commit(pid: int | None, expected_source_root: Path) -> str | None:
     if not _process_running(pid):
         return None
     try:
         cwd = (Path("/proc") / str(pid) / "cwd").resolve(strict=True)
     except OSError:
+        cwd = None
+    try:
+        if cwd is not None and os.path.samefile(cwd, expected_source_root):
+            commit, _dirty = _git_identity(expected_source_root)
+            return commit
+    except OSError:
+        pass
+
+    first_arg = _first_process_arg(pid)
+    if not first_arg:
         return None
-    commit, _dirty = _git_identity(cwd)
+    executable = Path(first_arg)
+    if executable.parent.name != "bin" or executable.parent.parent.name not in {
+        "venv",
+        ".venv",
+    }:
+        return None
+    candidate_root = executable.parents[2]
+    try:
+        if not os.path.samefile(candidate_root, expected_source_root):
+            return None
+    except OSError:
+        return None
+    commit, _dirty = _git_identity(expected_source_root)
     return commit
 
 
@@ -254,7 +294,9 @@ def collect_runtime_truth(
                 "sha256": _sha256(config.hermes_package),
             },
             "gateway": {
-                "commit": _gateway_commit(config.gateway_pid),
+                "commit": _gateway_commit(
+                    config.gateway_pid, config.hermes_source_root
+                ),
                 "running": gateway_running,
             },
         },

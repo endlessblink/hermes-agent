@@ -201,6 +201,31 @@ def test_live_collector_proves_runtime_without_emitting_credentials_or_task_data
     assert "argv" not in encoded.lower()
 
 
+def test_gateway_provenance_uses_only_python_argv_zero_when_cwd_is_elsewhere(
+    tmp_path,
+):
+    repo_root = Path(__file__).resolve().parents[1]
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    python = repo_root / ".venv" / "bin" / "python"
+    process = subprocess.Popen(
+        [str(python), "-c", "import time; time.sleep(30)", "unread-secret"],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert audit._gateway_commit(process.pid, repo_root) == commit
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
 def test_classifier_rebuilds_an_allowlisted_ledger_instead_of_echoing_input():
     snapshot = _verified_snapshot()
     snapshot["token"] = "top-level-secret"
