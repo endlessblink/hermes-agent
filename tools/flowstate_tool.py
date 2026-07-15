@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from tools.flowstate_receipts import CanonicalReceiptError, validate_canonical_receipt
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:5577"
@@ -28,7 +30,6 @@ _VALID_STATUS_FILTERS = {"todo", "open", "done"}
 _VALID_DUE_FILTERS = {"today", "overdue", "open"}
 _VALID_PRIORITIES = {"low", "medium", "high"}
 _CANONICAL_TASK_CONTRACT = "task-v1"
-_CANONICAL_TASK_SOURCE = "local-api"
 _CANONICAL_PATCH_FIELDS = {"title", "description", "priority", "dueDate", "progress"}
 _CANONICAL_UPDATE_FIELDS = {
     "id",
@@ -38,6 +39,7 @@ _CANONICAL_UPDATE_FIELDS = {
     "preview",
     "previewDigest",
     "previewExpiresAt",
+    "requestHash",
 }
 _RECURRENCE_COMMON_FIELDS = {"pattern", "interval", "endType", "endDate", "endCount"}
 _RECURRENCE_PATTERN_FIELDS = {
@@ -580,34 +582,11 @@ def _valid_canonical_preview(payload: Any, task_id: str, operation_id: str, revi
         and payload.get("baseRevision") == revision
         and isinstance(payload.get("previewDigest"), str)
         and bool(_SHA256_HEX_RE.fullmatch(payload["previewDigest"]))
+        and isinstance(payload.get("requestHash"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(payload["requestHash"]))
         and _is_iso_timestamp(payload.get("previewExpiresAt"))
         and isinstance(payload.get("normalizedPayload"), dict)
         and _valid_canonical_read_back(payload.get("readBack"), task_id, revision)
-    )
-
-
-def _valid_canonical_commit(payload: Any, task_id: str, operation_id: str) -> bool:
-    if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("result") != "committed":
-        return False
-    receipt = payload.get("receipt")
-    if not isinstance(receipt, dict):
-        return False
-    revision = receipt.get("canonicalRevision")
-    return (
-        receipt.get("contractVersion") == _CANONICAL_TASK_CONTRACT
-        and receipt.get("operationId") == operation_id
-        and receipt.get("source") == _CANONICAL_TASK_SOURCE
-        and receipt.get("entityType") == "task"
-        and receipt.get("action") == "patch"
-        and receipt.get("entityId") == task_id
-        and _is_positive_int(revision)
-        and _is_iso_timestamp(receipt.get("canonicalUpdatedAt"))
-        and _is_positive_int(receipt.get("changeSequence"))
-        and isinstance(receipt.get("replayed"), bool)
-        and _is_iso_timestamp(receipt.get("committedAt"))
-        and _valid_canonical_read_back(receipt.get("readBack"), task_id, revision)
-        and isinstance(receipt.get("readBackHash"), str)
-        and bool(_SHA256_HEX_RE.fullmatch(receipt["readBackHash"]))
     )
 
 
@@ -674,20 +653,38 @@ def _handle_update_task(args: dict, **kw) -> str:
     if not preview:
         digest = args.get("previewDigest")
         expiry = args.get("previewExpiresAt")
+        request_hash = args.get("requestHash")
         if not isinstance(digest, str) or not _SHA256_HEX_RE.fullmatch(digest):
             return _tool_error("previewDigest is required when preview is false")
         if not _is_iso_timestamp(expiry):
             return _tool_error("previewExpiresAt is required when preview is false")
+        if not isinstance(request_hash, str) or not _SHA256_HEX_RE.fullmatch(request_hash):
+            return _tool_error("requestHash is required when preview is false")
         body["previewDigest"] = digest
         body["previewExpiresAt"] = expiry
+        body["requestHash"] = request_hash
 
     try:
         payload = _request("PATCH", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}", body)
         if preview:
             if not _valid_canonical_preview(payload, task_id, operation_id, base_revision):
                 return _tool_error("Canonical task preview could not be verified")
-        elif not _valid_canonical_commit(payload, task_id, operation_id):
-            return _tool_error("Canonical task receipt could not be verified")
+        else:
+            try:
+                validate_canonical_receipt(
+                    payload,
+                    expected_operation_id=operation_id,
+                    expected_request_hash=body["requestHash"],
+                    expected_action="patch",
+                    expected_entity_id=task_id,
+                    read_back_validator=lambda read_back, receipt: (
+                        read_back.get("id") == task_id
+                        and read_back.get("canonicalRevision")
+                        == receipt.get("canonicalRevision")
+                    ),
+                )
+            except CanonicalReceiptError:
+                return _tool_error("Canonical task receipt could not be verified")
         return _tool_result(payload)
     except _FlowStateApiError as exc:
         logger.error("flowstate_update_task typed error: code=%s status=%s", exc.code, exc.status)
@@ -776,6 +773,20 @@ def _handle_schedule_task_instance(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+def _valid_action_preview(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("preview") is True
+        and isinstance(payload.get("requestId"), str)
+        and bool(payload["requestId"].strip())
+        and isinstance(payload.get("previewVersion"), str)
+        and bool(payload["previewVersion"].strip())
+        and isinstance(payload.get("requestHash"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(payload["requestHash"]))
+    )
+
+
 def _handle_done_for_now(args: dict, **kw) -> str:
     task_id = str(args.get("taskId") or "").strip()
     if not task_id:
@@ -788,12 +799,29 @@ def _handle_done_for_now(args: dict, **kw) -> str:
         return _tool_error("nextDueDate must be YYYY-MM-DD")
 
     preview = False if args.get("preview") is False else True
-    request_id = str(args.get("requestId") or "").strip()
+    raw_request_id = args.get("requestId")
+    if raw_request_id is not None and (
+        not isinstance(raw_request_id, str)
+        or raw_request_id != raw_request_id.strip()
+    ):
+        return _tool_error("requestId must not contain surrounding whitespace")
+    request_id = raw_request_id or ""
     preview_version = str(args.get("previewVersion") or "").strip()
+    raw_request_hash = args.get("requestHash")
+    if raw_request_hash is not None and (
+        not isinstance(raw_request_hash, str)
+        or raw_request_hash != raw_request_hash.strip()
+    ):
+        return _tool_error("requestHash must not contain surrounding whitespace")
+    request_hash = raw_request_hash or ""
+    if request_hash and not _SHA256_HEX_RE.fullmatch(request_hash):
+        return _tool_error("requestHash must be a 64-character lowercase SHA-256 digest")
     if not preview and not request_id:
         return _tool_error("requestId is required when preview is false")
     if not preview and not preview_version:
         return _tool_error("previewVersion is required when preview is false")
+    if not preview and not _SHA256_HEX_RE.fullmatch(request_hash):
+        return _tool_error("requestHash is required when preview is false")
 
     body: Dict[str, Any] = {"preview": preview}
     if next_due_date is not None:
@@ -802,10 +830,58 @@ def _handle_done_for_now(args: dict, **kw) -> str:
         body["requestId"] = request_id
     if preview_version:
         body["previewVersion"] = preview_version
+    if request_hash:
+        body["requestHash"] = request_hash
 
     try:
         path = f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/done-for-now"
-        return _tool_result(_request("POST", path, body))
+        payload = _request("POST", path, body)
+        if preview:
+            if not _valid_action_preview(payload):
+                return _tool_error("Canonical Done for now preview could not be verified")
+        else:
+            try:
+                receipt = payload.get("receipt") if isinstance(payload, dict) else None
+                read_back = receipt.get("readBack") if isinstance(receipt, dict) else None
+                completed = (
+                    read_back.get("completedOccurrence")
+                    if isinstance(read_back, dict)
+                    else None
+                )
+                completed_id = (
+                    completed.get("id") if isinstance(completed, dict) else None
+                )
+                if (
+                    not isinstance(completed_id, str)
+                    or not completed_id
+                    or completed_id == task_id
+                ):
+                    raise CanonicalReceiptError(
+                        "canonical completion identity does not match"
+                    )
+                validate_canonical_receipt(
+                    payload,
+                    expected_operation_id=request_id,
+                    expected_request_hash=request_hash,
+                    expected_action="done_for_now",
+                    expected_entity_id=task_id,
+                    expected_affected_actions={
+                        completed_id: "create",
+                        task_id: "update",
+                    },
+                    read_back_validator=lambda read_back, receipt: (
+                        read_back.get("id") == task_id
+                        and read_back.get("canonicalRevision")
+                        == receipt.get("canonicalRevision")
+                        and isinstance(read_back.get("completedOccurrence"), dict)
+                        and read_back["completedOccurrence"].get("id") == completed_id
+                        and isinstance(read_back.get("nextOccurrence"), dict)
+                        and read_back["nextOccurrence"].get("taskId") == task_id
+                    ),
+                )
+            except CanonicalReceiptError:
+                return _tool_error("Canonical Done for now receipt could not be verified")
+        return _tool_result(payload)
     except _FlowStateApiError as exc:
         logger.error(
             "flowstate_done_for_now API error: status=%s code=%s",
@@ -886,12 +962,29 @@ def _handle_merge_tasks(args: dict, **kw) -> str:
         return _tool_error("survivorTaskId and duplicateTaskId must be different")
 
     preview = False if args.get("preview") is False else True
-    request_id = str(args.get("requestId") or "").strip()
+    raw_request_id = args.get("requestId")
+    if raw_request_id is not None and (
+        not isinstance(raw_request_id, str)
+        or raw_request_id != raw_request_id.strip()
+    ):
+        return _tool_error("requestId must not contain surrounding whitespace")
+    request_id = raw_request_id or ""
     preview_version = str(args.get("previewVersion") or "").strip()
+    raw_request_hash = args.get("requestHash")
+    if raw_request_hash is not None and (
+        not isinstance(raw_request_hash, str)
+        or raw_request_hash != raw_request_hash.strip()
+    ):
+        return _tool_error("requestHash must not contain surrounding whitespace")
+    request_hash = raw_request_hash or ""
+    if request_hash and not _SHA256_HEX_RE.fullmatch(request_hash):
+        return _tool_error("requestHash must be a 64-character lowercase SHA-256 digest")
     if not preview and not request_id:
         return _tool_error("requestId is required when preview is false")
     if not preview and not preview_version:
         return _tool_error("previewVersion is required when preview is false")
+    if not preview and not _SHA256_HEX_RE.fullmatch(request_hash):
+        return _tool_error("requestHash is required when preview is false")
     recurrence_resolution = args.get("recurrenceResolution")
     if recurrence_resolution is not None and not _is_canonical_recurrence_rule(recurrence_resolution):
         return _tool_error("recurrenceResolution must be a canonical recurrence rule")
@@ -904,12 +997,41 @@ def _handle_merge_tasks(args: dict, **kw) -> str:
         body["requestId"] = request_id
     if preview_version:
         body["previewVersion"] = preview_version
+    if request_hash:
+        body["requestHash"] = request_hash
     if recurrence_resolution is not None:
         body["recurrenceResolution"] = recurrence_resolution
 
     try:
         path = f"/api/tasks/{urllib.parse.quote(survivor_task_id, safe='')}/merge"
-        return _tool_result(_request("POST", path, body))
+        payload = _request("POST", path, body)
+        if preview:
+            if not _valid_action_preview(payload):
+                return _tool_error("Canonical merge preview could not be verified")
+        else:
+            try:
+                validate_canonical_receipt(
+                    payload,
+                    expected_operation_id=request_id,
+                    expected_request_hash=request_hash,
+                    expected_action="merge",
+                    expected_entity_id=survivor_task_id,
+                    expected_affected_actions={
+                        survivor_task_id: "update",
+                        duplicate_task_id: "archive",
+                    },
+                    read_back_validator=lambda read_back, receipt: (
+                        read_back.get("id") == survivor_task_id
+                        and read_back.get("canonicalRevision")
+                        == receipt.get("canonicalRevision")
+                        and read_back.get("survivorTaskId") == survivor_task_id
+                        and read_back.get("duplicateTaskId") == duplicate_task_id
+                        and read_back.get("duplicateArchived") is True
+                    ),
+                )
+            except CanonicalReceiptError:
+                return _tool_error("Canonical merge receipt could not be verified")
+        return _tool_result(payload)
     except _FlowStateApiError as exc:
         logger.error(
             "flowstate_merge_tasks API error: status=%s code=%s",
@@ -1210,6 +1332,10 @@ FLOWSTATE_UPDATE_TASK_SCHEMA = {
             "preview": {"type": "boolean", "description": "Defaults true. False applies an approved preview."},
             "previewDigest": {"type": "string", "description": "Server-issued digest required for apply."},
             "previewExpiresAt": {"type": "string", "description": "Server-issued expiry required for apply."},
+            "requestHash": {
+                "type": "string",
+                "description": "Server-issued request hash from preview; required unchanged for apply.",
+            },
         },
         "required": ["id", "operationId", "baseRevision", "patch"],
         "additionalProperties": False,
@@ -1289,7 +1415,8 @@ FLOWSTATE_DONE_FOR_NOW_SCHEMA = {
         "Preview or apply FlowState's real Done for now operation for one exact recurring task. "
         "Defaults to preview and never treats a generic status, progress, or due-date update as "
         "recurring completion. Apply only after explicit user approval of the preview; preview=false "
-        "requires the stable requestId and previewVersion returned by FlowState. The response includes "
+        "requires the stable requestId, previewVersion, and exact server-issued requestHash returned "
+        "by FlowState. The response includes "
         "FlowState's typed receipt and read-back verification without authentication material."
     ),
     "parameters": {
@@ -1312,6 +1439,10 @@ FLOWSTATE_DONE_FOR_NOW_SCHEMA = {
                 "type": "string",
                 "description": "State-bound version returned by preview. Required when preview is false.",
             },
+            "requestHash": {
+                "type": "string",
+                "description": "Server-issued request hash returned by preview. Required unchanged for apply.",
+            },
         },
         "required": ["taskId"],
     },
@@ -1325,6 +1456,7 @@ FLOWSTATE_MERGE_TASKS_SCHEMA = {
         "returns FlowState's retained fields, transfers, conflicts, archival behavior, receipt, and "
         "read-back unchanged. Apply only after explicit approval of that preview and provide its "
         "requestId and previewVersion. Title similarity is never approval, and this tool does not "
+        "apply without the exact server-issued requestHash from that preview. "
         "implement or guess merge semantics outside FlowState. If FlowState returns a recurrence "
         "conflict without a supplied resolution, stop all further Flow State mutations and ask for "
         "the exact intended cadence; never fall back to separate task updates or deletion."
@@ -1377,6 +1509,10 @@ FLOWSTATE_MERGE_TASKS_SCHEMA = {
             "previewVersion": {
                 "type": "string",
                 "description": "State-bound version returned by preview. Required when preview is false.",
+            },
+            "requestHash": {
+                "type": "string",
+                "description": "Server-issued request hash returned by preview. Required unchanged for apply.",
             },
         },
         "required": ["survivorTaskId", "duplicateTaskId"],
