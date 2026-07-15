@@ -233,29 +233,30 @@ Source contract verified 2026-07-15 with 272 related pytest regressions. Package
 ### Task H4: Canonicalize task create, delete, restore, and status transitions
 
 **Files:**
-- Create: FlowState `supabase/migrations/20260715020000_canonical_task_lifecycle.sql`
+- Create: FlowState `supabase/migrations/20260715040000_canonical_task_lifecycle.sql`
 - Create: FlowState `server/local-api/task-lifecycle.cjs`
 - Modify: FlowState `server/local-api/server.cjs`
 - Modify: Hermes `tools/flowstate_tool.py`
 - Test: FlowState `scripts/db/test-task-lifecycle-rpc.sql`
+- Modify: FlowState `scripts/db/test-reliable-assistant-contract.sh`
 - Test: FlowState `tests/unit/local-api/task-lifecycle.test.ts`
 - Test: Hermes `tests/tools/test_flowstate_tool.py`
 
 - [ ] **Step 1: Write rollback-only create/delete/restore tests**
 
-Cover preview zero-write, exact workspace scope, stable generated task ID, stale revision, altered replay, cross-user/viewer denial, soft-delete tombstone, restore conflict, response loss, and injected rollback.
+Cover preview zero-write, exact workspace scope, deterministic generated task ID, stale revision, altered replay, cross-user/viewer denial, soft-delete tombstone, restore conflict against the live recurrence indexes, response loss, explicit non-recurring reopen, recurring reopen rejection, and injected rollback.
 
 - [ ] **Step 2: Implement one `task.lifecycle.v1` operation family**
 
-Create returns the previewed ID; delete and restore require the current canonical revision. Generic status changes that invoke completion/recurrence semantics must route to their domain command instead of scalar patch.
+Create returns the previewed ID; delete, restore, and reopen require the current canonical revision. Completion remains a separate domain command: non-recurring tasks use `flowstate_complete_task`, recurring tasks use `flowstate_done_for_now`, and generic scalar patch never changes status.
 
 - [ ] **Step 3: Make Hermes preview by default and halt on typed conflicts**
 
-No create/delete/restore tool may report success from HTTP status alone or issue a fallback patch.
+No create/delete/restore/reopen tool may report success from HTTP status alone or issue a fallback patch. The old bare DELETE route must fail closed rather than retaining a weaker mutation path.
 
 - [ ] **Step 4: Run the full lifecycle contract and commit**
 
-Run: `npm test -- tests/unit/local-api/task-lifecycle.test.ts && ./scripts/db/test-task-lifecycle-rpc.sql && python -m pytest -q tests/tools/test_flowstate_tool.py`
+Run: `npm test -- tests/unit/local-api/task-lifecycle.test.ts && bash scripts/db/test-reliable-assistant-contract.sh && python -m pytest -q tests/tools/test_flowstate_tool.py`
 
 Commit: `feat(tasks): add canonical lifecycle commands`
 
