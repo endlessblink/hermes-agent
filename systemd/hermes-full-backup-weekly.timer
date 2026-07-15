@@ -1,0 +1,11 @@
+[Unit]
+Description=Create a weekly full Hermes backup
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=30m
+Unit=hermes-full-backup@weekly.service
+
+[Install]
+WantedBy=timers.target

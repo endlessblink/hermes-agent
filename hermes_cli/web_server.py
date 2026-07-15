@@ -166,10 +166,11 @@ def _desktop_parent_alive(parent_pid: int) -> bool:
     if os.getppid() != parent_pid:
         return False
     try:
-        os.kill(parent_pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+        import psutil  # type: ignore
+
+        return bool(psutil.pid_exists(parent_pid))
+    except Exception:
         return False
-    return True
 
 
 def _run_desktop_parent_watchdog(
