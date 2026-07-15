@@ -48,8 +48,8 @@ test('desktop background child processes opt into hidden Windows consoles', () =
 })
 
 test('source backend PYTHONPATH follows the selected Python venv', () => {
-  const source = readElectronFile('main.cjs')
-  const createIndex = source.indexOf('function createPythonBackend(root, label, backendArgs, options = {})')
+  const source = readElectronFile('main.ts')
+  const createIndex = source.indexOf('function createPythonBackend(')
   assert.notEqual(createIndex, -1, 'missing source backend resolver')
   const snippet = source.slice(createIndex, createIndex + 900)
 
@@ -99,7 +99,7 @@ test('desktop backend teardown tree-kills Windows backend descendants', () => {
   assert.match(helperSnippet, /forceKillProcessTree\(child\.pid\)/)
   assert.match(helperSnippet, /child\.kill\('SIGTERM'\)/)
 
-  const resetIndex = source.indexOf('function resetHermesConnection()')
+  const resetIndex = source.indexOf('function resetHermesConnection(')
   assert.notEqual(resetIndex, -1, 'missing resetHermesConnection')
   const resetSnippet = source.slice(resetIndex, resetIndex + 300)
   assert.match(resetSnippet, /stopBackendChild\(hermesProcess\)/)
@@ -113,7 +113,7 @@ test('desktop backend teardown tree-kills Windows backend descendants', () => {
 })
 
 test('pooled backend startup failures clean up partial children', () => {
-  const source = readElectronFile('main.cjs')
+  const source = readElectronFile('main.ts')
   const ensureIndex = source.indexOf('async function ensureBackend(profile)')
   assert.notEqual(ensureIndex, -1, 'missing ensureBackend')
   const snippet = source.slice(ensureIndex, ensureIndex + 1400)
