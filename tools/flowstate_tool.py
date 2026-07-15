@@ -41,6 +41,15 @@ _CANONICAL_UPDATE_FIELDS = {
     "previewExpiresAt",
     "requestHash",
 }
+_CANONICAL_COMPLETE_FIELDS = {
+    "taskId",
+    "operationId",
+    "baseRevision",
+    "preview",
+    "previewDigest",
+    "previewExpiresAt",
+    "requestHash",
+}
 _RECURRENCE_COMMON_FIELDS = {"pattern", "interval", "endType", "endDate", "endCount"}
 _RECURRENCE_PATTERN_FIELDS = {
     "daily": set(),
@@ -701,6 +710,122 @@ def _handle_update_task(args: dict, **kw) -> str:
         return _tool_error("Flow State canonical task update failed")
 
 
+def _handle_complete_task(args: dict, **kw) -> str:
+    unknown = sorted(set(args) - _CANONICAL_COMPLETE_FIELDS)
+    if unknown:
+        return _tool_error(
+            f"unsupported canonical completion fields: {', '.join(unknown)}"
+        )
+
+    task_id = args.get("taskId")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _tool_error("taskId is required")
+    task_id = task_id.strip()
+
+    operation_id = args.get("operationId")
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id.strip()
+        or operation_id != operation_id.strip()
+        or len(operation_id) > 160
+    ):
+        return _tool_error(
+            "operationId is required and must be at most 160 trimmed characters"
+        )
+
+    base_revision = args.get("baseRevision")
+    if not _is_positive_int(base_revision):
+        return _tool_error("baseRevision is required and must be a positive integer")
+
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return _tool_error("preview must be a boolean")
+
+    body: Dict[str, Any] = {
+        "operationId": operation_id,
+        "baseRevision": base_revision,
+        "preview": preview,
+    }
+    if not preview:
+        digest = args.get("previewDigest")
+        expiry = args.get("previewExpiresAt")
+        request_hash = args.get("requestHash")
+        if not isinstance(digest, str) or not _SHA256_HEX_RE.fullmatch(digest):
+            return _tool_error("previewDigest is required when preview is false")
+        if not _is_iso_timestamp(expiry):
+            return _tool_error("previewExpiresAt is required when preview is false")
+        if not isinstance(request_hash, str) or not _SHA256_HEX_RE.fullmatch(request_hash):
+            return _tool_error("requestHash is required when preview is false")
+        body.update({
+            "previewDigest": digest,
+            "previewExpiresAt": expiry,
+            "requestHash": request_hash,
+        })
+
+    try:
+        path = f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/complete"
+        payload = _request("POST", path, body)
+        if preview:
+            valid_preview = (
+                _valid_canonical_preview(
+                    payload, task_id, operation_id, base_revision
+                )
+                and payload.get("willSetCompletedAt") is True
+                and payload.get("normalizedPayload") == {"status": "done"}
+            )
+            if not valid_preview:
+                return _tool_error(
+                    "Canonical task completion preview could not be verified"
+                )
+        else:
+            try:
+                validate_canonical_receipt(
+                    payload,
+                    expected_operation_id=operation_id,
+                    expected_request_hash=body["requestHash"],
+                    expected_action="complete",
+                    expected_entity_id=task_id,
+                    expected_affected_actions={task_id: "update"},
+                    read_back_validator=lambda read_back, receipt: (
+                        read_back.get("id") == task_id
+                        and read_back.get("canonicalRevision")
+                        == receipt.get("canonicalRevision")
+                        and read_back.get("canonicalUpdatedAt")
+                        == receipt.get("canonicalUpdatedAt")
+                        and read_back.get("status") == "done"
+                        and _is_iso_timestamp(read_back.get("completedAt"))
+                    ),
+                )
+            except CanonicalReceiptError:
+                return _tool_error(
+                    "Canonical task completion receipt could not be verified"
+                )
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_complete_task typed error: code=%s status=%s",
+            exc.code,
+            exc.status,
+        )
+        if exc.code == "recurring_task":
+            exc = _FlowStateApiError(
+                str(exc),
+                code=exc.code,
+                status=exc.status,
+                action="stop_mutations_and_use_done_for_now",
+            )
+        return _typed_tool_error(exc)
+    except RuntimeError as exc:
+        logger.error("flowstate_complete_task runtime error: %s", type(exc).__name__)
+        message = str(exc)
+        if message.startswith("Flow State Local Task API"):
+            return _tool_error(message)
+        return _tool_error("Flow State canonical task completion failed")
+    except Exception as exc:
+        logger.error("flowstate_complete_task error: %s", type(exc).__name__)
+        return _tool_error("Flow State canonical task completion failed")
+
+
 def _handle_delete_task(args: dict, **kw) -> str:
     task_id = str(args.get("id") or "").strip()
     if not task_id:
@@ -1350,6 +1475,50 @@ FLOWSTATE_UPDATE_TASK_SCHEMA = {
     },
 }
 
+FLOWSTATE_COMPLETE_TASK_SCHEMA = {
+    "name": "flowstate_complete_task",
+    "description": (
+        "Preview or apply the canonical completion of one exact non-recurring Flow State task. "
+        "Defaults to preview and applies only after explicit approval of the exact server-issued "
+        "digest, expiry, and request hash. Recurring tasks are rejected; use Done for now through "
+        "flowstate_done_for_now instead. A successful apply is returned only after Hermes verifies "
+        "the canonical receipt, completed status, and completed timestamp."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "description": "Exact Flow State task id."},
+            "operationId": {
+                "type": "string",
+                "description": "Stable idempotency key for preview and apply.",
+            },
+            "baseRevision": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Canonical revision returned by an exact task read.",
+            },
+            "preview": {
+                "type": "boolean",
+                "description": "Defaults true; set false only after explicit approval.",
+            },
+            "previewDigest": {
+                "type": "string",
+                "description": "Server-issued digest required unchanged for apply.",
+            },
+            "previewExpiresAt": {
+                "type": "string",
+                "description": "Server-issued preview expiry required for apply.",
+            },
+            "requestHash": {
+                "type": "string",
+                "description": "Server-issued request hash required unchanged for apply.",
+            },
+        },
+        "required": ["taskId", "operationId", "baseRevision"],
+        "additionalProperties": False,
+    },
+}
+
 FLOWSTATE_DELETE_TASK_SCHEMA = {
     "name": "flowstate_delete_task",
     "description": "Soft-delete an existing Flow State task by exact task id.",
@@ -1644,6 +1813,7 @@ for _name, _schema, _handler in [
     ("flowstate_get_task", FLOWSTATE_GET_TASK_SCHEMA, _handle_get_task),
     ("flowstate_create_task", FLOWSTATE_CREATE_TASK_SCHEMA, _handle_create_task),
     ("flowstate_update_task", FLOWSTATE_UPDATE_TASK_SCHEMA, _handle_update_task),
+    ("flowstate_complete_task", FLOWSTATE_COMPLETE_TASK_SCHEMA, _handle_complete_task),
     ("flowstate_delete_task", FLOWSTATE_DELETE_TASK_SCHEMA, _handle_delete_task),
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
     ("flowstate_get_timer_diagnostics", FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA, _handle_timer_diagnostics),

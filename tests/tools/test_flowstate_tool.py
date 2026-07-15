@@ -857,6 +857,179 @@ def test_update_task_schema_rejects_generic_recurring_completion_guidance():
     assert "not a substitute" in description
 
 
+def _valid_complete_args(**overrides):
+    args = {
+        "taskId": "task-1",
+        "operationId": "op-123",
+        "baseRevision": 7,
+    }
+    args.update(overrides)
+    return args
+
+
+def _canonical_complete_preview(**overrides):
+    return _canonical_preview_payload(
+        normalizedPayload={"status": "done"},
+        willSetCompletedAt=True,
+        **overrides,
+    )
+
+
+def _canonical_complete_commit(**receipt_overrides):
+    read_back = {
+        "id": "task-1",
+        "title": "Completed task",
+        "status": "done",
+        "completedAt": _CANONICAL_COMMITTED_AT,
+        "canonicalRevision": 8,
+        "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+    }
+    receipt = {"canonicalUpdatedAt": _CANONICAL_UPDATED_AT}
+    receipt.update(receipt_overrides)
+    return _canonical_action_payload(
+        action="complete",
+        operation_id="op-123",
+        entity_id="task-1",
+        read_back=read_back,
+        affected=[{
+            "entityType": "task",
+            "entityId": "task-1",
+            "action": "update",
+            "canonicalRevision": 8,
+            "changeSequence": 42,
+            "readBack": read_back,
+        }],
+        receipt_overrides=receipt,
+    )
+
+
+def test_complete_task_defaults_to_verified_non_mutating_preview(monkeypatch):
+    seen = {}
+    preview = _canonical_complete_preview()
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, preview),
+    )
+
+    result = json.loads(fst._handle_complete_task(_valid_complete_args()))
+
+    assert result["result"] == preview
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith("/api/tasks/task-1/complete")
+    assert seen["body"] == {
+        "operationId": "op-123",
+        "baseRevision": 7,
+        "preview": True,
+    }
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["previewDigest", "previewExpiresAt", "requestHash"],
+)
+def test_complete_task_apply_requires_exact_preview_binding_before_io(
+    monkeypatch, missing
+):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid apply reached Local Task API"),
+    )
+    args = _valid_complete_args(
+        preview=False,
+        previewDigest=_CANONICAL_DIGEST,
+        previewExpiresAt=_CANONICAL_PREVIEW_EXPIRY,
+        requestHash=_CANONICAL_REQUEST_HASH,
+    )
+    del args[missing]
+
+    result = json.loads(fst._handle_complete_task(args))
+
+    assert result["error"] == f"{missing} is required when preview is false"
+
+
+@pytest.mark.parametrize("replayed", [False, True])
+def test_complete_task_apply_accepts_only_verified_completion_receipt(
+    monkeypatch, replayed
+):
+    seen = {}
+    payload = _canonical_complete_commit()
+    if replayed:
+        payload["receipt"]["status"] = "replayed"
+        payload["receipt"]["replayed"] = True
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_complete_task(_valid_complete_args(
+        preview=False,
+        previewDigest=_CANONICAL_DIGEST,
+        previewExpiresAt=_CANONICAL_PREVIEW_EXPIRY,
+        requestHash=_CANONICAL_REQUEST_HASH,
+    )))
+
+    assert result["result"] == payload
+    assert seen["body"]["requestHash"] == _CANONICAL_REQUEST_HASH
+
+
+@pytest.mark.parametrize(
+    "receipt_overrides",
+    [
+        {"action": "patch"},
+        {"entityId": "other-task"},
+        {"readBackHash": "b" * 64},
+        {"readBack": {"id": "task-1", "status": "todo", "canonicalRevision": 8}},
+    ],
+)
+def test_complete_task_rejects_forged_or_noncompletion_receipt(
+    monkeypatch, receipt_overrides
+):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, _canonical_complete_commit(**receipt_overrides)),
+    )
+
+    result = json.loads(fst._handle_complete_task(_valid_complete_args(
+        preview=False,
+        previewDigest=_CANONICAL_DIGEST,
+        previewExpiresAt=_CANONICAL_PREVIEW_EXPIRY,
+        requestHash=_CANONICAL_REQUEST_HASH,
+    )))
+
+    assert "canonical" in result["error"].lower()
+
+
+def test_complete_task_preserves_typed_recurring_conflict(monkeypatch):
+    def _raise(req, timeout):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(json.dumps({
+                "error": {
+                    "code": "recurring_task",
+                    "message": "Use Done for now for recurring tasks.",
+                },
+            }).encode("utf-8")),
+        )
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_complete_task(_valid_complete_args()))
+
+    assert result == {
+        "error": "Use Done for now for recurring tasks.",
+        "code": "recurring_task",
+        "status": 409,
+        "action": "stop_mutations_and_use_done_for_now",
+    }
+
+
 def test_delete_task_uses_exact_id(monkeypatch):
     seen = {}
     monkeypatch.setattr(
@@ -2104,6 +2277,7 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_search_tasks",
         "flowstate_create_task",
         "flowstate_update_task",
+        "flowstate_complete_task",
         "flowstate_delete_task",
         "flowstate_get_current_timer",
         "flowstate_get_timer_diagnostics",
@@ -2155,6 +2329,18 @@ def test_done_for_now_schema_is_preview_first_and_apply_is_receipt_bound():
         "previewVersion",
         "requestHash",
     }
+
+
+def test_complete_task_schema_is_preview_first_and_recurrence_safe():
+    schema = fst.FLOWSTATE_COMPLETE_TASK_SCHEMA
+
+    assert schema["name"] == "flowstate_complete_task"
+    assert schema["parameters"]["required"] == [
+        "taskId", "operationId", "baseRevision",
+    ]
+    assert "Defaults to preview" in schema["description"]
+    assert "non-recurring" in schema["description"].lower()
+    assert "Done for now" in schema["description"]
 
 
 def test_timer_diagnostics_schema_is_read_only_and_verification_focused():

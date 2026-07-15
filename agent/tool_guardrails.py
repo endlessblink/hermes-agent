@@ -61,6 +61,15 @@ MUTATING_TOOL_NAMES = frozenset(
 
 _TRUSTED_TOOL_HALT_ACTIONS = {
     (
+        "flowstate_complete_task",
+        "stop_mutations_and_use_done_for_now",
+    ): (
+        "flowstate_recurring_completion_requires_done_for_now",
+        "FlowState rejected non-recurring completion because this task belongs to a recurring series. "
+        "No later FlowState mutation was executed. Use an exact task read and a fresh Done for now "
+        "preview on the next turn; never fall back to a generic task patch.",
+    ),
+    (
         "flowstate_merge_tasks",
         "stop_mutations_and_request_recurrence_resolution",
     ): (

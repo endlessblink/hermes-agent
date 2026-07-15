@@ -149,6 +149,27 @@ def test_flowstate_recurrence_history_requests_immediate_turn_halt():
     assert "No later FlowState mutation was executed" in decision.message
 
 
+def test_flowstate_complete_recurring_conflict_halts_before_fallback_patch():
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "Use Done for now for recurring tasks.",
+        "code": "recurring_task",
+        "status": 409,
+        "action": "stop_mutations_and_use_done_for_now",
+    })
+
+    decision = controller.after_call(
+        "flowstate_complete_task",
+        {"taskId": "a", "operationId": "op-1", "baseRevision": 7},
+        result,
+        failed=True,
+    )
+
+    assert decision.action == "halt"
+    assert decision.code == "flowstate_recurring_completion_requires_done_for_now"
+    assert "No later FlowState mutation was executed" in decision.message
+
+
 def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(

@@ -278,6 +278,7 @@ TOOLSETS = {
             "flowstate_get_task",
             "flowstate_create_task",
             "flowstate_update_task",
+            "flowstate_complete_task",
             "flowstate_delete_task",
             "flowstate_get_current_timer",
             "flowstate_get_timer_diagnostics",

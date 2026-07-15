@@ -176,7 +176,7 @@ Commit: `fix(monitor): consume complete canonical task inventory`
 - Create: Hermes `tools/flowstate_receipts.py`
 - Create: Hermes `tests/tools/test_flowstate_receipts.py`
 
-- [ ] **Step 1: Define and test the exact receipt contract**
+- [x] **Step 1: Define and test the exact receipt contract**
 
 ```ts
 type CanonicalReceipt<T> = {
@@ -194,22 +194,41 @@ type CanonicalReceipt<T> = {
 
 Tests recompute SHA-256 over canonical JSON. A well-shaped but incorrect hash, mismatched operation, missing revision/sequence, altered replay, or HTTP-only `ok: true` must be rejected.
 
-- [ ] **Step 2: Run RED receipt tests**
+- [x] **Step 2: Run RED receipt tests**
 
 Run: `npm test -- tests/unit/local-api/canonical-receipt.test.ts && python -m pytest -q tests/tools/test_flowstate_receipts.py`
 Expected: malformed successes currently pass and make the tests fail.
 
-- [ ] **Step 3: Route patch, done-for-now, and merge through the validator**
+- [x] **Step 3: Route patch, done-for-now, and merge through the validator**
 
 Domain receipts may retain operation-specific fields, but committed success must link to the canonical operation ledger and exact affected task revisions/sequences/read-backs.
 
-- [ ] **Step 4: Verify response-loss replay**
+- [x] **Step 4: Verify response-loss replay**
 
 Apply once, discard the response, retry the same operation/payload, and assert `status: "replayed"`, one revision increment, one sequence event, and identical read-back hash.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit: `feat(local-api): validate one canonical assistant receipt`
+
+### Task H3a: Expose canonical non-recurring completion to Hermes
+
+**Files:**
+- Modify: Hermes `tools/flowstate_tool.py`
+- Modify: Hermes `toolsets.py`
+- Modify: Hermes `agent/tool_guardrails.py`
+- Modify: office-work profile skill `skills/productivity/flowstate-personal-assistant-triage/SKILL.md`
+- Test: Hermes `tests/tools/test_flowstate_tool.py`
+- Test: Hermes `tests/agent/test_tool_guardrails.py`
+- Test: Hermes `tests/run_agent/test_tool_call_guardrail_runtime.py`
+
+- [x] **Step 1: Lock preview, apply, replay, typed conflict, and forged-receipt behavior with RED tests**
+- [x] **Step 2: Register `flowstate_complete_task` against the signed-user `/api/tasks/:id/complete` boundary**
+- [x] **Step 3: Require exact preview binding and verify completed status, timestamp, revision, sequence, and read-back hash**
+- [x] **Step 4: Halt the current mutation batch when a recurring task requires a fresh `Done for now` preview**
+- [x] **Step 5: Update the active office-work skill so triage evidence is not mistaken for completion approval**
+
+Source contract verified 2026-07-15 with 272 related pytest regressions. Packaged gateway activation and protected live read-back remain part of H11 and are intentionally held until FlowState authentication is restored.
 
 ### Task H4: Canonicalize task create, delete, restore, and status transitions
 
