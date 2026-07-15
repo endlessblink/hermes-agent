@@ -50,6 +50,23 @@ _CANONICAL_COMPLETE_FIELDS = {
     "previewExpiresAt",
     "requestHash",
 }
+_CANONICAL_LIFECYCLE_APPROVAL_FIELDS = {
+    "operationId",
+    "baseRevision",
+    "preview",
+    "previewDigest",
+    "previewExpiresAt",
+    "requestHash",
+}
+_CANONICAL_CREATE_FIELDS = _CANONICAL_LIFECYCLE_APPROVAL_FIELDS | {
+    "taskId",
+    "title",
+    "description",
+    "priority",
+    "dueDate",
+    "projectId",
+}
+_CANONICAL_EXISTING_LIFECYCLE_FIELDS = _CANONICAL_LIFECYCLE_APPROVAL_FIELDS | {"id"}
 _RECURRENCE_COMMON_FIELDS = {"pattern", "interval", "endType", "endDate", "endCount"}
 _RECURRENCE_PATTERN_FIELDS = {
     "daily": set(),
@@ -524,39 +541,240 @@ def _handle_get_task(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
-def _handle_create_task(args: dict, **kw) -> str:
-    title = str(args.get("title") or "").strip()
-    if not title:
-        return _tool_error("title is required")
+def _canonical_lifecycle_state(action: str, read_back: Any, task_id: str) -> bool:
+    if (
+        not isinstance(read_back, dict)
+        or read_back.get("id") != task_id
+        or not isinstance(read_back.get("tombstonePresent"), bool)
+    ):
+        return False
+    if action == "delete":
+        return (
+            read_back.get("isDeleted") is True
+            and read_back.get("tombstonePresent") is True
+            and _is_iso_timestamp(read_back.get("deletedAt"))
+        )
+    if not (
+        read_back.get("isDeleted") is False
+        and read_back.get("tombstonePresent") is False
+        and read_back.get("deletedAt") is None
+    ):
+        return False
+    return action != "reopen" or (
+        read_back.get("status") == "todo" and read_back.get("completedAt") is None
+    )
 
-    priority = args.get("priority")
-    if priority in ("", None):
-        priority = None
-    if priority is not None and priority not in _VALID_PRIORITIES:
-        return _tool_error("priority must be low|medium|high or null")
 
-    due_date = args.get("dueDate")
-    if due_date in ("", None):
-        due_date = None
-    elif not _DATE_ONLY_RE.match(str(due_date)):
-        return _tool_error("dueDate must be YYYY-MM-DD")
+def _valid_lifecycle_preview(
+    payload: Any,
+    *,
+    action: str,
+    task_id: Optional[str],
+    operation_id: str,
+    revision: int,
+    expected_create_payload: Optional[dict] = None,
+) -> bool:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("result") != "preview"
+        or payload.get("contractVersion") != _CANONICAL_TASK_CONTRACT
+        or payload.get("operationId") != operation_id
+        or payload.get("action") != action
+        or payload.get("baseRevision") != revision
+        or not isinstance(payload.get("previewDigest"), str)
+        or not _SHA256_HEX_RE.fullmatch(payload["previewDigest"])
+        or not isinstance(payload.get("requestHash"), str)
+        or not _SHA256_HEX_RE.fullmatch(payload["requestHash"])
+        or not _is_iso_timestamp(payload.get("previewExpiresAt"))
+        or not isinstance(payload.get("normalizedPayload"), dict)
+    ):
+        return False
+    issued_task_id = payload.get("taskId")
+    if not isinstance(issued_task_id, str) or not issued_task_id:
+        return False
+    if action == "create":
+        if task_id is not None and task_id != issued_task_id:
+            return False
+        if payload["normalizedPayload"].get("taskId") != issued_task_id:
+            return False
+        if expected_create_payload is None or any(
+            payload["normalizedPayload"].get(key) != value
+            for key, value in expected_create_payload.items()
+        ):
+            return False
+    elif issued_task_id != task_id:
+        return False
+    return (
+        _valid_canonical_read_back(payload.get("readBack"), issued_task_id, revision)
+        and _canonical_lifecycle_state(action, payload["readBack"], issued_task_id)
+    )
 
-    project_id = args.get("projectId")
-    if project_id in ("", None):
-        project_id = None
 
-    body = {
-        "title": title,
-        "description": str(args.get("description") or ""),
-        "priority": priority,
-        "dueDate": due_date,
-        "projectId": project_id,
+def _validate_lifecycle_operation(args: dict, *, action: str) -> tuple[Optional[dict], Optional[str]]:
+    allowed = _CANONICAL_CREATE_FIELDS if action == "create" else _CANONICAL_EXISTING_LIFECYCLE_FIELDS
+    unknown = sorted(set(args) - allowed)
+    if unknown:
+        return None, f"unsupported canonical lifecycle fields: {', '.join(unknown)}"
+    operation_id = args.get("operationId")
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id.strip()
+        or operation_id != operation_id.strip()
+        or len(operation_id) > 160
+    ):
+        return None, "operationId is required and must be at most 160 trimmed characters"
+    revision = args.get("baseRevision")
+    if action == "create":
+        if revision != 0 or isinstance(revision, bool):
+            return None, "baseRevision is required and must be 0 for task creation"
+    elif not _is_positive_int(revision):
+        return None, "baseRevision is required and must be a positive integer"
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return None, "preview must be a boolean"
+    task_key = "taskId" if action == "create" else "id"
+    task_id = args.get(task_key)
+    if action != "create" or not preview:
+        if not isinstance(task_id, str) or not task_id.strip():
+            return None, f"{task_key} is required"
+        task_id = task_id.strip()
+    else:
+        task_id = None
+    body: Dict[str, Any] = {
+        "operationId": operation_id,
+        "baseRevision": revision,
+        "preview": preview,
     }
+    if not preview:
+        digest = args.get("previewDigest")
+        expiry = args.get("previewExpiresAt")
+        request_hash = args.get("requestHash")
+        if not isinstance(digest, str) or not _SHA256_HEX_RE.fullmatch(digest):
+            return None, "previewDigest is required when preview is false"
+        if not _is_iso_timestamp(expiry):
+            return None, "previewExpiresAt is required when preview is false"
+        if not isinstance(request_hash, str) or not _SHA256_HEX_RE.fullmatch(request_hash):
+            return None, "requestHash is required when preview is false"
+        body.update({
+            "previewDigest": digest,
+            "previewExpiresAt": expiry,
+            "requestHash": request_hash,
+        })
+    return {"body": body, "taskId": task_id, "preview": preview}, None
+
+
+def _handle_task_lifecycle(action: str, args: dict) -> str:
+    validated, error = _validate_lifecycle_operation(args, action=action)
+    if error:
+        return _tool_error(error)
+    assert validated is not None
+    body = validated["body"]
+    task_id = validated["taskId"]
+    preview = validated["preview"]
+    if action == "create":
+        title = str(args.get("title") or "").strip()
+        if not title:
+            return _tool_error("title is required")
+        priority = args.get("priority")
+        if priority in ("", None):
+            priority = None
+        if priority is not None and priority not in _VALID_PRIORITIES:
+            return _tool_error("priority must be low|medium|high or null")
+        due_date = args.get("dueDate")
+        if due_date in ("", None):
+            due_date = None
+        elif not _DATE_ONLY_RE.fullmatch(str(due_date)):
+            return _tool_error("dueDate must be YYYY-MM-DD")
+        project_id = args.get("projectId")
+        if project_id in ("", None):
+            project_id = None
+        body["payload"] = {
+            "title": title,
+            "description": str(args.get("description") or ""),
+            "priority": priority,
+            "dueDate": due_date,
+            "projectId": project_id,
+        }
+        if not preview:
+            body["taskId"] = task_id
+        path = "/api/tasks"
+    else:
+        path = f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/{action}"
+
     try:
-        return _tool_result(_request("POST", "/api/tasks", body))
+        payload = _request("POST", path, body)
+        if preview:
+            if not _valid_lifecycle_preview(
+                payload,
+                action=action,
+                task_id=task_id,
+                operation_id=body["operationId"],
+                revision=body["baseRevision"],
+                expected_create_payload=body.get("payload") if action == "create" else None,
+            ):
+                return _tool_error("Canonical task lifecycle preview could not be verified")
+        else:
+            expected_action = "update" if action == "reopen" else action
+            if (
+                not isinstance(payload, dict)
+                or payload.get("operationId") != body["operationId"]
+                or payload.get("action") != action
+                or payload.get("taskId") != task_id
+            ):
+                return _tool_error("Canonical task lifecycle receipt could not be verified")
+            try:
+                validate_canonical_receipt(
+                    payload,
+                    expected_operation_id=body["operationId"],
+                    expected_request_hash=body["requestHash"],
+                    expected_action=action,
+                    expected_entity_id=task_id,
+                    expected_affected_actions={task_id: expected_action},
+                    read_back_validator=lambda read_back, receipt: (
+                        read_back.get("canonicalRevision") == receipt.get("canonicalRevision")
+                        and read_back.get("canonicalUpdatedAt") == receipt.get("canonicalUpdatedAt")
+                        and _canonical_lifecycle_state(action, read_back, task_id)
+                    ),
+                )
+            except CanonicalReceiptError:
+                return _tool_error("Canonical task lifecycle receipt could not be verified")
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error("flowstate_%s_task typed error: code=%s status=%s", action, exc.code, exc.status)
+        if action == "reopen" and exc.code == "recurring_task":
+            exc = _FlowStateApiError(
+                str(exc),
+                code=exc.code,
+                status=exc.status,
+                action="stop_mutations_and_report_recurrence_history",
+            )
+        return _typed_tool_error(exc)
+    except RuntimeError as exc:
+        logger.error("flowstate_%s_task runtime error: %s", action, type(exc).__name__)
+        message = str(exc)
+        if message.startswith("Flow State Local Task API"):
+            return _tool_error(message)
+        return _tool_error("Flow State canonical task lifecycle failed")
     except Exception as exc:
-        logger.error("flowstate_create_task error: %s", exc)
-        return _tool_error(str(exc))
+        logger.error("flowstate_%s_task error: %s", action, type(exc).__name__)
+        return _tool_error("Flow State canonical task lifecycle failed")
+
+
+def _handle_create_task(args: dict, **kw) -> str:
+    return _handle_task_lifecycle("create", args)
+
+
+def _handle_delete_task(args: dict, **kw) -> str:
+    return _handle_task_lifecycle("delete", args)
+
+
+def _handle_restore_task(args: dict, **kw) -> str:
+    return _handle_task_lifecycle("restore", args)
+
+
+def _handle_reopen_task(args: dict, **kw) -> str:
+    return _handle_task_lifecycle("reopen", args)
 
 
 def _is_positive_int(value: Any) -> bool:
@@ -824,17 +1042,6 @@ def _handle_complete_task(args: dict, **kw) -> str:
     except Exception as exc:
         logger.error("flowstate_complete_task error: %s", type(exc).__name__)
         return _tool_error("Flow State canonical task completion failed")
-
-
-def _handle_delete_task(args: dict, **kw) -> str:
-    task_id = str(args.get("id") or "").strip()
-    if not task_id:
-        return _tool_error("id is required")
-    try:
-        return _tool_result(_request("DELETE", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}"))
-    except Exception as exc:
-        logger.error("flowstate_delete_task error: %s", exc)
-        return _tool_error(str(exc))
 
 
 def _handle_current_timer(args: dict, **kw) -> str:
@@ -1418,21 +1625,31 @@ FLOWSTATE_GET_TASK_SCHEMA = {
 FLOWSTATE_CREATE_TASK_SCHEMA = {
     "name": "flowstate_create_task",
     "description": (
-        "Create a personal task in Flow State. Omit projectId unless the user "
-        "explicitly provided a known Flow State project id. When the user asks "
-        "to create, save, add, or schedule a task in FlowState, call this tool; "
-        "do not substitute Markdown, JSON, or a hermes-ui/task-triage artifact."
+        "Preview or apply canonical Flow State task creation. Defaults to a zero-write preview "
+        "that issues a deterministic taskId; apply only after explicit approval by resending "
+        "that exact taskId, operation, digest, expiry, and request hash with preview=false. "
+        "Omit projectId unless the user explicitly provided a known Flow State project id. "
+        "When the user asks for real FlowState creation, call this tool; do not substitute "
+        "Markdown or a hermes-ui/task-triage artifact."
     ),
     "parameters": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
+            "operationId": {"type": "string", "description": "Stable idempotency key for preview and apply."},
+            "baseRevision": {"type": "integer", "minimum": 0, "maximum": 0, "description": "Must be 0 for create."},
+            "taskId": {"type": "string", "description": "Server-issued preview task id; required unchanged for apply."},
             "title": {"type": "string", "description": "Task title."},
             "description": {"type": "string", "description": "Optional task description."},
-            "priority": {"type": "string", "description": "Optional: low, medium, high, or null."},
+            "priority": {"type": ["string", "null"], "enum": ["low", "medium", "high", None], "description": "Optional priority."},
             "dueDate": {"type": "string", "description": "Optional YYYY-MM-DD due date."},
             "projectId": {"type": "string", "description": "Optional known Flow State project id."},
+            "preview": {"type": "boolean", "description": "Defaults true; set false only after explicit approval."},
+            "previewDigest": {"type": "string", "description": "Server-issued digest required unchanged for apply."},
+            "previewExpiresAt": {"type": "string", "description": "Server-issued expiry required for apply."},
+            "requestHash": {"type": "string", "description": "Server-issued request hash required unchanged for apply."},
         },
-        "required": ["title"],
+        "required": ["operationId", "baseRevision", "title"],
     },
 }
 
@@ -1521,11 +1738,48 @@ FLOWSTATE_COMPLETE_TASK_SCHEMA = {
 
 FLOWSTATE_DELETE_TASK_SCHEMA = {
     "name": "flowstate_delete_task",
-    "description": "Soft-delete an existing Flow State task by exact task id.",
+    "description": (
+        "Preview or apply canonical soft-delete for one exact Flow State task. Defaults to "
+        "preview; apply requires explicit approval of the exact revision, digest, expiry, "
+        "and request hash. Success is returned only after receipt and tombstone verification."
+    ),
     "parameters": {
         "type": "object",
-        "properties": {"id": {"type": "string", "description": "Exact Flow State task id."}},
-        "required": ["id"],
+        "additionalProperties": False,
+        "properties": {
+            "id": {"type": "string", "description": "Exact Flow State task id."},
+            "operationId": {"type": "string", "description": "Stable idempotency key."},
+            "baseRevision": {"type": "integer", "minimum": 1},
+            "preview": {"type": "boolean", "description": "Defaults true."},
+            "previewDigest": {"type": "string"},
+            "previewExpiresAt": {"type": "string"},
+            "requestHash": {"type": "string"},
+        },
+        "required": ["id", "operationId", "baseRevision"],
+    },
+}
+
+FLOWSTATE_RESTORE_TASK_SCHEMA = {
+    "name": "flowstate_restore_task",
+    "description": (
+        "Preview or apply canonical restore for one exact soft-deleted Flow State task. "
+        "Defaults to preview and verifies the cleared tombstone after approved apply."
+    ),
+    "parameters": {
+        **FLOWSTATE_DELETE_TASK_SCHEMA["parameters"],
+        "properties": dict(FLOWSTATE_DELETE_TASK_SCHEMA["parameters"]["properties"]),
+    },
+}
+
+FLOWSTATE_REOPEN_TASK_SCHEMA = {
+    "name": "flowstate_reopen_task",
+    "description": (
+        "Preview or apply canonical reopen for one exact completed non-recurring Flow State task. "
+        "Defaults to preview; recurring tasks fail closed and must not fall back to a generic patch."
+    ),
+    "parameters": {
+        **FLOWSTATE_DELETE_TASK_SCHEMA["parameters"],
+        "properties": dict(FLOWSTATE_DELETE_TASK_SCHEMA["parameters"]["properties"]),
     },
 }
 
@@ -1815,6 +2069,8 @@ for _name, _schema, _handler in [
     ("flowstate_update_task", FLOWSTATE_UPDATE_TASK_SCHEMA, _handle_update_task),
     ("flowstate_complete_task", FLOWSTATE_COMPLETE_TASK_SCHEMA, _handle_complete_task),
     ("flowstate_delete_task", FLOWSTATE_DELETE_TASK_SCHEMA, _handle_delete_task),
+    ("flowstate_restore_task", FLOWSTATE_RESTORE_TASK_SCHEMA, _handle_restore_task),
+    ("flowstate_reopen_task", FLOWSTATE_REOPEN_TASK_SCHEMA, _handle_reopen_task),
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
     ("flowstate_get_timer_diagnostics", FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA, _handle_timer_diagnostics),
     ("flowstate_list_task_instances", FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA, _handle_list_task_instances),

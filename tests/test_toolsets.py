@@ -89,6 +89,8 @@ class TestResolveToolset:
             "flowstate_update_task",
             "flowstate_complete_task",
             "flowstate_delete_task",
+            "flowstate_restore_task",
+            "flowstate_reopen_task",
             "flowstate_get_current_timer",
             "flowstate_get_timer_diagnostics",
             "flowstate_list_task_instances",

@@ -170,6 +170,27 @@ def test_flowstate_complete_recurring_conflict_halts_before_fallback_patch():
     assert "No later FlowState mutation was executed" in decision.message
 
 
+def test_flowstate_reopen_recurring_conflict_halts_before_fallback_patch():
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "Recurring completion history requires review.",
+        "code": "recurring_task",
+        "status": 409,
+        "action": "stop_mutations_and_report_recurrence_history",
+    })
+
+    decision = controller.after_call(
+        "flowstate_reopen_task",
+        {"id": "a", "operationId": "op-1", "baseRevision": 7},
+        result,
+        failed=True,
+    )
+
+    assert decision.action == "halt"
+    assert decision.code == "flowstate_reopen_recurrence_requires_review"
+    assert "No later FlowState mutation was executed" in decision.message
+
+
 def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(

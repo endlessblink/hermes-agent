@@ -27,6 +27,8 @@ _CAPABILITY_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("flowstate_create_task", "create tasks"),
             ("flowstate_update_task", "update tasks"),
             ("flowstate_delete_task", "remove tasks"),
+            ("flowstate_restore_task", "restore tasks"),
+            ("flowstate_reopen_task", "reopen completed tasks"),
         ),
     ),
     (

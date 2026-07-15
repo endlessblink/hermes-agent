@@ -87,6 +87,15 @@ _TRUSTED_TOOL_HALT_ACTIONS = {
         "No later FlowState mutation was executed. Report the conflict and wait for an explicit series "
         "strategy instead of rewriting recurrence history automatically.",
     ),
+    (
+        "flowstate_reopen_task",
+        "stop_mutations_and_report_recurrence_history",
+    ): (
+        "flowstate_reopen_recurrence_requires_review",
+        "FlowState rejected reopen because this completion belongs to recurrence history. "
+        "No later FlowState mutation was executed. Read the exact recurrence chain and ask for "
+        "the intended correction instead of falling back to a generic task patch.",
+    ),
 }
 
 

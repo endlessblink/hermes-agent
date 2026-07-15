@@ -7,6 +7,8 @@ def test_context_describes_only_registered_capabilities_in_user_vocabulary():
             "flowstate_get_assistant_context",
             "flowstate_list_tasks",
             "flowstate_create_task",
+            "flowstate_restore_task",
+            "flowstate_reopen_task",
             "flowstate_list_subtasks",
             "flowstate_subtask_batch",
         },
@@ -18,7 +20,7 @@ def test_context_describes_only_registered_capabilities_in_user_vocabulary():
     assert context["availability"] == "available"
     assert context["capabilities"] == {
         "understand what needs attention": ["read assistant context", "list tasks"],
-        "organize my tasks": ["create tasks"],
+        "organize my tasks": ["create tasks", "restore tasks", "reopen completed tasks"],
         "break large tasks into steps": ["read subtasks", "apply an approved subtask plan"],
     }
     assert context["live_context"] == {"taskPressure": {"overdue": 2}}

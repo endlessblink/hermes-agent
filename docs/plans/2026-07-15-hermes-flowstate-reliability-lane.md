@@ -241,16 +241,17 @@ Source contract verified 2026-07-15 with 272 related pytest regressions. Package
 - Modify: FlowState `scripts/db/test-reliable-assistant-contract.sh`
 - Test: FlowState `tests/unit/local-api/task-lifecycle.test.ts`
 - Test: Hermes `tests/tools/test_flowstate_tool.py`
+- Test: Hermes `tests/tools/test_flowstate_lifecycle_tools.py`
 
-- [ ] **Step 1: Write rollback-only create/delete/restore tests**
+- [x] **Step 1: Write rollback-only create/delete/restore tests**
 
 Cover preview zero-write, exact workspace scope, deterministic generated task ID, stale revision, altered replay, cross-user/viewer denial, soft-delete tombstone, restore conflict against the live recurrence indexes, response loss, explicit non-recurring reopen, recurring reopen rejection, and injected rollback.
 
-- [ ] **Step 2: Implement one `task.lifecycle.v1` operation family**
+- [x] **Step 2: Implement one `task.lifecycle.v1` operation family**
 
 Create returns the previewed ID; delete, restore, and reopen require the current canonical revision. Completion remains a separate domain command: non-recurring tasks use `flowstate_complete_task`, recurring tasks use `flowstate_done_for_now`, and generic scalar patch never changes status.
 
-- [ ] **Step 3: Make Hermes preview by default and halt on typed conflicts**
+- [x] **Step 3: Make Hermes preview by default and halt on typed conflicts**
 
 No create/delete/restore/reopen tool may report success from HTTP status alone or issue a fallback patch. The old bare DELETE route must fail closed rather than retaining a weaker mutation path.
 
@@ -259,6 +260,13 @@ No create/delete/restore/reopen tool may report success from HTTP status alone o
 Run: `npm test -- tests/unit/local-api/task-lifecycle.test.ts && bash scripts/db/test-reliable-assistant-contract.sh && python -m pytest -q tests/tools/test_flowstate_tool.py`
 
 Commit: `feat(tasks): add canonical lifecycle commands`
+
+FlowState source boundary committed and pushed as `43665ebd`; the rollback-only
+database contract, 303 Local API tests, type-check, lint, and sidecar bundle all
+pass. Hermes now exposes four receipt-verified preview/apply tools and blocks a
+same-batch generic patch after recurring reopen rejection; 257 focused Hermes
+tests pass. Packaging, installed protected live proof, migration rollout, and
+final branch integration remain gated by the signed-in FlowState sidecar.
 
 ### Task H5: Canonicalize subtasks and interactive task breakdown
 

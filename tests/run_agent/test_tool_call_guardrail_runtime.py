@@ -413,6 +413,47 @@ def test_flowstate_recurring_completion_skips_fallback_patch_in_same_batch():
     assert "flowstate_recurring_completion_requires_done_for_now" in patch_result
 
 
+def test_flowstate_recurring_reopen_skips_fallback_patch_in_same_batch():
+    agent = _make_agent("flowstate_reopen_task", "flowstate_update_task", max_iterations=10)
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                _mock_tool_call(
+                    "flowstate_reopen_task",
+                    json.dumps({"id": "a", "operationId": "op-1", "baseRevision": 7}),
+                    "reopen-conflict",
+                ),
+                _mock_tool_call(
+                    "flowstate_update_task",
+                    json.dumps({"id": "a", "patch": {"progress": 0}}),
+                    "must-not-run",
+                ),
+            ],
+        ),
+    ]
+    conflict = json.dumps({
+        "error": "Recurring completion history requires review.",
+        "code": "recurring_task",
+        "status": 409,
+        "action": "stop_mutations_and_report_recurrence_history",
+    })
+
+    with (
+        patch("run_agent.handle_function_call", return_value=conflict) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("reopen the task")
+
+    mock_hfc.assert_called_once()
+    assert mock_hfc.call_args.args[0] == "flowstate_reopen_task"
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "flowstate_reopen_recurrence_requires_review"
+
+
 def test_foreground_tool_batch_limit_forces_a_visible_response():
     agent = _make_agent("web_search", max_iterations=10)
     agent._foreground_tool_batch_limit = 2

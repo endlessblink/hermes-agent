@@ -256,13 +256,36 @@ def test_inventory_rejects_receipt_not_marked_fresh(monkeypatch):
 
 def test_create_task_omits_empty_project_id(monkeypatch):
     seen = {}
+    preview = {
+        "ok": True,
+        "result": "preview",
+        "contractVersion": "task-v1",
+        "operationId": "create-budget",
+        "action": "create",
+        "taskId": "new-id",
+        "baseRevision": 0,
+        "previewDigest": "a" * 64,
+        "requestHash": "c" * 64,
+        "previewExpiresAt": "2026-07-15T20:30:00.000Z",
+        "normalizedPayload": {
+            "taskId": "new-id", "title": "Review budget",
+            "description": "Before Friday", "priority": "high",
+            "dueDate": "2026-07-10", "projectId": None,
+        },
+        "readBack": {
+            "id": "new-id", "canonicalRevision": 0, "isDeleted": False,
+            "deletedAt": None, "tombstonePresent": False,
+        },
+    }
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        _capturing_urlopen(seen, {"ok": True, "task": {"id": "new-id"}}),
+        _capturing_urlopen(seen, preview),
     )
 
     result = json.loads(fst._handle_create_task({
+        "operationId": "create-budget",
+        "baseRevision": 0,
         "title": "Review budget",
         "description": "Before Friday",
         "priority": "high",
@@ -270,15 +293,20 @@ def test_create_task_omits_empty_project_id(monkeypatch):
         "projectId": "",
     }))
 
-    assert result["result"]["task"]["id"] == "new-id"
+    assert result["result"]["taskId"] == "new-id"
     assert seen["method"] == "POST"
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks"
     assert seen["body"] == {
-        "title": "Review budget",
-        "description": "Before Friday",
-        "priority": "high",
-        "dueDate": "2026-07-10",
-        "projectId": None,
+        "operationId": "create-budget",
+        "baseRevision": 0,
+        "preview": True,
+        "payload": {
+            "title": "Review budget",
+            "description": "Before Friday",
+            "priority": "high",
+            "dueDate": "2026-07-10",
+            "projectId": None,
+        },
     }
 
 
@@ -1032,17 +1060,32 @@ def test_complete_task_preserves_typed_recurring_conflict(monkeypatch):
 
 def test_delete_task_uses_exact_id(monkeypatch):
     seen = {}
+    preview = {
+        "ok": True, "result": "preview", "contractVersion": "task-v1",
+        "operationId": "delete-exact", "action": "delete",
+        "taskId": "task/with/slash", "baseRevision": 7,
+        "previewDigest": "a" * 64, "requestHash": "c" * 64,
+        "previewExpiresAt": "2026-07-15T20:30:00.000Z",
+        "normalizedPayload": {"taskId": "task/with/slash"},
+        "readBack": {
+            "id": "task/with/slash", "canonicalRevision": 7,
+            "isDeleted": True, "deletedAt": "2026-07-15T20:10:00.000Z",
+            "tombstonePresent": True,
+        },
+    }
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        _capturing_urlopen(seen, {"ok": True}),
+        _capturing_urlopen(seen, preview),
     )
 
-    result = json.loads(fst._handle_delete_task({"id": "task/with/slash"}))
+    result = json.loads(fst._handle_delete_task({
+        "id": "task/with/slash", "operationId": "delete-exact", "baseRevision": 7,
+    }))
 
-    assert result["result"]["ok"] is True
-    assert seen["method"] == "DELETE"
-    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fwith%2Fslash"
+    assert result["result"]["result"] == "preview"
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fwith%2Fslash/delete"
 
 
 def test_unauthorized_error_is_actionable(monkeypatch):
@@ -1173,7 +1216,10 @@ def test_mutation_never_replays_or_queues_from_read_through_cache(monkeypatch, t
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
-    result = json.loads(fst._handle_create_task({"title": "Must not queue"}))
+    result = json.loads(fst._handle_create_task({
+        "operationId": "offline-create", "baseRevision": 0,
+        "title": "Must not queue",
+    }))
 
     assert "error" in result
     assert "unavailable" in result["error"].lower()
@@ -2279,6 +2325,8 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_update_task",
         "flowstate_complete_task",
         "flowstate_delete_task",
+        "flowstate_restore_task",
+        "flowstate_reopen_task",
         "flowstate_get_current_timer",
         "flowstate_get_timer_diagnostics",
         "flowstate_list_task_instances",
