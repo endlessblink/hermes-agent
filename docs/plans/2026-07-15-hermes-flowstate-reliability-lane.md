@@ -317,29 +317,50 @@ migration rollout, and release integration remain open.
 ### Task H6: Canonicalize work-block create, move, resize, and remove
 
 **Files:**
-- Create: FlowState `supabase/migrations/20260715022000_canonical_work_blocks.sql`
-- Create: FlowState `server/local-api/work-blocks.cjs`
+- Create: FlowState `supabase/migrations/20260715060000_canonical_work_block_batch.sql`
+- Create: FlowState `server/local-api/work-block-batch.cjs`
 - Modify: FlowState `server/local-api/server.cjs`
+- Create: FlowState `src/services/sync/canonicalWorkBlockBatch.ts`
+- Modify: FlowState `src/stores/tasks/taskOperations.ts`
+- Modify: FlowState `src/composables/undoSingleton.ts`
+- Modify: FlowState `src/utils/supabaseMappers.ts`
 - Modify: Hermes `tools/flowstate_tool.py`
-- Test: FlowState `scripts/db/test-work-block-rpc.sql`
-- Test: FlowState `tests/unit/local-api/work-blocks.test.ts`
-- Test: Hermes `tests/tools/test_flowstate_tool.py`
+- Test: FlowState `scripts/db/test-work-block-batch-rpc.sql`
+- Test: FlowState `tests/unit/local-api/work-block-batch.test.ts`
+- Test: Hermes `tests/tools/test_flowstate_work_blocks.py`
 
-- [ ] **Step 1: Prove the current random-ID approval bug**
+- [x] **Step 1: Prove the current random-ID approval bug**
 
 The RED test asserts preview and apply use the same stable work-block ID, identical retry creates no duplicate, changed payload conflicts, and concurrent sibling appends are preserved.
 
-- [ ] **Step 2: Implement exact interval commands**
+- [x] **Step 2: Implement exact interval commands**
 
 Preview shows before/after local time, timezone, duration, overlap warnings, task/due-date effects, and finish-by boundary. Apply uses operation identity, task revision, and work-block revision.
 
-- [ ] **Step 3: Add renderer mutation notification and authoritative read-back**
+- [x] **Step 3: Add renderer mutation notification and authoritative read-back**
 
 Calendar, Today, Search, Inbox, and Canvas reload the exact affected task/work-block IDs; notification failure cannot erase durable success.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Commit: `feat(schedule): add canonical work-block lifecycle`
+
+FlowState now owns a signed-user atomic work-block batch command with stable
+create identity, exact parent revision and block-content CAS, preview approval,
+finish-by enforcement, overlap warnings, durable replay, Canvas-aware Inbox
+derivation, deadline preservation, and all-or-nothing multi-parent ripple
+updates and inverse undo/redo. Stable derived identities recover an apply whose
+response was lost; status-only calendar presentation preserves its original CAS
+proof without leaking that local proof into canonical JSON; and every receipt
+consumer enforces the same replay semantics. The Local API singular and batch
+routes use the same verified command, and its fresh inventory supplies canonical
+parent revisions and exact block hashes to personal owners and authorized
+workspace editors. Signed renderer writers reconcile canonical read-back and
+convert legacy whole-array snapshots before generic persistence. Hermes exposes one unified
+preview/apply tool, independently verifies every affected task and outcome, and
+keeps the create-only tool as a strict adapter. Migration rollout, packaging,
+installed protected live proof, and broader create-with-schedule migration
+remain gated by the release phases below.
 
 ### Task H7: Complete recurrence, merge, timer, and organization commands
 

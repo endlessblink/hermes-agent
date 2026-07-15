@@ -16,8 +16,13 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from tools.flowstate_receipts import CanonicalReceiptError, validate_canonical_receipt
+from tools.flowstate_receipts import (
+    CanonicalReceiptError,
+    canonical_json_hash,
+    validate_canonical_receipt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,16 @@ _CANONICAL_CREATE_FIELDS = _CANONICAL_LIFECYCLE_APPROVAL_FIELDS | {
     "projectId",
 }
 _CANONICAL_EXISTING_LIFECYCLE_FIELDS = _CANONICAL_LIFECYCLE_APPROVAL_FIELDS | {"id"}
+_WORK_BLOCK_COMMAND_FIELDS = {
+    "operationId",
+    "timeZone",
+    "finishBy",
+    "operations",
+    "preview",
+    "previewDigest",
+    "previewExpiresAt",
+    "requestHash",
+}
 _RECURRENCE_COMMON_FIELDS = {"pattern", "interval", "endType", "endDate", "endCount"}
 _RECURRENCE_PATTERN_FIELDS = {
     "daily": set(),
@@ -791,6 +806,14 @@ def _is_iso_timestamp(value: Any) -> bool:
         return False
 
 
+def _same_iso_instant(left: Any, right: Any) -> bool:
+    if not _is_iso_timestamp(left) or not _is_iso_timestamp(right):
+        return False
+    left_value = datetime.fromisoformat(left.replace("Z", "+00:00"))
+    right_value = datetime.fromisoformat(right.replace("Z", "+00:00"))
+    return left_value == right_value
+
+
 def _valid_canonical_read_back(value: Any, task_id: str, revision: int) -> bool:
     return (
         isinstance(value, dict)
@@ -1066,44 +1089,364 @@ def _handle_list_task_instances(args: dict, **kw) -> str:
         return _tool_error("id is required")
 
     try:
-        return _tool_result(_request("GET", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances"))
+        payload = _request(
+            "GET",
+            f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances",
+            allow_stale_cache=False,
+        )
+        task = payload.get("task") if isinstance(payload, dict) else None
+        instances = payload.get("instances") if isinstance(payload, dict) else None
+        valid = (
+            isinstance(payload, dict)
+            and payload.get("ok") is True
+            and payload.get("fresh") is True
+            and isinstance(task, dict)
+            and task.get("id") == task_id
+            and _is_positive_int(task.get("canonicalRevision"))
+            and isinstance(instances, list)
+        )
+        if valid:
+            for instance in instances:
+                if not isinstance(instance, dict):
+                    valid = False
+                    break
+                block_hash = instance.get("baseWorkBlockHash")
+                canonical = {key: value for key, value in instance.items() if key != "baseWorkBlockHash"}
+                try:
+                    expected_hash = canonical_json_hash(canonical)
+                except (TypeError, ValueError):
+                    valid = False
+                    break
+                if not isinstance(block_hash, str) or block_hash != expected_hash:
+                    valid = False
+                    break
+        if not valid:
+            return _tool_error("Canonical work-block inventory could not be verified")
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error("flowstate_list_task_instances typed error: code=%s status=%s", exc.code, exc.status)
+        return _typed_tool_error(exc)
     except Exception as exc:
-        logger.error("flowstate_list_task_instances error: %s", exc)
-        return _tool_error(str(exc))
+        logger.error("flowstate_list_task_instances error: %s", type(exc).__name__)
+        message = str(exc)
+        if message.startswith("Flow State Local Task API"):
+            return _tool_error(message)
+        return _tool_error("Flow State work-block inventory failed")
+
+
+def _real_date(value: Any) -> bool:
+    if not isinstance(value, str) or not _DATE_ONLY_RE.fullmatch(value):
+        return False
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") == value
+    except ValueError:
+        return False
+
+
+def _valid_time_zone(value: Any) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 100:
+        return False
+    try:
+        ZoneInfo(value)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
+def _normalize_work_block_operations(value: Any) -> tuple[Optional[list[dict]], Optional[str]]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 50:
+        return None, "operations must contain 1 to 50 work-block commands"
+    normalized: list[dict] = []
+    seen_targets: set[tuple[str, str]] = set()
+    task_revisions: dict[str, int] = {}
+    common = {"kind", "taskId", "baseRevision"}
+    for raw in value:
+        if not isinstance(raw, dict):
+            return None, "each work-block operation must be an object"
+        kind = raw.get("kind")
+        task_id = raw.get("taskId")
+        revision = raw.get("baseRevision")
+        if kind not in {"create", "move", "resize", "remove"}:
+            return None, "kind must be create, move, resize, or remove"
+        if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip():
+            return None, "taskId is required and must be trimmed"
+        if not _is_positive_int(revision):
+            return None, "baseRevision must be a positive integer"
+        if task_id in task_revisions and task_revisions[task_id] != revision:
+            return None, "one task cannot carry conflicting baseRevision values"
+        task_revisions[task_id] = revision
+        if kind == "create":
+            allowed = common | {"clientId", "scheduledDate", "scheduledTime", "duration"}
+            client_id = raw.get("clientId")
+            if not isinstance(client_id, str) or not client_id.strip() or client_id != client_id.strip():
+                return None, "clientId is required for create"
+            target = (task_id, f"client:{client_id}")
+        else:
+            allowed = common | {"workBlockId", "baseWorkBlockHash"}
+            if kind == "move":
+                allowed |= {"scheduledDate", "scheduledTime", "duration"}
+            elif kind == "resize":
+                allowed.add("duration")
+            work_block_id = raw.get("workBlockId")
+            if not isinstance(work_block_id, str) or not work_block_id.strip() or work_block_id != work_block_id.strip():
+                return None, "workBlockId is required for move, resize, and remove"
+            block_hash = raw.get("baseWorkBlockHash")
+            if not isinstance(block_hash, str) or not _SHA256_HEX_RE.fullmatch(block_hash):
+                return None, "baseWorkBlockHash must be a lowercase SHA-256 digest"
+            target = (task_id, f"block:{work_block_id}")
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            return None, f"unsupported work-block fields: {', '.join(unknown)}"
+        if target in seen_targets:
+            return None, "one batch cannot target the same work block twice"
+        seen_targets.add(target)
+        if kind in {"create", "move"}:
+            if not _real_date(raw.get("scheduledDate")):
+                return None, "scheduledDate must be a real YYYY-MM-DD date"
+            if not isinstance(raw.get("scheduledTime"), str) or not _TIME_ONLY_RE.fullmatch(raw["scheduledTime"]):
+                return None, "scheduledTime must be HH:mm"
+        if kind in {"create", "resize"} or (kind == "move" and "duration" in raw):
+            duration = raw.get("duration")
+            if not _is_positive_int(duration) or duration > 1440:
+                return None, "duration must be an integer from 1 to 1440"
+        normalized.append(dict(raw))
+    return normalized, None
+
+
+def _work_block_operations_match(returned: Any, requested: list[dict]) -> bool:
+    if not isinstance(returned, list) or len(returned) != len(requested):
+        return False
+    for expected, actual in zip(requested, returned):
+        if not isinstance(actual, dict):
+            return False
+        if any(actual.get(key) != value for key, value in expected.items()):
+            return False
+        if expected["kind"] == "create" and not (
+            isinstance(actual.get("workBlockId"), str) and actual["workBlockId"]
+        ):
+            return False
+    return True
+
+
+def _work_block_task_ids(operations: list[dict]) -> list[str]:
+    return list(dict.fromkeys(operation["taskId"] for operation in operations))
+
+
+def _valid_work_block_read_backs(value: Any, operations: list[dict], *, applied: bool) -> bool:
+    task_ids = _work_block_task_ids(operations)
+    revisions = {operation["taskId"]: operation["baseRevision"] for operation in operations}
+    if not isinstance(value, list) or len(value) != len(task_ids):
+        return False
+    for task_id in task_ids:
+        task = next((item for item in value if isinstance(item, dict) and item.get("id") == task_id), None)
+        if not isinstance(task, dict):
+            return False
+        revision = task.get("canonicalRevision")
+        if not _is_positive_int(revision) or (
+            revision <= revisions[task_id] if applied else revision != revisions[task_id]
+        ):
+            return False
+        if not isinstance(task.get("instances"), list):
+            return False
+        if not isinstance(task.get("status"), str) or not task["status"]:
+            return False
+        if not _is_iso_timestamp(task.get("canonicalUpdatedAt")):
+            return False
+    return True
+
+
+def _work_block_outcomes_match(operations: list[dict], read_backs: list[dict]) -> bool:
+    for operation in operations:
+        task = next((item for item in read_backs if item.get("id") == operation["taskId"]), None)
+        if not task:
+            return False
+        instances = task["instances"]
+        if operation["kind"] == "create":
+            block = next((item for item in instances if item.get("clientId") == operation["clientId"]), None)
+        else:
+            block = next((item for item in instances if item.get("id") == operation["workBlockId"]), None)
+        if operation["kind"] == "remove":
+            if block is not None:
+                return False
+            continue
+        if not isinstance(block, dict):
+            return False
+        for field in ("scheduledDate", "scheduledTime", "duration"):
+            if field in operation and block.get(field) != operation[field]:
+                return False
+    return True
+
+
+def _valid_work_block_preview(payload: Any, request: dict) -> bool:
+    normalized = payload.get("normalizedPayload") if isinstance(payload, dict) else None
+    finish_by = request.get("finishBy")
+    return (
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("result") == "preview"
+        and payload.get("contractVersion") == _CANONICAL_TASK_CONTRACT
+        and payload.get("action") == "work_block_batch"
+        and payload.get("operationId") == request["operationId"]
+        and payload.get("timeZone") == request["timeZone"]
+        and (
+            payload.get("finishBy") is None
+            if finish_by is None
+            else _same_iso_instant(payload.get("finishBy"), finish_by)
+        )
+        and isinstance(payload.get("requestHash"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(payload["requestHash"]))
+        and isinstance(payload.get("previewDigest"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(payload["previewDigest"]))
+        and _is_iso_timestamp(payload.get("previewExpiresAt"))
+        and isinstance(normalized, dict)
+        and normalized.get("timeZone") == request["timeZone"]
+        and (
+            normalized.get("finishBy") is None
+            if finish_by is None
+            else _same_iso_instant(normalized.get("finishBy"), finish_by)
+        )
+        and _work_block_operations_match(normalized.get("operations"), request["operations"])
+        and isinstance(payload.get("overlapWarnings"), list)
+        and all(isinstance(item, dict) for item in payload["overlapWarnings"])
+        and _valid_work_block_read_backs(payload.get("readBack"), request["operations"], applied=False)
+        and _work_block_outcomes_match(request["operations"], payload["readBack"])
+    )
+
+
+def _valid_work_block_receipt(payload: Any, request: dict) -> bool:
+    if not (
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("result") == "committed"
+        and payload.get("action") == "work_block_batch"
+        and payload.get("operationId") == request["operationId"]
+        and payload.get("requestHash") == request["requestHash"]
+        and isinstance(payload.get("receipt"), dict)
+    ):
+        return False
+    receipt = payload["receipt"]
+    read_back = receipt.get("readBack")
+    task_ids = _work_block_task_ids(request["operations"])
+    try:
+        valid_envelope = (
+            receipt.get("ok") is True
+            and receipt.get("status") in {"committed", "replayed"}
+            and receipt.get("replayed") is (receipt.get("status") == "replayed")
+            and receipt.get("contractVersion") == _CANONICAL_TASK_CONTRACT
+            and receipt.get("operationId") == request["operationId"]
+            and receipt.get("requestHash") == request["requestHash"]
+            and receipt.get("source") == "local-api"
+            and receipt.get("entityType") == "batch"
+            and receipt.get("entityId") == request["operationId"]
+            and receipt.get("action") == "work_block_batch"
+            and _is_positive_int(receipt.get("canonicalRevision"))
+            and _is_positive_int(receipt.get("changeSequence"))
+            and _is_iso_timestamp(receipt.get("committedAt"))
+            and _valid_work_block_read_backs(read_back, request["operations"], applied=True)
+            and receipt.get("readBackHash") == canonical_json_hash(read_back)
+            and _work_block_outcomes_match(request["operations"], read_back)
+            and isinstance(receipt.get("affected"), list)
+            and len(receipt["affected"]) == len(task_ids)
+        )
+    except (TypeError, ValueError):
+        return False
+    if not valid_envelope:
+        return False
+    for task_id in task_ids:
+        task = next(item for item in read_back if item["id"] == task_id)
+        affected = next((item for item in receipt["affected"] if isinstance(item, dict) and item.get("entityId") == task_id), None)
+        try:
+            valid_affected = (
+                isinstance(affected, dict)
+                and affected.get("entityType") == "task"
+                and affected.get("action") == "update"
+                and affected.get("canonicalRevision") == task["canonicalRevision"]
+                and _is_positive_int(affected.get("changeSequence"))
+                and affected.get("readBack") == task
+                and affected.get("readBackHash") == canonical_json_hash(task)
+            )
+        except (TypeError, ValueError):
+            return False
+        if not valid_affected:
+            return False
+    return True
+
+
+def _handle_work_block_command(args: dict, **kw) -> str:
+    unknown = sorted(set(args) - _WORK_BLOCK_COMMAND_FIELDS)
+    if unknown:
+        return _tool_error(f"unsupported work-block command fields: {', '.join(unknown)}")
+    operation_id = args.get("operationId")
+    if not isinstance(operation_id, str) or not operation_id.strip() or operation_id != operation_id.strip() or len(operation_id) > 160:
+        return _tool_error("operationId is required and must be at most 160 trimmed characters")
+    if not _valid_time_zone(args.get("timeZone")):
+        return _tool_error("timeZone must be a valid IANA timezone")
+    finish_by = args.get("finishBy")
+    if finish_by is not None and not _is_iso_timestamp(finish_by):
+        return _tool_error("finishBy must be an ISO timestamp with an offset")
+    operations, operation_error = _normalize_work_block_operations(args.get("operations"))
+    if operation_error:
+        return _tool_error(operation_error)
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return _tool_error("preview must be a boolean")
+    body = {
+        "operationId": operation_id,
+        "timeZone": args["timeZone"],
+        **({"finishBy": finish_by} if finish_by is not None else {}),
+        "operations": operations,
+        "preview": preview,
+    }
+    if not preview:
+        for field in ("previewDigest", "previewExpiresAt", "requestHash"):
+            value = args.get(field)
+            valid = _is_iso_timestamp(value) if field == "previewExpiresAt" else (
+                isinstance(value, str) and bool(_SHA256_HEX_RE.fullmatch(value))
+            )
+            if not valid:
+                return _tool_error(f"{field} is required when preview is false")
+            body[field] = value
+    try:
+        payload = _request("POST", "/api/work-blocks/batch", body, allow_stale_cache=False)
+        request = dict(body)
+        if preview:
+            if not _valid_work_block_preview(payload, request):
+                return _tool_error("Canonical work-block preview could not be verified")
+        elif not _valid_work_block_receipt(payload, request):
+            return _tool_error("Canonical work-block receipt could not be verified")
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error("flowstate_work_block_command typed error: code=%s status=%s", exc.code, exc.status)
+        return _typed_tool_error(exc)
+    except RuntimeError as exc:
+        logger.error("flowstate_work_block_command runtime error: %s", type(exc).__name__)
+        message = str(exc)
+        if message.startswith("Flow State Local Task API"):
+            return _tool_error(message)
+        return _tool_error("Flow State canonical work-block command failed")
+    except Exception as exc:
+        logger.error("flowstate_work_block_command error: %s", type(exc).__name__)
+        return _tool_error("Flow State canonical work-block command failed")
 
 
 def _handle_schedule_task_instance(args: dict, **kw) -> str:
-    task_id = str(args.get("id") or "").strip()
-    if not task_id:
+    task_id = args.get("id")
+    if not isinstance(task_id, str) or not task_id.strip():
         return _tool_error("id is required")
-
-    scheduled_date = str(args.get("scheduledDate") or "").strip()
-    if not _DATE_ONLY_RE.match(scheduled_date):
-        return _tool_error("scheduledDate must be YYYY-MM-DD")
-
-    scheduled_time = str(args.get("scheduledTime") or "").strip()
-    if not _TIME_ONLY_RE.match(scheduled_time):
-        return _tool_error("scheduledTime must be HH:mm")
-
-    try:
-        duration = int(args.get("duration"))
-    except (TypeError, ValueError):
-        return _tool_error("duration must be an integer from 1 to 1440")
-    if duration < 1 or duration > 1440:
-        return _tool_error("duration must be an integer from 1 to 1440")
-
-    body = {
-        "scheduledDate": scheduled_date,
-        "scheduledTime": scheduled_time,
-        "duration": duration,
-        "preview": False if args.get("preview") is False else True,
+    command = {
+        key: value for key, value in args.items()
+        if key not in {"id", "baseRevision", "clientId", "scheduledDate", "scheduledTime", "duration"}
     }
-
-    try:
-        return _tool_result(_request("POST", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances", body))
-    except Exception as exc:
-        logger.error("flowstate_schedule_task_instance error: %s", exc)
-        return _tool_error(str(exc))
+    command["operations"] = [{
+        "kind": "create",
+        "taskId": task_id.strip(),
+        "baseRevision": args.get("baseRevision"),
+        "clientId": args.get("clientId"),
+        "scheduledDate": args.get("scheduledDate"),
+        "scheduledTime": args.get("scheduledTime"),
+        "duration": args.get("duration"),
+    }]
+    return _handle_work_block_command(command)
 
 
 def _valid_action_preview(payload: Any) -> bool:
@@ -1990,18 +2333,65 @@ FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA = {
     },
 }
 
+FLOWSTATE_WORK_BLOCK_COMMAND_SCHEMA = {
+    "name": "flowstate_work_block_command",
+    "description": (
+        "Preview or apply one atomic canonical FlowState work-block batch. Supports create, move, "
+        "resize, and remove across one or more exact task ids. Defaults to preview. Apply only after "
+        "the user approves the returned digest, expiry, and request hash. A stale task rejects the "
+        "whole batch; due dates remain deadlines and recurring occurrences require their own command."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "operationId": {"type": "string", "description": "Stable identity for this exact preview/apply action."},
+            "timeZone": {"type": "string", "description": "IANA timezone for the local calendar interval."},
+            "finishBy": {"type": "string", "description": "Optional ISO timestamp boundary with offset."},
+            "operations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["create", "move", "resize", "remove"]},
+                        "taskId": {"type": "string"},
+                        "baseRevision": {"type": "integer", "minimum": 1},
+                        "clientId": {"type": "string", "description": "Required only for create."},
+                        "workBlockId": {"type": "string", "description": "Required for move, resize, and remove."},
+                        "baseWorkBlockHash": {"type": "string", "description": "Exact SHA-256 identity of the current block."},
+                        "scheduledDate": {"type": "string", "description": "YYYY-MM-DD for create or move."},
+                        "scheduledTime": {"type": "string", "description": "HH:mm for create or move."},
+                        "duration": {"type": "integer", "minimum": 1, "maximum": 1440},
+                    },
+                    "required": ["kind", "taskId", "baseRevision"],
+                },
+            },
+            "preview": {"type": "boolean", "description": "Defaults true. False requires all approval fields."},
+            "previewDigest": {"type": "string"},
+            "previewExpiresAt": {"type": "string"},
+            "requestHash": {"type": "string"},
+        },
+        "required": ["operationId", "timeZone", "operations"],
+    },
+}
+
 FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA = {
     "name": "flowstate_schedule_task_instance",
     "description": (
-        "Preview or apply a FlowState task time block using POST /api/tasks/:id/instances. "
-        "Defaults to preview=true and is non-mutating unless preview is explicitly false after "
-        "the user approves the exact task id, date, time, and duration. This tool never changes "
-        "task status, title, priority, or due date, and never deletes tasks."
+        "Compatibility create adapter for the canonical FlowState work-block command. Defaults to "
+        "preview and requires stable operation, task revision, client identity, and timezone. Apply "
+        "requires the exact server-issued approval proof. Prefer flowstate_work_block_command for "
+        "move, resize, remove, or atomic multi-task scheduling."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "id": {"type": "string", "description": "Exact Flow State task id."},
+            "operationId": {"type": "string"},
+            "baseRevision": {"type": "integer", "minimum": 1},
+            "clientId": {"type": "string"},
+            "timeZone": {"type": "string"},
             "scheduledDate": {"type": "string", "description": "YYYY-MM-DD scheduled date."},
             "scheduledTime": {"type": "string", "description": "HH:mm 24-hour scheduled time."},
             "duration": {"type": "integer", "description": "Duration in minutes, 1-1440."},
@@ -2009,8 +2399,14 @@ FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA = {
                 "type": "boolean",
                 "description": "Omit or set true for a non-mutating preview; set false only after explicit approval.",
             },
+            "previewDigest": {"type": "string"},
+            "previewExpiresAt": {"type": "string"},
+            "requestHash": {"type": "string"},
         },
-        "required": ["id", "scheduledDate", "scheduledTime", "duration"],
+        "required": [
+            "id", "operationId", "baseRevision", "clientId", "timeZone",
+            "scheduledDate", "scheduledTime", "duration",
+        ],
     },
 }
 
@@ -2300,6 +2696,7 @@ for _name, _schema, _handler in [
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
     ("flowstate_get_timer_diagnostics", FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA, _handle_timer_diagnostics),
     ("flowstate_list_task_instances", FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA, _handle_list_task_instances),
+    ("flowstate_work_block_command", FLOWSTATE_WORK_BLOCK_COMMAND_SCHEMA, _handle_work_block_command),
     ("flowstate_schedule_task_instance", FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA, _handle_schedule_task_instance),
     ("flowstate_done_for_now", FLOWSTATE_DONE_FOR_NOW_SCHEMA, _handle_done_for_now),
     ("flowstate_merge_tasks", FLOWSTATE_MERGE_TASKS_SCHEMA, _handle_merge_tasks),

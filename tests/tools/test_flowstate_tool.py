@@ -1305,7 +1305,17 @@ def test_list_task_instances_uses_exact_task_id(monkeypatch):
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        _capturing_urlopen(seen, {"ok": True, "instances": []}),
+        _capturing_urlopen(seen, {
+            "ok": True,
+            "fresh": True,
+            "task": {
+                "id": "task/with/slash",
+                "title": "Exact task",
+                "workspaceId": None,
+                "canonicalRevision": 7,
+            },
+            "instances": [],
+        }),
     )
 
     result = json.loads(fst._handle_list_task_instances({"id": "task/with/slash"}))
@@ -1317,48 +1327,55 @@ def test_list_task_instances_uses_exact_task_id(monkeypatch):
 
 def test_schedule_task_instance_defaults_to_preview(monkeypatch):
     seen = {}
-    monkeypatch.setattr(
-        fst.urllib.request,
-        "urlopen",
-        _capturing_urlopen(seen, {"ok": True, "preview": True}),
-    )
+    monkeypatch.setattr(fst, "_handle_work_block_command", lambda command: (
+        seen.update(command) or json.dumps({"result": {"preview": command.get("preview", True)}})
+    ))
 
     result = json.loads(fst._handle_schedule_task_instance({
         "id": "task-1",
+        "operationId": "assistant:block:1",
+        "baseRevision": 7,
+        "clientId": "assistant-client-1",
+        "timeZone": "Asia/Jerusalem",
         "scheduledDate": "2026-07-08",
         "scheduledTime": "10:30",
         "duration": 25,
     }))
 
     assert result["result"]["preview"] is True
-    assert seen["method"] == "POST"
-    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task-1/instances"
-    assert seen["body"]["preview"] is True
+    assert seen["operationId"] == "assistant:block:1"
+    assert seen["operations"] == [{
+        "kind": "create", "taskId": "task-1", "baseRevision": 7,
+        "clientId": "assistant-client-1", "scheduledDate": "2026-07-08",
+        "scheduledTime": "10:30", "duration": 25,
+    }]
 
 
 def test_schedule_task_instance_apply_requires_explicit_false(monkeypatch):
     seen = {}
-    monkeypatch.setattr(
-        fst.urllib.request,
-        "urlopen",
-        _capturing_urlopen(seen, {"ok": True, "preview": False}),
-    )
+    monkeypatch.setattr(fst, "_handle_work_block_command", lambda command: (
+        seen.update(command) or json.dumps({"result": {"preview": command["preview"]}})
+    ))
 
     result = json.loads(fst._handle_schedule_task_instance({
         "id": "task-1",
+        "operationId": "assistant:block:1",
+        "baseRevision": 7,
+        "clientId": "assistant-client-1",
+        "timeZone": "Asia/Jerusalem",
         "scheduledDate": "2026-07-08",
         "scheduledTime": "10:30",
         "duration": 25,
         "preview": False,
+        "previewDigest": "a" * 64,
+        "previewExpiresAt": "2026-07-15T21:15:00Z",
+        "requestHash": "c" * 64,
     }))
 
     assert result["result"]["preview"] is False
-    assert seen["body"] == {
-        "duration": 25,
-        "preview": False,
-        "scheduledDate": "2026-07-08",
-        "scheduledTime": "10:30",
-    }
+    assert seen["preview"] is False
+    assert seen["previewDigest"] == "a" * 64
+    assert seen["requestHash"] == "c" * 64
 
 
 def test_schedule_task_instance_validation_returns_safe_error():
@@ -1369,7 +1386,7 @@ def test_schedule_task_instance_validation_returns_safe_error():
         "duration": 0,
     }))
 
-    assert result["error"] == "scheduledDate must be YYYY-MM-DD"
+    assert "operationId" in result["error"]
     assert "token-123" not in json.dumps(result)
 
 
@@ -2237,6 +2254,7 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_get_current_timer",
         "flowstate_get_timer_diagnostics",
         "flowstate_list_task_instances",
+        "flowstate_work_block_command",
         "flowstate_schedule_task_instance",
         "flowstate_done_for_now",
         "flowstate_merge_tasks",

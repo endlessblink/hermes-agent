@@ -11,6 +11,7 @@ def test_context_describes_only_registered_capabilities_in_user_vocabulary():
             "flowstate_reopen_task",
             "flowstate_list_subtasks",
             "flowstate_subtask_batch",
+            "flowstate_work_block_command",
         },
         flowstate_available=True,
         assistant_context_result={"taskPressure": {"overdue": 2}},
@@ -22,6 +23,7 @@ def test_context_describes_only_registered_capabilities_in_user_vocabulary():
         "understand what needs attention": ["read assistant context", "list tasks"],
         "organize my tasks": ["create tasks", "restore tasks", "reopen completed tasks"],
         "break large tasks into steps": ["read subtasks", "apply an approved subtask plan"],
+        "plan time for my work": ["preview, move, resize, or remove exact work blocks"],
     }
     assert context["live_context"] == {"taskPressure": {"overdue": 2}}
 

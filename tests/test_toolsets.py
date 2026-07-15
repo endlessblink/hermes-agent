@@ -94,6 +94,7 @@ class TestResolveToolset:
             "flowstate_get_current_timer",
             "flowstate_get_timer_diagnostics",
             "flowstate_list_task_instances",
+            "flowstate_work_block_command",
             "flowstate_schedule_task_instance",
             "flowstate_done_for_now",
             "flowstate_merge_tasks",

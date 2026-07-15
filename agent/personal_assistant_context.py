@@ -45,6 +45,7 @@ _CAPABILITY_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "plan time for my work",
         (
             ("flowstate_list_task_instances", "read scheduled work blocks"),
+            ("flowstate_work_block_command", "preview, move, resize, or remove exact work blocks"),
             ("flowstate_schedule_task_instance", "preview or schedule a work block"),
         ),
     ),
