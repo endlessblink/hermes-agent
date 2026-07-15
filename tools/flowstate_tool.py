@@ -874,8 +874,15 @@ def _handle_done_for_now(args: dict, **kw) -> str:
                         read_back.get("id") == task_id
                         and read_back.get("canonicalRevision")
                         == receipt.get("canonicalRevision")
+                        and isinstance(receipt.get("affected"), list)
+                        and len(receipt["affected"]) == 2
+                        and isinstance(receipt["affected"][1], dict)
                         and isinstance(read_back.get("completedOccurrence"), dict)
                         and read_back["completedOccurrence"].get("id") == completed_id
+                        and read_back["completedOccurrence"].get("canonicalRevision")
+                        == receipt["affected"][1].get("canonicalRevision")
+                        and read_back["completedOccurrence"].get("changeSequence")
+                        == receipt["affected"][1].get("changeSequence")
                         and isinstance(read_back.get("nextOccurrence"), dict)
                         and read_back["nextOccurrence"].get("taskId") == task_id
                     ),

@@ -18,7 +18,9 @@ def _read_back():
     return {
         "id": "task-1",
         "title": "Clarified task",
+        "status": "todo",
         "canonicalRevision": 8,
+        "canonicalUpdatedAt": COMMITTED_AT,
     }
 
 
@@ -157,7 +159,18 @@ def test_validator_rejects_replay_with_altered_read_back():
 
 
 def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations():
-    survivor_read_back = {"id": "survivor-1", "canonicalRevision": 8}
+    primary_task_read_back = {
+        "id": "survivor-1",
+        "canonicalRevision": 8,
+        "canonicalUpdatedAt": "2026-07-15T12:00:00.000Z",
+        "status": "todo",
+    }
+    survivor_read_back = {
+        **primary_task_read_back,
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "duplicateArchived": True,
+    }
     duplicate_read_back = {"id": "duplicate-1", "canonicalRevision": 5}
     response = _response(
         receipt_overrides={
@@ -172,8 +185,8 @@ def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations
                     "action": "update",
                     "canonicalRevision": 8,
                     "changeSequence": 42,
-                    "readBack": survivor_read_back,
-                    "readBackHash": canonical_json_hash(survivor_read_back),
+                    "readBack": primary_task_read_back,
+                    "readBackHash": canonical_json_hash(primary_task_read_back),
                 },
                 {
                     "entityType": "task",
@@ -261,12 +274,34 @@ def test_validator_rejects_primary_affected_entry_after_secondary_entry():
     [
         ("canonicalRevision", 7),
         ("changeSequence", 41),
-        ("readBack", {"id": "survivor-1", "canonicalRevision": 8, "changed": True}),
+        (
+            "readBack",
+            {
+                "id": "survivor-1",
+                "canonicalRevision": 8,
+                "canonicalUpdatedAt": "2026-07-15T12:00:00.000Z",
+                "status": "done",
+            },
+        ),
+        (
+            "readBack",
+            {
+                "id": "survivor-1",
+                "canonicalRevision": 8,
+                "canonicalUpdatedAt": "2026-07-15T12:01:00.000Z",
+                "status": "todo",
+            },
+        ),
         ("readBackHash", "b" * 64),
     ],
 )
 def test_validator_rejects_primary_affected_proof_mismatch(field, value):
-    primary_read_back = {"id": "survivor-1", "canonicalRevision": 8}
+    primary_read_back = {
+        "id": "survivor-1",
+        "canonicalRevision": 8,
+        "canonicalUpdatedAt": "2026-07-15T12:00:00.000Z",
+        "status": "todo",
+    }
     primary = {
         "entityType": "task",
         "entityId": "survivor-1",

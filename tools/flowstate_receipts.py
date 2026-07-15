@@ -55,6 +55,37 @@ def _timestamp(value: Any) -> bool:
     return parsed.tzinfo is not None
 
 
+def _primary_task_state_matches(
+    primary_read_back: Mapping[str, Any],
+    top_read_back: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> bool:
+    primary_entity_id = receipt.get("entityId")
+    primary_revision = receipt.get("canonicalRevision")
+    if (
+        primary_read_back.get("id") != primary_entity_id
+        or top_read_back.get("id") != primary_entity_id
+        or primary_read_back.get("canonicalRevision") != primary_revision
+        or top_read_back.get("canonicalRevision") != primary_revision
+        or any(
+            key not in top_read_back or top_read_back[key] != value
+            for key, value in primary_read_back.items()
+        )
+    ):
+        return False
+    primary_updated_at = primary_read_back.get("canonicalUpdatedAt")
+    top_updated_at = top_read_back.get("canonicalUpdatedAt")
+    primary_status = primary_read_back.get("status")
+    top_status = top_read_back.get("status")
+    return (
+        _timestamp(primary_updated_at)
+        and primary_updated_at == top_updated_at
+        and isinstance(primary_status, str)
+        and bool(primary_status)
+        and primary_status == top_status
+    )
+
+
 def _validate_affected(
     value: Any,
     *,
@@ -62,7 +93,6 @@ def _validate_affected(
     expected_actions: Mapping[str, str] | None,
     receipt: Mapping[str, Any],
     primary_read_back: Mapping[str, Any],
-    primary_read_back_hash: str,
 ) -> None:
     if value is None and not required and expected_actions is None:
         return
@@ -135,11 +165,16 @@ def _validate_affected(
         primary = next(
             entry for entry in value if entry.get("entityId") == primary_entity_id
         )
+        affected_primary_read_back = primary.get("readBack")
         if (
             primary.get("canonicalRevision") != receipt.get("canonicalRevision")
             or primary.get("changeSequence") != receipt.get("changeSequence")
-            or primary.get("readBack") != primary_read_back
-            or primary.get("readBackHash") != primary_read_back_hash
+            or not isinstance(affected_primary_read_back, Mapping)
+            or not _primary_task_state_matches(
+                affected_primary_read_back,
+                primary_read_back,
+                receipt,
+            )
         ):
             raise CanonicalReceiptError(
                 "canonical receipt primary affected proof does not match"
@@ -216,6 +251,5 @@ def validate_canonical_receipt(
         expected_actions=expected_affected_actions,
         receipt=receipt,
         primary_read_back=read_back,
-        primary_read_back_hash=read_back_hash,
     )
     return receipt

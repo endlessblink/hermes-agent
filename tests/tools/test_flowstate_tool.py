@@ -314,7 +314,9 @@ def _canonical_committed_payload(*, replayed=False, **receipt_overrides):
     read_back = {
         "id": "task-1",
         "title": "Clarified task",
+        "status": "todo",
         "canonicalRevision": 8,
+        "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
     }
     receipt = {
         "ok": True,
@@ -365,6 +367,9 @@ def _canonical_action_payload(
     receipt_overrides=None,
     outer_overrides=None,
 ):
+    read_back = dict(read_back)
+    read_back.setdefault("status", "todo")
+    read_back.setdefault("canonicalUpdatedAt", _CANONICAL_UPDATED_AT)
     canonical_affected = []
     for entry in affected:
         canonical_entry = dict(entry)
@@ -407,6 +412,75 @@ def _canonical_action_payload(
     }
     payload.update(outer_overrides or {})
     return payload
+
+
+def _sql_done_payload():
+    living_task = {
+        "id": "task-1",
+        "title": "Recurring task",
+        "status": "todo",
+        "canonicalRevision": 8,
+        "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+    }
+    completed_occurrence = {
+        "id": "history-1",
+        "taskId": "task-1",
+        "status": "done",
+        "canonicalRevision": 1,
+        "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+        "changeSequence": 41,
+    }
+    top_read_back = {
+        **living_task,
+        "completedOccurrence": completed_occurrence,
+        "nextOccurrence": {
+            "id": "occ-2",
+            "taskId": "task-1",
+            "status": "todo",
+        },
+    }
+    return {
+        "ok": True,
+        "result": "committed",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "receipt": {
+            "ok": True,
+            "status": "committed",
+            "contractVersion": "task-v1",
+            "operationId": "apply-1",
+            "requestHash": _CANONICAL_REQUEST_HASH,
+            "source": "local-api",
+            "entityType": "task",
+            "action": "done_for_now",
+            "entityId": "task-1",
+            "canonicalRevision": 8,
+            "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+            "changeSequence": 42,
+            "committedAt": _CANONICAL_COMMITTED_AT,
+            "readBack": top_read_back,
+            "readBackHash": canonical_json_hash(top_read_back),
+            "affected": [
+                {
+                    "entityType": "task",
+                    "entityId": "task-1",
+                    "action": "update",
+                    "canonicalRevision": 8,
+                    "changeSequence": 42,
+                    "readBack": living_task,
+                    "readBackHash": canonical_json_hash(living_task),
+                },
+                {
+                    "entityType": "task",
+                    "entityId": "history-1",
+                    "action": "create",
+                    "canonicalRevision": 1,
+                    "changeSequence": 41,
+                    "readBack": completed_occurrence,
+                    "readBackHash": canonical_json_hash(completed_occurrence),
+                },
+            ],
+        },
+    }
 
 
 def _valid_update_args(**overrides):
@@ -1217,6 +1291,67 @@ def test_done_for_now_apply_forwards_preview_receipt_and_returns_readback(
         "requestId": "apply-1",
         "requestHash": _CANONICAL_REQUEST_HASH,
     }
+
+
+def test_done_for_now_accepts_sql_receipt_with_enriched_top_read_back(monkeypatch):
+    payload = _sql_done_payload()
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task-1",
+        "preview": False,
+        "requestId": "apply-1",
+        "previewVersion": "version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+    }))
+
+    assert result["result"] == payload
+
+
+@pytest.mark.parametrize(("field", "value"), [("title", "Forged"), ("status", "done")])
+def test_done_for_now_rejects_forged_primary_subset_with_valid_hash(
+    monkeypatch, field, value
+):
+    payload = _sql_done_payload()
+    primary = payload["receipt"]["affected"][0]
+    primary["readBack"][field] = value
+    primary["readBackHash"] = canonical_json_hash(primary["readBack"])
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task-1",
+        "preview": False,
+        "requestId": "apply-1",
+        "previewVersion": "version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+    }))
+
+    assert result["error"] == "Canonical Done for now receipt could not be verified"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("canonicalRevision", 2), ("changeSequence", 40)],
+)
+def test_done_for_now_rejects_completed_occurrence_proof_mismatch(
+    monkeypatch, field, value
+):
+    payload = _sql_done_payload()
+    payload["receipt"]["readBack"]["completedOccurrence"][field] = value
+    payload["receipt"]["readBackHash"] = canonical_json_hash(
+        payload["receipt"]["readBack"]
+    )
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task-1",
+        "preview": False,
+        "requestId": "apply-1",
+        "previewVersion": "version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+    }))
+
+    assert result["error"] == "Canonical Done for now receipt could not be verified"
 
 
 def test_done_for_now_rejects_reordered_affected_rows(monkeypatch):
