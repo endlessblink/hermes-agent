@@ -56,6 +56,17 @@ def _inventory_payload(items=None, **overrides):
     return payload
 
 
+def _inventory_task(**overrides):
+    task = {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "title": "Plan",
+        "status": "todo",
+        "canonicalRevision": 3,
+    }
+    task.update(overrides)
+    return task
+
+
 @pytest.fixture(autouse=True)
 def flowstate_config(monkeypatch):
     monkeypatch.setattr(fst, "_FLOW_STATE_API_URL", "http://127.0.0.1:5577")
@@ -64,15 +75,22 @@ def flowstate_config(monkeypatch):
 
 def test_list_tasks_sends_query_and_bearer_header(monkeypatch):
     seen = {}
+    sample = {
+        "tasks": [{"id": "t1", "title": "Plan"}],
+        "complete": False,
+        "scope": "filtered_sample",
+        "limit": 5,
+        "hasMore": True,
+    }
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        _capturing_urlopen(seen, {"tasks": [{"id": "t1", "title": "Plan"}]}),
+        _capturing_urlopen(seen, sample),
     )
 
     result = json.loads(fst._handle_list_tasks({"status": "open", "due": "today", "limit": 5}))
 
-    assert result["result"]["tasks"][0]["id"] == "t1"
+    assert result["result"] == sample
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks?status=open&due=today&limit=5"
     assert seen["method"] == "GET"
     assert seen["headers"]["Authorization"] == "Bearer token-123"
@@ -95,6 +113,10 @@ def test_search_tasks_uses_encoded_query_and_preserves_exact_results(monkeypatch
         "ok": True,
         "query": "לשלוח כביסה",
         "tasks": [{"id": "task-1", "title": "לשלוח כביסה", "status": "todo"}],
+        "complete": False,
+        "scope": "filtered_sample",
+        "limit": 25,
+        "hasMore": False,
     }
     monkeypatch.setattr(
         fst.urllib.request,
@@ -187,6 +209,48 @@ def test_inventory_rejects_false_complete_receipt(monkeypatch):
 
     assert result["code"] == "invalid_inventory_receipt"
     assert "61" not in json.dumps(result)
+
+
+def test_inventory_rejects_incomplete_receipt_without_returning_partial_items(monkeypatch):
+    payload = _inventory_payload(
+        items=[_inventory_task()],
+        complete=False,
+        page={"limit": 100, "nextCursor": "next", "hasMore": True},
+    )
+    payload.pop("total")
+    payload.pop("changeSequence")
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert result["code"] == "invalid_inventory_receipt"
+    assert "00000000-0000-4000-8000-000000000001" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        _inventory_task(canonicalRevision=0),
+        _inventory_task(canonicalRevision=True),
+        {key: value for key, value in _inventory_task().items() if key != "canonicalRevision"},
+    ],
+)
+def test_inventory_requires_positive_canonical_revision_for_every_task(monkeypatch, task):
+    payload = _inventory_payload(items=[task])
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert result["code"] == "invalid_inventory_receipt"
+
+
+def test_inventory_rejects_receipt_not_marked_fresh(monkeypatch):
+    payload = _inventory_payload(items=[_inventory_task()], fresh=False)
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert result["code"] == "invalid_inventory_receipt"
 
 
 def test_create_task_omits_empty_project_id(monkeypatch):
@@ -1333,6 +1397,8 @@ def test_flowstate_schemas_require_real_tool_use_for_task_requests():
     assert "call this tool" in create_description
     assert "hermes-ui/task-triage" in create_description
     assert "instead of this tool" in list_description
+    assert "complete=false" in list_description
+    assert "cannot prove a total" in list_description
 
 
 def test_done_for_now_schema_is_preview_first_and_apply_is_receipt_bound():
@@ -1370,6 +1436,8 @@ def test_search_tasks_schema_is_read_only_and_supports_safe_browsing():
     assert "open tasks" in schema["description"].lower()
     assert "not" in schema["description"].lower()
     assert "pagination" in schema["description"].lower()
+    assert "complete=false" in schema["description"]
+    assert "cannot prove a total" in schema["description"]
     assert schema["parameters"]["properties"]["limit"]["maximum"] == 25
     assert set(schema["parameters"]["properties"]) == {"query", "limit"}
 

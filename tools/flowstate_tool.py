@@ -342,27 +342,27 @@ def _validated_inventory_receipt(payload: Dict[str, Any]) -> Dict[str, Any]:
             and isinstance(payload.get("appVersion"), str) and bool(payload["appVersion"])
             and captured.utcoffset() is not None
             and payload.get("fresh") is True
-            and isinstance(payload.get("complete"), bool)
+            and payload.get("complete") is True
             and isinstance(items, list)
             and all(isinstance(item, dict) for item in items)
             and all(isinstance(task_id, str) and _UUID_RE.fullmatch(task_id) for task_id in ids)
+            and all(
+                isinstance(item.get("canonicalRevision"), int)
+                and not isinstance(item.get("canonicalRevision"), bool)
+                and item["canonicalRevision"] > 0
+                for item in items
+            )
             and len(ids) == len(set(ids))
             and isinstance(page, dict)
-            and isinstance(page.get("hasMore"), bool)
+            and isinstance(payload.get("changeSequence"), int)
+            and not isinstance(payload.get("changeSequence"), bool)
+            and payload["changeSequence"] >= 0
+            and isinstance(payload.get("total"), int)
+            and not isinstance(payload.get("total"), bool)
+            and payload["total"] == len(ids)
+            and page.get("hasMore") is False
+            and page.get("nextCursor") is None
         )
-        if payload.get("complete") is True:
-            valid = valid and (
-                isinstance(payload.get("changeSequence"), int)
-                and not isinstance(payload.get("changeSequence"), bool)
-                and payload["changeSequence"] >= 0
-                and isinstance(payload.get("total"), int)
-                and not isinstance(payload.get("total"), bool)
-                and payload["total"] == len(ids)
-                and page.get("hasMore") is False
-                and page.get("nextCursor") is None
-            )
-        else:
-            valid = valid and "total" not in payload
     except (KeyError, TypeError, ValueError):
         valid = False
     if not valid:
@@ -1094,6 +1094,7 @@ FLOWSTATE_LIST_TASKS_SCHEMA = {
     "description": (
         "List Flow State tasks. With no due filter and open/todo status, this returns the complete "
         "live open-task inventory with explicit completeness, freshness, total, and receipt metadata. "
+        "Filtered or due-date results are bounded samples with complete=false and cannot prove a total. "
         "Flow State is the user's personal task app; "
         "it is not a project name. Use returned task ids for later updates. "
         "Do not answer FlowState list/check requests with Markdown, JSON, or "
@@ -1118,6 +1119,7 @@ FLOWSTATE_SEARCH_TASKS_SCHEMA = {
         "Search the signed-in user's Flow State tasks by title through the read-only Local Task API. "
         "If no exact title text is known, omit query to browse open tasks safely instead of guessing. "
         "Title search is not a wildcard, list-all, counting, or pagination substitute. "
+        "Exact-title results are bounded samples with complete=false and cannot prove a total. "
         "Use this before proposing a mutation when the exact task id is not already known. The response "
         "preserves FlowState's exact task identifiers so similar titles are never treated as duplicates."
     ),

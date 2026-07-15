@@ -5,6 +5,7 @@ import urllib.error
 import pytest
 
 from agent.personal_assistant_monitor import (
+    ConnectorResponseError,
     ack_candidate_event,
     defer_candidate_event,
     fetch_flowstate_context,
@@ -18,6 +19,45 @@ from agent.personal_assistant_monitor import (
 
 
 NOW = datetime(2026, 7, 12, 22, 0, tzinfo=timezone.utc)
+
+
+def _inventory_context(
+    tasks=None,
+    *,
+    scope_fingerprint="0123456789abcdef",
+    change_sequence=7,
+    **context,
+):
+    tasks = [] if tasks is None else tasks
+    return {
+        **context,
+        "taskInventory": {
+            "source": "flowstate",
+            "scope": "all open tasks visible to the authenticated user",
+            "scopeKind": "personal",
+            "scopeFingerprint": scope_fingerprint,
+            "capturedAt": "2026-07-14T12:00:00.000Z",
+            "appVersion": "1.4.263",
+            "fresh": True,
+            "complete": True,
+            "changeSequence": change_sequence,
+            "total": len(tasks),
+            "items": tasks,
+            "page": {"limit": 100, "nextCursor": None, "hasMore": False},
+        },
+    }
+
+
+def _inventory_task(index, **overrides):
+    task = {
+        "id": f"00000000-0000-4000-8000-{index:012x}",
+        "title": f"Task {index}",
+        "status": "todo",
+        "priority": "medium",
+        "canonicalRevision": index + 1,
+    }
+    task.update(overrides)
+    return task
 
 
 class _ConnectorHttpError(RuntimeError):
@@ -415,6 +455,70 @@ def test_offline_check_fails_closed_and_does_not_destroy_baseline(tmp_path):
     assert lease_candidate_event(tmp_path, "gateway", now=NOW) is None
 
 
+def test_complete_inventory_snapshot_keeps_every_id_revision_and_only_bounded_fields(tmp_path):
+    tasks = [_inventory_task(index) for index in range(125)]
+    tasks[-1].update({"title": "x" * 500, "blocker": "details", "duration": 90})
+
+    result = run_monitor_check(tmp_path, _inventory_context(tasks), now=NOW)
+
+    assert result == {"status": "checked", "candidate_count": 0}
+    state = json.loads(
+        (tmp_path / "state" / "personal-assistant-monitor" / "state.json").read_text()
+    )
+    snapshot = state["snapshot"]
+    assert snapshot["scopeFingerprint"] == "0123456789abcdef"
+    assert snapshot["changeSequence"] == 7
+    assert snapshot["total"] == 125
+    assert len(snapshot["tasks"]) == 125
+    assert snapshot["tasks"][-1]["canonicalRevision"] == 125
+    assert len(snapshot["tasks"][-1]["title"]) == 200
+    assert snapshot["tasks"][-1]["blocker"] is True
+    assert "duration" not in snapshot["tasks"][-1]
+
+
+def test_inventory_scope_change_resets_baseline_without_cross_scope_events(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        _inventory_context([_inventory_task(1)], scope_fingerprint="1111111111111111"),
+        now=NOW,
+    )
+
+    result = run_monitor_check(
+        tmp_path,
+        _inventory_context(
+            [_inventory_task(2, priority="high", blocked=True)],
+            scope_fingerprint="2222222222222222",
+            change_sequence=1,
+        ),
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert result == {"status": "checked", "candidate_count": 0}
+    assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16)) is None
+
+
+def test_inventory_sequence_regression_fails_closed_and_preserves_baseline(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        _inventory_context([_inventory_task(1)], change_sequence=5),
+        now=NOW,
+    )
+
+    result = run_monitor_check(
+        tmp_path,
+        _inventory_context([_inventory_task(1, priority="high")], change_sequence=4),
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert result == {"status": "offline", "candidate_count": 0}
+    state = json.loads(
+        (tmp_path / "state" / "personal-assistant-monitor" / "state.json").read_text()
+    )
+    assert state["snapshot"]["changeSequence"] == 5
+    assert state["connector_error"]["category"] == "invalid_response"
+    assert state["connector_error"]["code"] == "inventory_sequence_regression"
+
+
 def test_resolved_then_recurring_risk_gets_a_new_occurrence_id(tmp_path):
     run_monitor_check(tmp_path, {"taskPressure": {"overdue": 0}}, now=NOW)
     run_monitor_check(
@@ -518,21 +622,39 @@ def test_cli_notifies_only_when_new_candidates_are_added(tmp_path):
 
 def test_fetch_flowstate_context_uses_one_testable_seam_and_validates_shapes():
     seen = []
+    inventory = _inventory_context([_inventory_task(1)])["taskInventory"]
 
     def request(method, path, **kwargs):
         seen.append((method, path, kwargs))
         if path == "/api/assistant/context":
             return {"taskPressure": {"overdue": 1}}
-        return {"tasks": [{"id": "task-1", "title": "One"}]}
+        return inventory
 
     result = fetch_flowstate_context(request)
 
     assert result["taskPressure"] == {"overdue": 1}
-    assert result["tasks"] == [{"id": "task-1", "title": "One"}]
+    assert result["taskInventory"] == inventory
     assert seen == [
         ("GET", "/api/assistant/context", {"allow_stale_cache": False}),
-        ("GET", "/api/tasks?status=open&limit=25", {"allow_stale_cache": False}),
+        ("GET", "/api/tasks/inventory", {"allow_stale_cache": False}),
     ]
+
+
+def test_fetch_flowstate_context_rejects_incomplete_inventory():
+    inventory = _inventory_context([_inventory_task(1)])["taskInventory"]
+    inventory.update({"complete": False, "page": {"limit": 100, "nextCursor": "x", "hasMore": True}})
+    inventory.pop("total")
+    inventory.pop("changeSequence")
+
+    def request(method, path, **kwargs):
+        if path == "/api/assistant/context":
+            return {}
+        return inventory
+
+    with pytest.raises(ConnectorResponseError) as caught:
+        fetch_flowstate_context(request)
+
+    assert caught.value.code == "invalid_inventory_receipt"
 
 
 @pytest.mark.parametrize(

@@ -98,15 +98,23 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 def _task_metadata(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
-    allowed = (
-        "id", "title", "status", "priority", "dueDate", "scheduledDate",
-        "scheduledTime", "duration", "progress", "blocked", "blocker", "projectId",
-    )
     tasks = []
-    for value in raw[:100]:
+    for value in raw:
         if not isinstance(value, Mapping) or not value.get("id"):
             continue
-        task = {key: value[key] for key in allowed if key in value}
+        task: dict[str, Any] = {"id": str(value["id"])[:128]}
+        revision = value.get("canonicalRevision")
+        if isinstance(revision, int) and not isinstance(revision, bool) and revision > 0:
+            task["canonicalRevision"] = revision
+        for key in ("title", "status", "priority", "dueDate"):
+            if key in value:
+                task[key] = str(value[key] or "")[:200]
+        if "projectId" in value:
+            project_id = value.get("projectId")
+            task["projectId"] = None if project_id is None else str(project_id)[:128]
+        for key in ("blocked", "blocker"):
+            if key in value:
+                task[key] = bool(value.get(key))
         tasks.append(task)
     return sorted(tasks, key=lambda task: str(task["id"]))
 
@@ -122,11 +130,22 @@ def _normalize_context(raw: Mapping[str, Any]) -> dict[str, Any]:
             if isinstance(pressure.get(key), (int, float)):
                 safe_pressure[key] = pressure[key]
     drift = payload.get("scheduleDriftMinutes")
-    return {
+    inventory = payload.get("taskInventory")
+    tasks = inventory.get("items") if isinstance(inventory, Mapping) else payload.get("tasks")
+    normalized = {
         "taskPressure": safe_pressure,
         "scheduleDriftMinutes": drift if isinstance(drift, (int, float)) else 0,
-        "tasks": _task_metadata(payload.get("tasks")),
+        "tasks": _task_metadata(tasks),
     }
+    if isinstance(inventory, Mapping):
+        normalized.update(
+            {
+                "scopeFingerprint": str(inventory.get("scopeFingerprint") or "")[:64],
+                "changeSequence": inventory.get("changeSequence"),
+                "total": inventory.get("total"),
+            }
+        )
+    return normalized
 
 
 def _event_subject(kind: str, evidence: Mapping[str, Any]) -> str:
@@ -353,6 +372,37 @@ def run_monitor_check(
 
         current = _normalize_context(assistant_context)
         previous = state.get("snapshot")
+        current_scope = current.get("scopeFingerprint")
+        previous_scope = previous.get("scopeFingerprint") if isinstance(previous, dict) else None
+        scope_changed = bool(
+            isinstance(previous, dict)
+            and current_scope
+            and current_scope != previous_scope
+        )
+        if isinstance(previous, dict) and current_scope and current_scope == previous_scope:
+            previous_sequence = previous.get("changeSequence")
+            current_sequence = current.get("changeSequence")
+            if (
+                isinstance(previous_sequence, int)
+                and not isinstance(previous_sequence, bool)
+                and isinstance(current_sequence, int)
+                and not isinstance(current_sequence, bool)
+                and current_sequence < previous_sequence
+            ):
+                state.update(
+                    {
+                        "last_checked": checked_at.isoformat(),
+                        "last_status": "offline",
+                        "connector_error": _sanitize_connector_failure(
+                            {
+                                "category": "invalid_response",
+                                "code": "inventory_sequence_regression",
+                            }
+                        ),
+                    }
+                )
+                atomic_json_write(state_path, state, mode=0o600, sort_keys=True)
+                return {"status": "offline", "candidate_count": 0}
         raw_occurrences = state.get("occurrences", {})
         occurrences = (
             {str(key): int(value) for key, value in raw_occurrences.items() if isinstance(value, int)}
@@ -361,7 +411,7 @@ def run_monitor_check(
         )
         candidates = (
             []
-            if not isinstance(previous, dict)
+            if not isinstance(previous, dict) or scope_changed
             else _candidate_events(previous, current, checked_at, occurrences)
         )
         local_now = checked_at.astimezone(JERUSALEM)
@@ -698,7 +748,9 @@ def run_cli_monitor_check(
 
 
 class ConnectorResponseError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str = "invalid_shape"):
+        super().__init__(message)
+        self.code = code
 
 
 def _sanitize_connector_failure(value: Mapping[str, Any] | None) -> dict[str, str]:
@@ -754,7 +806,11 @@ def classify_connector_failure(exc: BaseException) -> dict[str, str]:
             )
         return _sanitize_connector_failure({"category": "unavailable", "code": "url_error"})
     if isinstance(exc, (json.JSONDecodeError, ConnectorResponseError)):
-        code = "invalid_json" if isinstance(exc, json.JSONDecodeError) else "invalid_shape"
+        code = (
+            "invalid_json"
+            if isinstance(exc, json.JSONDecodeError)
+            else str(getattr(exc, "code", "invalid_shape") or "invalid_shape")
+        )
         return _sanitize_connector_failure({"category": "invalid_response", "code": code})
     cause = getattr(exc, "__cause__", None)
     if isinstance(cause, BaseException) and cause is not exc:
@@ -796,20 +852,22 @@ def _is_temporary_connector_failure(exc: BaseException) -> bool:
 
 
 def fetch_flowstate_context(request=None) -> dict[str, Any]:
-    if request is None:
-        from tools.flowstate_tool import _request
+    from tools.flowstate_tool import _FlowStateApiError, _request, _validated_inventory_receipt
 
+    if request is None:
         request = _request
     context = request("GET", "/api/assistant/context", allow_stale_cache=False)
-    task_payload = request(
-        "GET", "/api/tasks?status=open&limit=25", allow_stale_cache=False
-    )
-    if not isinstance(context, Mapping) or not isinstance(task_payload, Mapping):
+    inventory = request("GET", "/api/tasks/inventory", allow_stale_cache=False)
+    if not isinstance(context, Mapping) or not isinstance(inventory, Mapping):
         raise ConnectorResponseError("invalid FlowState response shape")
-    tasks = task_payload.get("tasks")
-    if not isinstance(tasks, list):
-        raise ConnectorResponseError("invalid FlowState task response shape")
-    return {**dict(context), "tasks": tasks}
+    try:
+        validated_inventory = _validated_inventory_receipt(dict(inventory))
+    except _FlowStateApiError as exc:
+        raise ConnectorResponseError(
+            "invalid FlowState inventory receipt",
+            code=exc.code,
+        ) from None
+    return {**dict(context), "taskInventory": validated_inventory}
 
 
 def main(argv: list[str] | None = None, *, fetch_context=None) -> int:
