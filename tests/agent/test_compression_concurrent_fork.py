@@ -216,25 +216,26 @@ def test_pre_compress_memory_capture_does_not_block_compaction(tmp_path: Path) -
 
     started = threading.Event()
     release = threading.Event()
+    finished = threading.Event()
 
     class _SlowMemoryManager:
         def on_pre_compress(self, _messages):
             started.set()
             release.wait(timeout=5)
+            finished.set()
 
     agent._memory_manager = _SlowMemoryManager()
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
-    before = time.monotonic()
     compressed, _sp = agent._compress_context(
         messages, "sys", approx_tokens=120_000
     )
-    elapsed = time.monotonic() - before
 
     assert started.wait(timeout=1), "memory capture was not scheduled"
-    assert elapsed < 1.0, "memory extraction blocked the compaction path"
+    assert not finished.is_set(), "memory extraction blocked the compaction path"
     assert len(compressed) == 2
     release.set()
+    assert finished.wait(timeout=1), "background memory capture did not finish"
 
 
 def test_noop_compression_does_not_reinject_tasks_or_rewrite_history(

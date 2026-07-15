@@ -22,6 +22,7 @@ def _make_compressor():
     compressor.quiet_mode = True
     compressor.compression_count = 0
     compressor.last_prompt_tokens = 0
+    compressor._ineffective_compression_count = 0
     compressor._previous_summary = None
     compressor._summary_failure_cooldown_until = 0.0
     compressor.summary_model = None
