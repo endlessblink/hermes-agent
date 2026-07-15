@@ -677,6 +677,7 @@ def _handle_update_task(args: dict, **kw) -> str:
                     expected_request_hash=body["requestHash"],
                     expected_action="patch",
                     expected_entity_id=task_id,
+                    expected_affected_actions={task_id: "update"},
                     read_back_validator=lambda read_back, receipt: (
                         read_back.get("id") == task_id
                         and read_back.get("canonicalRevision")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from datetime import datetime
 from typing import Any, Callable, Mapping
 
@@ -34,45 +33,6 @@ def canonical_json_hash(value: Any) -> str:
     return _sha256(serialized)
 
 
-def _postgres_jsonb_key(key: str) -> tuple[int, bytes]:
-    encoded = key.encode("utf-8")
-    return len(encoded), encoded
-
-
-def _postgres_jsonb_text(value: Any) -> str:
-    """Serialize the JSON subset used by legacy PostgreSQL jsonb receipt hashes."""
-    if value is None:
-        return "null"
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("non-finite values are not valid JSON")
-        return json.dumps(value, allow_nan=False)
-    if isinstance(value, list):
-        return "[" + ", ".join(_postgres_jsonb_text(item) for item in value) + "]"
-    if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise TypeError("JSON object keys must be strings")
-        entries = []
-        for key in sorted(value, key=_postgres_jsonb_key):
-            encoded_key = json.dumps(key, ensure_ascii=False)
-            entries.append(f"{encoded_key}: {_postgres_jsonb_text(value[key])}")
-        return "{" + ", ".join(entries) + "}"
-    raise TypeError(f"unsupported JSON value: {type(value).__name__}")
-
-
-def postgres_jsonb_hash(value: Any) -> str:
-    """Hash PostgreSQL jsonb text for receipts issued before canonical JSON."""
-    return _sha256(_postgres_jsonb_text(value))
-
-
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
@@ -100,6 +60,9 @@ def _validate_affected(
     *,
     required: bool,
     expected_actions: Mapping[str, str] | None,
+    receipt: Mapping[str, Any],
+    primary_read_back: Mapping[str, Any],
+    primary_read_back_hash: str,
 ) -> None:
     if value is None and not required and expected_actions is None:
         return
@@ -147,21 +110,36 @@ def _validate_affected(
                     "canonical receipt affected read-back is invalid"
                 )
             try:
-                valid_hashes = {
-                    canonical_json_hash(affected_read_back),
-                    postgres_jsonb_hash(affected_read_back),
-                }
+                expected_hash = canonical_json_hash(affected_read_back)
             except (TypeError, ValueError):
                 raise CanonicalReceiptError(
                     "canonical receipt affected read-back is invalid"
                 ) from None
-            if affected_read_back_hash not in valid_hashes:
+            if affected_read_back_hash != expected_hash:
                 raise CanonicalReceiptError(
                     "canonical receipt affected read-back hash does not match"
                 )
 
     if expected_actions is not None and actual_actions != dict(expected_actions):
         raise CanonicalReceiptError("canonical receipt affected identities do not match")
+    if expected_actions is not None:
+        primary_entity_id = receipt.get("entityId")
+        if primary_entity_id not in actual_actions:
+            raise CanonicalReceiptError(
+                "canonical receipt primary affected identity does not match"
+            )
+        primary = next(
+            entry for entry in value if entry.get("entityId") == primary_entity_id
+        )
+        if (
+            primary.get("canonicalRevision") != receipt.get("canonicalRevision")
+            or primary.get("changeSequence") != receipt.get("changeSequence")
+            or primary.get("readBack") != primary_read_back
+            or primary.get("readBackHash") != primary_read_back_hash
+        ):
+            raise CanonicalReceiptError(
+                "canonical receipt primary affected proof does not match"
+            )
 
 
 def validate_canonical_receipt(
@@ -220,13 +198,10 @@ def validate_canonical_receipt(
     if not isinstance(read_back, Mapping) or not _digest(read_back_hash):
         raise CanonicalReceiptError("canonical mutation read-back is invalid")
     try:
-        valid_hashes = {
-            canonical_json_hash(read_back),
-            postgres_jsonb_hash(read_back),
-        }
+        expected_read_back_hash = canonical_json_hash(read_back)
     except (TypeError, ValueError):
         raise CanonicalReceiptError("canonical mutation read-back is invalid") from None
-    if read_back_hash not in valid_hashes:
+    if read_back_hash != expected_read_back_hash:
         raise CanonicalReceiptError("canonical mutation read-back hash does not match")
     if read_back_validator is not None and not read_back_validator(read_back, receipt):
         raise CanonicalReceiptError("canonical mutation read-back does not match")
@@ -235,5 +210,8 @@ def validate_canonical_receipt(
         receipt.get("affected"),
         required=require_affected,
         expected_actions=expected_affected_actions,
+        receipt=receipt,
+        primary_read_back=read_back,
+        primary_read_back_hash=read_back_hash,
     )
     return receipt

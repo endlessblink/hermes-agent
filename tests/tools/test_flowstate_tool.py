@@ -333,6 +333,17 @@ def _canonical_committed_payload(*, replayed=False, **receipt_overrides):
         "committedAt": _CANONICAL_COMMITTED_AT,
         "readBack": read_back,
         "readBackHash": canonical_json_hash(read_back),
+        "affected": [
+            {
+                "entityType": "task",
+                "entityId": "task-1",
+                "action": "update",
+                "canonicalRevision": 8,
+                "changeSequence": 42,
+                "readBack": read_back,
+                "readBackHash": canonical_json_hash(read_back),
+            }
+        ],
     }
     receipt.update(receipt_overrides)
     return {
@@ -357,10 +368,16 @@ def _canonical_action_payload(
     canonical_affected = []
     for entry in affected:
         canonical_entry = dict(entry)
-        affected_read_back = canonical_entry.get("readBack") or {
-            "id": canonical_entry["entityId"],
-            "canonicalRevision": canonical_entry["canonicalRevision"],
-        }
+        affected_read_back = canonical_entry.get("readBack")
+        if affected_read_back is None:
+            affected_read_back = (
+                read_back
+                if canonical_entry["entityId"] == entity_id
+                else {
+                    "id": canonical_entry["entityId"],
+                    "canonicalRevision": canonical_entry["canonicalRevision"],
+                }
+            )
         canonical_entry["readBack"] = affected_read_back
         canonical_entry["readBackHash"] = canonical_json_hash(affected_read_back)
         canonical_affected.append(canonical_entry)
@@ -605,6 +622,81 @@ def test_update_task_apply_forwards_preview_receipt_and_validates_commit(
         {"readBack": {"id": "task-1", "canonicalRevision": 7}},
         {"readBack": {"id": "wrong", "canonicalRevision": 8}},
         {"readBackHash": "not-a-sha256"},
+        {"affected": []},
+        {
+            "affected": [
+                {
+                    "entityType": "task",
+                    "entityId": "task-1",
+                    "action": "archive",
+                    "canonicalRevision": 8,
+                    "changeSequence": 42,
+                    "readBack": {
+                        "id": "task-1",
+                        "title": "Clarified task",
+                        "canonicalRevision": 8,
+                    },
+                    "readBackHash": canonical_json_hash({
+                        "id": "task-1",
+                        "title": "Clarified task",
+                        "canonicalRevision": 8,
+                    }),
+                }
+            ]
+        },
+        {
+            "affected": [
+                {
+                    "entityType": "task",
+                    "entityId": "task-1",
+                    "action": "update",
+                    "canonicalRevision": 7,
+                    "changeSequence": 42,
+                    "readBack": {"id": "task-1", "canonicalRevision": 7},
+                    "readBackHash": canonical_json_hash({
+                        "id": "task-1", "canonicalRevision": 7
+                    }),
+                }
+            ]
+        },
+        {
+            "affected": [
+                {
+                    "entityType": "task",
+                    "entityId": "task-1",
+                    "action": "update",
+                    "canonicalRevision": 8,
+                    "changeSequence": 41,
+                    "readBack": {
+                        "id": "task-1",
+                        "title": "Clarified task",
+                        "canonicalRevision": 8,
+                    },
+                    "readBackHash": canonical_json_hash({
+                        "id": "task-1",
+                        "title": "Clarified task",
+                        "canonicalRevision": 8,
+                    }),
+                }
+            ]
+        },
+        {
+            "affected": [
+                {
+                    "entityType": "task",
+                    "entityId": "task-1",
+                    "action": "update",
+                    "canonicalRevision": 8,
+                    "changeSequence": 42,
+                    "readBack": {
+                        "id": "task-1",
+                        "title": "Clarified task",
+                        "canonicalRevision": 8,
+                    },
+                    "readBackHash": "b" * 64,
+                }
+            ]
+        },
     ],
 )
 def test_update_task_rejects_mismatched_or_malformed_commit_receipt(

@@ -5,7 +5,6 @@ import pytest
 from tools.flowstate_receipts import (
     CanonicalReceiptError,
     canonical_json_hash,
-    postgres_jsonb_hash,
     validate_canonical_receipt,
 )
 
@@ -71,12 +70,17 @@ def test_canonical_json_hash_uses_sorted_compact_utf8_json():
     )
 
 
-def test_legacy_postgres_jsonb_hash_uses_jsonb_key_order_and_spacing():
+def test_validator_rejects_legacy_postgres_jsonb_read_back_hash():
     postgres_text = '{"b": [true, null], "aa": 1}'
-
-    assert postgres_jsonb_hash({"aa": 1, "b": [True, None]}) == (
-        hashlib.sha256(postgres_text.encode("utf-8")).hexdigest()
+    response = _response(
+        receipt_overrides={
+            "readBack": {"aa": 1, "b": [True, None]},
+            "readBackHash": hashlib.sha256(postgres_text.encode("utf-8")).hexdigest(),
+        }
     )
+
+    with pytest.raises(CanonicalReceiptError):
+        _validate(response)
 
 
 @pytest.mark.parametrize("status", ["committed", "replayed"])
@@ -105,15 +109,6 @@ def test_validator_rejects_contradictory_legacy_replayed_alias(status, replayed)
 
     with pytest.raises(CanonicalReceiptError):
         _validate(response)
-
-
-def test_validator_accepts_legacy_postgres_jsonb_read_back_hash():
-    response = _response()
-    response["receipt"]["readBackHash"] = postgres_jsonb_hash(
-        response["receipt"]["readBack"]
-    )
-
-    assert _validate(response) == response["receipt"]
 
 
 @pytest.mark.parametrize(
@@ -168,6 +163,8 @@ def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations
         receipt_overrides={
             "action": "merge",
             "entityId": "survivor-1",
+            "readBack": survivor_read_back,
+            "readBackHash": canonical_json_hash(survivor_read_back),
             "affected": [
                 {
                     "entityType": "task",
@@ -212,6 +209,48 @@ def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations
                 "survivor-1": "update",
                 "duplicate-1": "archive",
             },
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("canonicalRevision", 7),
+        ("changeSequence", 41),
+        ("readBack", {"id": "survivor-1", "canonicalRevision": 8, "changed": True}),
+        ("readBackHash", "b" * 64),
+    ],
+)
+def test_validator_rejects_primary_affected_proof_mismatch(field, value):
+    primary_read_back = {"id": "survivor-1", "canonicalRevision": 8}
+    primary = {
+        "entityType": "task",
+        "entityId": "survivor-1",
+        "action": "update",
+        "canonicalRevision": 8,
+        "changeSequence": 42,
+        "readBack": primary_read_back,
+        "readBackHash": canonical_json_hash(primary_read_back),
+    }
+    primary[field] = value
+    if field == "readBack":
+        primary["readBackHash"] = canonical_json_hash(value)
+    response = _response(
+        receipt_overrides={
+            "action": "merge",
+            "entityId": "survivor-1",
+            "readBack": primary_read_back,
+            "readBackHash": canonical_json_hash(primary_read_back),
+            "affected": [primary],
+        }
+    )
+
+    with pytest.raises(CanonicalReceiptError):
+        _validate(
+            response,
+            expected_action="merge",
+            expected_entity_id="survivor-1",
+            expected_affected_actions={"survivor-1": "update"},
         )
 
 
