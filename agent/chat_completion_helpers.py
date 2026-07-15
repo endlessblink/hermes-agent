@@ -147,6 +147,11 @@ def openai_codex_stale_timeout_floor(est_tokens: int) -> float:
     return 0.0
 
 
+# Desktop stream watchdog budget (apps/desktop/src/store/session.ts:
+# SESSION_WATCHDOG_TIMEOUT_MS = 8 minutes of complete stream silence).
+_DESKTOP_UI_WATCHDOG_SECONDS = 480.0
+
+
 def effective_openai_codex_stale_timeout(
     agent: Any, computed_timeout: float, est_tokens: int
 ) -> float:
@@ -157,9 +162,17 @@ def effective_openai_codex_stale_timeout(
     one minute so the user gets a retry or terminal error instead of watching
     an apparently frozen turn for several minutes.
     """
-    timeout = max(computed_timeout, openai_codex_stale_timeout_floor(est_tokens))
+    floor = openai_codex_stale_timeout_floor(est_tokens)
+    timeout = max(computed_timeout, floor)
     if str(getattr(agent, "platform", "") or "").strip().lower() == "desktop":
-        return min(timeout, 60.0)
+        # The snappy 60s cap is only safe below the context floor. At
+        # gateway-scale payloads (tools + instructions alone are ~34k tokens)
+        # Codex admission/prefill legitimately exceeds 60s, so capping under
+        # the floor killed healthy calls at exactly 60s, twice, and failed the
+        # turn. Allow the floor up to one minute under the desktop UI stream
+        # watchdog (8 minutes, apps/desktop session.ts) so a retry or typed
+        # error still lands before the UI declares the session stuck.
+        return min(timeout, max(60.0, min(floor, _DESKTOP_UI_WATCHDOG_SECONDS - 60.0)))
     return timeout
 
 

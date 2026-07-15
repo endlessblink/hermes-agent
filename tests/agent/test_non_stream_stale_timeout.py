@@ -210,12 +210,24 @@ def test_openai_codex_stale_floor_tiers():
 
 
 def test_desktop_codex_stale_timeout_is_bounded_below_ui_watchdog(tmp_path):
-    """A silent interactive desktop request must settle before the UI watchdog."""
-    from agent.chat_completion_helpers import effective_openai_codex_stale_timeout
+    """A silent interactive desktop request must settle before the UI watchdog.
+
+    The desktop stream watchdog allows 8 minutes of silence
+    (SESSION_WATCHDOG_TIMEOUT_MS); the stale detector must fire at least a
+    minute earlier so a retry or typed error lands while the UI still shows
+    the turn as working. The old hard 60s cap sat far below both the UI
+    watchdog and the Codex context floor and killed healthy large-context
+    calls at exactly 60s (the 'stuck desktop' failure shape)."""
+    from agent.chat_completion_helpers import (
+        _DESKTOP_UI_WATCHDOG_SECONDS,
+        effective_openai_codex_stale_timeout,
+    )
 
     agent = _make_agent(tmp_path, platform="desktop")
 
-    assert effective_openai_codex_stale_timeout(agent, 240.0, 120_000) == 60.0
+    timeout = effective_openai_codex_stale_timeout(agent, 240.0, 120_000)
+    assert timeout <= _DESKTOP_UI_WATCHDOG_SECONDS - 60.0
+    assert timeout == 420.0
 
 
 def test_noninteractive_codex_keeps_large_context_floor(tmp_path):
@@ -225,3 +237,43 @@ def test_noninteractive_codex_keeps_large_context_floor(tmp_path):
     agent = _make_agent(tmp_path, platform="cli")
 
     assert effective_openai_codex_stale_timeout(agent, 240.0, 120_000) == 1200.0
+
+
+# ── desktop cap must not undercut the Codex context floor (#stuck-turns) ──
+
+
+def _stub_agent(platform: str):
+    from types import SimpleNamespace
+    return SimpleNamespace(platform=platform)
+
+
+def test_desktop_large_context_keeps_codex_floor():
+    """A desktop request at gateway scale (~40k tokens) must get the same
+    admission/prefill patience as CLI. The old 60s desktop cap killed healthy
+    subscription-backed Codex calls at exactly 60s, twice, then failed the
+    turn — the 'stuck desktop' failure shape."""
+    from agent.chat_completion_helpers import (
+        effective_openai_codex_stale_timeout,
+        openai_codex_stale_timeout_floor,
+    )
+    est = 40_000
+    timeout = effective_openai_codex_stale_timeout(_stub_agent("desktop"), 90.0, est)
+    assert timeout > 60.0
+    assert timeout == 420.0
+    assert openai_codex_stale_timeout_floor(est) >= timeout
+
+
+def test_desktop_small_context_keeps_snappy_cap():
+    from agent.chat_completion_helpers import effective_openai_codex_stale_timeout
+    timeout = effective_openai_codex_stale_timeout(_stub_agent("desktop"), 90.0, 5_000)
+    assert timeout == 60.0
+
+
+def test_cli_large_context_floor_unchanged():
+    from agent.chat_completion_helpers import (
+        effective_openai_codex_stale_timeout,
+        openai_codex_stale_timeout_floor,
+    )
+    est = 120_000
+    timeout = effective_openai_codex_stale_timeout(_stub_agent("cli"), 90.0, est)
+    assert timeout == openai_codex_stale_timeout_floor(est)
