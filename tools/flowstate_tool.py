@@ -406,6 +406,108 @@ def _handle_assistant_context(args: dict, **kw) -> str:
         return _tool_error(str(exc))
 
 
+_AUDIT_COVERAGE_OPTIONAL_FIELDS = (
+    "snapshotAt",
+    "auditMode",
+    "representativeSample",
+    "expectedItemIds",
+    "expectedItemCount",
+    "reviewedItems",
+    "unreviewedItemIds",
+    "screenshotRows",
+    "knownTasks",
+    "blockers",
+    "notCovered",
+)
+
+_AUDIT_BLOCKED_INSTRUCTION = (
+    "FlowState refused this summary draft: it claims more coverage than the "
+    "receipt proves. Use safeSummary verbatim, or rewrite the summary strictly "
+    "weaker than safeSummary and call flowstate_audit_coverage again. Never "
+    "present the blocked draft to the user."
+)
+
+
+def _handle_audit_coverage(args: dict, **kw) -> str:
+    """Notarize a review/audit summary against FlowState's coverage receipt.
+
+    The endpoint re-reads claimed records server-side and refuses wording
+    stronger than the evidence (422 broad_claim_blocked). Hermes must treat a
+    blocked draft as a hard rewording requirement, and must surface typed
+    blockers when the endpoint or connector is unavailable instead of
+    presenting an unverified summary as covered.
+    """
+    body: Dict[str, Any] = {}
+    for field in ("auditScope", "sourceSurface", "summaryDraft"):
+        value = args.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return _tool_error(f"{field} is required")
+        body[field] = value
+    for field in _AUDIT_COVERAGE_OPTIONAL_FIELDS:
+        if field in args and args[field] is not None:
+            body[field] = args[field]
+    # Hermes has no server-owned live proof; never assert live verification.
+    body["liveVerified"] = False
+
+    base_url, token = _get_config()
+    req = urllib.request.Request(
+        f"{base_url}/api/audit/coverage",
+        data=json.dumps(body).encode("utf-8"),
+        headers=_headers(token),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 422:
+            try:
+                blocked = json.loads(exc.read().decode("utf-8", errors="replace"))
+            except Exception:
+                blocked = {}
+            if isinstance(blocked, dict) and blocked.get("error") == "broad_claim_blocked":
+                return _tool_result(
+                    {
+                        "accepted": False,
+                        "blocked": "broad_claim_blocked",
+                        "violations": blocked.get("violations") or [],
+                        "claimLevel": blocked.get("claimLevel"),
+                        "receipt": blocked.get("receipt"),
+                        "safeSummary": blocked.get("safeSummary"),
+                        "instruction": _AUDIT_BLOCKED_INSTRUCTION,
+                    }
+                )
+        if exc.code == 404:
+            return _typed_tool_error(
+                _FlowStateApiError(
+                    "The installed FlowState does not serve /api/audit/coverage yet, "
+                    "so this review cannot be receipt-verified. State explicitly that "
+                    "coverage is unverified declared-only evidence; do not claim full, "
+                    "complete, or verified coverage.",
+                    code="audit_endpoint_unavailable",
+                    status=404,
+                )
+            )
+        logger.error("flowstate_audit_coverage error: %s", exc)
+        return _typed_tool_error(_compact_http_error(exc))
+    except (urllib.error.URLError, TimeoutError) as exc:
+        logger.error("flowstate_audit_coverage error: %s", exc)
+        return _tool_error(
+            f"Flow State Local Task API is unavailable at {base_url}. The review "
+            "summary cannot be receipt-verified; report this blocker instead of "
+            "claiming any coverage level."
+        )
+
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return _tool_error("Flow State Local Task API returned non-JSON data.")
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        return _tool_error(str(error or "Flow State returned an unexpected audit response."))
+    return _tool_result({"accepted": True, **payload})
+
+
 def _handle_list_tasks(args: dict, **kw) -> str:
     status = args.get("status")
     due = args.get("due")
@@ -1219,6 +1321,91 @@ FLOWSTATE_HEALTH_SCHEMA = {
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
+FLOWSTATE_AUDIT_COVERAGE_SCHEMA = {
+    "name": "flowstate_audit_coverage",
+    "description": (
+        "MANDATORY before presenting any review, audit, or coverage summary about "
+        "FlowState tasks (including screenshot-based reviews). Sends the exact "
+        "reviewed/unreviewed item IDs and your draft summary to FlowState, which "
+        "re-reads the claimed records server-side and returns a durable "
+        "audit-coverage-v2 receipt plus the strongest wording the evidence "
+        "justifies. If the draft over-claims, the result has accepted=false and a "
+        "safeSummary you MUST use verbatim (or strictly weaker). Never state "
+        "'reviewed everything', 'all tasks', or 'fully verified' without an "
+        "accepted receipt whose claimLevel is verified."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "auditScope": {
+                "type": "string",
+                "description": "What universe was audited, e.g. 'open tasks in personal scope'.",
+            },
+            "sourceSurface": {
+                "type": "string",
+                "description": "Where the audited data came from, e.g. 'local-api /api/tasks/inventory' or 'screenshot + /api/tasks/search'.",
+            },
+            "summaryDraft": {
+                "type": "string",
+                "description": "The exact summary wording you intend to present to the user.",
+            },
+            "auditMode": {"type": "string", "enum": ["item", "capability"]},
+            "representativeSample": {
+                "type": "boolean",
+                "description": "True when only a sample of a wider scope was reviewed.",
+            },
+            "expectedItemIds": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "The full expected ID universe when known (e.g. from a complete inventory receipt).",
+            },
+            "expectedItemCount": {"type": "integer"},
+            "reviewedItems": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "itemId": {"type": "string"},
+                        "evidenceClass": {
+                            "type": "string",
+                            "enum": [
+                                "exact-record-read",
+                                "canonical-receipt",
+                                "screenshot-row-reconciled",
+                                "title-only-match",
+                                "capability-class",
+                            ],
+                        },
+                    },
+                    "required": ["itemId", "evidenceClass"],
+                },
+                "description": "Exactly which items you reviewed and what kind of evidence you have for each.",
+            },
+            "unreviewedItemIds": {"type": "array", "items": {"type": "string"}},
+            "screenshotRows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "visibleText": {"type": "string"},
+                        "claimedTaskId": {"type": "string"},
+                        "reviewed": {"type": "boolean"},
+                    },
+                    "required": ["visibleText"],
+                },
+                "description": "Visible screenshot rows (Hebrew/multiline safe); FlowState reconciles them to exact records.",
+            },
+            "blockers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Active connector/auth blockers that must survive into the final wording.",
+            },
+            "notCovered": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["auditScope", "sourceSurface", "summaryDraft"],
+    },
+}
+
 FLOWSTATE_LIST_TASKS_SCHEMA = {
     "name": "flowstate_list_tasks",
     "description": (
@@ -1639,6 +1826,7 @@ from tools.registry import registry
 for _name, _schema, _handler in [
     ("flowstate_get_assistant_context", FLOWSTATE_ASSISTANT_CONTEXT_SCHEMA, _handle_assistant_context),
     ("flowstate_health", FLOWSTATE_HEALTH_SCHEMA, _handle_health),
+    ("flowstate_audit_coverage", FLOWSTATE_AUDIT_COVERAGE_SCHEMA, _handle_audit_coverage),
     ("flowstate_list_tasks", FLOWSTATE_LIST_TASKS_SCHEMA, _handle_list_tasks),
     ("flowstate_search_tasks", FLOWSTATE_SEARCH_TASKS_SCHEMA, _handle_search_tasks),
     ("flowstate_get_task", FLOWSTATE_GET_TASK_SCHEMA, _handle_get_task),
