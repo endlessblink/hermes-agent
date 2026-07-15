@@ -867,8 +867,8 @@ def _handle_done_for_now(args: dict, **kw) -> str:
                     expected_action="done_for_now",
                     expected_entity_id=task_id,
                     expected_affected_actions={
-                        completed_id: "create",
                         task_id: "update",
+                        completed_id: "create",
                     },
                     read_back_validator=lambda read_back, receipt: (
                         read_back.get("id") == task_id

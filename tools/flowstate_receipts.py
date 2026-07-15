@@ -70,6 +70,7 @@ def _validate_affected(
         raise CanonicalReceiptError("canonical receipt affected entries are invalid")
 
     actual_actions: dict[str, str] = {}
+    actual_action_items: list[tuple[str, str]] = []
     for entry in value:
         if not isinstance(entry, Mapping):
             raise CanonicalReceiptError("canonical receipt affected entries are invalid")
@@ -89,6 +90,7 @@ def _validate_affected(
         if entity_id in actual_actions:
             raise CanonicalReceiptError("canonical receipt affected entries are duplicated")
         actual_actions[entity_id] = action
+        actual_action_items.append((entity_id, action))
 
         affected_read_back = entry.get("readBack")
         affected_read_back_hash = entry.get("readBackHash")
@@ -120,7 +122,9 @@ def _validate_affected(
                     "canonical receipt affected read-back hash does not match"
                 )
 
-    if expected_actions is not None and actual_actions != dict(expected_actions):
+    if expected_actions is not None and actual_action_items != list(
+        expected_actions.items()
+    ):
         raise CanonicalReceiptError("canonical receipt affected identities do not match")
     if expected_actions is not None:
         primary_entity_id = receipt.get("entityId")

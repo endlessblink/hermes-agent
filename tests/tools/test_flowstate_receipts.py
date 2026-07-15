@@ -212,6 +212,50 @@ def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations
         )
 
 
+def test_validator_rejects_primary_affected_entry_after_secondary_entry():
+    primary_read_back = {"id": "survivor-1", "canonicalRevision": 8}
+    secondary_read_back = {"id": "duplicate-1", "canonicalRevision": 5}
+    response = _response(
+        receipt_overrides={
+            "action": "merge",
+            "entityId": "survivor-1",
+            "readBack": primary_read_back,
+            "readBackHash": canonical_json_hash(primary_read_back),
+            "affected": [
+                {
+                    "entityType": "task",
+                    "entityId": "duplicate-1",
+                    "action": "archive",
+                    "canonicalRevision": 5,
+                    "changeSequence": 43,
+                    "readBack": secondary_read_back,
+                    "readBackHash": canonical_json_hash(secondary_read_back),
+                },
+                {
+                    "entityType": "task",
+                    "entityId": "survivor-1",
+                    "action": "update",
+                    "canonicalRevision": 8,
+                    "changeSequence": 42,
+                    "readBack": primary_read_back,
+                    "readBackHash": canonical_json_hash(primary_read_back),
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(CanonicalReceiptError):
+        _validate(
+            response,
+            expected_action="merge",
+            expected_entity_id="survivor-1",
+            expected_affected_actions={
+                "survivor-1": "update",
+                "duplicate-1": "archive",
+            },
+        )
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

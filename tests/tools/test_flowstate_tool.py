@@ -1179,17 +1179,17 @@ def test_done_for_now_apply_forwards_preview_receipt_and_returns_readback(
         affected=[
             {
                 "entityType": "task",
-                "entityId": "history-1",
-                "action": "create",
-                "canonicalRevision": 1,
-                "changeSequence": 41,
-            },
-            {
-                "entityType": "task",
                 "entityId": "task-1",
                 "action": "update",
                 "canonicalRevision": 8,
                 "changeSequence": 42,
+            },
+            {
+                "entityType": "task",
+                "entityId": "history-1",
+                "action": "create",
+                "canonicalRevision": 1,
+                "changeSequence": 41,
             },
         ],
         status=status,
@@ -1217,6 +1217,49 @@ def test_done_for_now_apply_forwards_preview_receipt_and_returns_readback(
         "requestId": "apply-1",
         "requestHash": _CANONICAL_REQUEST_HASH,
     }
+
+
+def test_done_for_now_rejects_reordered_affected_rows(monkeypatch):
+    read_back = {
+        "id": "task-1",
+        "canonicalRevision": 8,
+        "completedOccurrence": {"id": "history-1"},
+        "nextOccurrence": {"id": "occ-2", "taskId": "task-1"},
+    }
+    payload = _canonical_action_payload(
+        action="done_for_now",
+        operation_id="apply-1",
+        entity_id="task-1",
+        read_back=read_back,
+        affected=[
+            {
+                "entityType": "task",
+                "entityId": "task-1",
+                "action": "update",
+                "canonicalRevision": 8,
+                "changeSequence": 42,
+            },
+            {
+                "entityType": "task",
+                "entityId": "history-1",
+                "action": "create",
+                "canonicalRevision": 1,
+                "changeSequence": 41,
+            },
+        ],
+    )
+    payload["receipt"]["affected"].reverse()
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task-1",
+        "preview": False,
+        "requestId": "apply-1",
+        "previewVersion": "version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+    }))
+
+    assert result["error"] == "Canonical Done for now receipt could not be verified"
 
 
 @pytest.mark.parametrize(
@@ -1283,18 +1326,18 @@ def test_done_for_now_rejects_unverified_success_receipts(monkeypatch, payload_o
         affected=[
             {
                 "entityType": "task",
+                "entityId": "task-1",
+                "action": "update",
+                "canonicalRevision": 8,
+                "changeSequence": 42,
+            },
+            {
+                "entityType": "task",
                 "entityId": "history-1",
                 "action": "create",
                 "canonicalRevision": 1,
                 "changeSequence": 41,
             },
-            {
-                "entityType": "task",
-                "entityId": "task-1",
-                "action": "update",
-                "canonicalRevision": 8,
-                "changeSequence": 42,
-            }
         ],
         **payload_overrides,
     )
@@ -1606,6 +1649,51 @@ def test_merge_tasks_apply_forwards_preview_binding_and_receipt(monkeypatch, sta
         "requestId": "merge-apply-1",
         "requestHash": _CANONICAL_REQUEST_HASH,
     }
+
+
+def test_merge_tasks_rejects_reordered_affected_rows(monkeypatch):
+    read_back = {
+        "id": "survivor-1",
+        "canonicalRevision": 8,
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "duplicateArchived": True,
+    }
+    payload = _canonical_action_payload(
+        action="merge",
+        operation_id="merge-apply-1",
+        entity_id="survivor-1",
+        read_back=read_back,
+        affected=[
+            {
+                "entityType": "task",
+                "entityId": "survivor-1",
+                "action": "update",
+                "canonicalRevision": 8,
+                "changeSequence": 42,
+            },
+            {
+                "entityType": "task",
+                "entityId": "duplicate-1",
+                "action": "archive",
+                "canonicalRevision": 5,
+                "changeSequence": 43,
+            },
+        ],
+    )
+    payload["receipt"]["affected"].reverse()
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "preview": False,
+        "requestId": "merge-apply-1",
+        "previewVersion": "merge-version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+    }))
+
+    assert result["error"] == "Canonical merge receipt could not be verified"
 
 
 @pytest.mark.parametrize(
