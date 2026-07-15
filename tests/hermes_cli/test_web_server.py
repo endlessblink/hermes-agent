@@ -7219,3 +7219,24 @@ class TestDesktopCronTicker:
         )
 
         assert exits == [0]
+
+    def test_parent_liveness_probe_does_not_signal_the_parent(self, monkeypatch):
+        import psutil
+
+        from hermes_cli import web_server
+
+        checked = []
+        monkeypatch.setattr(web_server.os, "getppid", lambda: 4242)
+        monkeypatch.setattr(
+            web_server.os,
+            "kill",
+            lambda *_args: pytest.fail("parent liveness probes must not send signals"),
+        )
+        monkeypatch.setattr(
+            psutil,
+            "pid_exists",
+            lambda pid: checked.append(pid) or True,
+        )
+
+        assert web_server._desktop_parent_alive(4242) is True
+        assert checked == [4242]
