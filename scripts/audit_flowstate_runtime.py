@@ -229,7 +229,7 @@ def collect_runtime_truth(
     health_status, _health_payload = request("/api/health", "")
     diagnostics_status, diagnostics = request("/api/timer/diagnostics", "")
     protected_status, _protected_payload = request(
-        "/api/tasks/inventory?limit=1", token
+        "/api/tasks/inventory?mode=page&limit=1", token
     )
     renderer_state = (
         diagnostics.get("rendererAuthState")

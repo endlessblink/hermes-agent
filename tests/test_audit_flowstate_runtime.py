@@ -148,7 +148,7 @@ def test_live_collector_proves_runtime_without_emitting_credentials_or_task_data
                     "isInitialized": True,
                 },
             }
-        assert path == "/api/tasks/inventory?limit=1"
+        assert path == "/api/tasks/inventory?mode=page&limit=1"
         assert token == secret
         return 200, {"tasks": [{"title": task_title}]}
 
