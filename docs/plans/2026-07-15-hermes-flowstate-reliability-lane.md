@@ -271,7 +271,7 @@ final branch integration remain gated by the signed-in FlowState sidecar.
 ### Task H5: Canonicalize subtasks and interactive task breakdown
 
 **Files:**
-- Create: FlowState `supabase/migrations/20260715021000_canonical_subtask_batch.sql`
+- Create: FlowState `supabase/migrations/20260715050000_canonical_subtask_batch.sql`
 - Create: FlowState `server/local-api/subtask-batch.cjs`
 - Modify: FlowState `server/local-api/server.cjs`
 - Modify: Hermes `tools/flowstate_tool.py`
@@ -279,11 +279,11 @@ final branch integration remain gated by the signed-in FlowState sidecar.
 - Test: FlowState `tests/unit/local-api/subtask-batch.test.ts`
 - Test: Hermes `tests/tools/test_flowstate_tool.py`
 
-- [ ] **Step 1: Replace process-local receipt tests with durable restart tests**
+- [x] **Step 1: Replace process-local receipt tests with durable restart tests**
 
 Preview A/apply altered B rejects; same request/different payload conflicts before and after sidecar restart; concurrent app and Hermes edits preserve both or return `stale_revision`; injected failure rolls back the entire approved batch.
 
-- [ ] **Step 2: Bind the approved ordered breakdown**
+- [x] **Step 2: Bind the approved ordered breakdown**
 
 The preview contains parent ID/revision and exact ordered operations:
 
@@ -293,13 +293,26 @@ The preview contains parent ID/revision and exact ordered operations:
 
 Apply returns canonical parent revision/sequence plus exact normalized subtask read-back.
 
-- [ ] **Step 3: Preserve partial completion semantics**
+- [x] **Step 3: Preserve partial completion semantics**
 
 Subtasks may be intentionally “done enough”; no rule requires every breakdown step or parent task to reach maximal implementation.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Commit: `feat(subtasks): make assistant breakdown atomic and replayable`
+
+FlowState now has a signed-user canonical batch RPC with parent-revision CAS,
+stable client step identities, exact preview binding, durable replay, atomic
+rollback, metadata-preserving updates, and ordered read-back. The Local API and
+all singular subtask routes use the same receipt-validating adapter with no
+process-local replay cache. Hermes validates exact previews and canonical
+receipts for batch and singular tools, including optional `doneEnough`,
+`estimateMinutes`, Canvas position, and pomodoro progress. Signed renderer
+whole-array edits become element operations, and rollback retains already
+committed canonical read-back. The disposable database contract, 380 FlowState
+regressions (1 skipped), 210 Hermes connector tests, type-check, web build, and
+Electron sidecar build pass. Packaging, installed protected live proof,
+migration rollout, and release integration remain open.
 
 ### Task H6: Canonicalize work-block create, move, resize, and remove
 

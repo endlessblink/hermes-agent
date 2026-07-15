@@ -1391,20 +1391,189 @@ def _subtask_path(task_id: str, subtask_id: Optional[str] = None) -> str:
     return path
 
 
-def _preview_metadata(args: dict) -> Dict[str, Any]:
-    metadata: Dict[str, Any] = {
-        "preview": False if args.get("preview") is False else True,
+def _normalize_subtask_operation(operation: Any) -> tuple[Optional[dict], Optional[str]]:
+    if not isinstance(operation, dict):
+        return None, "each subtask operation must be an object"
+    kind = operation.get("kind")
+    if kind not in {"create", "update", "delete"}:
+        return None, "each operation kind must be create|update|delete"
+    allowed = (
+        {
+            "kind", "clientId", "title", "description", "doneEnough", "estimateMinutes",
+            "completedPomodoros", "canvasPosition", "isCompleted", "order",
+        }
+        if kind == "create"
+        else {
+            "kind", "subtaskId", "title", "description", "doneEnough", "estimateMinutes",
+            "completedPomodoros", "canvasPosition", "isCompleted", "order",
+        }
+    )
+    unknown = sorted(set(operation) - allowed)
+    if unknown:
+        return None, f"unsupported subtask operation fields: {', '.join(unknown)}"
+    normalized: Dict[str, Any] = {"kind": kind}
+    if kind == "create":
+        client_id = operation.get("clientId")
+        title = operation.get("title")
+        if not isinstance(client_id, str) or not client_id.strip() or client_id != client_id.strip():
+            return None, "create operations require a trimmed clientId"
+        if not isinstance(title, str) or not title.strip() or title != title.strip():
+            return None, "create operations require a trimmed title"
+        normalized.update({"clientId": client_id, "title": title})
+    else:
+        subtask_id = operation.get("subtaskId")
+        if not isinstance(subtask_id, str) or not subtask_id.strip() or subtask_id != subtask_id.strip():
+            return None, f"{kind} operations require a trimmed subtaskId"
+        normalized["subtaskId"] = subtask_id
+    if kind == "delete":
+        return normalized, None
+    for key in ("title", "description", "doneEnough"):
+        if key not in operation:
+            continue
+        value = operation[key]
+        if key == "doneEnough" and value is None:
+            normalized[key] = None
+            continue
+        if not isinstance(value, str) or (key == "title" and not value.strip()):
+            return None, f"{key} must be text{'' if key != 'title' else ' and non-empty'}"
+        if key == "title" and value != value.strip():
+            return None, "title must not contain surrounding whitespace"
+        normalized[key] = value
+    if "estimateMinutes" in operation:
+        estimate = operation["estimateMinutes"]
+        if estimate is not None and (not _is_positive_int(estimate) or estimate > 1440):
+            return None, "estimateMinutes must be an integer from 1 to 1440"
+        normalized["estimateMinutes"] = estimate
+    if "completedPomodoros" in operation:
+        completed = operation["completedPomodoros"]
+        if not isinstance(completed, int) or isinstance(completed, bool) or completed < 0:
+            return None, "completedPomodoros must be a non-negative integer"
+        normalized["completedPomodoros"] = completed
+    if "canvasPosition" in operation:
+        position = operation["canvasPosition"]
+        if position is not None and (
+            not isinstance(position, dict)
+            or set(position) != {"x", "y"}
+            or any(not isinstance(position[axis], (int, float)) or isinstance(position[axis], bool) for axis in ("x", "y"))
+        ):
+            return None, "canvasPosition must be null or an object with numeric x and y"
+        normalized["canvasPosition"] = position
+    if "isCompleted" in operation:
+        if not isinstance(operation["isCompleted"], bool):
+            return None, "isCompleted must be a boolean"
+        normalized["isCompleted"] = operation["isCompleted"]
+    if "order" in operation:
+        order = operation["order"]
+        if not isinstance(order, int) or isinstance(order, bool) or order < 0:
+            return None, "order must be a non-negative integer"
+        normalized["order"] = order
+    if kind == "update" and set(normalized) == {"kind", "subtaskId"}:
+        return None, "update operations require at least one changed field"
+    return normalized, None
+
+
+def _canonical_subtask_body(args: dict, operations: list[dict]) -> tuple[Optional[dict], Optional[str]]:
+    operation_id = args.get("operationId")
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id.strip()
+        or operation_id != operation_id.strip()
+        or len(operation_id) > 160
+    ):
+        return None, "operationId is required and must be at most 160 trimmed characters"
+    revision = args.get("baseRevision")
+    if not _is_positive_int(revision):
+        return None, "baseRevision is required and must be a positive integer"
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return None, "preview must be a boolean"
+    body: Dict[str, Any] = {
+        "operationId": operation_id,
+        "baseRevision": revision,
+        "preview": preview,
+        "operations": operations,
     }
-    request_id = str(args.get("requestId") or "").strip()
-    if request_id:
-        metadata["requestId"] = request_id
-    return metadata
+    if not preview:
+        digest = args.get("previewDigest")
+        expiry = args.get("previewExpiresAt")
+        request_hash = args.get("requestHash")
+        if not isinstance(digest, str) or not _SHA256_HEX_RE.fullmatch(digest):
+            return None, "previewDigest is required when preview is false"
+        if not _is_iso_timestamp(expiry):
+            return None, "previewExpiresAt is required when preview is false"
+        if not isinstance(request_hash, str) or not _SHA256_HEX_RE.fullmatch(request_hash):
+            return None, "requestHash is required when preview is false"
+        body.update({
+            "previewDigest": digest,
+            "previewExpiresAt": expiry,
+            "requestHash": request_hash,
+        })
+    return body, None
 
 
-def _validate_apply_request(body: Dict[str, Any]) -> Optional[str]:
-    if body["preview"] is False and not body.get("requestId"):
-        return "requestId is required when preview is false"
-    return None
+def _valid_subtask_preview(payload: Any, task_id: str, body: dict) -> bool:
+    normalized = payload.get("normalizedPayload") if isinstance(payload, dict) else None
+    returned_operations = normalized.get("operations") if isinstance(normalized, dict) else None
+    operations_match = (
+        isinstance(returned_operations, list)
+        and len(returned_operations) == len(body["operations"])
+        and all(
+            isinstance(returned, dict)
+            and returned.get("kind") == requested.get("kind")
+            and all(returned.get(key) == value for key, value in requested.items())
+            for requested, returned in zip(body["operations"], returned_operations)
+        )
+    )
+    return (
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("result") == "preview"
+        and payload.get("contractVersion") == _CANONICAL_TASK_CONTRACT
+        and payload.get("action") == "subtask_batch"
+        and payload.get("operationId") == body["operationId"]
+        and payload.get("taskId") == task_id
+        and payload.get("baseRevision") == body["baseRevision"]
+        and isinstance(payload.get("previewDigest"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(payload["previewDigest"]))
+        and isinstance(payload.get("requestHash"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(payload["requestHash"]))
+        and _is_iso_timestamp(payload.get("previewExpiresAt"))
+        and isinstance(normalized, dict)
+        and normalized.get("taskId") == task_id
+        and operations_match
+        and isinstance(payload.get("readBack"), dict)
+        and payload["readBack"].get("id") == task_id
+        and payload["readBack"].get("canonicalRevision") == body["baseRevision"]
+        and isinstance(payload["readBack"].get("subtasks"), list)
+    )
+
+
+def _subtask_operations_reflected(operations: list[dict], subtasks: Any) -> bool:
+    if not isinstance(subtasks, list) or not all(isinstance(item, dict) for item in subtasks):
+        return False
+    for operation in operations:
+        if operation["kind"] == "delete":
+            if any(item.get("id") == operation["subtaskId"] for item in subtasks):
+                return False
+            continue
+        identity_key = "clientId" if operation["kind"] == "create" else "id"
+        identity = operation.get("clientId") if operation["kind"] == "create" else operation.get("subtaskId")
+        index = next(
+            (position for position, item in enumerate(subtasks) if item.get(identity_key) == identity),
+            None,
+        )
+        if index is None:
+            return False
+        item = subtasks[index]
+        for field in (
+            "title", "description", "doneEnough", "estimateMinutes",
+            "completedPomodoros", "canvasPosition", "isCompleted",
+        ):
+            if field in operation and item.get(field) != operation[field]:
+                return False
+        if "order" in operation and index != operation["order"]:
+            return False
+    return True
 
 
 def _handle_list_subtasks(args: dict, **kw) -> str:
@@ -1426,24 +1595,18 @@ def _handle_create_subtask(args: dict, **kw) -> str:
     if not title:
         return _tool_error("title is required")
 
-    body: Dict[str, Any] = {"title": title, **_preview_metadata(args)}
-    if "order" in args and args.get("order") is not None:
-        try:
-            order = int(args["order"])
-        except (TypeError, ValueError):
-            return _tool_error("order must be a non-negative integer")
-        if order < 0:
-            return _tool_error("order must be a non-negative integer")
-        body["order"] = order
-    error = _validate_apply_request(body)
-    if error:
-        return _tool_error(error)
-
-    try:
-        return _tool_result(_request("POST", _subtask_path(task_id), body))
-    except Exception as exc:
-        logger.error("flowstate_create_subtask error: %s", exc)
-        return _tool_error(str(exc))
+    operation: Dict[str, Any] = {
+        "kind": "create",
+        "clientId": args.get("clientId"),
+        "title": title,
+    }
+    for key in (
+        "description", "doneEnough", "estimateMinutes", "completedPomodoros",
+        "canvasPosition", "isCompleted", "order",
+    ):
+        if key in args:
+            operation[key] = args[key]
+    return _handle_subtask_batch({**args, "operations": [operation]})
 
 
 def _handle_update_subtask(args: dict, **kw) -> str:
@@ -1454,35 +1617,15 @@ def _handle_update_subtask(args: dict, **kw) -> str:
     if not subtask_id:
         return _tool_error("subtaskId is required")
 
-    body: Dict[str, Any] = _preview_metadata(args)
-    if "title" in args:
-        title = str(args.get("title") or "").strip()
-        if not title:
-            return _tool_error("title cannot be empty")
-        body["title"] = title
-    if "completed" in args:
-        if not isinstance(args.get("completed"), bool):
-            return _tool_error("completed must be a boolean")
-        body["completed"] = args["completed"]
-    if "order" in args:
-        try:
-            order = int(args["order"])
-        except (TypeError, ValueError):
-            return _tool_error("order must be a non-negative integer")
-        if order < 0:
-            return _tool_error("order must be a non-negative integer")
-        body["order"] = order
-    if not any(field in body for field in ("title", "completed", "order")):
-        return _tool_error("provide at least one field to update")
-    error = _validate_apply_request(body)
-    if error:
-        return _tool_error(error)
-
-    try:
-        return _tool_result(_request("PATCH", _subtask_path(task_id, subtask_id), body))
-    except Exception as exc:
-        logger.error("flowstate_update_subtask error: %s", exc)
-        return _tool_error(str(exc))
+    operation: Dict[str, Any] = {"kind": "update", "subtaskId": subtask_id}
+    field_aliases = {"completed": "isCompleted"}
+    for key in (
+        "title", "description", "doneEnough", "estimateMinutes", "completedPomodoros",
+        "canvasPosition", "isCompleted", "completed", "order",
+    ):
+        if key in args:
+            operation[field_aliases.get(key, key)] = args[key]
+    return _handle_subtask_batch({**args, "operations": [operation]})
 
 
 def _handle_delete_subtask(args: dict, **kw) -> str:
@@ -1492,18 +1635,10 @@ def _handle_delete_subtask(args: dict, **kw) -> str:
     subtask_id = str(args.get("subtaskId") or "").strip()
     if not subtask_id:
         return _tool_error("subtaskId is required")
-    body = _preview_metadata(args)
-    error = _validate_apply_request(body)
-    if error:
-        return _tool_error(error)
-
-    try:
-        # A POST action keeps preview payloads portable; a DELETE body is not
-        # handled consistently by all localhost proxies and HTTP clients.
-        return _tool_result(_request("POST", f"{_subtask_path(task_id, subtask_id)}/delete", body))
-    except Exception as exc:
-        logger.error("flowstate_delete_subtask error: %s", exc)
-        return _tool_error(str(exc))
+    return _handle_subtask_batch({
+        **args,
+        "operations": [{"kind": "delete", "subtaskId": subtask_id}],
+    })
 
 
 def _handle_subtask_batch(args: dict, **kw) -> str:
@@ -1513,20 +1648,60 @@ def _handle_subtask_batch(args: dict, **kw) -> str:
     operations = args.get("operations")
     if not isinstance(operations, list) or not operations or len(operations) > 50:
         return _tool_error("operations must contain 1 to 50 items")
+    normalized: list[dict] = []
     for operation in operations:
-        if not isinstance(operation, dict) or operation.get("action") not in {"create", "update", "delete"}:
-            return _tool_error("each operation action must be create|update|delete")
-        if operation["action"] == "create" and not str(operation.get("title") or "").strip():
-            return _tool_error("create operations require title")
-        if operation["action"] in {"update", "delete"} and not str(operation.get("subtaskId") or "").strip():
-            return _tool_error(f"{operation['action']} operations require subtaskId")
-
-    body: Dict[str, Any] = {"operations": operations, **_preview_metadata(args)}
-    error = _validate_apply_request(body)
+        item, error = _normalize_subtask_operation(operation)
+        if error:
+            return _tool_error(error)
+        assert item is not None
+        normalized.append(item)
+    body, error = _canonical_subtask_body(args, normalized)
     if error:
         return _tool_error(error)
+    assert body is not None
     try:
-        return _tool_result(_request("POST", f"{_subtask_path(task_id)}/batch", body))
+        payload = _request("POST", f"{_subtask_path(task_id)}/batch", body)
+        if body["preview"]:
+            if not _valid_subtask_preview(payload, task_id, body):
+                return _tool_error("Canonical subtask preview could not be verified")
+        else:
+            if (
+                not isinstance(payload, dict)
+                or payload.get("result") != "committed"
+                or payload.get("operationId") != body["operationId"]
+                or payload.get("requestHash") != body["requestHash"]
+            ):
+                return _tool_error("Canonical subtask receipt could not be verified")
+            try:
+                validate_canonical_receipt(
+                    payload,
+                    expected_operation_id=body["operationId"],
+                    expected_request_hash=body["requestHash"],
+                    expected_action="subtask_batch",
+                    expected_entity_id=task_id,
+                    expected_affected_actions={task_id: "update"},
+                    read_back_validator=lambda read_back, receipt: (
+                        read_back.get("id") == task_id
+                        and read_back.get("canonicalRevision")
+                        == receipt.get("canonicalRevision")
+                        and read_back.get("canonicalUpdatedAt")
+                        == receipt.get("canonicalUpdatedAt")
+                        and isinstance(read_back.get("subtasks"), list)
+                        and _subtask_operations_reflected(
+                            body["operations"], read_back.get("subtasks")
+                        )
+                    ),
+                )
+            except CanonicalReceiptError:
+                return _tool_error("Canonical subtask receipt could not be verified")
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_subtask_batch API error: status=%s code=%s",
+            exc.status,
+            exc.code,
+        )
+        return _typed_tool_error(exc)
     except Exception as exc:
         logger.error("flowstate_subtask_batch error: %s", exc)
         return _tool_error(str(exc))
@@ -1952,13 +2127,30 @@ FLOWSTATE_MERGE_TASKS_SCHEMA = {
 
 
 _SUBTASK_MUTATION_PROPERTIES = {
+    "operationId": {
+        "type": "string",
+        "description": "Stable operation identity required for preview, apply, and replay.",
+    },
+    "baseRevision": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Exact canonical revision of the parent task.",
+    },
     "preview": {
         "type": "boolean",
         "description": "Defaults true; set false only after the user approves the exact change.",
     },
-    "requestId": {
+    "previewDigest": {
         "type": "string",
-        "description": "Stable idempotency key. Required when preview is false and echoed in the apply receipt.",
+        "description": "Server-issued preview digest required unchanged for apply.",
+    },
+    "previewExpiresAt": {
+        "type": "string",
+        "description": "Server-issued preview expiry required unchanged for apply.",
+    },
+    "requestHash": {
+        "type": "string",
+        "description": "Server-issued request hash required unchanged for apply.",
     },
 }
 
@@ -1982,11 +2174,23 @@ FLOWSTATE_CREATE_SUBTASK_SCHEMA = {
         "type": "object",
         "properties": {
             "taskId": {"type": "string", "description": "Exact parent task id."},
+            "clientId": {"type": "string", "description": "Stable client identity for this new step."},
             "title": {"type": "string", "description": "Subtask title."},
+            "description": {"type": "string"},
+            "doneEnough": {"type": ["string", "null"], "description": "Optional sufficient stopping condition; null clears it."},
+            "estimateMinutes": {"type": ["integer", "null"], "minimum": 1, "maximum": 1440},
+            "completedPomodoros": {"type": "integer", "minimum": 0},
+            "canvasPosition": {
+                "anyOf": [
+                    {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}, "required": ["x", "y"], "additionalProperties": False},
+                    {"type": "null"},
+                ]
+            },
+            "isCompleted": {"type": "boolean"},
             "order": {"type": "integer", "description": "Optional zero-based order."},
             **_SUBTASK_MUTATION_PROPERTIES,
         },
-        "required": ["taskId", "title"],
+        "required": ["taskId", "operationId", "baseRevision", "clientId", "title"],
     },
 }
 
@@ -2002,11 +2206,21 @@ FLOWSTATE_UPDATE_SUBTASK_SCHEMA = {
             "taskId": {"type": "string", "description": "Exact parent task id."},
             "subtaskId": {"type": "string", "description": "Exact subtask id."},
             "title": {"type": "string", "description": "Optional new title."},
-            "completed": {"type": "boolean", "description": "Optional completion state."},
+            "description": {"type": "string"},
+            "doneEnough": {"type": ["string", "null"], "description": "Optional sufficient stopping condition; null clears it."},
+            "estimateMinutes": {"type": ["integer", "null"], "minimum": 1, "maximum": 1440},
+            "completedPomodoros": {"type": "integer", "minimum": 0},
+            "canvasPosition": {
+                "anyOf": [
+                    {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}, "required": ["x", "y"], "additionalProperties": False},
+                    {"type": "null"},
+                ]
+            },
+            "isCompleted": {"type": "boolean", "description": "Optional completion state."},
             "order": {"type": "integer", "description": "Optional zero-based order."},
             **_SUBTASK_MUTATION_PROPERTIES,
         },
-        "required": ["taskId", "subtaskId"],
+        "required": ["taskId", "operationId", "baseRevision", "subtaskId"],
     },
 }
 
@@ -2020,7 +2234,7 @@ FLOWSTATE_DELETE_SUBTASK_SCHEMA = {
             "subtaskId": {"type": "string", "description": "Exact subtask id."},
             **_SUBTASK_MUTATION_PROPERTIES,
         },
-        "required": ["taskId", "subtaskId"],
+        "required": ["taskId", "operationId", "baseRevision", "subtaskId"],
     },
 }
 
@@ -2041,18 +2255,30 @@ FLOWSTATE_SUBTASK_BATCH_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["create", "update", "delete"]},
+                        "kind": {"type": "string", "enum": ["create", "update", "delete"]},
+                        "clientId": {"type": "string"},
                         "subtaskId": {"type": "string"},
                         "title": {"type": "string"},
-                        "completed": {"type": "boolean"},
-                        "order": {"type": "integer"},
+                        "description": {"type": "string"},
+                        "doneEnough": {"type": ["string", "null"]},
+                        "estimateMinutes": {"type": ["integer", "null"], "minimum": 1, "maximum": 1440},
+                        "completedPomodoros": {"type": "integer", "minimum": 0},
+                        "canvasPosition": {
+                            "anyOf": [
+                                {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}, "required": ["x", "y"], "additionalProperties": False},
+                                {"type": "null"},
+                            ]
+                        },
+                        "isCompleted": {"type": "boolean"},
+                        "order": {"type": "integer", "minimum": 0},
                     },
-                    "required": ["action"],
+                    "required": ["kind"],
+                    "additionalProperties": False,
                 },
             },
             **_SUBTASK_MUTATION_PROPERTIES,
         },
-        "required": ["taskId", "operations"],
+        "required": ["taskId", "operationId", "baseRevision", "operations"],
     },
 }
 
