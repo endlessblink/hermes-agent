@@ -1394,11 +1394,13 @@ def test_done_for_now_defaults_to_non_mutating_preview_and_uses_exact_task_id(mo
     seen = {}
     payload = {
         "ok": True,
+        "result": "preview",
         "preview": True,
-        "requestId": "preview-1",
+        "contractVersion": "task-v1",
+        "operationId": "preview-1",
         "previewVersion": "version-1",
         "requestHash": _CANONICAL_REQUEST_HASH,
-        "verification": {"taskId": "task/one", "nextDueDate": "2026-07-16"},
+        "task": {"id": "task/one", "nextDueDate": "2026-07-16"},
     }
     monkeypatch.setattr(
         fst.urllib.request,
@@ -1409,12 +1411,54 @@ def test_done_for_now_defaults_to_non_mutating_preview_and_uses_exact_task_id(mo
     result = json.loads(fst._handle_done_for_now({
         "taskId": "task/one",
         "nextDueDate": "2026-07-16",
+        "requestId": "preview-1",
     }))
 
     assert result["result"] == payload
     assert seen["method"] == "POST"
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fone/done-for-now"
-    assert seen["body"] == {"nextDueDate": "2026-07-16", "preview": True}
+    assert seen["body"] == {
+        "nextDueDate": "2026-07-16",
+        "preview": True,
+        "requestId": "preview-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload_override",
+    [
+        {"operationId": "other-operation"},
+        {"task": {"id": "other-task"}},
+        {"result": "committed"},
+        {"contractVersion": "legacy-v0"},
+    ],
+)
+def test_done_for_now_rejects_preview_not_bound_to_request_and_task(
+    monkeypatch, payload_override
+):
+    payload = {
+        "ok": True,
+        "result": "preview",
+        "preview": True,
+        "contractVersion": "task-v1",
+        "operationId": "preview-1",
+        "previewVersion": "version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "task": {"id": "task-1"},
+    }
+    payload.update(payload_override)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, payload),
+    )
+
+    result = json.loads(fst._handle_done_for_now({
+        "taskId": "task-1",
+        "requestId": "preview-1",
+    }))
+
+    assert result["error"] == "Canonical Done for now preview could not be verified"
 
 
 def test_get_task_reads_one_exact_encoded_id(monkeypatch):
@@ -1440,6 +1484,7 @@ def test_get_task_requires_exact_id_without_leaking_auth():
     [
         ({}, "taskId is required"),
         ({"taskId": "task-1", "nextDueDate": "07/16/2026"}, "nextDueDate must be YYYY-MM-DD"),
+        ({"taskId": "task-1"}, "requestId is required"),
         ({"taskId": "task-1", "preview": False, "previewVersion": "version-1"}, "requestId is required when preview is false"),
         ({"taskId": "task-1", "preview": False, "requestId": "apply-1"}, "previewVersion is required when preview is false"),
         (
@@ -1830,8 +1875,10 @@ def test_merge_tasks_defaults_to_non_mutating_preview_with_exact_ids(monkeypatch
     seen = {}
     payload = {
         "ok": True,
+        "result": "preview",
         "preview": True,
-        "requestId": "merge-preview-1",
+        "contractVersion": "task-v1",
+        "operationId": "merge-preview-1",
         "previewVersion": "merge-version-1",
         "requestHash": _CANONICAL_REQUEST_HASH,
         "survivor": {"id": "survivor/1", "title": "Keep me"},
@@ -1847,22 +1894,31 @@ def test_merge_tasks_defaults_to_non_mutating_preview_with_exact_ids(monkeypatch
     result = json.loads(fst._handle_merge_tasks({
         "survivorTaskId": "survivor/1",
         "duplicateTaskId": "duplicate/1",
+        "requestId": "merge-preview-1",
     }))
 
     assert result["result"] == payload
     assert seen["method"] == "POST"
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks/survivor%2F1/merge"
-    assert seen["body"] == {"duplicateTaskId": "duplicate/1", "preview": True}
+    assert seen["body"] == {
+        "duplicateTaskId": "duplicate/1",
+        "preview": True,
+        "requestId": "merge-preview-1",
+    }
 
 
 def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
     seen = {}
     payload = {
         "ok": True,
+        "result": "preview",
         "preview": True,
-        "requestId": "recurrence-merge-preview-1",
+        "contractVersion": "task-v1",
+        "operationId": "recurrence-merge-preview-1",
         "previewVersion": "recurrence-merge-v1",
         "requestHash": _CANONICAL_REQUEST_HASH,
+        "survivor": {"id": "survivor-1"},
+        "duplicate": {"id": "duplicate-1"},
         "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
     }
     monkeypatch.setattr(
@@ -1874,6 +1930,7 @@ def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
     result = json.loads(fst._handle_merge_tasks({
         "survivorTaskId": "survivor-1",
         "duplicateTaskId": "duplicate-1",
+        "requestId": "recurrence-merge-preview-1",
         "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
     }))
 
@@ -1881,8 +1938,89 @@ def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
     assert seen["body"] == {
         "duplicateTaskId": "duplicate-1",
         "preview": True,
+        "requestId": "recurrence-merge-preview-1",
         "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
     }
+
+
+@pytest.mark.parametrize(
+    "payload_override",
+    [
+        {"operationId": "other-operation"},
+        {"survivor": {"id": "duplicate-1"}},
+        {"duplicate": {"id": "survivor-1"}},
+        {
+            "recurrenceResolution": {
+                "pattern": "daily",
+                "interval": 4,
+                "endType": "never",
+            }
+        },
+    ],
+)
+def test_merge_tasks_rejects_preview_not_bound_to_identity_and_recurrence(
+    monkeypatch, payload_override
+):
+    recurrence = {"pattern": "daily", "interval": 3, "endType": "never"}
+    payload = {
+        "ok": True,
+        "result": "preview",
+        "preview": True,
+        "contractVersion": "task-v1",
+        "operationId": "merge-preview-1",
+        "previewVersion": "merge-version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "survivor": {"id": "survivor-1"},
+        "duplicate": {"id": "duplicate-1"},
+        "recurrenceResolution": recurrence,
+    }
+    payload.update(payload_override)
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "requestId": "merge-preview-1",
+        "recurrenceResolution": recurrence,
+    }))
+
+    assert result["error"] == "Canonical merge preview could not be verified"
+
+
+def test_merge_tasks_rejects_unrequested_recurrence_in_preview(monkeypatch):
+    payload = {
+        "ok": True,
+        "result": "preview",
+        "preview": True,
+        "contractVersion": "task-v1",
+        "operationId": "merge-preview-1",
+        "previewVersion": "merge-version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "survivor": {"id": "survivor-1"},
+        "duplicate": {"id": "duplicate-1"},
+        "recurrenceResolution": {
+            "pattern": "daily",
+            "interval": 3,
+            "endType": "never",
+        },
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "requestId": "merge-preview-1",
+    }))
+
+    assert result["error"] == "Canonical merge preview could not be verified"
 
 
 def test_merge_tasks_preserves_stop_action_for_unresolved_recurrence(monkeypatch):
@@ -1902,6 +2040,7 @@ def test_merge_tasks_preserves_stop_action_for_unresolved_recurrence(monkeypatch
     result = json.loads(fst._handle_merge_tasks({
         "survivorTaskId": "survivor-1",
         "duplicateTaskId": "duplicate-1",
+        "requestId": "merge-preview-1",
     }))
 
     assert result == {
@@ -1936,6 +2075,10 @@ def test_merge_tasks_rejects_noncanonical_recurrence_resolution(rule):
         (
             {"survivorTaskId": "same", "duplicateTaskId": "same"},
             "survivorTaskId and duplicateTaskId must be different",
+        ),
+        (
+            {"survivorTaskId": "survivor-1", "duplicateTaskId": "duplicate-1"},
+            "requestId is required",
         ),
         (
             {"survivorTaskId": "survivor-1", "duplicateTaskId": "duplicate-1", "preview": False, "previewVersion": "v1"},
@@ -2020,6 +2163,91 @@ def test_merge_tasks_apply_forwards_preview_binding_and_receipt(monkeypatch, sta
         "requestId": "merge-apply-1",
         "requestHash": _CANONICAL_REQUEST_HASH,
     }
+
+
+def _recurrence_merge_payload(*, recurrence_rule, operation_context_rule):
+    return _canonical_action_payload(
+        action="merge",
+        operation_id="recurrence-merge-apply-1",
+        entity_id="survivor-1",
+        read_back={
+            "id": "survivor-1",
+            "canonicalRevision": 8,
+            "survivorTaskId": "survivor-1",
+            "duplicateTaskId": "duplicate-1",
+            "duplicateArchived": True,
+            "recurrenceRule": recurrence_rule,
+        },
+        affected=[
+            {
+                "entityType": "task",
+                "entityId": "survivor-1",
+                "action": "update",
+                "canonicalRevision": 8,
+                "changeSequence": 42,
+            },
+            {
+                "entityType": "task",
+                "entityId": "duplicate-1",
+                "action": "archive",
+                "canonicalRevision": 5,
+                "changeSequence": 43,
+            },
+        ],
+        receipt_overrides={
+            "operationContext": {
+                "recurrenceResolution": operation_context_rule,
+            }
+        },
+    )
+
+
+def test_merge_tasks_accepts_receipt_bound_to_approved_recurrence(monkeypatch):
+    recurrence = {"pattern": "daily", "interval": 3, "endType": "never"}
+    payload = _recurrence_merge_payload(
+        recurrence_rule=recurrence,
+        operation_context_rule=recurrence,
+    )
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "preview": False,
+        "requestId": "recurrence-merge-apply-1",
+        "previewVersion": "merge-version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "recurrenceResolution": recurrence,
+    }))
+
+    assert result["result"] == payload
+
+
+@pytest.mark.parametrize("mismatch", ["operation_context", "read_back"])
+def test_merge_tasks_rejects_receipt_not_bound_to_approved_recurrence(
+    monkeypatch, mismatch
+):
+    recurrence = {"pattern": "daily", "interval": 3, "endType": "never"}
+    other = {"pattern": "daily", "interval": 4, "endType": "never"}
+    payload = _recurrence_merge_payload(
+        recurrence_rule=other if mismatch == "read_back" else recurrence,
+        operation_context_rule=(
+            other if mismatch == "operation_context" else recurrence
+        ),
+    )
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "preview": False,
+        "requestId": "recurrence-merge-apply-1",
+        "previewVersion": "merge-version-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "recurrenceResolution": recurrence,
+    }))
+
+    assert result["error"] == "Canonical merge receipt could not be verified"
 
 
 def test_merge_tasks_rejects_reordered_affected_rows(monkeypatch):
@@ -2291,7 +2519,7 @@ def test_done_for_now_schema_is_preview_first_and_apply_is_receipt_bound():
     schema = fst.FLOWSTATE_DONE_FOR_NOW_SCHEMA
 
     assert schema["name"] == "flowstate_done_for_now"
-    assert schema["parameters"]["required"] == ["taskId"]
+    assert schema["parameters"]["required"] == ["taskId", "requestId"]
     assert "Defaults to preview" in schema["description"]
     assert "generic" in schema["description"].lower()
     assert set(schema["parameters"]["properties"]) == {
@@ -2345,7 +2573,9 @@ def test_merge_tasks_schema_is_preview_first_and_exact_id_bound():
     schema = fst.FLOWSTATE_MERGE_TASKS_SCHEMA
 
     assert schema["name"] == "flowstate_merge_tasks"
-    assert schema["parameters"]["required"] == ["survivorTaskId", "duplicateTaskId"]
+    assert schema["parameters"]["required"] == [
+        "survivorTaskId", "duplicateTaskId", "requestId",
+    ]
     assert "recurrenceResolution" in schema["parameters"]["properties"]
     assert "stop all further Flow State mutations" in schema["description"]
     assert "Defaults to preview" in schema["description"]

@@ -103,6 +103,13 @@ class TestResolveToolset:
             "flowstate_update_subtask",
             "flowstate_delete_subtask",
             "flowstate_subtask_batch",
+            "flowstate_get_capabilities",
+            "flowstate_get_recurrence_chain",
+            "flowstate_recurrence_command",
+            "flowstate_get_timer_session",
+            "flowstate_timer_command",
+            "flowstate_get_organization",
+            "flowstate_organization_command",
         }
 
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):

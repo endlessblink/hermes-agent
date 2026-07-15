@@ -1449,17 +1449,52 @@ def _handle_schedule_task_instance(args: dict, **kw) -> str:
     return _handle_work_block_command(command)
 
 
-def _valid_action_preview(payload: Any) -> bool:
+def _valid_action_preview(payload: Any, *, operation_id: str) -> bool:
     return (
         isinstance(payload, dict)
         and payload.get("ok") is True
+        and payload.get("result") == "preview"
         and payload.get("preview") is True
-        and isinstance(payload.get("requestId"), str)
-        and bool(payload["requestId"].strip())
+        and payload.get("contractVersion") == _CANONICAL_TASK_CONTRACT
+        and payload.get("operationId") == operation_id
         and isinstance(payload.get("previewVersion"), str)
         and bool(payload["previewVersion"].strip())
         and isinstance(payload.get("requestHash"), str)
         and bool(_SHA256_HEX_RE.fullmatch(payload["requestHash"]))
+    )
+
+
+def _valid_done_for_now_preview(
+    payload: Any, *, task_id: str, operation_id: str
+) -> bool:
+    return (
+        _valid_action_preview(payload, operation_id=operation_id)
+        and isinstance(payload.get("task"), dict)
+        and payload["task"].get("id") == task_id
+    )
+
+
+def _valid_merge_preview(
+    payload: Any,
+    *,
+    survivor_task_id: str,
+    duplicate_task_id: str,
+    operation_id: str,
+    recurrence_resolution: Optional[dict],
+) -> bool:
+    if not (
+        _valid_action_preview(payload, operation_id=operation_id)
+        and isinstance(payload.get("survivor"), dict)
+        and payload["survivor"].get("id") == survivor_task_id
+        and isinstance(payload.get("duplicate"), dict)
+        and payload["duplicate"].get("id") == duplicate_task_id
+    ):
+        return False
+    if recurrence_resolution is None:
+        return "recurrenceResolution" not in payload
+    return (
+        canonical_json_hash(payload.get("recurrenceResolution"))
+        == canonical_json_hash(recurrence_resolution)
     )
 
 
@@ -1494,6 +1529,8 @@ def _handle_done_for_now(args: dict, **kw) -> str:
         return _tool_error("requestHash must be a 64-character lowercase SHA-256 digest")
     if not preview and not request_id:
         return _tool_error("requestId is required when preview is false")
+    if not request_id:
+        return _tool_error("requestId is required")
     if not preview and not preview_version:
         return _tool_error("previewVersion is required when preview is false")
     if not preview and not _SHA256_HEX_RE.fullmatch(request_hash):
@@ -1513,7 +1550,11 @@ def _handle_done_for_now(args: dict, **kw) -> str:
         path = f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/done-for-now"
         payload = _request("POST", path, body)
         if preview:
-            if not _valid_action_preview(payload):
+            if not _valid_done_for_now_preview(
+                payload,
+                task_id=task_id,
+                operation_id=request_id,
+            ):
                 return _tool_error("Canonical Done for now preview could not be verified")
         else:
             try:
@@ -1671,6 +1712,8 @@ def _handle_merge_tasks(args: dict, **kw) -> str:
     recurrence_resolution = args.get("recurrenceResolution")
     if recurrence_resolution is not None and not _is_canonical_recurrence_rule(recurrence_resolution):
         return _tool_error("recurrenceResolution must be a canonical recurrence rule")
+    if not request_id:
+        return _tool_error("requestId is required")
 
     body: Dict[str, Any] = {
         "duplicateTaskId": duplicate_task_id,
@@ -1689,7 +1732,13 @@ def _handle_merge_tasks(args: dict, **kw) -> str:
         path = f"/api/tasks/{urllib.parse.quote(survivor_task_id, safe='')}/merge"
         payload = _request("POST", path, body)
         if preview:
-            if not _valid_action_preview(payload):
+            if not _valid_merge_preview(
+                payload,
+                survivor_task_id=survivor_task_id,
+                duplicate_task_id=duplicate_task_id,
+                operation_id=request_id,
+                recurrence_resolution=recurrence_resolution,
+            ):
                 return _tool_error("Canonical merge preview could not be verified")
         else:
             try:
@@ -1710,6 +1759,26 @@ def _handle_merge_tasks(args: dict, **kw) -> str:
                         and read_back.get("survivorTaskId") == survivor_task_id
                         and read_back.get("duplicateTaskId") == duplicate_task_id
                         and read_back.get("duplicateArchived") is True
+                        and (
+                            recurrence_resolution is None
+                            or (
+                                isinstance(receipt.get("operationContext"), dict)
+                                and receipt["operationContext"].get(
+                                    "recurrenceResolution"
+                                )
+                                is not None
+                                and canonical_json_hash(
+                                    receipt["operationContext"][
+                                        "recurrenceResolution"
+                                    ]
+                                )
+                                == canonical_json_hash(recurrence_resolution)
+                                and canonical_json_hash(
+                                    read_back.get("recurrenceRule")
+                                )
+                                == canonical_json_hash(recurrence_resolution)
+                            )
+                        )
                     ),
                 )
             except CanonicalReceiptError:
@@ -2416,8 +2485,9 @@ FLOWSTATE_DONE_FOR_NOW_SCHEMA = {
     "description": (
         "Preview or apply FlowState's real Done for now operation for one exact recurring task. "
         "Defaults to preview and never treats a generic status, progress, or due-date update as "
-        "recurring completion. Apply only after explicit user approval of the preview; preview=false "
-        "requires the stable requestId, previewVersion, and exact server-issued requestHash returned "
+        "recurring completion. A stable requestId is required for preview and reused for apply. "
+        "Apply only after explicit user approval of the preview; preview=false requires the "
+        "previewVersion and exact server-issued requestHash returned "
         "by FlowState. The response includes "
         "FlowState's typed receipt and read-back verification without authentication material."
     ),
@@ -2435,7 +2505,7 @@ FLOWSTATE_DONE_FOR_NOW_SCHEMA = {
             },
             "requestId": {
                 "type": "string",
-                "description": "Stable idempotency key. Required when preview is false.",
+                "description": "Stable operation identity required for preview and reused unchanged for apply.",
             },
             "previewVersion": {
                 "type": "string",
@@ -2446,7 +2516,7 @@ FLOWSTATE_DONE_FOR_NOW_SCHEMA = {
                 "description": "Server-issued request hash returned by preview. Required unchanged for apply.",
             },
         },
-        "required": ["taskId"],
+        "required": ["taskId", "requestId"],
     },
 }
 
@@ -2456,10 +2526,11 @@ FLOWSTATE_MERGE_TASKS_SCHEMA = {
     "description": (
         "Preview or apply FlowState's safe merge for two exact task ids. Defaults to preview and "
         "returns FlowState's retained fields, transfers, conflicts, archival behavior, receipt, and "
-        "read-back unchanged. Apply only after explicit approval of that preview and provide its "
-        "requestId and previewVersion. Title similarity is never approval, and this tool does not "
-        "apply without the exact server-issued requestHash from that preview. "
-        "implement or guess merge semantics outside FlowState. If FlowState returns a recurrence "
+        "read-back unchanged. A stable requestId is required for preview and reused for apply. "
+        "Apply only after explicit approval of that preview and provide its previewVersion. "
+        "Title similarity is never approval, and this tool does not apply without the exact "
+        "server-issued requestHash from that preview or implement or guess merge semantics "
+        "outside FlowState. If FlowState returns a recurrence "
         "conflict without a supplied resolution, stop all further Flow State mutations and ask for "
         "the exact intended cadence; never fall back to separate task updates or deletion."
     ),
@@ -2506,7 +2577,7 @@ FLOWSTATE_MERGE_TASKS_SCHEMA = {
             },
             "requestId": {
                 "type": "string",
-                "description": "Stable idempotency key. Required when preview is false.",
+                "description": "Stable operation identity required for preview and reused unchanged for apply.",
             },
             "previewVersion": {
                 "type": "string",
@@ -2517,7 +2588,7 @@ FLOWSTATE_MERGE_TASKS_SCHEMA = {
                 "description": "Server-issued request hash returned by preview. Required unchanged for apply.",
             },
         },
-        "required": ["survivorTaskId", "duplicateTaskId"],
+        "required": ["survivorTaskId", "duplicateTaskId", "requestId"],
     },
 }
 
