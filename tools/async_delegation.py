@@ -915,7 +915,10 @@ def _reset_for_tests() -> None:
     global _executor, _executor_max_workers
     with _executor_lock:
         if _executor is not None:
-            _executor.shutdown(wait=False)
+            # Tests share the process-wide completion queue. Let prior workers
+            # finish before the fixture drains it so a late completion cannot
+            # leak into the next test and be mistaken for that test's result.
+            _executor.shutdown(wait=True, cancel_futures=True)
         _executor = None
         _executor_max_workers = 0
     with _records_lock:
