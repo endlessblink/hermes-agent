@@ -6031,10 +6031,15 @@ def _resolve_task_provider_model(
 
 _DEFAULT_AUX_TIMEOUT = 30.0
 
-# Compression blocks the user's turn. One bounded attempt is enough; on timeout
-# the context compressor preserves the exact transcript and builds its existing
-# deterministic local handoff instead of freezing the UI for repeated requests.
-_COMPRESSION_TIMEOUT_BUDGET_SECONDS = 30.0
+# Compression blocks the user's turn, so it stays bounded — but the bound must
+# fit the job. Summarizing a 120k+-token conversation through the Codex
+# Responses backend needs minutes, not seconds: the previous 30s budget killed
+# EVERY summary attempt on large sessions (observed 2026-07-16: a 205k-token
+# session re-attempting and failing at exactly 30.0s in a loop, never
+# compacting), which is strictly worse than one slow compaction — the context
+# balloons past the threshold and every subsequent main turn pays for it.
+# Config (auxiliary.compression.timeout) still wins when smaller.
+_COMPRESSION_TIMEOUT_BUDGET_SECONDS = 300.0
 
 
 def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
