@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .bridge import Bridge, BridgeConfig, BridgeError
+from .inventory import InventoryError, reconcile_inventory
 
 _bridge: Bridge | None = None
 _bridge_lock = threading.Lock()
@@ -124,6 +125,33 @@ def _handler(method: str, tool_name: str) -> Callable[..., str]:
     return call
 
 
+def _inventory_handler(args: dict[str, Any], **_: Any) -> str:
+    try:
+        result = reconcile_inventory(args)
+        return json.dumps(
+            {"ok": True, "result": result},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except InventoryError as exc:
+        return json.dumps(
+            {"ok": False, "error": {"code": "invalid_inventory", "message": str(exc)}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except Exception:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": {
+                    "code": "internal_error",
+                    "message": "Inventory reconciliation failed",
+                },
+            },
+            separators=(",", ":"),
+        )
+
+
 _SCHEMAS = {
     "notion_data_source_schema": {
         "name": "notion_data_source_schema",
@@ -231,11 +259,75 @@ _SCHEMAS = {
             "additionalProperties": False,
         },
     },
+    "task_inventory_reconcile": {
+        "name": "task_inventory_reconcile",
+        "description": (
+            "Prove whether task inventory evidence from Notion, FlowState, notes, or other "
+            "sources supports an exact count. Partial, stale, unidentified, unknown, or "
+            "conflicting evidence returns no exact count."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "inventory_question": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "max_age_seconds": {"type": "integer", "minimum": 30, "maximum": 3600},
+                "sources": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_id": {"type": "string", "minLength": 1, "maxLength": 300},
+                            "scope": {"type": "string", "minLength": 1, "maxLength": 1000},
+                            "completeness_evidence": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 2000,
+                            },
+                            "captured_at": {"type": "string", "format": "date-time"},
+                            "complete": {"type": "boolean"},
+                            "items": {
+                                "type": "array",
+                                "maxItems": 500,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string", "minLength": 1, "maxLength": 500},
+                                        "canonical_id": {"type": "string", "maxLength": 500},
+                                        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+                                        "classification": {
+                                            "type": "string",
+                                            "enum": ["characterized", "uncharacterized", "unknown"],
+                                        },
+                                        "evidence": {"type": "string", "minLength": 1, "maxLength": 2000},
+                                    },
+                                    "required": ["id", "title", "classification", "evidence"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": [
+                            "source_id",
+                            "scope",
+                            "completeness_evidence",
+                            "captured_at",
+                            "complete",
+                            "items",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["inventory_question", "sources"],
+            "additionalProperties": False,
+        },
+    },
 }
 
 
 def register(ctx: Any) -> None:
-    """Register the five service-gated bridge tools with Hermes."""
+    """Register the service-gated bridge and inventory tools with Hermes."""
     profile_name = getattr(ctx, "profile_name", "default")
     methods = {
         "notion_data_source_schema": "read_schema",
@@ -254,6 +346,22 @@ def register(ctx: Any) -> None:
             description=_SCHEMAS[name]["description"],
             emoji="🔗",
         )
+    ctx.register_tool(
+        name="task_inventory_reconcile",
+        toolset="notion_flowstate_bridge",
+        schema=_SCHEMAS["task_inventory_reconcile"],
+        handler=_inventory_handler,
+        check_fn=lambda profile_name=profile_name: _available(profile_name),
+        description=_SCHEMAS["task_inventory_reconcile"]["description"],
+        emoji="🔎",
+    )
 
 
-__all__ = ["Bridge", "BridgeConfig", "BridgeError", "register"]
+__all__ = [
+    "Bridge",
+    "BridgeConfig",
+    "BridgeError",
+    "InventoryError",
+    "reconcile_inventory",
+    "register",
+]

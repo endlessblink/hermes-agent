@@ -1,6 +1,6 @@
 name: notion-flowstate-bridge
-version: 1.2.0
-description: "Approval-gated Notion task updates and Notion-to-FlowState activation with durable receipts."
+version: 1.3.0
+description: "Approval-gated Notion task updates, FlowState activation, and proven cross-source inventory counts."
 author: local
 kind: standalone
 requires_env:
@@ -11,3 +11,4 @@ provides_tools:
   - notion_page_get
   - notion_mutation
   - notion_flowstate_activate
+  - task_inventory_reconcile

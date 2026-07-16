@@ -20,6 +20,7 @@ EXPECTED_TOOLS = {
     "notion_page_get",
     "notion_mutation",
     "notion_flowstate_activate",
+    "task_inventory_reconcile",
 }
 
 

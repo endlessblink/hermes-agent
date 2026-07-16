@@ -382,6 +382,7 @@ def test_manifest_and_register_expose_user_installed_standalone_tools():
     manifest = (root / "plugin.yaml").read_text(encoding="utf-8")
     assert "kind: standalone" in manifest
     assert "notion_flowstate_activate" in manifest
+    assert "task_inventory_reconcile" in manifest
 
     class Context:
         def __init__(self, profile_name="office-work"):
@@ -400,6 +401,7 @@ def test_manifest_and_register_expose_user_installed_standalone_tools():
         "notion_page_get",
         "notion_mutation",
         "notion_flowstate_activate",
+        "task_inventory_reconcile",
     }
     assert all(tool["toolset"] == "notion_flowstate_bridge" for tool in context.tools)
 

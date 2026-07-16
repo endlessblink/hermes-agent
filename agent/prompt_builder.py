@@ -415,6 +415,19 @@ NOTION_FLOWSTATE_BRIDGE_GUIDANCE = (
     "requiring its own preview and approval. Report success only from the verified read-back receipt."
 )
 
+CROSS_SOURCE_INVENTORY_GUIDANCE = (
+    "# Cross-source task inventory proof\n"
+    "Use `task_inventory_reconcile` before reporting a cross-source task count as exact. "
+    "Give every source its precise scope, capture time, completeness, completeness evidence, "
+    "stable item IDs, and item-level characterization evidence. Mark a source complete only "
+    "after its connector proves end-of-pagination; search results, HTML, notes, and memory are "
+    "partial unless their enumeration contract proves otherwise. Cross-source items also need "
+    "a shared canonical_id. "
+    "Never add source counts in prose, treat a search result or note snapshot as complete, or "
+    "turn unknown and conflicting records into zero. When the tool returns verified=false, report "
+    "only observed per-source counts and the blocking uncertainty; do not state or imply an exact total."
+)
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.

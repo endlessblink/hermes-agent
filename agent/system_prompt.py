@@ -28,6 +28,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
+    CROSS_SOURCE_INVENTORY_GUIDANCE,
     DEFAULT_AGENT_IDENTITY,
     FLOWSTATE_SUBTASK_BREAKDOWN_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
@@ -235,6 +236,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         or is_truthy_value(os.getenv("HERMES_DESKTOP"))
     ):
         stable_parts.append(NOTION_FLOWSTATE_BRIDGE_GUIDANCE)
+
+    if "task_inventory_reconcile" in agent.valid_tool_names:
+        stable_parts.append(CROSS_SOURCE_INVENTORY_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []
