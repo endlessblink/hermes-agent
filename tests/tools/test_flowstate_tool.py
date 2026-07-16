@@ -1,6 +1,7 @@
 """Tests for the Flow State local API tool module."""
 
 import json
+import io
 import urllib.error
 from unittest.mock import patch
 
@@ -207,6 +208,221 @@ def test_health_uses_existing_api_contract(monkeypatch):
     assert seen["url"] == "http://127.0.0.1:5577/api/health"
 
 
+def test_merge_tasks_defaults_to_non_mutating_preview_with_exact_ids(monkeypatch):
+    seen = {}
+    payload = {"ok": True, "preview": True, "previewVersion": "merge-v1"}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor/1",
+        "duplicateTaskId": "duplicate/1",
+    }))
+
+    assert result["result"] == payload
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/survivor%2F1/merge"
+    assert seen["body"] == {"duplicateTaskId": "duplicate/1", "preview": True}
+
+
+def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
+    seen = {}
+    payload = {
+        "ok": True,
+        "preview": True,
+        "previewVersion": "recurrence-merge-v1",
+        "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
+    }))
+
+    assert result["result"] == payload
+    assert seen["body"] == {
+        "duplicateTaskId": "duplicate-1",
+        "preview": True,
+        "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
+    }
+
+
+def test_merge_tasks_refuses_apply_without_interactive_capability():
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "preview": False,
+        "requestId": "request-1",
+        "previewVersion": "merge-v1",
+    }))
+
+    assert result["error"] == (
+        "merge apply is unavailable until exact interactive approval is registered"
+    )
+
+
+def test_merge_tasks_preserves_stop_action_for_unresolved_recurrence(monkeypatch):
+    def _raise(req, timeout):
+        body = json.dumps({
+            "ok": False,
+            "error": {
+                "code": "incompatible_recurrence",
+                "message": "Recurring definitions or chain identities are incompatible",
+            },
+            "action": "stop_mutations_and_request_recurrence_resolution",
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+    }))
+
+    assert result == {
+        "error": "Recurring definitions or chain identities are incompatible",
+        "code": "incompatible_recurrence",
+        "status": 409,
+        "action": "stop_mutations_and_request_recurrence_resolution",
+    }
+
+
+def test_merge_tasks_turns_successful_preview_recurrence_conflict_into_stop(monkeypatch):
+    payload = {
+        "ok": True,
+        "preview": True,
+        "conflicts": [
+            {
+                "code": "recurring_merge_unsupported",
+                "message": "Recurring definitions require explicit series semantics",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, payload),
+    )
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+    }))
+
+    assert result == {
+        "error": "Recurring tasks require an exact cadence choice before they can be merged",
+        "code": "recurring_merge_unsupported",
+        "status": 409,
+        "action": "stop_mutations_and_request_recurrence_resolution",
+    }
+
+
+def test_merge_tasks_preserves_stop_action_for_unsupported_recurring_merge(monkeypatch):
+    def _raise(req, timeout):
+        body = json.dumps({
+            "ok": False,
+            "error": {
+                "code": "recurring_merge_unsupported",
+                "message": "Recurring task merge is not supported",
+            },
+            "action": "stop_mutations_and_request_recurrence_resolution",
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+    }))
+
+    assert result == {
+        "error": "Recurring tasks require an exact cadence choice before they can be merged",
+        "code": "recurring_merge_unsupported",
+        "status": 409,
+        "action": "stop_mutations_and_request_recurrence_resolution",
+    }
+
+
+def test_merge_tasks_drops_untrusted_stop_action(monkeypatch):
+    def _raise(req, timeout):
+        body = json.dumps({
+            "error": {"code": "state_conflict", "message": "State changed"},
+            "action": "stop_mutations_and_request_recurrence_resolution",
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+    }))
+
+    assert result["code"] == "state_conflict"
+    assert "action" not in result
+
+
+def test_merge_tasks_preserves_stop_action_for_established_recurrence_history(monkeypatch):
+    def _raise(req, timeout):
+        body = json.dumps({
+            "error": {
+                "code": "recurrence_history_unsupported",
+                "message": "Recurring task history requires an explicit series strategy",
+            },
+            "action": "stop_mutations_and_report_recurrence_history",
+        }).encode("utf-8")
+        raise urllib.error.HTTPError(req.full_url, 409, "Conflict", {}, io.BytesIO(body))
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
+    }))
+
+    assert result["code"] == "recurrence_history_unsupported"
+    assert result["action"] == "stop_mutations_and_report_recurrence_history"
+
+
+def test_merge_tasks_schema_is_preview_only_and_recurrence_aware():
+    schema = fst.FLOWSTATE_MERGE_TASKS_SCHEMA
+
+    assert schema["name"] == "flowstate_merge_tasks"
+    assert schema["parameters"]["required"] == ["survivorTaskId", "duplicateTaskId"]
+    assert schema["parameters"]["properties"]["preview"]["const"] is True
+    assert "requestId" not in schema["parameters"]["properties"]
+    assert "previewVersion" not in schema["parameters"]["properties"]
+    assert "recurrenceResolution" in schema["parameters"]["properties"]
+    assert "stop all further Flow State mutations" in schema["description"]
+
+
+@pytest.mark.parametrize("rule", [
+    {"pattern": "daily", "interval": 0, "endType": "never"},
+    {"pattern": "weekly", "interval": 1, "endType": "never"},
+    {"pattern": "daily", "interval": 3},
+    {"pattern": "daily", "interval": 3, "endType": "never", "guess": True},
+])
+def test_merge_tasks_rejects_noncanonical_recurrence_resolution(rule):
+    result = json.loads(fst._handle_merge_tasks({
+        "survivorTaskId": "survivor-1",
+        "duplicateTaskId": "duplicate-1",
+        "recurrenceResolution": rule,
+    }))
+
+    assert result["error"] == "recurrenceResolution must be a canonical recurrence rule"
+
+
 def test_toolset_registration_maps_all_flowstate_tools():
     from tools.registry import registry
 
@@ -217,6 +433,7 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_update_task",
         "flowstate_delete_task",
         "flowstate_get_current_timer",
+        "flowstate_merge_tasks",
     }
 
     for tool in expected:

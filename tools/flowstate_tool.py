@@ -26,6 +26,14 @@ _VALID_STATUS_FILTERS = {"todo", "open", "done"}
 _VALID_DUE_FILTERS = {"today", "overdue", "open"}
 _VALID_TASK_STATUSES = {"todo", "done"}
 _VALID_PRIORITIES = {"low", "medium", "high"}
+_RECURRENCE_COMMON_FIELDS = {"pattern", "interval", "endType", "endDate", "endCount"}
+_RECURRENCE_PATTERN_FIELDS = {
+    "daily": set(),
+    "weekly": {"weekdays"},
+    "monthly": {"monthDay", "monthWeekday"},
+    "yearly": set(),
+}
+_RECURRENCE_RESOLUTION_ACTION = "stop_mutations_and_request_recurrence_resolution"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCOPE_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
 _ERROR_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
@@ -52,11 +60,13 @@ class _FlowStateApiError(RuntimeError):
         code: str,
         status: int,
         current_revision: Optional[int] = None,
+        action: Optional[str] = None,
     ):
         super().__init__(message)
         self.code = code
         self.status = status
         self.current_revision = current_revision
+        self.action = action
 
 
 def _get_env_value(key: str) -> Optional[str]:
@@ -98,6 +108,8 @@ def _is_valid_date_or_due_filter(value: str) -> bool:
 def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
     code = f"http_{exc.code}"
     current_revision = None
+    action = None
+    payload: Any = {}
     try:
         raw = exc.read().decode("utf-8", errors="replace")
         payload = json.loads(raw) if raw else {}
@@ -132,8 +144,29 @@ def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
     if exc.code == 503:
         message = "Flow State Local Task API is running but is not signed in."
         code = "signed_out"
+    candidate_action = payload.get("action") if isinstance(payload, dict) else None
+    trusted_actions = {
+        (
+            "incompatible_recurrence",
+            _RECURRENCE_RESOLUTION_ACTION,
+        ),
+        (
+            "recurring_merge_unsupported",
+            _RECURRENCE_RESOLUTION_ACTION,
+        ),
+        (
+            "recurrence_history_unsupported",
+            "stop_mutations_and_report_recurrence_history",
+        ),
+    }
+    if exc.code == 409 and (code, candidate_action) in trusted_actions:
+        action = candidate_action
     return _FlowStateApiError(
-        str(message), code=code, status=exc.code, current_revision=current_revision
+        str(message),
+        code=code,
+        status=exc.code,
+        current_revision=current_revision,
+        action=action,
     )
 
 
@@ -252,12 +285,23 @@ def _typed_flowstate_error(exc: _FlowStateApiError) -> str:
             "Flow State returned an invalid inventory receipt; no exact count is available."
         ),
         "subtask_limit_exceeded": "This task already has the maximum number of subtasks.",
+        "incompatible_recurrence": (
+            "Recurring definitions or chain identities are incompatible"
+        ),
+        "recurring_merge_unsupported": (
+            "Recurring tasks require an exact cadence choice before they can be merged"
+        ),
+        "recurrence_history_unsupported": (
+            "Recurring task history requires an explicit series strategy"
+        ),
         "not_found": "task not found",
     }
     message = messages.get(exc.code, "Flow State request failed.")
     extra = {"code": exc.code, "status": exc.status}
     if exc.code in {"stale_revision", "incompatible_revision"} and exc.current_revision is not None:
         extra["currentRevision"] = exc.current_revision
+    if exc.action is not None:
+        extra["action"] = exc.action
     return tool_error(message, **extra)
 
 
@@ -441,6 +485,152 @@ def _handle_current_timer(args: dict, **kw) -> str:
         return _tool_result(_request("GET", "/api/timer/current"))
     except Exception as exc:
         logger.error("flowstate_get_current_timer error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _is_canonical_recurrence_rule(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    pattern = value.get("pattern")
+    allowed_pattern_fields = _RECURRENCE_PATTERN_FIELDS.get(pattern)
+    if allowed_pattern_fields is None:
+        return False
+    if set(value) - (_RECURRENCE_COMMON_FIELDS | allowed_pattern_fields):
+        return False
+    interval = value.get("interval")
+    if (
+        not isinstance(interval, int)
+        or isinstance(interval, bool)
+        or not 1 <= interval <= 365
+    ):
+        return False
+    end_type = value.get("endType")
+    if end_type not in {"never", "after_count", "on_date"}:
+        return False
+    if end_type == "never" and ("endDate" in value or "endCount" in value):
+        return False
+    if end_type == "after_count":
+        end_count = value.get("endCount")
+        if (
+            not isinstance(end_count, int)
+            or isinstance(end_count, bool)
+            or end_count < 1
+            or "endDate" in value
+        ):
+            return False
+    if end_type == "on_date":
+        end_date = value.get("endDate")
+        if (
+            not isinstance(end_date, str)
+            or not _DATE_ONLY_RE.fullmatch(end_date)
+            or "endCount" in value
+        ):
+            return False
+    if pattern == "weekly":
+        weekdays = value.get("weekdays")
+        if (
+            not isinstance(weekdays, list)
+            or not weekdays
+            or len(weekdays) != len(set(weekdays))
+            or any(
+                not isinstance(day, int)
+                or isinstance(day, bool)
+                or not 0 <= day <= 6
+                for day in weekdays
+            )
+        ):
+            return False
+    if pattern == "monthly":
+        month_day = value.get("monthDay")
+        month_weekday = value.get("monthWeekday")
+        if (month_day is None) == (month_weekday is None):
+            return False
+        if month_day is not None and (
+            not isinstance(month_day, int)
+            or isinstance(month_day, bool)
+            or not 1 <= month_day <= 31
+        ):
+            return False
+        if month_weekday is not None and (
+            not isinstance(month_weekday, dict)
+            or set(month_weekday) != {"nth", "day"}
+            or not isinstance(month_weekday.get("nth"), int)
+            or isinstance(month_weekday.get("nth"), bool)
+            or month_weekday["nth"] not in {-1, 1, 2, 3, 4, 5}
+            or not isinstance(month_weekday.get("day"), int)
+            or isinstance(month_weekday.get("day"), bool)
+            or not 0 <= month_weekday["day"] <= 6
+        ):
+            return False
+    return True
+
+
+def _merge_preview_recurrence_stop(payload: Dict[str, Any]) -> Optional[str]:
+    if payload.get("ok") is not True or payload.get("preview") is not True:
+        return None
+    conflicts = payload.get("conflicts")
+    if not isinstance(conflicts, list):
+        return None
+    if not any(
+        isinstance(conflict, dict)
+        and conflict.get("code") == "recurring_merge_unsupported"
+        for conflict in conflicts
+    ):
+        return None
+    return _typed_flowstate_error(
+        _FlowStateApiError(
+            "Recurring tasks require an exact cadence choice before they can be merged",
+            code="recurring_merge_unsupported",
+            status=409,
+            action=_RECURRENCE_RESOLUTION_ACTION,
+        )
+    )
+
+
+def _handle_merge_tasks(args: dict, **kw) -> str:
+    survivor_task_id = str(args.get("survivorTaskId") or "").strip()
+    duplicate_task_id = str(args.get("duplicateTaskId") or "").strip()
+    if not survivor_task_id:
+        return _tool_error("survivorTaskId is required")
+    if not duplicate_task_id:
+        return _tool_error("duplicateTaskId is required")
+    if survivor_task_id == duplicate_task_id:
+        return _tool_error("survivorTaskId and duplicateTaskId must differ")
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return _tool_error("preview must be a boolean")
+    if not preview:
+        return _tool_error(
+            "merge apply is unavailable until exact interactive approval is registered"
+        )
+    recurrence_resolution = args.get("recurrenceResolution")
+    if (
+        recurrence_resolution is not None
+        and not _is_canonical_recurrence_rule(recurrence_resolution)
+    ):
+        return _tool_error("recurrenceResolution must be a canonical recurrence rule")
+
+    body: Dict[str, Any] = {
+        "duplicateTaskId": duplicate_task_id,
+        "preview": preview,
+    }
+    if recurrence_resolution is not None:
+        body["recurrenceResolution"] = recurrence_resolution
+
+    try:
+        path = f"/api/tasks/{urllib.parse.quote(survivor_task_id, safe='')}/merge"
+        payload = _request("POST", path, body)
+        recurrence_stop = _merge_preview_recurrence_stop(payload)
+        if recurrence_stop is not None:
+            return recurrence_stop
+        return _tool_result(payload)
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_merge_tasks API error: status=%s code=%s", exc.status, exc.code
+        )
+        return _typed_flowstate_error(exc)
+    except Exception as exc:
+        logger.error("flowstate_merge_tasks error: %s", exc)
         return _tool_error(str(exc))
 
 
@@ -1021,6 +1211,69 @@ FLOWSTATE_CURRENT_TIMER_SCHEMA = {
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
+FLOWSTATE_MERGE_TASKS_SCHEMA = {
+    "name": "flowstate_merge_tasks",
+    "description": (
+        "Create a non-mutating preview for merging one exact duplicate Flow State task into one exact "
+        "survivor. Apply remains unavailable until exact interactive approval is registered. Title "
+        "similarity is never approval. If Flow State returns a "
+        "recurrence conflict, stop all further Flow State mutations and ask for the exact intended "
+        "cadence; never fall back to separate task updates or deletion."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "survivorTaskId": {"type": "string", "description": "Exact task id that will survive."},
+            "duplicateTaskId": {"type": "string", "description": "Exact task id to merge and archive."},
+            "recurrenceResolution": {
+                "type": "object",
+                "description": (
+                    "Optional exact canonical cadence selected by the user. Use only after reading "
+                    "both tasks and confirming there is no established series history."
+                ),
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "enum": ["daily", "weekly", "monthly", "yearly"],
+                    },
+                    "interval": {"type": "integer", "minimum": 1, "maximum": 365},
+                    "weekdays": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 6},
+                        "minItems": 1,
+                        "uniqueItems": True,
+                    },
+                    "monthDay": {"type": "integer", "minimum": 1, "maximum": 31},
+                    "monthWeekday": {
+                        "type": "object",
+                        "properties": {
+                            "nth": {"type": "integer", "enum": [-1, 1, 2, 3, 4, 5]},
+                            "day": {"type": "integer", "minimum": 0, "maximum": 6},
+                        },
+                        "required": ["nth", "day"],
+                        "additionalProperties": False,
+                    },
+                    "endType": {
+                        "type": "string",
+                        "enum": ["never", "after_count", "on_date"],
+                    },
+                    "endDate": {"type": "string", "description": "YYYY-MM-DD for on_date."},
+                    "endCount": {"type": "integer", "minimum": 1},
+                },
+                "required": ["pattern", "interval", "endType"],
+                "additionalProperties": False,
+            },
+            "preview": {
+                "type": "boolean",
+                "const": True,
+                "description": "Optional; only the non-mutating true value is accepted.",
+            },
+        },
+        "required": ["survivorTaskId", "duplicateTaskId"],
+        "additionalProperties": False,
+    },
+}
+
 FLOWSTATE_LIST_SUBTASKS_SCHEMA = {
     "name": "flowstate_list_subtasks",
     "description": (
@@ -1112,6 +1365,7 @@ _FLOWSTATE_TOOL_REGISTRATIONS = [
     ("flowstate_update_task", FLOWSTATE_UPDATE_TASK_SCHEMA, _handle_update_task),
     ("flowstate_delete_task", FLOWSTATE_DELETE_TASK_SCHEMA, _handle_delete_task),
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
+    ("flowstate_merge_tasks", FLOWSTATE_MERGE_TASKS_SCHEMA, _handle_merge_tasks),
     ("flowstate_list_subtasks", FLOWSTATE_LIST_SUBTASKS_SCHEMA, _handle_list_subtasks),
     ("flowstate_subtask_batch", FLOWSTATE_SUBTASK_BATCH_SCHEMA, _handle_subtask_batch),
 ]

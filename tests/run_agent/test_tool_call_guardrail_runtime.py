@@ -5,6 +5,8 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from run_agent import AIAgent
 
 
@@ -266,6 +268,71 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert result["final_response"] == "done"
     tool_contents = [m["content"] for m in result["messages"] if m.get("role") == "tool"]
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
+
+
+@pytest.mark.parametrize(
+    ("conflict_code", "conflict_message"),
+    [
+        (
+            "incompatible_recurrence",
+            "Recurring definitions or chain identities are incompatible",
+        ),
+        (
+            "recurring_merge_unsupported",
+            "Recurring tasks require an exact cadence choice before they can be merged",
+        ),
+    ],
+)
+def test_flowstate_recurrence_conflict_skips_later_mutation_in_same_tool_batch(
+    conflict_code,
+    conflict_message,
+):
+    agent = _make_agent("flowstate_merge_tasks", "flowstate_update_task", max_iterations=10)
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                _mock_tool_call(
+                    "flowstate_merge_tasks",
+                    json.dumps({"survivorTaskId": "a", "duplicateTaskId": "b"}),
+                    "merge-conflict",
+                ),
+                _mock_tool_call(
+                    "flowstate_update_task",
+                    json.dumps({"id": "a", "dueDate": "2026-07-15"}),
+                    "must-not-run",
+                ),
+            ],
+        ),
+    ]
+    conflict = json.dumps({
+        "error": conflict_message,
+        "code": conflict_code,
+        "status": 409,
+        "action": "stop_mutations_and_request_recurrence_resolution",
+    })
+
+    with (
+        patch("run_agent.handle_function_call", return_value=conflict) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("merge the duplicates and update the survivor")
+
+    mock_hfc.assert_called_once()
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "flowstate_recurrence_resolution_required"
+    assert "exact user choice" in result["final_response"]
+    assert "No later FlowState mutation was executed" in result["final_response"]
+    update_result = next(
+        message["content"]
+        for message in result["messages"]
+        if message.get("role") == "tool" and message.get("name") == "flowstate_update_task"
+    )
+    assert "not started" in update_result
+    assert "recurrence resolution" in update_result
 
 
 def test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_halt_without_top_level_error():

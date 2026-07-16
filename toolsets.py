@@ -266,6 +266,9 @@ TOOLSETS = {
             "flowstate_update_task",
             "flowstate_delete_task",
             "flowstate_get_current_timer",
+            "flowstate_merge_tasks",
+            "flowstate_list_subtasks",
+            "flowstate_subtask_batch",
         ],
         "includes": []
     },
