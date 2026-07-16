@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from tools import flowstate_tool as fst
-from tools.flowstate_receipts import canonical_json_hash
+from tools.flowstate_receipts import canonical_json_sha256
 
 
 class _Response:
@@ -334,7 +334,7 @@ def _canonical_committed_payload(*, replayed=False, **receipt_overrides):
         "replayed": replayed,
         "committedAt": _CANONICAL_COMMITTED_AT,
         "readBack": read_back,
-        "readBackHash": canonical_json_hash(read_back),
+        "readBackHash": canonical_json_sha256(read_back),
         "affected": [
             {
                 "entityType": "task",
@@ -343,7 +343,7 @@ def _canonical_committed_payload(*, replayed=False, **receipt_overrides):
                 "canonicalRevision": 8,
                 "changeSequence": 42,
                 "readBack": read_back,
-                "readBackHash": canonical_json_hash(read_back),
+                "readBackHash": canonical_json_sha256(read_back),
             }
         ],
     }
@@ -384,7 +384,7 @@ def _canonical_action_payload(
                 }
             )
         canonical_entry["readBack"] = affected_read_back
-        canonical_entry["readBackHash"] = canonical_json_hash(affected_read_back)
+        canonical_entry["readBackHash"] = canonical_json_sha256(affected_read_back)
         canonical_affected.append(canonical_entry)
     receipt = {
         "ok": True,
@@ -400,7 +400,7 @@ def _canonical_action_payload(
         "changeSequence": 42,
         "committedAt": _CANONICAL_COMMITTED_AT,
         "readBack": read_back,
-        "readBackHash": canonical_json_hash(read_back),
+        "readBackHash": canonical_json_sha256(read_back),
         "affected": canonical_affected,
     }
     receipt.update(receipt_overrides or {})
@@ -458,7 +458,7 @@ def _sql_done_payload():
             "changeSequence": 42,
             "committedAt": _CANONICAL_COMMITTED_AT,
             "readBack": top_read_back,
-            "readBackHash": canonical_json_hash(top_read_back),
+            "readBackHash": canonical_json_sha256(top_read_back),
             "affected": [
                 {
                     "entityType": "task",
@@ -467,7 +467,7 @@ def _sql_done_payload():
                     "canonicalRevision": 8,
                     "changeSequence": 42,
                     "readBack": living_task,
-                    "readBackHash": canonical_json_hash(living_task),
+                    "readBackHash": canonical_json_sha256(living_task),
                 },
                 {
                     "entityType": "task",
@@ -476,7 +476,7 @@ def _sql_done_payload():
                     "canonicalRevision": 1,
                     "changeSequence": 41,
                     "readBack": completed_occurrence,
-                    "readBackHash": canonical_json_hash(completed_occurrence),
+                    "readBackHash": canonical_json_sha256(completed_occurrence),
                 },
             ],
         },
@@ -710,7 +710,7 @@ def test_update_task_apply_forwards_preview_receipt_and_validates_commit(
                         "title": "Clarified task",
                         "canonicalRevision": 8,
                     },
-                    "readBackHash": canonical_json_hash({
+                    "readBackHash": canonical_json_sha256({
                         "id": "task-1",
                         "title": "Clarified task",
                         "canonicalRevision": 8,
@@ -727,7 +727,7 @@ def test_update_task_apply_forwards_preview_receipt_and_validates_commit(
                     "canonicalRevision": 7,
                     "changeSequence": 42,
                     "readBack": {"id": "task-1", "canonicalRevision": 7},
-                    "readBackHash": canonical_json_hash({
+                    "readBackHash": canonical_json_sha256({
                         "id": "task-1", "canonicalRevision": 7
                     }),
                 }
@@ -746,7 +746,7 @@ def test_update_task_apply_forwards_preview_receipt_and_validates_commit(
                         "title": "Clarified task",
                         "canonicalRevision": 8,
                     },
-                    "readBackHash": canonical_json_hash({
+                    "readBackHash": canonical_json_sha256({
                         "id": "task-1",
                         "title": "Clarified task",
                         "canonicalRevision": 8,
@@ -1315,7 +1315,7 @@ def test_done_for_now_rejects_forged_primary_subset_with_valid_hash(
     payload = _sql_done_payload()
     primary = payload["receipt"]["affected"][0]
     primary["readBack"][field] = value
-    primary["readBackHash"] = canonical_json_hash(primary["readBack"])
+    primary["readBackHash"] = canonical_json_sha256(primary["readBack"])
     monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
 
     result = json.loads(fst._handle_done_for_now({
@@ -1338,7 +1338,7 @@ def test_done_for_now_rejects_completed_occurrence_proof_mismatch(
 ):
     payload = _sql_done_payload()
     payload["receipt"]["readBack"]["completedOccurrence"][field] = value
-    payload["receipt"]["readBackHash"] = canonical_json_hash(
+    payload["receipt"]["readBackHash"] = canonical_json_sha256(
         payload["receipt"]["readBack"]
     )
     monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))

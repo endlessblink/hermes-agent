@@ -159,25 +159,81 @@ def validate_nested_canonical_receipt(
     return receipt
 
 
+_PRIMARY_PROOF_KEYS = ("id", "canonicalRevision", "canonicalUpdatedAt", "status")
+
+
+def _verified_read_back(container: Mapping[str, Any], code_prefix: str) -> Mapping[str, Any]:
+    """Recompute and require the strict canonical read-back hash.
+
+    Only the canonical compact-JSON hash is accepted — the legacy PostgreSQL
+    JSONB text hash is rejected here (unlike the nested validator) because
+    the outer-envelope contract postdates the JSONB RPCs.
+    """
+    read_back = container.get("readBack")
+    if not isinstance(read_back, Mapping):
+        raise CanonicalReceiptError(
+            f"{code_prefix}_read_back_missing", "Canonical receipt read-back proof is missing"
+        )
+    try:
+        computed_hash = canonical_json_sha256(dict(read_back))
+    except (TypeError, ValueError, UnicodeError):
+        raise CanonicalReceiptError(
+            f"{code_prefix}_read_back_invalid", "Canonical receipt read-back is not valid JSON"
+        ) from None
+    read_back_hash = container.get("readBackHash")
+    if not _sha256(read_back_hash) or not secrets.compare_digest(read_back_hash, computed_hash):
+        raise CanonicalReceiptError(
+            f"{code_prefix}_read_back_hash_mismatch",
+            "Canonical receipt read-back hash does not match",
+        )
+    return read_back
+
+
 def validate_canonical_receipt(
-    receipt: Mapping[str, Any],
+    response: Mapping[str, Any],
     *,
     expected_operation_id: Optional[str] = None,
     expected_request_hash: Optional[str] = None,
+    expected_action: Optional[str] = None,
+    expected_entity_id: Optional[str] = None,
+    expected_affected_actions: Optional[Mapping[str, str]] = None,
 ) -> Mapping[str, Any]:
-    """Validate and return a committed or replayed canonical receipt.
+    """Validate a full mutation response envelope and return its receipt.
 
-    The function deliberately accepts operation-specific extra fields while
-    enforcing the shared proof fields.  It never logs or returns request
-    payloads, credentials, or server diagnostics.
+    An HTTP-level success is never proof: the envelope must say committed,
+    the nested receipt must bind to the expected operation, request, action,
+    and entity, the read-back hash must recompute exactly, and — for
+    multi-row mutations — every affected row must carry its own read-back
+    proof matching the approved per-entity action bindings. The function
+    never logs or returns request payloads, credentials, or server
+    diagnostics.
     """
 
     if (
-        not isinstance(receipt, Mapping)
-        or receipt.get("ok") is not True
-        or receipt.get("status") not in {"committed", "replayed"}
+        not isinstance(response, Mapping)
+        or response.get("ok") is not True
+        or response.get("result") != "committed"
     ):
-        raise CanonicalReceiptError("not_committed", "FlowState did not return a committed canonical receipt")
+        raise CanonicalReceiptError(
+            "not_committed", "FlowState did not return a committed canonical response"
+        )
+
+    receipt = response.get("receipt")
+    if not isinstance(receipt, Mapping):
+        raise CanonicalReceiptError(
+            "receipt_missing", "FlowState response carries no canonical receipt"
+        )
+
+    status = receipt.get("status")
+    if receipt.get("ok") is not True or status not in {"committed", "replayed"}:
+        raise CanonicalReceiptError(
+            "not_committed", "FlowState did not return a committed canonical receipt"
+        )
+    # Legacy boolean alias: optional, but when present it must agree with status.
+    if "replayed" in receipt and receipt.get("replayed") is not (status == "replayed"):
+        raise CanonicalReceiptError(
+            "replayed_alias_mismatch", "Canonical receipt replay markers contradict"
+        )
 
     operation_id = receipt.get("operationId")
     if not isinstance(operation_id, str) or not operation_id.strip():
@@ -185,30 +241,103 @@ def validate_canonical_receipt(
     if expected_operation_id is not None and not secrets.compare_digest(operation_id, expected_operation_id):
         raise CanonicalReceiptError("operation_mismatch", "Canonical receipt belongs to another operation")
 
-    request_hash = receipt.get("requestHash")
-    if not _sha256(request_hash):
-        raise CanonicalReceiptError("invalid_request_hash", "Canonical receipt request hash is invalid")
-    if expected_request_hash is not None:
-        if not _sha256(expected_request_hash) or not secrets.compare_digest(request_hash, expected_request_hash):
+    for request_hash in (receipt.get("requestHash"), response.get("requestHash")):
+        if not _sha256(request_hash):
+            raise CanonicalReceiptError("invalid_request_hash", "Canonical receipt request hash is invalid")
+        if expected_request_hash is not None and (
+            not _sha256(expected_request_hash)
+            or not secrets.compare_digest(request_hash, expected_request_hash)
+        ):
             raise CanonicalReceiptError("request_mismatch", "Canonical receipt belongs to another request")
 
-    if not _positive_int(receipt.get("canonicalRevision")):
+    if expected_action is not None and receipt.get("action") != expected_action:
+        raise CanonicalReceiptError("action_mismatch", "Canonical receipt action does not match the request")
+    entity_id = receipt.get("entityId")
+    if expected_entity_id is not None and entity_id != expected_entity_id:
+        raise CanonicalReceiptError("entity_mismatch", "Canonical receipt entity does not match the request")
+
+    revision = receipt.get("canonicalRevision")
+    if not _positive_int(revision):
         raise CanonicalReceiptError("invalid_revision", "Canonical receipt revision is invalid")
     if not _positive_int(receipt.get("changeSequence")):
         raise CanonicalReceiptError("invalid_sequence", "Canonical receipt change sequence is invalid")
     if not _aware_iso_timestamp(receipt.get("committedAt")):
         raise CanonicalReceiptError("invalid_committed_at", "Canonical receipt commit time is invalid")
 
-    read_back = receipt.get("readBack")
-    if read_back is None:
-        raise CanonicalReceiptError("invalid_read_back", "Canonical receipt read-back is missing")
-    try:
-        computed_hash = canonical_json_sha256(read_back)
-    except (TypeError, ValueError):
-        raise CanonicalReceiptError("invalid_read_back", "Canonical receipt read-back is not valid JSON") from None
+    read_back = _verified_read_back(receipt, "receipt")
+    if read_back.get("id") != entity_id or read_back.get("canonicalRevision") != revision:
+        raise CanonicalReceiptError(
+            "read_back_identity_mismatch", "Canonical receipt read-back identity does not match"
+        )
 
-    read_back_hash = receipt.get("readBackHash")
-    if not _sha256(read_back_hash) or not secrets.compare_digest(read_back_hash, computed_hash):
-        raise CanonicalReceiptError("read_back_hash_mismatch", "Canonical receipt read-back hash does not match")
+    if expected_affected_actions is not None:
+        affected = receipt.get("affected")
+        if not isinstance(affected, list) or not affected:
+            raise CanonicalReceiptError(
+                "affected_missing", "Canonical receipt lacks affected-row proofs"
+            )
+        seen: dict[str, Mapping[str, Any]] = {}
+        for index, entry in enumerate(affected):
+            if not isinstance(entry, Mapping):
+                raise CanonicalReceiptError(
+                    "affected_invalid", "Canonical receipt affected entry is malformed"
+                )
+            entry_id = entry.get("entityId")
+            if (
+                not isinstance(entry_id, str)
+                or entry_id in seen
+                or entry_id not in expected_affected_actions
+                or entry.get("action") != expected_affected_actions[entry_id]
+            ):
+                raise CanonicalReceiptError(
+                    "affected_binding_mismatch",
+                    "Canonical receipt affected rows do not match the approved bindings",
+                )
+            if entry_id == entity_id and index != 0:
+                raise CanonicalReceiptError(
+                    "affected_primary_order",
+                    "Canonical receipt primary affected row must come first",
+                )
+            if not _positive_int(entry.get("canonicalRevision")) or not _positive_int(
+                entry.get("changeSequence")
+            ):
+                raise CanonicalReceiptError(
+                    "affected_invalid", "Canonical receipt affected proof fields are invalid"
+                )
+            entry_read_back = _verified_read_back(entry, "affected")
+            if entry_read_back.get("id") != entry_id:
+                raise CanonicalReceiptError(
+                    "affected_read_back_identity_mismatch",
+                    "Canonical receipt affected read-back identity does not match",
+                )
+            if entry_id == entity_id:
+                # The primary affected row restates the receipt's own proof.
+                if (
+                    entry.get("canonicalRevision") != revision
+                    or entry.get("changeSequence") != receipt.get("changeSequence")
+                ):
+                    raise CanonicalReceiptError(
+                        "affected_primary_proof_mismatch",
+                        "Canonical receipt primary affected proof does not match",
+                    )
+                if any(key not in entry_read_back for key in _PRIMARY_PROOF_KEYS):
+                    raise CanonicalReceiptError(
+                        "affected_primary_proof_incomplete",
+                        "Canonical receipt primary affected read-back is incomplete",
+                    )
+                if any(
+                    key in read_back and entry_read_back[key] != read_back[key]
+                    for key in entry_read_back
+                ):
+                    raise CanonicalReceiptError(
+                        "affected_primary_proof_mismatch",
+                        "Canonical receipt primary affected read-back contradicts the receipt",
+                    )
+            seen[entry_id] = entry
+        if set(seen) != set(expected_affected_actions):
+            raise CanonicalReceiptError(
+                "affected_binding_mismatch",
+                "Canonical receipt affected rows do not cover the approved bindings",
+            )
 
     return receipt

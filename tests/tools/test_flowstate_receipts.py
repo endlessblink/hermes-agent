@@ -4,7 +4,7 @@ import pytest
 
 from tools.flowstate_receipts import (
     CanonicalReceiptError,
-    canonical_json_hash,
+    canonical_json_sha256,
     validate_canonical_receipt,
 )
 
@@ -40,7 +40,7 @@ def _response(*, status="committed", receipt_overrides=None, outer_overrides=Non
         "changeSequence": 42,
         "committedAt": COMMITTED_AT,
         "readBack": read_back,
-        "readBackHash": canonical_json_hash(read_back),
+        "readBackHash": canonical_json_sha256(read_back),
     }
     receipt.update(receipt_overrides or {})
     response = {
@@ -64,10 +64,10 @@ def _validate(response, **overrides):
     return validate_canonical_receipt(response, **expected)
 
 
-def test_canonical_json_hash_uses_sorted_compact_utf8_json():
+def test_canonical_json_sha256_uses_sorted_compact_utf8_json():
     canonical = '{"aa":1,"b":[true,null],"hebrew":"שלום"}'
 
-    assert canonical_json_hash({"hebrew": "שלום", "b": [True, None], "aa": 1}) == (
+    assert canonical_json_sha256({"hebrew": "שלום", "b": [True, None], "aa": 1}) == (
         hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     )
 
@@ -177,7 +177,7 @@ def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations
             "action": "merge",
             "entityId": "survivor-1",
             "readBack": survivor_read_back,
-            "readBackHash": canonical_json_hash(survivor_read_back),
+            "readBackHash": canonical_json_sha256(survivor_read_back),
             "affected": [
                 {
                     "entityType": "task",
@@ -186,7 +186,7 @@ def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations
                     "canonicalRevision": 8,
                     "changeSequence": 42,
                     "readBack": primary_task_read_back,
-                    "readBackHash": canonical_json_hash(primary_task_read_back),
+                    "readBackHash": canonical_json_sha256(primary_task_read_back),
                 },
                 {
                     "entityType": "task",
@@ -195,7 +195,7 @@ def test_validator_requires_exact_affected_task_bindings_for_multi_row_mutations
                     "canonicalRevision": 5,
                     "changeSequence": 43,
                     "readBack": duplicate_read_back,
-                    "readBackHash": canonical_json_hash(duplicate_read_back),
+                    "readBackHash": canonical_json_sha256(duplicate_read_back),
                 },
             ],
         }
@@ -233,7 +233,7 @@ def test_validator_rejects_primary_affected_entry_after_secondary_entry():
             "action": "merge",
             "entityId": "survivor-1",
             "readBack": primary_read_back,
-            "readBackHash": canonical_json_hash(primary_read_back),
+            "readBackHash": canonical_json_sha256(primary_read_back),
             "affected": [
                 {
                     "entityType": "task",
@@ -242,7 +242,7 @@ def test_validator_rejects_primary_affected_entry_after_secondary_entry():
                     "canonicalRevision": 5,
                     "changeSequence": 43,
                     "readBack": secondary_read_back,
-                    "readBackHash": canonical_json_hash(secondary_read_back),
+                    "readBackHash": canonical_json_sha256(secondary_read_back),
                 },
                 {
                     "entityType": "task",
@@ -251,7 +251,7 @@ def test_validator_rejects_primary_affected_entry_after_secondary_entry():
                     "canonicalRevision": 8,
                     "changeSequence": 42,
                     "readBack": primary_read_back,
-                    "readBackHash": canonical_json_hash(primary_read_back),
+                    "readBackHash": canonical_json_sha256(primary_read_back),
                 },
             ],
         }
@@ -309,17 +309,17 @@ def test_validator_rejects_primary_affected_proof_mismatch(field, value):
         "canonicalRevision": 8,
         "changeSequence": 42,
         "readBack": primary_read_back,
-        "readBackHash": canonical_json_hash(primary_read_back),
+        "readBackHash": canonical_json_sha256(primary_read_back),
     }
     primary[field] = value
     if field == "readBack":
-        primary["readBackHash"] = canonical_json_hash(value)
+        primary["readBackHash"] = canonical_json_sha256(value)
     response = _response(
         receipt_overrides={
             "action": "merge",
             "entityId": "survivor-1",
             "readBack": primary_read_back,
-            "readBackHash": canonical_json_hash(primary_read_back),
+            "readBackHash": canonical_json_sha256(primary_read_back),
             "affected": [primary],
         }
     )
