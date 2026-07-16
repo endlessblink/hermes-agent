@@ -205,3 +205,492 @@ def test_home_rolls_back_owner_row_when_canonical_state_write_fails(
     db = SessionDB(db_path=owner_home / "state.db")
     assert db.search_sessions(limit=10) == []
     db.close()
+
+
+def test_contextual_start_binds_structured_delivery_before_submit(
+    monkeypatch, tmp_path
+):
+    import threading
+
+    import tui_gateway.server as server
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: tmp_path)
+    session = {
+        "session_key": "assistant-home",
+        "history_lock": threading.RLock(),
+        "running": False,
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setattr(
+        server,
+        "_open_personal_assistant_home",
+        lambda rid, _params, **_kwargs: server._ok(
+            rid,
+            {
+                "session_id": "assistant-live",
+                "canonical_session_id": "assistant-home",
+            },
+        ),
+    )
+    submitted = []
+
+    def submit(rid, params):
+        delivery = session.get("personal_assistant_monitor_delivery")
+        assert delivery["events"] == [
+            {"id": "event-1", "lease_id": "lease-1"}
+        ]
+        assert params["reject_if_busy"] is True
+        assert "Validated structured FlowState monitor events" in params["text"]
+        submitted.append(params)
+        return server._ok(rid, {"status": "accepted"})
+
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    event = {
+        "id": "event-1",
+        "version": 1,
+        "kind": "deadline_risk",
+        "subject": "task-pressure:overdue",
+        "occurrence": 1,
+        "evidence": {"overdue": 2},
+        "created_at": "2026-07-16T12:00:00+00:00",
+    }
+
+    response = server._methods["personal_assistant.start"](
+        "r1",
+        {
+            "profile": "office-work",
+            "trigger": "contextual",
+            "idempotencyKey": "monitor:event-1",
+            "monitorEvents": [event],
+            "monitorDelivery": [{"id": "event-1", "lease_id": "lease-1"}],
+        },
+    )
+
+    assert response["result"]["status"] == "launched"
+    assert submitted
+    assert session["personal_assistant"] is True
+    assert session["personal_assistant_profile_home"] == str(tmp_path)
+
+
+def test_contextual_start_does_not_acknowledge_existing_unread_attention(
+    monkeypatch, tmp_path
+):
+    import threading
+
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    store.set_canonical_session("assistant-home")
+    store.increment_unread()
+    store.increment_unread()
+    session = {
+        "session_key": "assistant-home",
+        "history_lock": threading.RLock(),
+        "running": False,
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, _params: server._ok(
+            rid, {"session_id": "assistant-live", "resumed": "assistant-home"}
+        ),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, _params: server._ok(rid, {"status": "accepted"}),
+    )
+
+    response = server._methods["personal_assistant.start"](
+        "r1",
+        {
+            "profile": "office-work",
+            "trigger": "contextual",
+            "idempotencyKey": "monitor:event-unread",
+            "monitorEvents": [
+                {
+                    "id": "event-unread",
+                    "version": 1,
+                    "kind": "deadline_risk",
+                    "subject": "task-pressure:overdue",
+                    "occurrence": 1,
+                    "evidence": {"overdue": 2},
+                    "created_at": "2026-07-16T12:00:00+00:00",
+                }
+            ],
+            "monitorDelivery": [
+                {"id": "event-unread", "lease_id": "lease-unread"}
+            ],
+        },
+    )
+
+    assert response["result"]["status"] == "launched"
+    assert PersonalAssistantStateStore(tmp_path).read()["unreadCount"] == 2
+
+
+def test_internal_monitor_submit_rejects_busy_without_interrupting(monkeypatch):
+    import threading
+
+    import tui_gateway.server as server
+
+    session = {
+        "history_lock": threading.RLock(),
+        "personal_assistant": True,
+        "running": True,
+        "transport": None,
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setattr(
+        server,
+        "_handle_busy_submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("monitor submission must not interrupt")
+        ),
+    )
+
+    response = server._methods["prompt.submit"](
+        "r1",
+        {
+            "session_id": "assistant-live",
+            "text": "monitor context",
+            "reject_if_busy": True,
+        },
+    )
+
+    assert response["error"]["code"] == 4009
+
+
+def test_contextual_start_retries_a_duplicate_pending_episode(monkeypatch, tmp_path):
+    import threading
+
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    store.append_episode(
+        trigger="contextual",
+        user_intent="retry",
+        idempotency_key="monitor:event-retry",
+    )
+    session = {
+        "session_key": "assistant-home",
+        "history_lock": threading.RLock(),
+        "running": False,
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setattr(
+        server,
+        "_open_personal_assistant_home",
+        lambda rid, _params, **_kwargs: server._ok(
+            rid,
+            {
+                "session_id": "assistant-live",
+                "canonical_session_id": "assistant-home",
+            },
+        ),
+    )
+    submitted = []
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, params: submitted.append(params)
+        or server._ok(rid, {"status": "accepted"}),
+    )
+    event = {
+        "id": "event-retry",
+        "version": 1,
+        "kind": "deadline_risk",
+        "subject": "task-pressure:overdue",
+        "occurrence": 1,
+        "evidence": {"overdue": 2},
+        "created_at": "2026-07-16T12:00:00+00:00",
+    }
+
+    response = server._methods["personal_assistant.start"](
+        "r1",
+        {
+            "profile": "office-work",
+            "trigger": "contextual",
+            "idempotencyKey": "monitor:event-retry",
+            "monitorEvents": [event],
+            "monitorDelivery": [
+                {"id": "event-retry", "lease_id": "lease-retry"}
+            ],
+        },
+    )
+
+    assert response["result"]["status"] == "launched"
+    assert len(submitted) == 1
+    assert session["personal_assistant_monitor_delivery"]["events"] == [
+        {"id": "event-retry", "lease_id": "lease-retry"}
+    ]
+
+
+def test_contextual_start_recovers_a_stale_processing_episode(
+    monkeypatch, tmp_path
+):
+    import threading
+
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    _state, episode, _duplicate = store.append_episode(
+        trigger="contextual",
+        user_intent="recover",
+        idempotency_key="monitor:event-stale",
+    )
+    store.mark_episode_status(episode["episode_id"], "processing")
+    session = {
+        "session_key": "assistant-home",
+        "history_lock": threading.RLock(),
+        "running": False,
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setattr(
+        server,
+        "_open_personal_assistant_home",
+        lambda rid, _params, **_kwargs: server._ok(
+            rid,
+            {
+                "session_id": "assistant-live",
+                "canonical_session_id": "assistant-home",
+            },
+        ),
+    )
+    submitted = []
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, params: submitted.append(params)
+        or server._ok(rid, {"status": "accepted"}),
+    )
+    event = {
+        "id": "event-stale",
+        "version": 1,
+        "kind": "deadline_risk",
+        "subject": "task-pressure:overdue",
+        "occurrence": 1,
+        "evidence": {"overdue": 2},
+        "created_at": "2026-07-16T12:00:00+00:00",
+    }
+
+    response = server._methods["personal_assistant.start"](
+        "r1",
+        {
+            "profile": "office-work",
+            "trigger": "contextual",
+            "idempotencyKey": "monitor:event-stale",
+            "monitorEvents": [event],
+            "monitorDelivery": [
+                {"id": "event-stale", "lease_id": "lease-stale"}
+            ],
+        },
+    )
+
+    assert response["result"]["status"] == "launched"
+    assert len(submitted) == 1
+
+
+def test_contextual_start_never_overwrites_an_inflight_delivery(
+    monkeypatch, tmp_path
+):
+    import threading
+
+    import tui_gateway.server as server
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: tmp_path)
+    existing = {
+        "profile_home": str(tmp_path),
+        "episode_id": "episode-existing",
+        "events": [{"id": "event-existing", "lease_id": "lease-existing"}],
+    }
+    session = {
+        "session_key": "assistant-home",
+        "history_lock": threading.RLock(),
+        "running": False,
+        "personal_assistant_monitor_delivery": existing,
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setattr(
+        server,
+        "_open_personal_assistant_home",
+        lambda rid, _params, **_kwargs: server._ok(
+            rid,
+            {
+                "session_id": "assistant-live",
+                "canonical_session_id": "assistant-home",
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a second monitor turn must not be submitted")
+        ),
+    )
+    event = {
+        "id": "event-new",
+        "version": 1,
+        "kind": "deadline_risk",
+        "subject": "task-pressure:overdue",
+        "occurrence": 2,
+        "evidence": {"overdue": 3},
+        "created_at": "2026-07-16T12:01:00+00:00",
+    }
+
+    response = server._methods["personal_assistant.start"](
+        "r2",
+        {
+            "profile": "office-work",
+            "trigger": "contextual",
+            "idempotencyKey": "monitor:event-new",
+            "monitorEvents": [event],
+            "monitorDelivery": [
+                {"id": "event-new", "lease_id": "lease-new"}
+            ],
+        },
+    )
+
+    assert response["error"]["code"] == 4009
+    assert session["personal_assistant_monitor_delivery"] is existing
+
+
+def test_monitor_delivery_retries_when_agent_initialization_fails(monkeypatch):
+    import threading
+
+    import tui_gateway.server as server
+
+    threads = []
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self.target = target
+            threads.append(self)
+
+        def start(self):
+            return None
+
+    session = {
+        "session_key": "assistant-home",
+        "history_lock": threading.RLock(),
+        "history": [],
+        "history_version": 0,
+        "attached_images": [],
+        "running": False,
+        "agent": None,
+        "personal_assistant": True,
+        "personal_assistant_monitor_delivery": {"events": []},
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setattr(server.threading, "Thread", FakeThread)
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
+    monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(
+        server,
+        "_wait_agent",
+        lambda *_args: server._err("r1", 5000, "agent build failed"),
+    )
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    settled = []
+    monkeypatch.setattr(
+        server,
+        "_finish_personal_assistant_monitor_delivery",
+        lambda _session, **kwargs: settled.append(kwargs),
+    )
+
+    response = server._methods["prompt.submit"](
+        "r1", {"session_id": "assistant-live", "text": "monitor context"}
+    )
+    threads[0].target()
+
+    assert response["result"]["status"] == "streaming"
+    assert settled == [
+        {"status": "agent_initialization_failed", "has_visible_response": False}
+    ]
+
+
+def test_monitor_delivery_retries_when_cancelled_before_agent_is_ready(
+    monkeypatch,
+):
+    import threading
+
+    import tui_gateway.server as server
+
+    threads = []
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self.target = target
+            threads.append(self)
+
+        def start(self):
+            return None
+
+    session = {
+        "session_key": "assistant-home",
+        "history_lock": threading.RLock(),
+        "history": [],
+        "history_version": 0,
+        "attached_images": [],
+        "running": False,
+        "agent": None,
+        "personal_assistant": True,
+        "personal_assistant_monitor_delivery": {"events": []},
+    }
+    monkeypatch.setattr(server, "_sessions", {"assistant-live": session})
+    monkeypatch.setattr(server.threading, "Thread", FakeThread)
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
+    monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
+    monkeypatch.setattr(server, "_start_agent_build", lambda *_args: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *_args: None)
+    settled = []
+    monkeypatch.setattr(
+        server,
+        "_finish_personal_assistant_monitor_delivery",
+        lambda _session, **kwargs: settled.append(kwargs),
+    )
+
+    response = server._methods["prompt.submit"](
+        "r1", {"session_id": "assistant-live", "text": "monitor context"}
+    )
+    session["_turn_cancel_requested"] = True
+    threads[0].target()
+
+    assert response["result"]["status"] == "streaming"
+    assert settled == [{"status": "cancelled", "has_visible_response": False}]
+
+
+def test_stdio_gateway_startup_starts_the_monitor_consumer(monkeypatch):
+    import hermes_cli.config as config
+    import tui_gateway.entry as entry
+
+    calls = []
+    monkeypatch.setattr(entry, "_install_sidecar_publisher", lambda: None)
+    monkeypatch.setattr(
+        entry.server,
+        "start_personal_assistant_monitor_consumer",
+        lambda: calls.append(True),
+    )
+    monkeypatch.setattr(config, "read_raw_config", lambda: {})
+    monkeypatch.setattr(entry, "write_json", lambda _payload: True)
+    monkeypatch.setattr(entry.sys, "stdin", [])
+    monkeypatch.setattr(entry, "_log_exit", lambda _reason: None)
+
+    entry.main()
+
+    assert calls == [True]
