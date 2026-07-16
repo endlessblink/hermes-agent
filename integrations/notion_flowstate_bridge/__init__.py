@@ -65,6 +65,16 @@ def _get_bridge() -> Bridge:
         return _bridge
 
 
+def _available(profile_name: str) -> bool:
+    if profile_name != "office-work" or not os.environ.get("NOTION_TOKEN"):
+        return False
+    try:
+        _runtime_config()
+    except (BridgeError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _handler(method: str) -> Callable[..., str]:
     def call(args: dict[str, Any], **_: Any) -> str:
         try:
@@ -122,19 +132,42 @@ _SCHEMAS = {
     },
     "notion_mutation": {
         "name": "notion_mutation",
-        "description": "Preview or apply a receipt-backed Notion page create/property update. Defaults to preview.",
+        "description": "Preview or apply a version-bound Notion task create, property update, status change, or archive. Defaults to preview.",
         "parameters": {
             "type": "object",
             "properties": {
                 "mode": {"type": "string", "enum": ["preview", "apply"], "default": "preview"},
                 "operation_id": {"type": "string"},
-                "action": {"type": "string", "enum": ["create", "property_update"]},
+                "action": {
+                    "type": "string",
+                    "enum": ["create_task", "update_properties", "set_status", "archive_task"],
+                },
                 "data_source_id": {"type": "string"},
                 "page_id": {"type": "string"},
                 "properties": {"type": "object"},
+                "status_property": {"type": "string"},
+                "status_name": {"type": "string"},
                 "preview_digest": {"type": "string"},
             },
-            "required": ["operation_id", "action", "properties"],
+            "required": ["operation_id", "action"],
+            "oneOf": [
+                {
+                    "properties": {"action": {"const": "create_task"}},
+                    "required": ["properties"],
+                },
+                {
+                    "properties": {"action": {"const": "update_properties"}},
+                    "required": ["page_id", "properties"],
+                },
+                {
+                    "properties": {"action": {"const": "set_status"}},
+                    "required": ["page_id", "status_property", "status_name"],
+                },
+                {
+                    "properties": {"action": {"const": "archive_task"}},
+                    "required": ["page_id"],
+                },
+            ],
             "additionalProperties": False,
         },
     },
@@ -163,7 +196,7 @@ _SCHEMAS = {
                 "work_block": {"type": "object"},
                 "preview_digest": {"type": "string"},
             },
-            "required": ["operation_id", "page_id", "task", "work_block"],
+            "required": ["operation_id", "page_id", "task"],
             "additionalProperties": False,
         },
     },
@@ -186,9 +219,7 @@ def register(ctx: Any) -> None:
             toolset="notion_flowstate_bridge",
             schema=_SCHEMAS[name],
             handler=_handler(method),
-            check_fn=lambda: (
-                profile_name == "office-work" and bool(os.environ.get("NOTION_TOKEN"))
-            ),
+            check_fn=lambda profile_name=profile_name: _available(profile_name),
             description=_SCHEMAS[name]["description"],
             emoji="🔗",
         )
