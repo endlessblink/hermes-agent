@@ -3,6 +3,7 @@ import { atom, computed } from 'nanostores'
 import type { HermesGitWorktree, HermesRepoStatus } from '@/global'
 import { desktopGit } from '@/lib/desktop-git'
 
+import { $sidebarAgentsGrouped } from './layout'
 import { $worktreeRefreshToken } from './projects'
 import { $busy, $currentCwd } from './session'
 import { $workspaceChangeTick } from './workspace-events'
@@ -45,6 +46,12 @@ export const $repoChangeByPath = computed([$repoStatus, $currentCwd], (status, c
 })
 
 async function loadWorktrees(target: string): Promise<void> {
+  if (!$sidebarAgentsGrouped.get()) {
+    $repoWorktrees.set([])
+
+    return
+  }
+
   const list = desktopGit()?.worktreeList
 
   if (!list) {
@@ -142,6 +149,16 @@ $currentCwd.subscribe(cwd => scheduleRepoStatusRefresh(cwd))
 // A worktree add/remove (desktop op, or the agent's out-of-band git in a settled
 // turn / a window refocus — both already bump this token) → re-probe.
 $worktreeRefreshToken.subscribe(() => scheduleRepoStatusRefresh())
+
+// Folder-first mode keeps Git status/review but does not discover or expose
+// alternate worktrees. Entering Projects mode re-runs the normal repo probe.
+$sidebarAgentsGrouped.subscribe(enabled => {
+  if (enabled) {
+    scheduleRepoStatusRefresh()
+  } else {
+    $repoWorktrees.set([])
+  }
+})
 
 // A file-mutating tool finished (event-driven, not polled) → re-probe so the
 // rail's branch/+/- move exactly when the agent touches the tree.

@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { HermesRepoStatus } from '@/global'
 
-import { $repoStatus, refreshRepoStatus } from './coding-status'
+import { $repoStatus, $repoWorktrees, refreshRepoStatus } from './coding-status'
+import { $sidebarAgentsGrouped } from './layout'
 import { $currentCwd } from './session'
 
 const sampleStatus: HermesRepoStatus = {
@@ -27,7 +28,9 @@ function stubProbe(impl: (cwd: string) => Promise<HermesRepoStatus | null>) {
 
 describe('refreshRepoStatus', () => {
   beforeEach(() => {
+    $sidebarAgentsGrouped.set(false)
     $repoStatus.set(null)
+    $repoWorktrees.set([])
     $currentCwd.set('')
     delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
   })
@@ -40,6 +43,40 @@ describe('refreshRepoStatus', () => {
     stubProbe(async () => sampleStatus)
     await refreshRepoStatus('/repo')
     expect($repoStatus.get()).toEqual(sampleStatus)
+  })
+
+  it('does not scan for worktrees while the folder view is selected', async () => {
+    const worktreeList = vi.fn(async () => [
+      { branch: 'feature', detached: false, isMain: false, locked: false, path: '/repo/.worktrees/feature' }
+    ])
+
+    ;(window as unknown as { hermesDesktop?: unknown }).hermesDesktop = {
+      git: { repoStatus: async () => sampleStatus, worktreeList }
+    }
+
+    await refreshRepoStatus('/repo')
+
+    expect(worktreeList).not.toHaveBeenCalled()
+    expect($repoWorktrees.get()).toEqual([])
+  })
+
+  it('scans for worktrees after the user explicitly selects Projects', async () => {
+    $sidebarAgentsGrouped.set(true)
+
+    const worktrees = [
+      { branch: 'feature', detached: false, isMain: false, locked: false, path: '/repo/.worktrees/feature' }
+    ]
+
+    const worktreeList = vi.fn(async () => worktrees)
+
+    ;(window as unknown as { hermesDesktop?: unknown }).hermesDesktop = {
+      git: { repoStatus: async () => sampleStatus, worktreeList }
+    }
+
+    await refreshRepoStatus('/repo')
+    await vi.waitFor(() => expect($repoWorktrees.get()).toEqual(worktrees))
+
+    expect(worktreeList).toHaveBeenCalledWith('/repo')
   })
 
   it('falls back to the active session cwd when none is passed', async () => {

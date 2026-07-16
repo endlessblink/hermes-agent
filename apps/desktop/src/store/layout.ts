@@ -17,7 +17,11 @@ export const FILE_BROWSER_MAX_WIDTH = '20rem'
 export const SIDEBAR_SESSIONS_PAGE_SIZE = 50
 
 const SIDEBAR_PINNED_STORAGE_KEY = 'hermes.desktop.pinnedSessions'
-const SIDEBAR_AGENTS_GROUPED_STORAGE_KEY = 'hermes.desktop.agentsGroupedByWorkspace'
+// A new key intentionally retires the old value, which was often set by
+// automatic cwd/worktree navigation rather than an explicit user choice. The
+// upgrade starts folder-first once; Projects remains a one-click opt-in and its
+// new preference persists normally afterward.
+const SIDEBAR_AGENTS_GROUPED_STORAGE_KEY = 'hermes.desktop.projectsViewEnabled'
 const SIDEBAR_CRON_OPEN_STORAGE_KEY = 'hermes.desktop.sidebarCronOpen'
 const SIDEBAR_MESSAGING_OPEN_STORAGE_KEY = 'hermes.desktop.sidebarMessagingOpen'
 const SIDEBAR_SESSION_ORDER_STORAGE_KEY = 'hermes.desktop.sessionOrder'
