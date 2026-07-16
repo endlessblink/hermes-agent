@@ -714,6 +714,13 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
     except Exception:
         pass
     try:
+        from agent.notion_approval_capabilities import notion_approval_capabilities
+
+        if key := session.get("session_key"):
+            notion_approval_capabilities.revoke_session(key)
+    except Exception:
+        pass
+    try:
         agent = session.get("agent")
         if agent is not None and hasattr(agent, "close"):
             agent.close()
@@ -14912,6 +14919,71 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"approvalCapability": capability})
     except (KeyError, TypeError, ValueError):
         return _err(rid, 4002, "invalid FlowState approval decision")
+
+
+def _notion_approval_proof(decision: Any) -> tuple[str, dict[str, Any]]:
+    if not isinstance(decision, dict):
+        raise ValueError("decision must be an object")
+    choice = decision.get("decision")
+    expected = {
+        "type", "schemaVersion", "contractVersion", "decision", "approval",
+        "tool", "apply", "previewExpiresAt",
+    }
+    if choice == "revise":
+        expected.add("correction")
+    if (
+        set(decision) != expected
+        or decision.get("type") != "notion-mutation-decision"
+        or decision.get("schemaVersion") != 1
+        or decision.get("contractVersion") != "notion-bridge-v1"
+        or choice not in {"approve", "revise"}
+        or decision.get("approval") is not (choice == "approve")
+    ):
+        raise ValueError("decision contract is invalid")
+    if choice == "revise":
+        correction = decision.get("correction")
+        if (
+            not isinstance(correction, str)
+            or correction != correction.strip()
+            or len(correction) > 2_000
+        ):
+            raise ValueError("revision correction is invalid")
+    from agent.notion_approval_capabilities import validate_notion_approval_proof
+
+    proof, _ = validate_notion_approval_proof(
+        {
+            "tool": decision.get("tool"),
+            "apply": decision.get("apply"),
+            "previewExpiresAt": decision.get("previewExpiresAt"),
+        }
+    )
+    return choice, proof
+
+
+@method("notion.approval.register")
+def _(rid, params: dict) -> dict:
+    if set(params) != {"session_id", "decision"}:
+        return _err(rid, 4002, "invalid Notion approval decision")
+    session, error = _sess_nowait(params, rid)
+    if error:
+        return error
+    try:
+        from agent.notion_approval_capabilities import notion_approval_capabilities
+
+        choice, proof = _notion_approval_proof(params.get("decision"))
+        session_key = str(session.get("session_key") or "")
+        if choice == "revise":
+            return _ok(
+                rid,
+                {
+                    "revoked": notion_approval_capabilities.invalidate(session_key, proof),
+                    "status": "revised",
+                },
+            )
+        notion_approval_capabilities.register(session_key, proof)
+        return _ok(rid, {"status": "approved"})
+    except (KeyError, TypeError, ValueError):
+        return _err(rid, 4002, "invalid Notion approval decision")
 
 
 # ── Methods: insights ────────────────────────────────────────────────

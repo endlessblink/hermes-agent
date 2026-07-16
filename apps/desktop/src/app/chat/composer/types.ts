@@ -57,6 +57,7 @@ export interface ChatBarProps {
     options?: {
       attachments?: ComposerAttachment[]
       flowstateDecision?: Record<string, unknown>
+      notionDecision?: Record<string, unknown>
       fromQueue?: boolean
       hidden?: boolean
     }

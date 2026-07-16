@@ -75,10 +75,39 @@ def _available(profile_name: str) -> bool:
     return True
 
 
-def _handler(method: str) -> Callable[..., str]:
+def _handler(method: str, tool_name: str) -> Callable[..., str]:
     def call(args: dict[str, Any], **_: Any) -> str:
         try:
-            result = getattr(_get_bridge(), method)(args)
+            request = dict(args)
+            bridge = _get_bridge()
+            if request.get("mode", "preview") == "apply":
+                preview_expires_at = request.get("preview_expires_at")
+                if not isinstance(preview_expires_at, str) or not preview_expires_at:
+                    raise BridgeError(
+                        "approval_required", "Interactive approval is required before apply"
+                    )
+                try:
+                    from agent.notion_approval_capabilities import notion_approval_capabilities
+                    from tools.approval import get_current_session_key
+
+                    notion_approval_capabilities.authorize_registered(
+                        get_current_session_key(default=""),
+                        {
+                            "tool": tool_name,
+                            "apply": request,
+                            "previewExpiresAt": preview_expires_at,
+                        },
+                    )
+                except Exception:
+                    try:
+                        recoverable = bridge.can_recover(method, request)
+                    except Exception:
+                        recoverable = False
+                    if not recoverable:
+                        raise BridgeError(
+                            "approval_required", "Interactive approval is required before apply"
+                        ) from None
+            result = getattr(bridge, method)(request)
             return json.dumps({"ok": True, **result}, ensure_ascii=False, separators=(",", ":"))
         except BridgeError as exc:
             return json.dumps(
@@ -148,6 +177,7 @@ _SCHEMAS = {
                 "status_property": {"type": "string"},
                 "status_name": {"type": "string"},
                 "preview_digest": {"type": "string"},
+                "preview_expires_at": {"type": "string"},
             },
             "required": ["operation_id", "action"],
             "oneOf": [
@@ -195,6 +225,7 @@ _SCHEMAS = {
                 },
                 "work_block": {"type": "object"},
                 "preview_digest": {"type": "string"},
+                "preview_expires_at": {"type": "string"},
             },
             "required": ["operation_id", "page_id", "task"],
             "additionalProperties": False,
@@ -218,7 +249,7 @@ def register(ctx: Any) -> None:
             name=name,
             toolset="notion_flowstate_bridge",
             schema=_SCHEMAS[name],
-            handler=_handler(method),
+            handler=_handler(method, name),
             check_fn=lambda profile_name=profile_name: _available(profile_name),
             description=_SCHEMAS[name]["description"],
             emoji="🔗",

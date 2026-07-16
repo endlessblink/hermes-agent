@@ -95,6 +95,7 @@ interface ChatViewProps extends Omit<React.ComponentProps<'div'>, 'onSubmit'> {
     options?: {
       attachments?: ComposerAttachment[]
       flowstateDecision?: Record<string, unknown>
+      notionDecision?: Record<string, unknown>
       fromQueue?: boolean
       hidden?: boolean
     }

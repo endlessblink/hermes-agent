@@ -52,6 +52,7 @@ interface HarnessHandle {
     options?: {
       attachments?: ComposerAttachment[]
       flowstateDecision?: Record<string, unknown>
+      notionDecision?: Record<string, unknown>
       fromQueue?: boolean
       hidden?: boolean
     }
@@ -658,9 +659,7 @@ describe('usePromptActions submit / queue drain semantics', () => {
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       calls.push({ method, params })
 
-      return (method === 'flowstate.approval.register'
-        ? { approvalCapability: 'capability-123' }
-        : {}) as never
+      return (method === 'flowstate.approval.register' ? { approvalCapability: 'capability-123' } : {}) as never
     })
 
     let handle: HarnessHandle | null = null
@@ -694,15 +693,11 @@ describe('usePromptActions submit / queue drain semantics', () => {
   })
 
   it('fails closed when approval registration returns no capability', async () => {
-    const requestGateway = vi.fn(async () => ({} as never))
+    const requestGateway = vi.fn(async () => ({}) as never)
     let handle: HarnessHandle | null = null
 
     render(
-      <Harness
-        onReady={h => (handle = h)}
-        refreshSessions={async () => undefined}
-        requestGateway={requestGateway}
-      />
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
     )
 
     expect(
@@ -716,6 +711,33 @@ describe('usePromptActions submit / queue drain semantics', () => {
       session_id: RUNTIME_SESSION_ID
     })
     expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
+  })
+
+  it('registers an exact Notion approval without exposing a capability token', async () => {
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const decision = {
+      approval: true,
+      apply: { mode: 'apply', operation_id: 'notion-op-1' },
+      contractVersion: 'notion-bridge-v1',
+      decision: 'approve',
+      previewExpiresAt: '2099-07-16T12:00:00Z',
+      tool: 'notion_mutation',
+      type: 'notion-mutation-decision'
+    }
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+      return (method === 'notion.approval.register' ? { status: 'approved' } : {}) as never
+    })
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    expect(await handle!.submitText('untrusted', { hidden: true, notionDecision: decision })).toBe(true)
+    expect(calls.map(call => call.method)).toEqual(['notion.approval.register', 'prompt.submit'])
+    expect(calls[0]?.params).toEqual({ decision, session_id: RUNTIME_SESSION_ID })
+    expect(calls[1]?.params?.text).toBe(`Hermes UI trusted Notion mutation decision:\n${JSON.stringify(decision)}`)
+    expect(String(calls[1]?.params?.text)).not.toContain('approvalCapability')
   })
 
   it('submits revision decisions without an approval capability', async () => {
@@ -733,32 +755,28 @@ describe('usePromptActions submit / queue drain semantics', () => {
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       calls.push({ method, params })
 
-      return (method === 'flowstate.approval.register'
-        ? { approvalCapability: 'must-not-follow-a-revision' }
-        : {}) as never
+      return (
+        method === 'flowstate.approval.register' ? { approvalCapability: 'must-not-follow-a-revision' } : {}
+      ) as never
     })
 
     let handle: HarnessHandle | null = null
 
     render(
-      <Harness
-        onReady={h => (handle = h)}
-        refreshSessions={async () => undefined}
-        requestGateway={requestGateway}
-      />
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
     )
 
     expect(await handle!.submitText('revise', { flowstateDecision: decision, hidden: true })).toBe(true)
     expect(calls.map(call => call.method)).toEqual(['flowstate.approval.register', 'prompt.submit'])
-    expect(calls[1]?.params?.text).toBe(
-      `Hermes UI trusted FlowState mutation decision:\n${JSON.stringify(decision)}`
-    )
+    expect(calls[1]?.params?.text).toBe(`Hermes UI trusted FlowState mutation decision:\n${JSON.stringify(decision)}`)
 
-    const [persisted] = toChatMessages([{
-      content: calls[1]?.params?.text as string,
-      role: 'user',
-      timestamp: 1
-    }])
+    const [persisted] = toChatMessages([
+      {
+        content: calls[1]?.params?.text as string,
+        role: 'user',
+        timestamp: 1
+      }
+    ])
 
     expect(persisted.hidden).toBe(true)
   })
@@ -784,11 +802,7 @@ describe('usePromptActions submit / queue drain semantics', () => {
     let handle: HarnessHandle | null = null
 
     render(
-      <Harness
-        onReady={h => (handle = h)}
-        refreshSessions={async () => undefined}
-        requestGateway={requestGateway}
-      />
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
     )
 
     expect(await handle!.submitText('approve', { flowstateDecision: decision, hidden: true })).toBe(false)

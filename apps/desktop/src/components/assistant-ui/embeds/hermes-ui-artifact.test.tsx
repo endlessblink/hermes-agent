@@ -1,9 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { HermesUiMutationPreviewArtifact, HermesUiTaskBreakdownArtifact } from '@/lib/hermes-ui-artifacts'
+import type {
+  HermesUiMutationPreviewArtifact,
+  HermesUiNotionMutationPreviewArtifact,
+  HermesUiTaskBreakdownArtifact
+} from '@/lib/hermes-ui-artifacts'
 
-import { MutationPreviewCard, TaskBreakdownCard } from './hermes-ui-artifact'
+import { MutationPreviewCard, NotionMutationPreviewCard, TaskBreakdownCard } from './hermes-ui-artifact'
 import { RichCodeBlock } from './registry'
 
 const { requestComposerSubmit } = vi.hoisted(() => ({
@@ -19,7 +23,12 @@ const breakdown: HermesUiTaskBreakdownArtifact = {
   schemaVersion: 1,
   scope: 'working-session',
   steps: [
-    { clientId: 'discover', doneEnough: 'The missing input is named', estimateMinutes: 10, title: 'Find what is missing' },
+    {
+      clientId: 'discover',
+      doneEnough: 'The missing input is named',
+      estimateMinutes: 10,
+      title: 'Find what is missing'
+    },
     { clientId: 'draft', doneEnough: 'A rough draft exists', estimateMinutes: 20, title: 'Make a rough draft' }
   ],
   submitLabel: 'Update breakdown',
@@ -43,7 +52,15 @@ function preview(expiresAt = '2099-07-16T12:00:00Z'): HermesUiMutationPreviewArt
       requestHash: 'b'.repeat(64),
       taskId: 'task-vague'
     },
-    changes: [{ after: { steps: 1 }, before: { steps: 0 }, operation: 'update', taskId: 'task-vague', title: 'Move the site forward' }],
+    changes: [
+      {
+        after: { steps: 1 },
+        before: { steps: 0 },
+        operation: 'update',
+        taskId: 'task-vague',
+        title: 'Move the site forward'
+      }
+    ],
     direction: 'ltr',
     title: 'Approve exact breakdown',
     type: 'mutation-preview'
@@ -112,12 +129,14 @@ describe('TaskBreakdownCard', () => {
 describe('MutationPreviewCard', () => {
   it('shows every exact canonical field and ignores the model-authored change summary', () => {
     const artifact = preview()
-    artifact.changes = [{
-      operation: 'delete',
-      risk: 'high',
-      taskId: 'task-vague',
-      title: 'MISLEADING MODEL SUMMARY'
-    }]
+    artifact.changes = [
+      {
+        operation: 'delete',
+        risk: 'high',
+        taskId: 'task-vague',
+        title: 'MISLEADING MODEL SUMMARY'
+      }
+    ]
     artifact.canonicalApproval.operations = [
       {
         canvasPosition: { x: 12, y: 24 },
@@ -214,6 +233,79 @@ describe('MutationPreviewCard', () => {
   })
 })
 
+describe('NotionMutationPreviewCard', () => {
+  it('shows the exact apply payload and submits a trusted Notion decision', async () => {
+    const expires = '2099-07-16T12:00:00Z'
+    const artifact: HermesUiNotionMutationPreviewArtifact = {
+      canonicalApproval: {
+        apply: {
+          action: 'set_status',
+          data_source_id: 'source-1',
+          mode: 'apply',
+          operation_id: 'notion-status-1',
+          page_id: 'page-1',
+          preview_digest: `sha256:${'a'.repeat(64)}`,
+          preview_expires_at: expires,
+          status_name: 'In progress',
+          status_property: 'Status'
+        },
+        contractVersion: 'notion-bridge-v1',
+        previewExpiresAt: expires,
+        tool: 'notion_mutation'
+      },
+      changes: [{ operation: 'update', targetId: 'page-1', title: 'MISLEADING SUMMARY' }],
+      title: 'Approve Notion update',
+      type: 'notion-mutation-preview'
+    }
+
+    render(<NotionMutationPreviewCard artifact={artifact} />)
+    const exact = document.querySelector('[data-exact-notion-operation="notion_mutation"]')?.textContent || ''
+    expect(exact).toContain('set_status')
+    expect(exact).toContain('page-1')
+    expect(exact).toContain('In progress')
+    expect(screen.queryByText('MISLEADING SUMMARY')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve exact changes' }))
+    await waitFor(() => expect(requestComposerSubmit).toHaveBeenCalledTimes(1))
+    const [text, options] = requestComposerSubmit.mock.calls[0] as unknown as [string, Record<string, unknown>]
+    const decision = JSON.parse(text.slice(text.indexOf('\n') + 1))
+    expect(decision).toMatchObject({ approval: true, decision: 'approve', tool: 'notion_mutation' })
+    expect(options).toEqual({ hidden: true, notionDecision: decision, target: 'main' })
+  })
+
+  it('renders an exact activation work block instead of a prose-only confirmation', () => {
+    const expires = '2099-07-16T12:00:00Z'
+    const artifact: HermesUiNotionMutationPreviewArtifact = {
+      canonicalApproval: {
+        apply: {
+          data_source_id: 'source-1',
+          mode: 'apply',
+          operation_id: 'activate-1',
+          page_id: 'page-1',
+          preview_digest: 'sha256:activation-preview',
+          preview_expires_at: expires,
+          task: { title: 'Prepare proposal' },
+          work_block: { duration: 25, scheduledDate: '2026-07-16', scheduledTime: '10:00' }
+        },
+        contractVersion: 'notion-bridge-v1',
+        previewExpiresAt: expires,
+        tool: 'notion_flowstate_activate'
+      },
+      changes: [{ operation: 'create', targetId: 'page-1', title: 'Activate Prepare proposal' }],
+      type: 'notion-mutation-preview'
+    }
+
+    render(<NotionMutationPreviewCard artifact={artifact} />)
+    const exact = document.querySelector('[data-exact-notion-operation="notion_flowstate_activate"]')?.textContent || ''
+
+    expect(exact).toContain('Prepare proposal')
+    expect(exact).toContain('scheduledTime')
+    expect(exact).toContain('10:00')
+    expect(exact).toContain('duration')
+    expect(exact).toContain('25')
+  })
+})
+
 describe('hermes-ui rich fences', () => {
   it('replaces a valid completed fence with its card without flashing raw JSON', async () => {
     render(<RichCodeBlock code={JSON.stringify(breakdown)} fallback={<pre>raw valid JSON</pre>} language="hermes-ui" />)
@@ -223,7 +315,14 @@ describe('hermes-ui rich fences', () => {
   })
 
   it('shows a placeholder for incomplete streaming JSON and never exposes raw JSON', () => {
-    render(<RichCodeBlock code={'{"type":"task-breakdown","steps":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming />)
+    render(
+      <RichCodeBlock
+        code={'{"type":"task-breakdown","steps":['}
+        fallback={<pre>raw partial JSON</pre>}
+        language="hermes-ui"
+        streaming
+      />
+    )
 
     expect(screen.getByRole('status').textContent).toBe('Preparing interactive assistant…')
     expect(screen.queryByText('raw partial JSON')).toBeNull()

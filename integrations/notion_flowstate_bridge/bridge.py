@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 import urllib.error
@@ -164,7 +165,22 @@ class JsonTransport:
 class ReceiptStore:
     def __init__(self, path: Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.path.parent.chmod(0o700)
+        if self.path.is_symlink():
+            raise BridgeError("invalid_config", "Bridge state file must not be a symbolic link")
+        flags = os.O_WRONLY | os.O_CREAT
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise BridgeError("invalid_config", "Bridge state file could not be secured") from exc
+        else:
+            os.close(descriptor)
+        self.path.chmod(0o600)
         with self._connect() as db:
             db.executescript(
                 """
@@ -314,6 +330,24 @@ class ReceiptStore:
             return value
         return None
 
+    def recovery_status(
+        self, operation_id: str, kind: str, request: dict[str, Any], now: float
+    ) -> str | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT request_digest,status,claimed_at FROM receipts WHERE operation_id=? AND kind=?",
+                (operation_id, kind),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["request_digest"] != _digest(request):
+            raise BridgeError("operation_conflict", "Operation ID is already bound to different input")
+        if row["status"] == "verified":
+            return "verified"
+        if row["status"] == "applying" and float(row["claimed_at"] or 0) <= now - 60:
+            return "stale_applying"
+        return None
+
     def claim(
         self, operation_id: str, kind: str, request: dict[str, Any], now: float
     ) -> dict[str, Any] | None:
@@ -392,6 +426,49 @@ class Bridge:
         if self.config.flowstate_token:
             headers["Authorization"] = f"Bearer {self.config.flowstate_token}"
         return headers
+
+    @staticmethod
+    def _approved_expiry_matches(args: Mapping[str, Any], preview_row: sqlite3.Row) -> bool:
+        try:
+            return _parse_time(args.get("preview_expires_at")) == float(preview_row["expires_at"])
+        except BridgeError:
+            return False
+
+    def can_recover(self, method: str, args: dict[str, Any]) -> bool:
+        """Allow only exact read-back/replay of a previously dispatched apply."""
+        if args.get("mode") != "apply":
+            return False
+        preview_digest = _required_text(args.get("preview_digest"), "preview_digest")
+        now = self.clock()
+        if method == "mutate_notion":
+            operation_id, intent = self._notion_request(args)
+            row, request = self.store.resolve_preview(
+                operation_id, "notion_mutation", intent, preview_digest
+            )
+            if not self._approved_expiry_matches(args, row):
+                return False
+            return self.store.recovery_status(
+                operation_id, "notion_mutation", request, now
+            ) in {"verified", "stale_applying"}
+        if method == "activate":
+            page_id = _required_text(args.get("page_id"), "page_id")
+            page = self._notion("GET", f"/pages/{urllib.parse.quote(page_id)}")
+            self._verify_page_identity(page, page_id, self._data_source_id(args))
+            operation_id, request = self._activation_request(args, page)
+            row = self.store.require_preview(
+                operation_id,
+                "flowstate_activation",
+                request,
+                preview_digest,
+                now,
+                allow_expired=True,
+            )
+            if not self._approved_expiry_matches(args, row):
+                return False
+            return self.store.recovery_status(
+                operation_id, "flowstate_activation", request, now
+            ) in {"verified", "stale_applying"}
+        return False
 
     def _notion(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.transport.request(
@@ -747,12 +824,34 @@ class Bridge:
                 {"kind": kind, "request": request, "expires_at": expires_at}
             )
             self.store.save_preview(operation_id, kind, request, preview_digest, expires_at, now)
+            expires_at_text = datetime.fromtimestamp(expires_at, timezone.utc).isoformat()
+            apply: dict[str, Any] = {
+                "mode": "apply",
+                "operation_id": operation_id,
+                "action": intent["action"],
+                "data_source_id": intent["data_source_id"],
+            }
+            if "page_id" in intent:
+                apply["page_id"] = intent["page_id"]
+            if intent["action"] in {"create_task", "update_properties"}:
+                apply["properties"] = intent["properties"]
+            elif intent["action"] == "set_status":
+                apply["status_property"] = intent["status_property"]
+                apply["status_name"] = intent["status_name"]
+            apply["preview_digest"] = preview_digest
+            apply["preview_expires_at"] = expires_at_text
             return {
                 "mode": "preview",
                 "operation_id": operation_id,
                 "preview_digest": preview_digest,
-                "expires_at": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+                "expires_at": expires_at_text,
                 "preview": request,
+                "approval_request": {
+                    "contractVersion": "notion-bridge-v1",
+                    "tool": "notion_mutation",
+                    "apply": apply,
+                    "previewExpiresAt": expires_at_text,
+                },
             }
         preview_digest = _required_text(args.get("preview_digest"), "preview_digest")
         preview_row, request = self.store.resolve_preview(
@@ -1077,6 +1176,17 @@ class Bridge:
             self.store.save_preview(
                 operation_id, kind, request, preview_digest, expires_at, now
             )
+            apply = {
+                "mode": "apply",
+                "operation_id": operation_id,
+                "data_source_id": data_source_id,
+                "page_id": page_id,
+                "task": request["task"],
+                "preview_digest": preview_digest,
+                "preview_expires_at": str(expires_raw),
+            }
+            if request["workBlock"] is not None:
+                apply["work_block"] = request["workBlock"]
             return {
                 "mode": "preview",
                 "operation_id": operation_id,
@@ -1086,6 +1196,12 @@ class Bridge:
                 "expires_at": expires_raw,
                 "already_activated": response.get("alreadyActivated") is True,
                 "preview": response.get("normalizedPayload", {}),
+                "approval_request": {
+                    "contractVersion": "notion-bridge-v1",
+                    "tool": "notion_flowstate_activate",
+                    "apply": apply,
+                    "previewExpiresAt": str(expires_raw),
+                },
             }
         preview_digest = _required_text(args.get("preview_digest"), "preview_digest")
         duplicate = self.store.receipt(operation_id, kind, request)

@@ -8,6 +8,7 @@ import {
   HERMES_UI_TASK_BREAKDOWN_LIMITS,
   type HermesUiArtifact,
   type HermesUiMutationPreviewArtifact,
+  type HermesUiNotionMutationPreviewArtifact,
   type HermesUiTaskBreakdownArtifact,
   type HermesUiTaskBreakdownStep,
   parseHermesUiArtifact,
@@ -28,9 +29,15 @@ function artifactDirection(artifact: HermesUiArtifact): 'ltr' | 'rtl' {
     return artifact.direction
   }
 
-  const text = artifact.type === 'task-breakdown'
-    ? [artifact.title, artifact.description, artifact.task.title, ...artifact.steps.flatMap(step => [step.title, step.doneEnough])]
-    : [artifact.title, artifact.description, ...artifact.changes.map(change => change.title)]
+  const text =
+    artifact.type === 'task-breakdown'
+      ? [
+          artifact.title,
+          artifact.description,
+          artifact.task.title,
+          ...artifact.steps.flatMap(step => [step.title, step.doneEnough])
+        ]
+      : [artifact.title, artifact.description, ...artifact.changes.map(change => change.title)]
 
   return text.some(hasRtlText) ? 'rtl' : 'ltr'
 }
@@ -49,16 +56,25 @@ function ArtifactShell({ artifact, children }: { artifact: HermesUiArtifact; chi
 
   return (
     <section
-      aria-label={artifact.title || (artifact.type === 'task-breakdown' ? artifact.task.title : t.assistantUi.previewLabel)}
-      className={cn('my-3 overflow-hidden rounded-md border border-border/80 bg-muted/25', isRtl ? 'text-right' : 'text-left')}
+      aria-label={
+        artifact.title || (artifact.type === 'task-breakdown' ? artifact.task.title : t.assistantUi.previewLabel)
+      }
+      className={cn(
+        'my-3 overflow-hidden rounded-md border border-border/80 bg-muted/25',
+        isRtl ? 'text-right' : 'text-left'
+      )}
       data-hermes-ui-artifact={artifact.type}
       dir={direction}
       style={style}
     >
       {(artifact.title || artifact.description) && (
         <header className="border-b border-border/65 px-3 py-2.5">
-          {artifact.title && <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground">{artifact.title}</h3>}
-          {artifact.description && <p className="m-0 mt-1 text-[0.72rem] leading-relaxed text-muted-foreground">{artifact.description}</p>}
+          {artifact.title && (
+            <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground">{artifact.title}</h3>
+          )}
+          {artifact.description && (
+            <p className="m-0 mt-1 text-[0.72rem] leading-relaxed text-muted-foreground">{artifact.description}</p>
+          )}
         </header>
       )}
       {children}
@@ -158,12 +174,12 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
     })
   }
 
-  const valid = steps.every(step =>
-    step.title.trim() &&
-    step.doneEnough.trim() &&
-    (step.estimateMinutes === undefined || (
-      Number.isInteger(step.estimateMinutes) && step.estimateMinutes >= 1 && step.estimateMinutes <= 480
-    ))
+  const valid = steps.every(
+    step =>
+      step.title.trim() &&
+      step.doneEnough.trim() &&
+      (step.estimateMinutes === undefined ||
+        (Number.isInteger(step.estimateMinutes) && step.estimateMinutes >= 1 && step.estimateMinutes <= 480))
   )
 
   const submit = async () => {
@@ -203,7 +219,11 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
 
   return (
     <ArtifactShell artifact={artifact}>
-      <div className="flex items-center justify-between gap-3 border-b border-border/55 px-3 py-2" dir={direction} style={style}>
+      <div
+        className="flex items-center justify-between gap-3 border-b border-border/55 px-3 py-2"
+        dir={direction}
+        style={style}
+      >
         <span className="min-w-0 truncate text-[0.75rem] font-medium text-foreground">{artifact.task.title}</span>
         <span className="shrink-0 rounded-md border border-border/70 px-2 py-1 text-[0.68rem] text-muted-foreground">
           {copy.scope[artifact.scope]}
@@ -234,16 +254,34 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
           return (
             <div className="rounded-lg border border-border/60 bg-background/35 p-2.5" key={identity}>
               <div className={cn('mb-1.5 flex items-center justify-between gap-2', isRtl && 'flex-row-reverse')}>
-                <span className="text-[0.68rem] font-medium text-muted-foreground">{copy.step} {index + 1}</span>
+                <span className="text-[0.68rem] font-medium text-muted-foreground">
+                  {copy.step} {index + 1}
+                </span>
                 <div className="flex items-center gap-1">
-                  <button aria-label={`${copy.moveUp} ${step.title}`} disabled={index === 0} onClick={() => moveStep(index, -1)} type="button">↑</button>
-                  <button aria-label={`${copy.moveDown} ${step.title}`} disabled={index === steps.length - 1} onClick={() => moveStep(index, 1)} type="button">↓</button>
+                  <button
+                    aria-label={`${copy.moveUp} ${step.title}`}
+                    disabled={index === 0}
+                    onClick={() => moveStep(index, -1)}
+                    type="button"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    aria-label={`${copy.moveDown} ${step.title}`}
+                    disabled={index === steps.length - 1}
+                    onClick={() => moveStep(index, 1)}
+                    type="button"
+                  >
+                    ↓
+                  </button>
                   <button
                     aria-label={`${copy.remove} ${step.title}`}
                     disabled={steps.length === 1}
                     onClick={() => replaceSteps(current => current.filter(item => stepIdentity(item) !== identity))}
                     type="button"
-                  >×</button>
+                  >
+                    ×
+                  </button>
                 </div>
               </div>
               <input
@@ -269,9 +307,12 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
                     className="mx-1 w-20 rounded-md border border-border/70 bg-background px-2 py-1 text-[0.72rem] text-foreground"
                     max={480}
                     min={1}
-                    onChange={event => updateStep(identity, {
-                      estimateMinutes: event.currentTarget.value === '' ? undefined : event.currentTarget.valueAsNumber
-                    })}
+                    onChange={event =>
+                      updateStep(identity, {
+                        estimateMinutes:
+                          event.currentTarget.value === '' ? undefined : event.currentTarget.valueAsNumber
+                      })
+                    }
                     type="number"
                     value={step.estimateMinutes ?? ''}
                   />
@@ -291,23 +332,39 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
         })}
       </div>
 
-      <footer className={cn('flex flex-wrap items-center gap-2 border-t border-border/65 px-3 py-2.5', isRtl && 'justify-end')}>
+      <footer
+        className={cn(
+          'flex flex-wrap items-center gap-2 border-t border-border/65 px-3 py-2.5',
+          isRtl && 'justify-end'
+        )}
+      >
         <button
           className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.72rem]"
           disabled={steps.length >= HERMES_UI_TASK_BREAKDOWN_LIMITS.stepCount}
-          onClick={() => replaceSteps(current => [...current, { clientId: nextClientId(artifact, current), doneEnough: '', title: '' }])}
+          onClick={() =>
+            replaceSteps(current => [
+              ...current,
+              { clientId: nextClientId(artifact, current), doneEnough: '', title: '' }
+            ])
+          }
           type="button"
         >
           {copy.addStep}
         </button>
-        {submission === 'failed' && <span className="text-[0.68rem] font-medium text-destructive">{copy.sendFailed}</span>}
+        {submission === 'failed' && (
+          <span className="text-[0.68rem] font-medium text-destructive">{copy.sendFailed}</span>
+        )}
         <button
           className="rounded-md bg-foreground px-2.5 py-1 text-[0.72rem] font-medium text-background disabled:opacity-45"
           disabled={!valid || submission === 'sending'}
           onClick={() => void submit()}
           type="button"
         >
-          {submission === 'sending' ? copy.sending : submission === 'sent' ? copy.sent : artifact.submitLabel || copy.updateBreakdown}
+          {submission === 'sending'
+            ? copy.sending
+            : submission === 'sent'
+              ? copy.sent
+              : artifact.submitLabel || copy.updateBreakdown}
         </button>
       </footer>
     </ArtifactShell>
@@ -338,7 +395,11 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
   const copy = t.assistantUi
   const { direction, isRtl, style } = useArtifactLayout(artifact)
   const [correction, setCorrection] = useState('')
-  const [submission, setSubmission] = useState<'approve' | 'failed' | 'idle' | 'revise' | 'sending-approve' | 'sending-revise'>('idle')
+
+  const [submission, setSubmission] = useState<
+    'approve' | 'failed' | 'idle' | 'revise' | 'sending-approve' | 'sending-revise'
+  >('idle')
+
   const approvalIdentity = useMemo(() => JSON.stringify(artifact.canonicalApproval), [artifact.canonicalApproval])
   const expiry = Date.parse(artifact.canonicalApproval.previewExpiresAt)
   const [now, setNow] = useState(() => Date.now())
@@ -386,10 +447,11 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
 
     setSubmission(decision === 'approve' ? 'sending-approve' : 'sending-revise')
 
-    const accepted = await requestComposerSubmit(
-      `Hermes UI canonical mutation decision:\n${JSON.stringify(payload)}`,
-      { flowstateDecision: payload, hidden: true, target: 'main' }
-    )
+    const accepted = await requestComposerSubmit(`Hermes UI canonical mutation decision:\n${JSON.stringify(payload)}`, {
+      flowstateDecision: payload,
+      hidden: true,
+      target: 'main'
+    })
 
     setSubmission(accepted ? decision : 'failed')
   }
@@ -403,7 +465,8 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
 
         <div className="space-y-2 rounded-md border border-border/60 bg-background/30 p-2.5">
           <div className="text-[0.68rem] text-muted-foreground">
-            {copy.exactOperations}: {artifact.canonicalApproval.operations.length} · {copy.baseRevision}: {artifact.canonicalApproval.baseRevision}
+            {copy.exactOperations}: {artifact.canonicalApproval.operations.length} · {copy.baseRevision}:{' '}
+            {artifact.canonicalApproval.baseRevision}
           </div>
           <div className="space-y-1">
             {artifact.canonicalApproval.operations.map((operation, index) => {
@@ -422,7 +485,9 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
                   <dl className="mt-1 grid gap-x-3 gap-y-1 sm:grid-cols-[minmax(7rem,auto)_1fr]">
                     {fields.map(([key, value]) => (
                       <div className="contents" key={key}>
-                        <dt className="text-muted-foreground">{copy.mutationFields[key as keyof typeof copy.mutationFields]}</dt>
+                        <dt className="text-muted-foreground">
+                          {copy.mutationFields[key as keyof typeof copy.mutationFields]}
+                        </dt>
                         <dd className="m-0 whitespace-pre-wrap wrap-anywhere">
                           {displayExactOperationValue(value, copy)}
                         </dd>
@@ -445,8 +510,12 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
               value={correction}
             />
           </label>
-          {expired && <div className="text-[0.68rem] font-medium text-amber-700 dark:text-amber-300">{copy.expired}</div>}
-          {submission === 'failed' && <div className="text-[0.68rem] font-medium text-destructive">{copy.sendFailed}</div>}
+          {expired && (
+            <div className="text-[0.68rem] font-medium text-amber-700 dark:text-amber-300">{copy.expired}</div>
+          )}
+          {submission === 'failed' && (
+            <div className="text-[0.68rem] font-medium text-destructive">{copy.sendFailed}</div>
+          )}
           <div className={cn('flex flex-wrap gap-1.5', isRtl && 'justify-end')}>
             <button
               className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.7rem] font-medium text-foreground disabled:opacity-50"
@@ -454,7 +523,11 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
               onClick={() => void submit('revise')}
               type="button"
             >
-              {submission === 'sending-revise' ? copy.sending : submission === 'revise' ? copy.sent : copy.requestPreview}
+              {submission === 'sending-revise'
+                ? copy.sending
+                : submission === 'revise'
+                  ? copy.sent
+                  : copy.requestPreview}
             </button>
             <button
               className="rounded-md border border-emerald-600/50 bg-emerald-600/10 px-2 py-1 text-[0.7rem] font-semibold text-emerald-800 disabled:opacity-50 dark:text-emerald-200"
@@ -462,9 +535,154 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
               onClick={() => void submit('approve')}
               type="button"
             >
-              {submission === 'sending-approve' ? copy.sending : submission === 'approve' ? copy.approvedAndSent : copy.approveExact}
+              {submission === 'sending-approve'
+                ? copy.sending
+                : submission === 'approve'
+                  ? copy.approvedAndSent
+                  : copy.approveExact}
             </button>
           </div>
+        </div>
+      </div>
+    </ArtifactShell>
+  )
+}
+
+function displayNotionValue(value: unknown, unknown: string): string {
+  if (value === undefined || value === null || value === '') {
+    return unknown
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value)
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false'
+  }
+
+  return JSON.stringify(value, null, 2)
+}
+
+export function NotionMutationPreviewCard({ artifact }: { artifact: HermesUiNotionMutationPreviewArtifact }) {
+  const { t } = useI18n()
+  const copy = t.assistantUi
+  const { direction, isRtl, style } = useArtifactLayout(artifact)
+  const [correction, setCorrection] = useState('')
+
+  const [submission, setSubmission] = useState<
+    'approve' | 'failed' | 'idle' | 'revise' | 'sending-approve' | 'sending-revise'
+  >('idle')
+
+  const approvalIdentity = useMemo(() => JSON.stringify(artifact.canonicalApproval), [artifact.canonicalApproval])
+  const expiry = Date.parse(artifact.canonicalApproval.previewExpiresAt)
+  const [now, setNow] = useState(() => Date.now())
+  const expired = expiry <= now
+
+  const applyFields = Object.entries(artifact.canonicalApproval.apply).filter(
+    ([key]) => !['mode', 'preview_digest', 'preview_expires_at'].includes(key)
+  )
+
+  useEffect(() => {
+    setCorrection('')
+    setSubmission('idle')
+    setNow(Date.now())
+  }, [approvalIdentity])
+
+  useEffect(() => {
+    if (expiry <= now) {
+      return
+    }
+
+    const timeout = window.setTimeout(() => setNow(Date.now()), Math.min(expiry - now + 10, 2_147_483_647))
+
+    return () => window.clearTimeout(timeout)
+  }, [expiry, now])
+
+  const submit = async (decision: 'approve' | 'revise') => {
+    if (submission !== 'idle' && submission !== 'failed') {
+      return
+    }
+
+    if (decision === 'approve' && (expired || correction.trim())) {
+      return
+    }
+
+    const payload = {
+      ...artifact.canonicalApproval,
+      approval: decision === 'approve',
+      ...(decision === 'revise' ? { correction: correction.trim() } : {}),
+      decision,
+      schemaVersion: 1,
+      type: 'notion-mutation-decision'
+    }
+
+    setSubmission(decision === 'approve' ? 'sending-approve' : 'sending-revise')
+
+    const accepted = await requestComposerSubmit(
+      `Hermes UI canonical Notion mutation decision:\n${JSON.stringify(payload)}`,
+      { hidden: true, notionDecision: payload, target: 'main' }
+    )
+
+    setSubmission(accepted ? decision : 'failed')
+  }
+
+  return (
+    <ArtifactShell artifact={{ ...artifact, description: undefined, title: copy.previewLabel }}>
+      <div className="space-y-2 px-3 py-3" dir={direction} style={style}>
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[0.72rem] font-medium text-amber-800 dark:text-amber-200">
+          {copy.canonicalPreview}
+        </div>
+        <div
+          className="space-y-1 rounded-md border border-border/60 bg-background/30 p-2.5"
+          data-exact-notion-operation={artifact.canonicalApproval.tool}
+        >
+          {applyFields.map(([key, value]) => (
+            <div className="grid gap-1 text-[0.68rem] sm:grid-cols-[minmax(8rem,auto)_1fr]" key={key}>
+              <span className="font-medium text-muted-foreground">{key}</span>
+              <span className="whitespace-pre-wrap wrap-anywhere text-foreground">
+                {displayNotionValue(value, copy.unknown)}
+              </span>
+            </div>
+          ))}
+        </div>
+        <label className="block text-[0.7rem] font-medium text-foreground">
+          {copy.correction}
+          <textarea
+            aria-label={copy.correction}
+            className="mt-1 min-h-20 w-full resize-y rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.72rem] text-foreground"
+            disabled={submission === 'approve' || submission === 'revise'}
+            maxLength={1000}
+            onChange={event => setCorrection(event.currentTarget.value)}
+            placeholder={copy.correctionPlaceholder}
+            value={correction}
+          />
+        </label>
+        {expired && <div className="text-[0.68rem] font-medium text-amber-700 dark:text-amber-300">{copy.expired}</div>}
+        {submission === 'failed' && (
+          <div className="text-[0.68rem] font-medium text-destructive">{copy.sendFailed}</div>
+        )}
+        <div className={cn('flex flex-wrap gap-1.5', isRtl && 'justify-end')}>
+          <button
+            className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.7rem] font-medium text-foreground disabled:opacity-50"
+            disabled={submission !== 'idle' && submission !== 'failed'}
+            onClick={() => void submit('revise')}
+            type="button"
+          >
+            {submission === 'sending-revise' ? copy.sending : submission === 'revise' ? copy.sent : copy.requestPreview}
+          </button>
+          <button
+            className="rounded-md border border-emerald-600/50 bg-emerald-600/10 px-2 py-1 text-[0.7rem] font-semibold text-emerald-800 disabled:opacity-50 dark:text-emerald-200"
+            disabled={expired || Boolean(correction.trim()) || (submission !== 'idle' && submission !== 'failed')}
+            onClick={() => void submit('approve')}
+            type="button"
+          >
+            {submission === 'sending-approve'
+              ? copy.sending
+              : submission === 'approve'
+                ? copy.approvedAndSent
+                : copy.approveExact}
+          </button>
         </div>
       </div>
     </ArtifactShell>
@@ -478,7 +696,13 @@ export default function HermesUiArtifactRenderer({ code }: RichFenceProps) {
     return null
   }
 
-  return result.artifact.type === 'task-breakdown'
-    ? <TaskBreakdownCard artifact={result.artifact} />
-    : <MutationPreviewCard artifact={result.artifact} />
+  if (result.artifact.type === 'task-breakdown') {
+    return <TaskBreakdownCard artifact={result.artifact} />
+  }
+
+  if (result.artifact.type === 'notion-mutation-preview') {
+    return <NotionMutationPreviewCard artifact={result.artifact} />
+  }
+
+  return <MutationPreviewCard artifact={result.artifact} />
 }

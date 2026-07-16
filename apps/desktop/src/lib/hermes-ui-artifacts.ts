@@ -96,7 +96,35 @@ export interface HermesUiMutationPreviewArtifact {
   description?: string
 }
 
-export type HermesUiArtifact = HermesUiMutationPreviewArtifact | HermesUiTaskBreakdownArtifact
+export interface HermesUiNotionApproval {
+  contractVersion: 'notion-bridge-v1'
+  tool: 'notion_flowstate_activate' | 'notion_mutation'
+  apply: Record<string, unknown>
+  previewExpiresAt: string
+}
+
+export interface HermesUiNotionMutationPreviewArtifact {
+  type: 'notion-mutation-preview'
+  canonicalApproval: HermesUiNotionApproval
+  changes: Array<{
+    targetId: string
+    title: string
+    operation: HermesUiMutationOperation
+    after?: HermesUiVisibleRecord
+    before?: HermesUiVisibleRecord
+    risk?: HermesUiMutationRisk
+    untouched?: string[]
+  }>
+  direction?: HermesUiDirection
+  id?: string
+  title?: string
+  description?: string
+}
+
+export type HermesUiArtifact =
+  | HermesUiMutationPreviewArtifact
+  | HermesUiNotionMutationPreviewArtifact
+  | HermesUiTaskBreakdownArtifact
 
 export interface HermesUiArtifactParseSuccess {
   artifact: HermesUiArtifact
@@ -149,8 +177,20 @@ const TASK_BREAKDOWN_KEYS = new Set([
 
 const TASK_KEYS = new Set(['baseRevision', 'id', 'title'])
 const STEP_KEYS = new Set(['clientId', 'doneEnough', 'estimateMinutes', 'optional', 'subtaskId', 'title'])
-const MUTATION_PREVIEW_KEYS = new Set(['canonicalApproval', 'changes', 'description', 'direction', 'id', 'title', 'type'])
+
+const MUTATION_PREVIEW_KEYS = new Set([
+  'canonicalApproval',
+  'changes',
+  'description',
+  'direction',
+  'id',
+  'title',
+  'type'
+])
+
 const CHANGE_KEYS = new Set(['after', 'before', 'operation', 'risk', 'taskId', 'title', 'untouched'])
+const NOTION_CHANGE_KEYS = new Set(['after', 'before', 'operation', 'risk', 'targetId', 'title', 'untouched'])
+const NOTION_APPROVAL_KEYS = new Set(['apply', 'contractVersion', 'previewExpiresAt', 'tool'])
 
 const APPROVAL_KEYS = new Set([
   'action',
@@ -250,7 +290,11 @@ function exactText(
   return value
 }
 
-function requiredNormalizedText(value: unknown, maxLength: number, field: string): HermesUiArtifactParseFailure | string {
+function requiredNormalizedText(
+  value: unknown,
+  maxLength: number,
+  field: string
+): HermesUiArtifactParseFailure | string {
   return normalizedText(value, maxLength, field, true) ?? { error: `${field} is required`, ok: false }
 }
 
@@ -522,7 +566,12 @@ function parseCanonicalOperation(
   const isCreate = value.kind === 'create'
   const identityField = isCreate ? 'clientId' : 'subtaskId'
   const incompatibleIdentity = isCreate ? 'subtaskId' : 'clientId'
-  const identity = requiredExactText(value[identityField], isCreate ? MAX_ID_LENGTH : MAX_SUBTASK_ID_LENGTH, `${field}.${identityField}`)
+
+  const identity = requiredExactText(
+    value[identityField],
+    isCreate ? MAX_ID_LENGTH : MAX_SUBTASK_ID_LENGTH,
+    `${field}.${identityField}`
+  )
 
   if (typeof identity !== 'string') {
     return identity
@@ -570,7 +619,11 @@ function parseCanonicalOperation(
   if (value.estimateMinutes === null) {
     estimateMinutes = null
   } else if (value.estimateMinutes !== undefined) {
-    if (!Number.isSafeInteger(value.estimateMinutes) || (value.estimateMinutes as number) < 1 || (value.estimateMinutes as number) > 1440) {
+    if (
+      !Number.isSafeInteger(value.estimateMinutes) ||
+      (value.estimateMinutes as number) < 1 ||
+      (value.estimateMinutes as number) > 1440
+    ) {
       return { error: `${field}.estimateMinutes must be null or an integer from 1 to 1440`, ok: false }
     }
 
@@ -698,7 +751,11 @@ function parseCanonicalApproval(value: unknown): HermesUiArtifactParseFailure | 
     return { error: 'canonicalApproval.previewExpiresAt must be an ISO timestamp', ok: false }
   }
 
-  if (!Array.isArray(value.operations) || value.operations.length === 0 || value.operations.length > MAX_CANONICAL_OPERATIONS) {
+  if (
+    !Array.isArray(value.operations) ||
+    value.operations.length === 0 ||
+    value.operations.length > MAX_CANONICAL_OPERATIONS
+  ) {
     return { error: 'canonicalApproval.operations must contain 1 to 50 operations', ok: false }
   }
 
@@ -737,7 +794,10 @@ function parseCanonicalApproval(value: unknown): HermesUiArtifactParseFailure | 
   }
 }
 
-function parseVisibleRecord(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiVisibleRecord | undefined {
+function parseVisibleRecord(
+  value: unknown,
+  field: string
+): HermesUiArtifactParseFailure | HermesUiVisibleRecord | undefined {
   if (value === undefined) {
     return undefined
   }
@@ -749,7 +809,11 @@ function parseVisibleRecord(value: unknown, field: string): HermesUiArtifactPars
   const record: HermesUiVisibleRecord = {}
 
   for (const [key, candidate] of Object.entries(value)) {
-    if (!key || key.length > 80 || (candidate !== null && !['boolean', 'number', 'string'].includes(typeof candidate))) {
+    if (
+      !key ||
+      key.length > 80 ||
+      (candidate !== null && !['boolean', 'number', 'string'].includes(typeof candidate))
+    ) {
       return { error: `${field} contains an unsupported value`, ok: false }
     }
 
@@ -819,15 +883,16 @@ function parseMutationPreview(value: Record<string, unknown>): HermesUiArtifactP
       return { error: 'canonical mutation-preview changes must match taskId', ok: false }
     }
 
-    if (
-      candidate.operation !== 'update' &&
-      candidate.operation !== 'create' &&
-      candidate.operation !== 'delete'
-    ) {
+    if (candidate.operation !== 'update' && candidate.operation !== 'create' && candidate.operation !== 'delete') {
       return { error: `changes[${index}].operation is invalid`, ok: false }
     }
 
-    if (candidate.risk !== undefined && candidate.risk !== 'low' && candidate.risk !== 'medium' && candidate.risk !== 'high') {
+    if (
+      candidate.risk !== undefined &&
+      candidate.risk !== 'low' &&
+      candidate.risk !== 'medium' &&
+      candidate.risk !== 'high'
+    ) {
       return { error: `changes[${index}].risk is invalid`, ok: false }
     }
 
@@ -877,6 +942,185 @@ function parseMutationPreview(value: Record<string, unknown>): HermesUiArtifactP
   return { artifact: { ...base, canonicalApproval, changes, type: 'mutation-preview' }, ok: true }
 }
 
+function parseNotionApproval(value: unknown): HermesUiArtifactParseFailure | HermesUiNotionApproval {
+  if (!isRecord(value)) {
+    return { error: 'canonicalApproval must be an object', ok: false }
+  }
+
+  const unsupported = unsupportedField(value, NOTION_APPROVAL_KEYS, 'canonicalApproval')
+
+  if (unsupported) {
+    return unsupported
+  }
+
+  if (
+    value.contractVersion !== 'notion-bridge-v1' ||
+    (value.tool !== 'notion_mutation' && value.tool !== 'notion_flowstate_activate')
+  ) {
+    return { error: 'Notion approval contract/tool is invalid', ok: false }
+  }
+
+  if (!isRecord(value.apply) || value.apply.mode !== 'apply' || Object.keys(value.apply).length > 16) {
+    return { error: 'Notion apply request is invalid', ok: false }
+  }
+
+  const common = ['mode', 'operation_id', 'data_source_id', 'preview_digest', 'preview_expires_at']
+  let expected: string[] | undefined
+
+  if (value.tool === 'notion_mutation') {
+    const actionKeys: Record<string, string[]> = {
+      create_task: [...common, 'action', 'properties'],
+      update_properties: [...common, 'action', 'page_id', 'properties'],
+      set_status: [...common, 'action', 'page_id', 'status_property', 'status_name'],
+      archive_task: [...common, 'action', 'page_id']
+    }
+
+    expected = typeof value.apply.action === 'string' ? actionKeys[value.apply.action] : undefined
+  } else {
+    expected = [...common, 'page_id', 'task', ...('work_block' in value.apply ? ['work_block'] : [])]
+  }
+
+  if (!expected || Object.keys(value.apply).sort().join('\0') !== [...expected].sort().join('\0')) {
+    return { error: 'Notion apply request fields are invalid', ok: false }
+  }
+
+  for (const key of ['operation_id', 'data_source_id', 'preview_digest', 'preview_expires_at']) {
+    if (
+      typeof value.apply[key] !== 'string' ||
+      !value.apply[key] ||
+      value.apply[key] !== (value.apply[key] as string).trim() ||
+      (value.apply[key] as string).length > 256
+    ) {
+      return { error: `Notion apply ${key} is invalid`, ok: false }
+    }
+  }
+
+  for (const key of ['page_id', 'status_property', 'status_name']) {
+    if (
+      key in value.apply &&
+      (typeof value.apply[key] !== 'string' ||
+        !value.apply[key] ||
+        value.apply[key] !== (value.apply[key] as string).trim() ||
+        (value.apply[key] as string).length > 500)
+    ) {
+      return { error: `Notion apply ${key} is invalid`, ok: false }
+    }
+  }
+
+  if ('properties' in value.apply && !isRecord(value.apply.properties)) {
+    return { error: 'Notion properties are invalid', ok: false }
+  }
+
+  if ('task' in value.apply && !isRecord(value.apply.task)) {
+    return { error: 'Notion task is invalid', ok: false }
+  }
+
+  if ('work_block' in value.apply && !isRecord(value.apply.work_block)) {
+    return { error: 'Notion work block is invalid', ok: false }
+  }
+
+  const encoded = JSON.stringify(value.apply)
+
+  if (encoded.length > 64 * 1024) {
+    return { error: 'Notion apply request is too large', ok: false }
+  }
+
+  if (
+    typeof value.previewExpiresAt !== 'string' ||
+    value.previewExpiresAt !== value.apply.preview_expires_at ||
+    !ISO_TIMESTAMP_RE.test(value.previewExpiresAt) ||
+    !Number.isFinite(Date.parse(value.previewExpiresAt))
+  ) {
+    return { error: 'Notion approval expiry is invalid', ok: false }
+  }
+
+  return {
+    apply: value.apply,
+    contractVersion: 'notion-bridge-v1',
+    previewExpiresAt: value.previewExpiresAt,
+    tool: value.tool
+  }
+}
+
+function parseNotionMutationPreview(value: Record<string, unknown>): HermesUiArtifactParseResult {
+  const unsupported = unsupportedField(value, MUTATION_PREVIEW_KEYS, 'notion-mutation-preview')
+
+  if (unsupported) {
+    return unsupported
+  }
+
+  const base = parseBase(value)
+
+  if (isFailure(base)) {
+    return base
+  }
+
+  const canonicalApproval = parseNotionApproval(value.canonicalApproval)
+
+  if (isFailure(canonicalApproval)) {
+    return canonicalApproval
+  }
+
+  if (!Array.isArray(value.changes) || value.changes.length < 1 || value.changes.length > MAX_MUTATION_CHANGES) {
+    return { error: 'notion-mutation-preview changes must contain 1 to 10 changes', ok: false }
+  }
+
+  const changes: HermesUiNotionMutationPreviewArtifact['changes'] = []
+
+  for (const [index, candidate] of value.changes.entries()) {
+    if (!isRecord(candidate)) {
+      return { error: `changes[${index}] must be an object`, ok: false }
+    }
+
+    const unknown = unsupportedField(candidate, NOTION_CHANGE_KEYS, `changes[${index}]`)
+
+    if (unknown) {
+      return unknown
+    }
+
+    const targetId = requiredNormalizedText(candidate.targetId, MAX_TASK_ID_LENGTH, `changes[${index}].targetId`)
+    const title = requiredNormalizedText(candidate.title, MAX_TITLE_LENGTH, `changes[${index}].title`)
+
+    if (typeof targetId !== 'string') {
+      return targetId
+    }
+
+    if (typeof title !== 'string') {
+      return title
+    }
+
+    if (!['create', 'delete', 'update'].includes(candidate.operation as string)) {
+      return { error: `changes[${index}].operation is invalid`, ok: false }
+    }
+
+    if (candidate.risk !== undefined && !['low', 'medium', 'high'].includes(candidate.risk as string)) {
+      return { error: `changes[${index}].risk is invalid`, ok: false }
+    }
+
+    const before = parseVisibleRecord(candidate.before, `changes[${index}].before`)
+    const after = parseVisibleRecord(candidate.after, `changes[${index}].after`)
+
+    if (isFailure(before)) {
+      return before
+    }
+
+    if (isFailure(after)) {
+      return after
+    }
+
+    changes.push({
+      after,
+      before,
+      operation: candidate.operation as HermesUiMutationOperation,
+      risk: candidate.risk as HermesUiMutationRisk | undefined,
+      targetId,
+      title
+    })
+  }
+
+  return { artifact: { ...base, canonicalApproval, changes, type: 'notion-mutation-preview' }, ok: true }
+}
+
 export function parseHermesUiArtifact(source: string): HermesUiArtifactParseResult {
   let value: unknown
 
@@ -896,6 +1140,10 @@ export function parseHermesUiArtifact(source: string): HermesUiArtifactParseResu
 
   if (value.type === 'mutation-preview') {
     return parseMutationPreview(value)
+  }
+
+  if (value.type === 'notion-mutation-preview') {
+    return parseNotionMutationPreview(value)
   }
 
   return { error: 'Unsupported artifact type', ok: false }
@@ -927,6 +1175,12 @@ export function stableArtifactStorageKey(artifact: HermesUiArtifact): string {
     const proposalIdentity = `${normalizedIdentity(artifact.proposalId) || 'proposal'}-${stableHash(artifact.proposalId)}`
 
     return `hermes-ui:task-breakdown:${taskIdentity}:${proposalIdentity}:r${artifact.proposalRevision}:b${artifact.task.baseRevision}`
+  }
+
+  if (artifact.type === 'notion-mutation-preview') {
+    const operationId = String(artifact.canonicalApproval.apply.operation_id || '')
+
+    return `hermes-ui:notion-mutation-preview:${normalizedIdentity(operationId) || 'operation'}-${stableHash(operationId)}`
   }
 
   const taskIdentity = `${normalizedIdentity(artifact.canonicalApproval.taskId) || 'task'}-${stableHash(artifact.canonicalApproval.taskId)}`

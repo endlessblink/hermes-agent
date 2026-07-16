@@ -399,6 +399,22 @@ FLOWSTATE_SUBTASK_BREAKDOWN_GUIDANCE = (
     "ask for bounded repair; never overwrite or synthesize around invalid existing subtask data."
 )
 
+NOTION_FLOWSTATE_BRIDGE_GUIDANCE = (
+    "# Notion project tasks and FlowState activation\n"
+    "Treat live Notion pages as the project source of truth. Read the configured Notion data source "
+    "during planning, but do not copy its tasks into FlowState merely because they were considered. "
+    "Use `notion_mutation` only for a change the user requested: preview first, then copy its exact "
+    "`approval_request` unchanged into `canonicalApproval` of one `hermes-ui` artifact with "
+    "type=notion-mutation-preview and a short human-readable `changes` list whose entries contain "
+    "targetId, title, operation=create|update|delete, and optional before/after/risk fields. Never print that "
+    "artifact as generic JSON. Apply only after the renderer returns an exact "
+    "notion-mutation-decision with decision=approve and approval=true. A correction or ordinary chat "
+    "reply is not approval. Activate a Notion task in FlowState only when the user explicitly starts it "
+    "now or approves an exact personal work block; preview `notion_flowstate_activate` and use the same "
+    "interactive approval path. Starting work and changing Notion status are separate mutations, each "
+    "requiring its own preview and approval. Report success only from the verified read-back receipt."
+)
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.

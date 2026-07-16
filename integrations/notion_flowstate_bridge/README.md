@@ -47,8 +47,19 @@ update header, so there remains a narrow race between the final version read and
 PATCH; post-write read-back and typed 409 handling prevent an unverified success
 but cannot make that remote interval atomic.
 
+Every preview returns an exact `approval_request`. In Hermes Desktop it must be
+copied unchanged into a `notion-mutation-preview` `hermes-ui` card. The gateway
+registers an owner-session, expiry-bound approval only when the user presses the
+card's approval button; model-authored prose, a typed "yes", and a preview alone
+cannot authorize apply. The approval token remains internal and is never added
+to the conversation. After a restart, the bridge permits only exact read-back
+or idempotent replay of an already verified or stale-dispatched operation; a
+fresh unapproved mutation still fails closed.
+
 Approved previews are stored in the profile-local SQLite file because exact
 payload recovery is required after a lost response. Tokens are never persisted.
+The state directory and database are forced to owner-only permissions and a
+symbolic-link state file is rejected.
 Verified receipts contain hashes and version evidence rather than copied task
 content. A Notion page is sent to FlowState only through the separate activation
 endpoint and keeps its page and data-source provenance.

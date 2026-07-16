@@ -78,6 +78,7 @@ export function useComposerSubmit({
     options?: {
       attachments?: ComposerAttachment[]
       flowstateDecision?: Record<string, unknown>
+      notionDecision?: Record<string, unknown>
       hidden?: boolean
     }
   ) => {
@@ -124,12 +125,18 @@ export function useComposerSubmit({
 
   useEffect(
     () =>
-      onComposerSubmitRequest(({ acknowledge, flowstateDecision, hidden, target, text }) => {
+      onComposerSubmitRequest(({ acknowledge, flowstateDecision, hidden, notionDecision, target, text }) => {
         if (target === 'main' && !inputDisabled) {
           void dispatchSubmitRef
             .current(
               text,
-              flowstateDecision || hidden ? { flowstateDecision, hidden } : undefined
+              flowstateDecision || notionDecision || hidden
+                ? {
+                    ...(flowstateDecision ? { flowstateDecision } : {}),
+                    hidden,
+                    ...(notionDecision ? { notionDecision } : {})
+                  }
+                : undefined
             )
             .then(accepted => acknowledge?.(accepted))
         } else {

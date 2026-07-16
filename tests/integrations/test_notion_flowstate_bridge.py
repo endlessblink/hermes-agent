@@ -3,9 +3,12 @@ from __future__ import annotations
 import importlib
 import hashlib
 import json
+import os
+import stat
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -121,6 +124,21 @@ def test_update_preview_binds_schema_version_and_normalized_changes(tmp_path):
     assert bound["normalized_changes"] == {"Done": {"checkbox": True}}
     assert bound["property_schema"]["Done"]["type"] == "checkbox"
     assert bound["schema_digest"].startswith("sha256:")
+    assert preview["approval_request"] == {
+        "contractVersion": "notion-bridge-v1",
+        "tool": "notion_mutation",
+        "apply": {
+            "mode": "apply",
+            "operation_id": "op-bound-update",
+            "action": "update_properties",
+            "data_source_id": "source-1",
+            "page_id": "page-1",
+            "properties": {"Done": {"checkbox": True}},
+            "preview_digest": preview["preview_digest"],
+            "preview_expires_at": preview["expires_at"],
+        },
+        "previewExpiresAt": preview["expires_at"],
+    }
 
 
 def test_apply_fails_closed_when_notion_page_changed_after_preview(tmp_path):
@@ -406,10 +424,117 @@ def test_registered_tools_fail_closed_outside_office_work(monkeypatch, tmp_path)
     assert not any(tool["check_fn"]() for tool in default.tools)
 
 
+def test_registered_mutation_apply_requires_exact_interactive_capability(monkeypatch):
+    module = importlib.import_module("integrations.notion_flowstate_bridge")
+    from agent.notion_approval_capabilities import notion_approval_capabilities
+    from tools.approval import reset_current_session_key, set_current_session_key
+
+    apply = {
+        "mode": "apply",
+        "operation_id": "op-approved",
+        "action": "archive_task",
+        "data_source_id": "source-1",
+        "page_id": "page-1",
+        "preview_digest": "sha256:" + "a" * 64,
+        "preview_expires_at": "2099-07-16T09:05:00+00:00",
+    }
+    bridge = SimpleNamespace(mutate_notion=lambda args: {"received": args})
+    monkeypatch.setattr(module, "_get_bridge", lambda: bridge)
+    handler = module._handler("mutate_notion", "notion_mutation")
+    token = set_current_session_key("ui-session")
+    notion_approval_capabilities.revoke_session("ui-session")
+    try:
+        denied = json.loads(handler(apply))
+        assert denied["error"]["code"] == "approval_required"
+
+        notion_approval_capabilities.register(
+            "ui-session",
+            {
+                "tool": "notion_mutation",
+                "apply": apply,
+                "previewExpiresAt": apply["preview_expires_at"],
+            },
+        )
+        accepted = json.loads(handler(apply))
+        assert accepted == {"ok": True, "received": apply}
+
+        changed = {**apply, "page_id": "other-page"}
+        mismatch = json.loads(handler(changed))
+        assert mismatch["error"]["code"] == "approval_required"
+    finally:
+        notion_approval_capabilities.revoke_session("ui-session")
+        reset_current_session_key(token)
+
+
+def test_registered_handler_recovers_stale_dispatched_apply_without_new_capability(
+    monkeypatch, tmp_path
+):
+    module = importlib.import_module("integrations.notion_flowstate_bridge")
+    now = [1000.0]
+    before = page(properties={"Done": {"checkbox": False}})
+    desired = {
+        **page(properties={"Done": {"checkbox": True}}),
+        "last_edited_time": "2026-07-13T18:01:00Z",
+    }
+    bridge = Bridge(
+        config(tmp_path, preview_ttl_seconds=30),
+        transport=FakeTransport([before, desired]),
+        clock=lambda: now[0],
+    )
+    base = {
+        "operation_id": "op-recover-after-restart",
+        "action": "update_properties",
+        "data_source_id": "source-1",
+        "page_id": "page-1",
+        "properties": {"Done": {"checkbox": True}},
+    }
+    preview = bridge.mutate_notion(base)
+    bridge.store.claim(
+        base["operation_id"], "notion_mutation", preview["preview"], now[0]
+    )
+    now[0] = 1061.0
+    monkeypatch.setattr(module, "_get_bridge", lambda: bridge)
+
+    result = json.loads(
+        module._handler("mutate_notion", "notion_mutation")(
+            preview["approval_request"]["apply"]
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["verified"] is True
+    assert result["already_satisfied"] is True
+    assert not any(call[0] == "PATCH" for call in bridge.transport.calls)
+
+
 def test_config_repr_never_exposes_tokens(tmp_path):
     rendered = repr(config(tmp_path))
     assert "notion-secret-value" not in rendered
     assert "flowstate-secret-value" not in rendered
+
+
+def test_receipt_store_is_owner_only_even_under_a_permissive_umask(tmp_path):
+    state_path = tmp_path / "bridge-state" / "receipts.sqlite3"
+    old_umask = os.umask(0)
+    try:
+        Bridge(config(tmp_path, state_path=state_path), transport=FakeTransport())
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+
+def test_receipt_store_rejects_a_symlink_state_file(tmp_path):
+    target = tmp_path / "target.sqlite3"
+    target.touch()
+    state_path = tmp_path / "bridge-state" / "receipts.sqlite3"
+    state_path.parent.mkdir()
+    state_path.symlink_to(target)
+
+    with pytest.raises(BridgeError) as error:
+        Bridge(config(tmp_path, state_path=state_path), transport=FakeTransport())
+    assert error.value.code == "invalid_config"
 
 
 def test_read_tools_use_current_data_source_endpoints_and_bound_page_size(tmp_path):
@@ -1184,6 +1309,18 @@ def test_activation_fetches_exact_page_and_uses_preview_apply_contract(tmp_path)
     preview = bridge.activate(base)
     assert preview["preview_digest"] == "sha256:flowstate-preview"
     assert preview["already_activated"] is False
+    assert preview["approval_request"] == {
+        "contractVersion": "notion-bridge-v1",
+        "tool": "notion_flowstate_activate",
+        "apply": {
+            **base,
+            "data_source_id": "source-1",
+            "mode": "apply",
+            "preview_digest": "sha256:flowstate-preview",
+            "preview_expires_at": datetime.fromtimestamp(1200, timezone.utc).isoformat(),
+        },
+        "previewExpiresAt": datetime.fromtimestamp(1200, timezone.utc).isoformat(),
+    }
     assert transport.calls[1][3]["preview"] is True
     assert transport.calls[1][3]["notion"] == {
         "pageId": "page-1",
