@@ -3356,7 +3356,10 @@ for _name, _schema, _handler in [
         check_fn=(
             _check_flowstate_available
             if _name == "flowstate_health"
-            else _FLOWSTATE_TOOL_CHECKS[_name]
+            # Tools without a route-requirement entry (e.g. audit_coverage,
+            # which degrades gracefully server-side) fall back to the plain
+            # availability check instead of being capability-gated.
+            else _FLOWSTATE_TOOL_CHECKS.get(_name, _check_flowstate_available)
         ),
         emoji="📋",
     )
