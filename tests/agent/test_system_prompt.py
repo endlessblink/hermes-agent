@@ -129,6 +129,23 @@ class TestNotionFlowStateBridgeGuidance:
         assert "type=notion-mutation-preview" not in stable
 
 
+class TestCrossSourceInventoryGuidance:
+    def test_reconciliation_tool_forbids_prose_arithmetic(self):
+        stable = _stable_prompt(_make_agent(
+            platform="desktop", valid_tool_names=["task_inventory_reconcile"]
+        ))
+        assert "before reporting a cross-source task count" in stable
+        assert "Never add source counts in prose" in stable
+        assert "verified=false" in stable
+        assert "connector proves end-of-pagination" in stable
+
+    def test_guidance_is_absent_without_reconciliation_tool(self):
+        stable = _stable_prompt(_make_agent(
+            platform="desktop", valid_tool_names=["notion_data_source_list"]
+        ))
+        assert "Never add source counts in prose" not in stable
+
+
 class TestCodingContextBlock:
     def test_injected_when_active(self, monkeypatch, tmp_path):
         _init_code_repo(tmp_path)

@@ -69,3 +69,9 @@ operation as applying instead of issuing an immediate duplicate. After the
 recovery grace period, the same operation ID may recover through exact Notion
 read-back or the canonical FlowState replay contract even if the local preview
 has since expired. Failures before any write is dispatched release the claim.
+
+The read-only `task_inventory_reconcile` tool is the proof gate for counts that
+combine Notion, FlowState, notes, HTML exports, or memory. It returns an exact
+count only when every source is complete and fresh, every item has evidence,
+cross-source records share canonical IDs, and no classifications conflict.
+Otherwise it returns observed per-source counts and explicit blocking reasons.
