@@ -248,3 +248,176 @@ def test_monitor_context_ledger_recovers_compatibly_from_legacy_or_invalid_state
     assert state["canonical_session_id"] == "assistant-home"
     assert state["context_ledger"] == []
     assert store.public()["contextLedger"] == []
+
+
+def test_assistant_mutation_provenance_is_durable_idempotent_and_exact(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    proof = {
+        "operationId": "assistant-operation-1",
+        "sessionKey": "assistant-session",
+        "episodeId": "episode-1",
+        "turnId": "turn-1",
+        "tasks": [
+            {"taskId": "task-1", "canonicalRevision": 7, "changeSequence": 41},
+            {"taskId": "task-2", "canonicalRevision": 3, "changeSequence": 42},
+        ],
+    }
+
+    first = store.record_assistant_mutation(proof)
+    replay = PersonalAssistantStateStore(tmp_path).record_assistant_mutation({
+        **proof,
+        "episodeId": "episode-2",
+        "turnId": "turn-2",
+    })
+
+    assert first["assistant_mutations"] == replay["assistant_mutations"]
+    assert len(replay["assistant_mutations"]) == 1
+    assert replay["assistant_mutations"][0]["operationId"] == "assistant-operation-1"
+    assert replay["assistant_mutations"][0]["tasks"] == proof["tasks"]
+
+    with pytest.raises(ValueError, match="identity collision"):
+        store.record_assistant_mutation({
+            **proof,
+            "tasks": [{"taskId": "task-1", "canonicalRevision": 8, "changeSequence": 43}],
+        })
+
+
+def test_monitor_classifier_suppresses_exact_assistant_causes_and_revisions(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.record_assistant_mutation({
+        "operationId": "assistant-operation-1",
+        "sessionKey": "assistant-session",
+        "episodeId": None,
+        "turnId": "turn-1",
+        "tasks": [{"taskId": "task-1", "canonicalRevision": 7, "changeSequence": 41}],
+    })
+    exact_operation = _monitor_event(operation_id="assistant-operation-1")
+    exact_revision = _monitor_event("event-2", operation_id="external-op")
+    exact_revision["evidence"].pop("operationId")
+    exact_revision["evidence"]["canonicalRevision"] = 7
+    conflicting_external = _monitor_event("event-3", operation_id="external-op")
+    conflicting_external["evidence"]["canonicalRevision"] = 7
+    newer_external = _monitor_event("event-4", operation_id="external-newer")
+    newer_external["evidence"]["canonicalRevision"] = 8
+
+    classified = store.classify_monitor_events(
+        [exact_operation, exact_revision, conflicting_external, newer_external]
+    )
+
+    assert [event["id"] for event in classified["suppressed"]] == ["event-1", "event-2"]
+    assert classified["merged"] == []
+    assert [event["id"] for event in classified["remaining"]] == ["event-3", "event-4"]
+
+
+def test_monitor_classifier_keeps_mixed_self_and_external_batch_visible(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.record_assistant_mutation({
+        "operationId": "assistant-operation-1",
+        "sessionKey": "assistant-session",
+        "episodeId": None,
+        "turnId": "turn-1",
+        "tasks": [{"taskId": "task-1", "canonicalRevision": 7, "changeSequence": 41}],
+    })
+    mixed = _monitor_event("mixed", operation_id="assistant-operation-1")
+    mixed["kind"] = "uncategorized_tasks"
+    mixed["evidence"] = {
+        "added": [
+            {"taskId": "task-1", "operationId": "assistant-operation-1"},
+            {"taskId": "task-2", "operationId": "external-operation-1"},
+        ]
+    }
+
+    classified = store.classify_monitor_events([mixed])
+
+    assert classified["suppressed"] == []
+    assert classified["merged"] == []
+    assert [event["id"] for event in classified["remaining"]] == ["mixed"]
+
+
+def test_monitor_classifier_keeps_nullable_external_cause_in_mixed_batch_visible(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.record_assistant_mutation({
+        "operationId": "assistant-operation-1",
+        "sessionKey": "assistant-session",
+        "episodeId": None,
+        "turnId": "turn-1",
+        "tasks": [{"taskId": "task-1", "canonicalRevision": 7, "changeSequence": 41}],
+    })
+    mixed = _monitor_event("mixed-null", operation_id="assistant-operation-1")
+    mixed["kind"] = "uncategorized_tasks"
+    mixed["evidence"] = {
+        "added": [
+            {"taskId": "task-1", "operationId": "assistant-operation-1"},
+            {
+                "taskId": "task-2",
+                "causeSource": "legacy",
+                "changeSequence": 42,
+                "canonicalRevision": 3,
+            },
+        ]
+    }
+
+    classified = store.classify_monitor_events([mixed])
+
+    assert classified["suppressed"] == []
+    assert [event["id"] for event in classified["remaining"]] == ["mixed-null"]
+
+
+def test_monitor_classifier_merges_only_active_context_overlap(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    active = _monitor_event("active", task_id="task-active", operation_id="old-active")
+    handled = _monitor_event("handled", task_id="task-handled", operation_id="old-handled")
+    store.merge_monitor_events([active], disposition="retry_wait")
+    store.merge_monitor_events([handled], disposition="handled")
+
+    active_update = _monitor_event("active-update", task_id="task-active", operation_id="external-a")
+    handled_update = _monitor_event("handled-update", task_id="task-handled", operation_id="external-b")
+    classified = store.classify_monitor_events([active_update, handled_update])
+
+    assert [event["id"] for event in classified["merged"]] == ["active-update"]
+    assert [event["id"] for event in classified["remaining"]] == ["handled-update"]
+
+
+def test_monitor_classifier_does_not_remerge_later_external_change(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    prior = _monitor_event("prior", task_id="task-1", operation_id="external-old")
+    store.merge_monitor_events([prior], disposition="merged")
+    later = _monitor_event("later", task_id="task-1", operation_id="external-new")
+
+    classified = store.classify_monitor_events([later])
+
+    assert classified["merged"] == []
+    assert [event["id"] for event in classified["remaining"]] == ["later"]
+
+
+def test_monitor_classifier_keeps_mixed_active_and_external_batch_visible(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    active = _monitor_event("active", task_id="task-1", operation_id="external-old")
+    store.merge_monitor_events([active], disposition="retry_wait")
+    mixed = _monitor_event("mixed-active", operation_id="external-new")
+    mixed["kind"] = "uncategorized_tasks"
+    mixed["evidence"] = {
+        "added": [
+            {"taskId": "task-1", "operationId": "external-new"},
+            {"taskId": "task-2", "operationId": "external-other"},
+        ]
+    }
+
+    classified = store.classify_monitor_events([mixed])
+
+    assert classified["merged"] == []
+    assert [event["id"] for event in classified["remaining"]] == ["mixed-active"]

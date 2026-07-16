@@ -115,6 +115,40 @@ def _task_metadata(raw: Any) -> list[dict[str, Any]]:
         for key in ("blocked", "blocker"):
             if key in value:
                 task[key] = bool(value.get(key))
+        cause = value.get("lastChangeCause")
+        if isinstance(cause, Mapping):
+            operation_id = cause.get("operationId")
+            source = cause.get("source")
+            sequence = cause.get("changeSequence")
+            cause_revision = cause.get("canonicalRevision")
+            if (
+                (operation_id is None or (
+                    isinstance(operation_id, str)
+                    and bool(operation_id.strip())
+                    and operation_id == operation_id.strip()
+                    and len(operation_id) <= 160
+                ))
+                and isinstance(source, str)
+                and bool(source.strip())
+                and source == source.strip()
+                and len(source) <= 64
+                and isinstance(sequence, int)
+                and not isinstance(sequence, bool)
+                and sequence > 0
+                and isinstance(cause_revision, int)
+                and not isinstance(cause_revision, bool)
+                and cause_revision > 0
+                and (
+                    "canonicalRevision" not in task
+                    or cause_revision == task["canonicalRevision"]
+                )
+            ):
+                task["lastChangeCause"] = {
+                    "operationId": operation_id,
+                    "source": source,
+                    "changeSequence": sequence,
+                    "canonicalRevision": cause_revision,
+                }
         tasks.append(task)
     return sorted(tasks, key=lambda task: str(task["id"]))
 
@@ -171,14 +205,32 @@ def _event(
     subject: str | None = None,
 ) -> dict[str, Any]:
     subject = (str(subject).strip()[:200] if subject else _event_subject(kind, evidence))
+    operation_ids: set[str] = set()
+
+    def collect_causes(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if key == "operationId" and isinstance(item, str) and item.strip():
+                    operation_ids.add(item.strip()[:160])
+                else:
+                    collect_causes(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect_causes(item)
+
+    collect_causes(evidence)
+    identity = {
+        "version": EVENT_VERSION,
+        "kind": kind,
+        "subject": subject,
+        **(
+            {"causeOperationIds": sorted(operation_ids)}
+            if operation_ids
+            else {"evidence": evidence, "occurrence": occurrence}
+        ),
+    }
     canonical = json.dumps(
-        {
-            "version": EVENT_VERSION,
-            "kind": kind,
-            "subject": subject,
-            "evidence": evidence,
-            "occurrence": occurrence,
-        },
+        identity,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -209,6 +261,17 @@ def _candidate_events(
     occurrences: dict[str, int],
 ) -> list[dict[str, Any]]:
     events = []
+
+    def cause_evidence(task: Mapping[str, Any]) -> dict[str, Any]:
+        cause = task.get("lastChangeCause")
+        if not isinstance(cause, Mapping):
+            return {}
+        return {
+            **({"operationId": cause["operationId"]} if cause.get("operationId") else {}),
+            "causeSource": cause.get("source"),
+            "changeSequence": cause.get("changeSequence"),
+            "canonicalRevision": cause.get("canonicalRevision"),
+        }
 
     def emit(kind: str, evidence: Mapping[str, Any], subject: str | None = None) -> None:
         subject = (str(subject).strip()[:200] if subject else _event_subject(kind, evidence))
@@ -257,6 +320,7 @@ def _candidate_events(
             {
                 "taskId": str(task["id"]),
                 "title": str(task.get("title") or "")[:200],
+                **cause_evidence(task),
             }
             for task in current_uncategorized
             if str(task["id"]) not in old_uncategorized
@@ -279,9 +343,18 @@ def _candidate_events(
         if blocked and not was_blocked:
             emit(
                 "blocker",
-                {"taskId": task_id, "title": task.get("title", "")},
+                {
+                    "taskId": task_id,
+                    "title": task.get("title", ""),
+                    **cause_evidence(task),
+                },
             )
-        if old and old.get("priority") != "high" and task.get("priority") == "high":
+        if (
+            old
+            and "priority" in old
+            and old.get("priority") != "high"
+            and task.get("priority") == "high"
+        ):
             emit(
                 "changed_high_priority",
                 {
@@ -291,6 +364,7 @@ def _candidate_events(
                         for key in ("title", "status", "dueDate")
                         if key in task
                     },
+                    **cause_evidence(task),
                 },
             )
     return events

@@ -127,6 +127,57 @@ def test_high_priority_events_require_an_existing_task_to_transition_into_high(t
     assert event["subject"] == "task:promoted"
 
 
+def test_high_priority_schema_introduction_is_not_a_promotion(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        {"tasks": [{"id": "existing", "title": "Existing task"}]},
+        now=NOW,
+    )
+
+    result = run_monitor_check(
+        tmp_path,
+        {"tasks": [{"id": "existing", "title": "Existing task", "priority": "high"}]},
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert result == {"status": "checked", "candidate_count": 0}
+    assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16)) is None
+
+
+def test_canonical_cause_produces_stable_event_identity_and_safe_evidence(tmp_path):
+    cause = {
+        "operationId": "assistant-operation-1",
+        "source": "local-api",
+        "changeSequence": 41,
+        "canonicalRevision": 2,
+    }
+    baseline = _inventory_context([
+        _inventory_task(1, priority="medium", canonicalRevision=1),
+    ], change_sequence=40)
+    promoted = _inventory_context([
+        _inventory_task(
+            1,
+            priority="high",
+            canonicalRevision=2,
+            lastChangeCause=cause,
+        ),
+    ], change_sequence=41)
+
+    for root in (tmp_path / "first", tmp_path / "replay"):
+        run_monitor_check(root, baseline, now=NOW)
+        run_monitor_check(root, promoted, now=NOW + timedelta(minutes=15))
+
+    first = lease_candidate_event(tmp_path / "first", "gateway", now=NOW + timedelta(minutes=16))
+    replay = lease_candidate_event(tmp_path / "replay", "gateway", now=NOW + timedelta(minutes=16))
+
+    assert first is not None and replay is not None
+    assert first["id"] == replay["id"]
+    assert first["evidence"]["operationId"] == "assistant-operation-1"
+    assert first["evidence"]["causeSource"] == "local-api"
+    assert first["evidence"]["canonicalRevision"] == 2
+    assert "actorUserId" not in json.dumps(first["evidence"])
+
+
 def test_more_uncategorized_tasks_emit_one_preview_only_organization_candidate(tmp_path):
     run_monitor_check(
         tmp_path,

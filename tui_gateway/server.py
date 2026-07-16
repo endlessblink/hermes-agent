@@ -4021,6 +4021,38 @@ def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
     canonical_events = remaining_canonical
     if not leased:
         return True
+
+    classified = store.classify_monitor_events(canonical_events)
+    leased_by_id = {
+        str(event.get("id") or ""): event
+        for event in leased
+        if isinstance(event, dict)
+    }
+    for disposition in ("suppressed", "merged"):
+        for event in classified[disposition]:
+            store.merge_monitor_events([event], disposition=disposition)
+            leased_event = leased_by_id.get(event["id"])
+            if leased_event is not None:
+                settle_candidate_event(
+                    profile_home,
+                    str(leased_event.get("id") or ""),
+                    str(leased_event.get("lease_id") or ""),
+                    disposition,
+                )
+    remaining_ids = {event["id"] for event in classified["remaining"]}
+    leased = [
+        event for event in leased if str(event.get("id") or "") in remaining_ids
+    ]
+    canonical_events = classified["remaining"]
+    if not leased:
+        record_monitor_health(
+            profile_home,
+            component="consumer",
+            event="events_classified",
+            status="available",
+            count=len(classified["suppressed"]) + len(classified["merged"]),
+        )
+        return True
     new_event_count = sum(
         1 for event in canonical_events if event["id"] not in ledger_dispositions
     )
@@ -4370,6 +4402,14 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                 },
             )
 
+        with _sessions_lock:
+            assistant_session = _sessions.get(session_id)
+            if assistant_session is not None:
+                assistant_session["personal_assistant_profile_home"] = str(owner_home)
+                assistant_session["personal_assistant_episode_id"] = (
+                    str(episode.get("episode_id") or "") or None
+                )
+
         runtime_context["assistant_home"] = {
             "outcomes": state.get("outcomes", []),
             "commitments": state.get("commitments", []),
@@ -4414,6 +4454,14 @@ def _start_personal_assistant(rid, params: dict) -> dict:
             },
         )
         if "error" in submitted:
+            with _sessions_lock:
+                assistant_session = _sessions.get(session_id)
+                if (
+                    assistant_session is not None
+                    and assistant_session.get("personal_assistant_episode_id")
+                    == str(episode.get("episode_id") or "")
+                ):
+                    assistant_session["personal_assistant_episode_id"] = None
             if monitor_delivery:
                 with _sessions_lock:
                     monitor_session = _sessions.get(session_id)
@@ -4762,6 +4810,92 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
         _emit("tool.start", sid, payload)
 
 
+def _personal_assistant_mutation_proof(
+    session: dict | None, name: str, args: dict, result: str
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(session, dict)
+        or session.get("personal_assistant") is not True
+        or not isinstance(name, str)
+        or not name.startswith("flowstate_")
+        or not isinstance(args, dict)
+    ):
+        return None
+    operation_id = args.get("operationId") or args.get("requestId")
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id
+        or operation_id != operation_id.strip()
+        or len(operation_id) > 160
+    ):
+        return None
+    try:
+        envelope = json.loads(result)
+    except (TypeError, ValueError):
+        return None
+    payload = envelope.get("result") if isinstance(envelope, dict) else None
+    receipt = payload.get("receipt") if isinstance(payload, dict) else None
+    payload_operation_id = payload.get("operationId") if isinstance(payload, dict) else None
+    if not (
+        isinstance(payload, dict)
+        and payload.get("result") == "committed"
+        and (payload_operation_id is None or payload_operation_id == operation_id)
+        and isinstance(receipt, dict)
+        and receipt.get("ok") is True
+        and receipt.get("status") in {"committed", "replayed"}
+        and receipt.get("source") == "local-api"
+        and receipt.get("operationId") == operation_id
+        and isinstance(receipt.get("affected"), list)
+    ):
+        return None
+    tasks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for affected in receipt["affected"]:
+        if not isinstance(affected, dict) or affected.get("entityType") != "task":
+            continue
+        task_id = affected.get("entityId")
+        revision = affected.get("canonicalRevision")
+        sequence = affected.get("changeSequence")
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or task_id != task_id.strip()
+            or len(task_id) > 160
+            or task_id in seen
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+            or not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or sequence < 1
+        ):
+            return None
+        seen.add(task_id)
+        tasks.append({
+            "taskId": task_id,
+            "canonicalRevision": revision,
+            "changeSequence": sequence,
+        })
+    session_key = session.get("session_key")
+    profile_home = session.get("personal_assistant_profile_home")
+    if (
+        not tasks
+        or not isinstance(session_key, str)
+        or not session_key.strip()
+        or not isinstance(profile_home, str)
+        or not profile_home.strip()
+    ):
+        return None
+    return {
+        "operationId": operation_id,
+        "sessionKey": session_key,
+        "episodeId": str(session.get("personal_assistant_episode_id") or "") or None,
+        "turnId": str(session.get("watchdog_turn_id") or "") or None,
+        "tasks": tasks,
+        "profileHome": profile_home,
+    }
+
+
 def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
     payload = {"tool_id": tool_call_id, "name": name, "args": args}
     session = _sessions.get(sid)
@@ -4770,6 +4904,18 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     if session is not None:
         snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
         started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
+        proof = _personal_assistant_mutation_proof(session, name, args, result)
+        if proof is not None:
+            try:
+                from agent.personal_assistant_state import PersonalAssistantStateStore
+
+                profile_home = Path(proof.pop("profileHome"))
+                PersonalAssistantStateStore(profile_home).record_assistant_mutation(proof)
+            except (OSError, ValueError):
+                logger.warning(
+                    "Personal assistant FlowState provenance could not be recorded",
+                    exc_info=True,
+                )
     duration_s = time.time() - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s

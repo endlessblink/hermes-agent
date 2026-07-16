@@ -341,6 +341,11 @@ def test_start_applies_runtime_policy_before_submitting(monkeypatch, tmp_path):
             rid, {"session_id": "assistant-live", "stored_session_id": "assistant-home"}
         ),
     )
+    monkeypatch.setattr(
+        server,
+        "_sessions",
+        {"assistant-live": {"personal_assistant": True, "session_key": "assistant-home"}},
+    )
     applied = []
     submitted = []
     monkeypatch.setattr(
@@ -361,6 +366,11 @@ def test_start_applies_runtime_policy_before_submitting(monkeypatch, tmp_path):
     assert response["result"]["status"] == "launched"
     assert applied == ["assistant-live"]
     assert submitted[0]["session_id"] == "assistant-live"
+    assert server._sessions["assistant-live"]["personal_assistant_profile_home"] == str(tmp_path)
+    assert (
+        server._sessions["assistant-live"]["personal_assistant_episode_id"]
+        == response["result"]["episode"]["episode_id"]
+    )
 
 
 def test_contextual_start_preserves_validated_monitor_event_until_final_prompt_boundary(

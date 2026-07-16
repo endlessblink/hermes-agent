@@ -16,6 +16,7 @@ from utils import atomic_json_write
 
 SCHEMA_VERSION = 1
 CONTEXT_LEDGER_LIMIT = 128
+ASSISTANT_MUTATION_LIMIT = 128
 MONITOR_EVENT_BATCH_LIMIT = 32
 MONITOR_EVENT_BYTES_LIMIT = 16_384
 _MONITOR_EVENT_VERSION = 1
@@ -29,7 +30,8 @@ _CONTEXT_ENTRY_FIELDS = {
 _MONITOR_DISPOSITIONS = {
     "pending", "merged", "processing", "retry_wait", "suppressed", "handled", "failed",
 }
-_TERMINAL_MONITOR_DISPOSITIONS = {"suppressed", "handled"}
+_TERMINAL_MONITOR_DISPOSITIONS = {"merged", "suppressed", "handled"}
+_ACTIVE_CONTEXT_DISPOSITIONS = {"pending", "processing", "retry_wait"}
 _SENSITIVE_KEY_PARTS = ("authorization", "cookie", "password", "secret", "token")
 _TASK_EVENT_KINDS = {"blocker", "changed_high_priority"}
 
@@ -182,6 +184,50 @@ def _collect_evidence_ids(event: dict[str, Any]) -> tuple[list[str], list[str]]:
     return sorted(task_ids)[:32], sorted(operation_ids)[:32]
 
 
+def _collect_task_operation_ids(event: dict[str, Any]) -> dict[str, set[str]]:
+    task_operations: dict[str, set[str]] = {}
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            local_tasks: set[str] = set()
+            local_operations: set[str] = set()
+            for key, item in value.items():
+                normalized = re.sub(r"[^a-z]", "", key.lower())
+                if normalized == "taskid" and isinstance(item, str) and item.strip():
+                    local_tasks.add(item.strip()[:160])
+                elif normalized == "taskids" and isinstance(item, list):
+                    local_tasks.update(
+                        candidate.strip()[:160]
+                        for candidate in item
+                        if isinstance(candidate, str) and candidate.strip()
+                    )
+                elif (
+                    normalized == "id"
+                    and event["kind"] in _TASK_EVENT_KINDS
+                    and isinstance(item, str)
+                    and item.strip()
+                ):
+                    local_tasks.add(item.strip()[:160])
+                elif normalized == "operationid" and isinstance(item, str) and item.strip():
+                    local_operations.add(item.strip()[:160])
+                elif normalized == "operationids" and isinstance(item, list):
+                    local_operations.update(
+                        candidate.strip()[:160]
+                        for candidate in item
+                        if isinstance(candidate, str) and candidate.strip()
+                    )
+            for task_id in local_tasks:
+                task_operations.setdefault(task_id, set()).update(local_operations)
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(event["evidence"])
+    return task_operations
+
+
 def _validate_disposition(value: Any) -> str:
     if value not in _MONITOR_DISPOSITIONS:
         raise ValueError(
@@ -240,6 +286,70 @@ def _safe_context_ledger(raw: Any) -> list[dict[str, Any]]:
     return safe
 
 
+def _validate_assistant_mutation(raw: Any) -> dict[str, Any]:
+    fields = {
+        "operationId", "sessionKey", "episodeId", "turnId", "tasks", "recordedAt",
+    }
+    if not isinstance(raw, dict) or set(raw) != fields:
+        raise ValueError("assistant mutation fields are invalid")
+    episode_id = raw.get("episodeId")
+    if episode_id is not None:
+        episode_id = _bounded_identifier(episode_id, "episode id")
+    turn_id = raw.get("turnId")
+    if turn_id is not None:
+        turn_id = _bounded_identifier(turn_id, "turn id")
+    tasks = raw.get("tasks")
+    if not isinstance(tasks, list) or not tasks or len(tasks) > 64:
+        raise ValueError("assistant mutation tasks are invalid")
+    safe_tasks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for task in tasks:
+        if not isinstance(task, dict) or set(task) != {
+            "taskId", "canonicalRevision", "changeSequence",
+        }:
+            raise ValueError("assistant mutation task proof is invalid")
+        task_id = _bounded_identifier(task.get("taskId"), "task id")
+        revision = task.get("canonicalRevision")
+        sequence = task.get("changeSequence")
+        if (
+            not isinstance(revision, int) or isinstance(revision, bool) or revision < 1
+            or not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1
+            or task_id in seen
+        ):
+            raise ValueError("assistant mutation task proof is invalid")
+        seen.add(task_id)
+        safe_tasks.append({
+            "taskId": task_id,
+            "canonicalRevision": revision,
+            "changeSequence": sequence,
+        })
+    return {
+        "operationId": _bounded_identifier(raw.get("operationId"), "operation id"),
+        "sessionKey": _bounded_identifier(raw.get("sessionKey"), "session key"),
+        "episodeId": episode_id,
+        "turnId": turn_id,
+        "tasks": safe_tasks,
+        "recordedAt": _iso_timestamp(raw.get("recordedAt"), "recordedAt"),
+    }
+
+
+def _safe_assistant_mutations(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in raw[-ASSISTANT_MUTATION_LIMIT:]:
+        try:
+            mutation = _validate_assistant_mutation(value)
+        except ValueError:
+            continue
+        if mutation["operationId"] in seen:
+            continue
+        seen.add(mutation["operationId"])
+        safe.append(mutation)
+    return safe
+
+
 def _default() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -255,6 +365,7 @@ def _default() -> dict[str, Any]:
         },
         "episode_summaries": [],
         "context_ledger": [],
+        "assistant_mutations": [],
         "pending_approvals": [],
         "pending_proposals": [],
         "sync_status": {"status": "unknown", "updated_at": None, "detail": None},
@@ -291,6 +402,9 @@ class PersonalAssistantStateStore:
             state.update(raw)
         state["schema_version"] = SCHEMA_VERSION
         state["context_ledger"] = _safe_context_ledger(state.get("context_ledger"))
+        state["assistant_mutations"] = _safe_assistant_mutations(
+            state.get("assistant_mutations")
+        )
         return state
 
     def read(self) -> dict[str, Any]:
@@ -491,6 +605,87 @@ class PersonalAssistantStateStore:
     ) -> bool:
         event_id = _bounded_identifier(event_id, "event id")
         return event_id in self.monitor_event_ids(dispositions=dispositions)
+
+    def record_assistant_mutation(self, proof: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(proof, dict):
+            raise ValueError("assistant mutation proof must be an object")
+        candidate = _validate_assistant_mutation({
+            **copy.deepcopy(proof),
+            "recordedAt": datetime.now(timezone.utc).isoformat(),
+        })
+
+        def mutate(state: dict[str, Any]) -> None:
+            mutations = _safe_assistant_mutations(state.get("assistant_mutations"))
+            for existing in mutations:
+                if existing["operationId"] != candidate["operationId"]:
+                    continue
+                stable_fields = {"operationId", "sessionKey", "tasks"}
+                comparable_existing = {
+                    key: value for key, value in existing.items() if key in stable_fields
+                }
+                comparable_candidate = {
+                    key: value for key, value in candidate.items() if key in stable_fields
+                }
+                if comparable_existing != comparable_candidate:
+                    raise ValueError(
+                        f"assistant mutation identity collision: {candidate['operationId']}"
+                    )
+                state["assistant_mutations"] = mutations
+                return
+            mutations.append(candidate)
+            state["assistant_mutations"] = mutations[-ASSISTANT_MUTATION_LIMIT:]
+
+        return self.update(mutate)
+
+    def classify_monitor_events(
+        self, events: list[dict[str, Any]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        validated = validate_monitor_events(events)
+        state = self.read()
+        mutations = _safe_assistant_mutations(state.get("assistant_mutations"))
+        assistant_operations = {item["operationId"] for item in mutations}
+        assistant_revisions = {
+            (task["taskId"], task["canonicalRevision"])
+            for item in mutations
+            for task in item["tasks"]
+        }
+        active_task_ids = {
+            task_id
+            for entry in _safe_context_ledger(state.get("context_ledger"))
+            if entry["disposition"] in _ACTIVE_CONTEXT_DISPOSITIONS
+            for task_id in entry["taskIds"]
+        }
+        result: dict[str, list[dict[str, Any]]] = {
+            "suppressed": [], "merged": [], "remaining": [],
+        }
+        for event in validated:
+            task_ids, operation_ids = _collect_evidence_ids(event)
+            task_id_set = set(task_ids)
+            operation_id_set = set(operation_ids)
+            task_operations = _collect_task_operation_ids(event)
+            revision = event["evidence"].get("canonicalRevision")
+            exact_revision = (
+                not operation_id_set
+                and len(task_id_set) == 1
+                and isinstance(revision, int)
+                and not isinstance(revision, bool)
+                and any((task_id, revision) in assistant_revisions for task_id in task_id_set)
+            )
+            exact_operations = (
+                bool(task_id_set)
+                and all(
+                    task_operations.get(task_id)
+                    and task_operations[task_id].issubset(assistant_operations)
+                    for task_id in task_id_set
+                )
+            )
+            if exact_operations or exact_revision:
+                result["suppressed"].append(event)
+            elif task_id_set and task_id_set.issubset(active_task_ids):
+                result["merged"].append(event)
+            else:
+                result["remaining"].append(event)
+        return result
 
     def patch(
         self,
