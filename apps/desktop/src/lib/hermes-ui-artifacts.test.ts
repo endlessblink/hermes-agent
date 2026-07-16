@@ -95,7 +95,7 @@ describe('form artifacts', () => {
       fields: [{ ...validForm.fields[0], onClick: 'alert(1)' }]
     }))
 
-    expect(result).toEqual({ error: 'fields[0] contains unsupported properties', ok: false })
+    expect(result).toEqual({ error: 'fields[0] contains unsupported properties: onClick', ok: false })
   })
 
   it('adds a correction field to checkbox-only approval forms', () => {

@@ -415,9 +415,18 @@ DESKTOP_QUESTIONNAIRE_GUIDANCE = (
     "unless a few fields are tightly related. Render the interaction as a `hermes-ui` fenced "
     'artifact with `type: "form"` instead of a plain Markdown list, raw JSON, or a code block. '
     "Use only the bounded form field types supported by Hermes: `short-text`, `long-text`, "
-    "`single-choice`, `multi-choice`, `boolean`, `number`, `date`, and `time`. Keep the JSON "
-    "small and safe with `type`, optional `direction`, `id`, `title`, `description`, `fields`, "
-    "and `submitLabel`. Each field needs an `id`, `label`, and `type`; use `required` only when "
+    "`single-choice`, `multi-choice`, `boolean`, `number`, `date`, and `time`. The fence body "
+    "must be PURE JSON: no prose before or after the JSON inside the fence, no comments, no "
+    "trailing commas, no nested code fences. The validator hard-rejects any key outside this "
+    "exact allowlist — top level: `type`, `direction`, `id`, `title`, `description`, `fields`, "
+    "`submitLabel`; per field: `id`, `label`, `type`, `description`, `placeholder`, `required`, "
+    "`options`, `default`. Do not invent keys like `value`, `name`, `min`, `max`, or `rows`. "
+    "Keep forms short — at most 6 fields with concise labels — so the artifact never truncates "
+    "mid-JSON. Minimal valid example:\n"
+    '```hermes-ui\n{"type": "form", "id": "confirm-plan", "title": "Quick check", '
+    '"fields": [{"id": "mood", "label": "How are you feeling?", "type": "single-choice", '
+    '"options": ["Good", "Tired"]}], "submitLabel": "Send"}\n```\n'
+    "Each field needs an `id`, `label`, and `type`; use `required` only when "
     "the assistant cannot proceed without an answer. For Hebrew or mixed Hebrew text, set "
     "`direction` to `rtl` or `auto`. Never generate arbitrary HTML or executable UI code. "
     "Do not use a form as a substitute for tool calls when the user asked you to take an action."

@@ -824,8 +824,9 @@ function parseQuestionnaireArtifact(parsed: Record<string, unknown>): HermesUiAr
 }
 
 function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
-  if (Object.keys(parsed).some(key => !SAFE_FORM_KEYS.has(key))) {
-    return { error: 'form contains unsupported properties', ok: false }
+  const unsupportedFormKeys = Object.keys(parsed).filter(key => !SAFE_FORM_KEYS.has(key))
+  if (unsupportedFormKeys.length > 0) {
+    return { error: `form contains unsupported properties: ${unsupportedFormKeys.join(', ')}`, ok: false }
   }
 
   const base = parseBaseFields(parsed)
@@ -854,8 +855,9 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
       return { error: `fields[${index}] must be an object`, ok: false }
     }
 
-    if (Object.keys(raw).some(key => !SAFE_FORM_FIELD_KEYS.has(key))) {
-      return { error: `fields[${index}] contains unsupported properties`, ok: false }
+    const unsupportedFieldKeys = Object.keys(raw).filter(key => !SAFE_FORM_FIELD_KEYS.has(key))
+    if (unsupportedFieldKeys.length > 0) {
+      return { error: `fields[${index}] contains unsupported properties: ${unsupportedFieldKeys.join(', ')}`, ok: false }
     }
 
     const id = normalizeText(raw.id, MAX_ITEM_ID_LENGTH, `fields[${index}].id`)
