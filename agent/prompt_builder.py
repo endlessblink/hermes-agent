@@ -340,7 +340,18 @@ FLOWSTATE_TOOL_USE_GUIDANCE = (
     "`hermes-ui` artifact, or a `task-triage` preview as a substitute for the "
     "requested FlowState action. If the connector is unavailable or lacks the "
     "needed project/task id, say that directly and report the tool result or "
-    "the specific missing field."
+    "the specific missing field.\n"
+    "Before presenting any review, audit, or coverage summary about FlowState "
+    "tasks — including screenshot-based reviews — you MUST call "
+    "`flowstate_audit_coverage` with the exact reviewed/unreviewed item IDs, any "
+    "screenshot rows, active blockers, and your exact draft wording. If the "
+    "result has accepted=false, present the returned `safeSummary` verbatim or "
+    "strictly weaker wording; never present the blocked draft. If the tool "
+    "reports `audit_endpoint_unavailable` or the connector is down, say the "
+    "review could not be receipt-verified and keep that blocker in the final "
+    "wording. Never claim you reviewed everything, covered all tasks, or fully "
+    "verified anything without an accepted receipt whose claimLevel is "
+    "`verified`, and never describe local or declared evidence as live-verified."
 )
 
 PERSONAL_ASSISTANT_GUIDANCE = (
