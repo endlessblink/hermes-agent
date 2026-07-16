@@ -414,6 +414,13 @@ class TestBareTextNoLongerApproves:
 class TestBlockingApprovalE2E:
     """Test the full blocking flow: agent thread blocks → user approves → agent resumes."""
 
+    @pytest.fixture(autouse=True)
+    def _manual_approval_mode(self, monkeypatch):
+        """Exercise the blocking owner flow without auxiliary-model latency."""
+        from tools import approval as approval_module
+
+        monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
+
     def setup_method(self):
         _clear_approval_state()
         os.environ.pop("HERMES_YOLO_MODE", None)
