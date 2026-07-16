@@ -257,6 +257,25 @@ class TestProjectFacts:
     def test_project_facts_for_none_outside_workspace(self, tmp_path):
         assert cc.project_facts_for(tmp_path) is None
 
+    def test_shared_temp_git_dir_does_not_capture_nested_project(
+        self, tmp_path, monkeypatch
+    ):
+        shared_temp = tmp_path / "shared-temp"
+        project = shared_temp / "job" / "project"
+        project.mkdir(parents=True)
+        (shared_temp / ".git").mkdir()
+        real_exists = Path.exists
+
+        def exists(path):
+            if path.name == ".git":
+                return path == shared_temp / ".git"
+            return real_exists(path)
+
+        monkeypatch.setattr(Path, "exists", exists)
+        monkeypatch.setattr(cc.tempfile, "gettempdir", lambda: str(shared_temp))
+
+        assert cc._git_root(project) is None
+
 
 # ── $HOME dotfiles guard ────────────────────────────────────────────────────
 
