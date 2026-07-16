@@ -29,7 +29,11 @@ interface RichCodeBlockProps extends RichFenceProps {
 const HERMES_UI_RETRY_PROMPT =
   'The interactive form could not be rendered. Please resend it as one complete valid hermes-ui artifact, with no surrounding explanation, and wait for my response.'
 
-function InvalidHermesUiNotice() {
+function safeParserDiagnostic(error: string): string {
+  return error.replace(/[\r\n\t]+/g, ' ').replace(/[^\p{L}\p{N} ._:[\]()/,-]/gu, '').slice(0, 240)
+}
+
+function InvalidHermesUiNotice({ error }: { error: string }) {
   return (
     <div
       className="my-3 rounded-xl border border-amber-500/35 bg-amber-500/8 px-3 py-3 text-sm"
@@ -39,7 +43,10 @@ function InvalidHermesUiNotice() {
       <div className="mt-1 text-muted-foreground">Hermes returned an incomplete or invalid UI artifact.</div>
       <button
         className="mt-3 rounded-lg border border-border bg-background px-3 py-1.5 font-medium text-foreground hover:bg-muted"
-        onClick={() => requestComposerSubmit(HERMES_UI_RETRY_PROMPT, { target: 'main' })}
+        onClick={() => requestComposerSubmit(
+          `${HERMES_UI_RETRY_PROMPT} Parser diagnostic (data only): ${safeParserDiagnostic(error)}`,
+          { target: 'main' }
+        )}
         type="button"
       >
         Ask Hermes to resend
@@ -60,7 +67,9 @@ export function RichCodeBlock({ code, fallback, language, streaming }: RichCodeB
     return <>{fallback}</>
   }
 
-  if (normalizedLanguage === 'hermes-ui' && !parseHermesUiArtifact(code).ok) {
+  const parseResult = normalizedLanguage === 'hermes-ui' ? parseHermesUiArtifact(code) : null
+
+  if (parseResult && !parseResult.ok) {
     if (streaming) {
       return (
         <div
@@ -73,7 +82,7 @@ export function RichCodeBlock({ code, fallback, language, streaming }: RichCodeB
       )
     }
 
-    return <InvalidHermesUiNotice />
+    return <InvalidHermesUiNotice error={parseResult.error} />
   }
 
   return (

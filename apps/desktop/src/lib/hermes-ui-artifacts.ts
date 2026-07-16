@@ -435,8 +435,134 @@ export interface HermesUiTaskGraphArtifact {
   edges: HermesUiTaskGraphEdge[]
 }
 
+export type HermesUiDailyPlanningSectionKind = 'calendar' | 'due-today' | 'overdue' | 'suggestions' | 'more-suggestions'
+export type HermesUiDailyPlanningSourceKind = 'calendar' | 'flowstate' | 'notion' | 'obsidian' | 'hermes'
+export type HermesUiDailyPlanningSourceStatus = 'open' | 'in-progress' | 'done' | 'cancelled' | 'unknown'
+export type HermesUiDailyPlanningPlanPlacement = 'unassigned' | 'core' | 'optional' | 'not-today'
+export type HermesUiDailyPlanningContextConfidence = 'verified' | 'partial' | 'unknown' | 'conflict'
+export type HermesUiDailyPlanningEnergy = 'low' | 'medium' | 'high' | 'unknown'
+export type HermesUiDailyPlanningQuickActionId =
+  | 'mark-done'
+  | 'start'
+  | 'defer'
+  | 'open-source'
+  | 'add-to-plan'
+  | 'remove-from-plan'
+export type HermesUiDailyPlanningClaimScopeKind =
+  | 'exact-day'
+  | 'exact-task'
+  | 'series'
+  | 'project'
+  | 'life-domain'
+  | 'workflow'
+  | 'global'
+
+export interface HermesUiDailyPlanningSourceIdentity {
+  kind: HermesUiDailyPlanningSourceKind
+  recordId: string
+  revision?: string
+}
+
+export interface HermesUiDailyPlanningTemporal {
+  allDay?: boolean
+  endTime?: string
+  startTime?: string
+}
+
+export interface HermesUiDailyPlanningContextEntry {
+  id: string
+  text: string
+}
+
+export interface HermesUiDailyPlanningProvenanceEntry {
+  capturedAt: string
+  id: string
+  sourceKind: HermesUiDailyPlanningSourceKind
+  sourceRecordId?: string
+  text?: string
+}
+
+export interface HermesUiDailyPlanningClaimScope {
+  kind: HermesUiDailyPlanningClaimScopeKind
+  referenceId?: string
+}
+
+export interface HermesUiDailyPlanningLearnedClaim {
+  id: string
+  provenance: HermesUiDailyPlanningProvenanceEntry[]
+  scope: HermesUiDailyPlanningClaimScope
+  state: 'active' | 'superseded'
+  supersedesClaimId?: string
+  text: string
+}
+
+export interface HermesUiDailyPlanningLearningConflict {
+  id: string
+  newClaimId: string
+  priorClaimId: string
+}
+
+export interface HermesUiDailyPlanningGeneralizationProposal {
+  claimId: string
+  id: string
+  rationale: string
+  scope: HermesUiDailyPlanningClaimScope
+}
+
+export interface HermesUiDailyPlanningQuickAction {
+  id: HermesUiDailyPlanningQuickActionId
+  label: string
+}
+
+export interface HermesUiDailyPlanningRow {
+  context?: HermesUiDailyPlanningContextEntry[]
+  contextConfidence: HermesUiDailyPlanningContextConfidence
+  doneEnough?: string
+  dueDate?: string | null
+  durationMinutes?: number
+  energy?: HermesUiDailyPlanningEnergy
+  expectedImpact?: string
+  generalizationProposals?: HermesUiDailyPlanningGeneralizationProposal[]
+  id: string
+  learnedClaims?: HermesUiDailyPlanningLearnedClaim[]
+  learningConflicts?: HermesUiDailyPlanningLearningConflict[]
+  nextStep?: string
+  planPlacement: HermesUiDailyPlanningPlanPlacement
+  priority?: HermesUiTaskPriority
+  provenance?: HermesUiDailyPlanningProvenanceEntry[]
+  quickActions?: HermesUiDailyPlanningQuickAction[]
+  source: HermesUiDailyPlanningSourceIdentity
+  sourceMutationAllowed: boolean
+  sourceStatus: HermesUiDailyPlanningSourceStatus
+  suggestionConfidence?: HermesUiConfidence
+  suggestionRationale?: string
+  temporal?: HermesUiDailyPlanningTemporal
+  title: string
+}
+
+export interface HermesUiDailyPlanningSection {
+  id: string
+  kind: HermesUiDailyPlanningSectionKind
+  rows: HermesUiDailyPlanningRow[]
+  title: string
+}
+
+export interface HermesUiDailyPlanningListArtifact {
+  baselineId: string
+  date: string
+  description?: string
+  direction?: 'auto' | 'ltr' | 'rtl'
+  id: string
+  schemaVersion: 1
+  sections: [HermesUiDailyPlanningSection, HermesUiDailyPlanningSection, HermesUiDailyPlanningSection, HermesUiDailyPlanningSection, HermesUiDailyPlanningSection]
+  timezone: string
+  title: string
+  type: 'daily-planning-list'
+}
+
 export type HermesUiArtifact =
   | HermesUiChecklistArtifact
+  | HermesUiDailyPlanningListArtifact
   | HermesUiDayTimelineArtifact
   | HermesUiQuestionnaireArtifact
   | HermesUiFlowStateBatchArtifact
@@ -3151,6 +3277,389 @@ function parseFlowStateNextBlockArtifact(parsed: Record<string, unknown>): Herme
   }
 }
 
+const DAILY_SECTION_ORDER: readonly HermesUiDailyPlanningSectionKind[] = ['calendar', 'due-today', 'overdue', 'suggestions', 'more-suggestions']
+const DAILY_MAX_CALENDAR_ROWS = 8
+const DAILY_MAX_UNRESOLVED_CHOICES = 3
+const DAILY_MAX_CONTEXT_ENTRIES = 20
+const DAILY_MAX_NESTED_ITEMS = 20
+const DAILY_MAX_TEXT = 2000
+const DAILY_ARTIFACT_KEYS = new Set(['baselineId', 'date', 'description', 'direction', 'id', 'schemaVersion', 'sections', 'timezone', 'title', 'type'])
+const DAILY_SECTION_KEYS = new Set(['id', 'kind', 'rows', 'title'])
+
+const DAILY_ROW_KEYS = new Set([
+  'context', 'contextConfidence', 'doneEnough', 'dueDate', 'durationMinutes', 'energy', 'expectedImpact',
+  'generalizationProposals', 'id', 'learnedClaims', 'learningConflicts', 'nextStep', 'planPlacement', 'priority',
+  'provenance', 'quickActions', 'source', 'sourceMutationAllowed', 'sourceStatus', 'suggestionConfidence',
+  'suggestionRationale', 'temporal', 'title'
+])
+
+function dailyHasUnsupportedKeys(value: Record<string, unknown>, safeKeys: ReadonlySet<string>): boolean {
+  return Object.keys(value).some(key => !safeKeys.has(key))
+}
+
+function parseDailyIdentity(value: unknown, field: string): HermesUiArtifactParseFailure | string {
+  const identity = normalizeText(value, MAX_ITEM_ID_LENGTH, field)
+
+  if (typeof identity !== 'string') {return identity}
+
+  return identity && /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/.test(identity)
+    ? identity
+    : { error: `${field} must be a stable identifier`, ok: false }
+}
+
+function parseDailyExternalIdentity(value: unknown, field: string): HermesUiArtifactParseFailure | string {
+  const identity = normalizeText(value, MAX_ITEM_ID_LENGTH, field)
+
+  if (typeof identity !== 'string') {return identity}
+
+  return identity || { error: `${field} must be a stable external identifier`, ok: false }
+}
+
+function parseDailyRevision(value: unknown, field: string): HermesUiArtifactParseFailure | string {
+  const hasControlCharacters = typeof value === 'string' && Array.from(value).some(character => {
+    const codePoint = character.codePointAt(0) ?? 0
+
+    return codePoint < 32 || codePoint === 127
+  })
+
+  if (typeof value !== 'string' || !value || value.length > MAX_ITEM_ID_LENGTH || hasControlCharacters) {
+    return { error: `${field} must be safe bounded revision evidence`, ok: false }
+  }
+
+  return value
+}
+
+function isRealDate(value: string): boolean {
+  if (!DATE_ONLY_RE.test(value)) {return false}
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+function parseDailyDate(value: unknown, field: string, nullable = false): HermesUiArtifactParseFailure | string | null {
+  if (nullable && value === null) {return null}
+
+  if (typeof value !== 'string' || !isRealDate(value)) {return { error: `${field} must be a valid YYYY-MM-DD date`, ok: false }}
+
+  return value
+}
+
+function parseDailyTimezone(value: unknown): HermesUiArtifactParseFailure | string {
+  if (typeof value !== 'string' || !value || value.length > 120) {return { error: 'timezone must be a valid IANA timezone', ok: false }}
+
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format()
+
+    return value
+  } catch {
+    return { error: 'timezone must be a valid IANA timezone', ok: false }
+  }
+}
+
+function parseDailyEnum<T extends string>(value: unknown, values: readonly T[], field: string): HermesUiArtifactParseFailure | T {
+  return typeof value === 'string' && values.includes(value as T)
+    ? value as T
+    : { error: `${field} has an invalid value`, ok: false }
+}
+
+function parseDailyProvenance(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiDailyPlanningProvenanceEntry[] | undefined {
+  if (value === undefined) {return undefined}
+
+  if (!Array.isArray(value) || value.length > DAILY_MAX_NESTED_ITEMS) {return { error: `${field} must be a bounded array`, ok: false }}
+  const entries: HermesUiDailyPlanningProvenanceEntry[] = []
+
+  for (const [index, raw] of value.entries()) {
+    if (!isRecord(raw) || dailyHasUnsupportedKeys(raw, new Set(['capturedAt', 'id', 'sourceKind', 'sourceRecordId', 'text']))) {return { error: `${field}[${index}] is invalid`, ok: false }}
+    const id = parseDailyIdentity(raw.id, `${field}[${index}].id`)
+    const sourceKind = parseDailyEnum(raw.sourceKind, ['calendar', 'flowstate', 'notion', 'obsidian', 'hermes'] as const, `${field}[${index}].sourceKind`)
+    const capturedAt = raw.capturedAt
+
+    if (isParseFailure(id) || isParseFailure(sourceKind)) {return isParseFailure(id) ? id : sourceKind as HermesUiArtifactParseFailure}
+
+    if (typeof capturedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T/.test(capturedAt) || Number.isNaN(Date.parse(capturedAt))) {return { error: `${field}[${index}].capturedAt must be ISO-8601`, ok: false }}
+    const sourceRecordId = raw.sourceRecordId === undefined ? undefined : parseDailyExternalIdentity(raw.sourceRecordId, `${field}[${index}].sourceRecordId`)
+    const text = optionalText(raw.text, DAILY_MAX_TEXT, `${field}[${index}].text`)
+
+    if (isParseFailure(sourceRecordId) || isParseFailure(text)) {return isParseFailure(sourceRecordId) ? sourceRecordId : text as HermesUiArtifactParseFailure}
+    entries.push({ capturedAt, id, sourceKind, sourceRecordId, text })
+  }
+
+  return entries
+}
+
+function parseDailyScope(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiDailyPlanningClaimScope {
+  if (!isRecord(value) || dailyHasUnsupportedKeys(value, new Set(['kind', 'referenceId']))) {return { error: `${field} is invalid`, ok: false }}
+  const kind = parseDailyEnum(value.kind, ['exact-day', 'exact-task', 'series', 'project', 'life-domain', 'workflow', 'global'] as const, `${field}.kind`)
+
+  if (isParseFailure(kind)) {return kind}
+  const referenceId = value.referenceId === undefined ? undefined : parseDailyIdentity(value.referenceId, `${field}.referenceId`)
+
+  if (isParseFailure(referenceId)) {return referenceId}
+
+  if (kind !== 'global' && !referenceId) {return { error: `${field}.referenceId is required`, ok: false }}
+
+  return { kind, referenceId }
+}
+
+function parseDailyRow(raw: unknown, field: string): HermesUiArtifactParseFailure | HermesUiDailyPlanningRow {
+  if (!isRecord(raw) || dailyHasUnsupportedKeys(raw, DAILY_ROW_KEYS)) {return { error: `${field} contains unsupported properties`, ok: false }}
+  const id = parseDailyIdentity(raw.id, `${field}.id`)
+  const title = normalizeText(raw.title, MAX_LABEL_LENGTH, `${field}.title`)
+
+  if (isParseFailure(id) || typeof title !== 'string' || !title) {return isParseFailure(id) ? id : { error: `${field}.title is required`, ok: false }}
+
+  if (!isRecord(raw.source) || dailyHasUnsupportedKeys(raw.source, new Set(['kind', 'recordId', 'revision']))) {return { error: `${field}.source is invalid`, ok: false }}
+  const sourceKind = parseDailyEnum(raw.source.kind, ['calendar', 'flowstate', 'notion', 'obsidian', 'hermes'] as const, `${field}.source.kind`)
+  const recordId = parseDailyExternalIdentity(raw.source.recordId, `${field}.source.recordId`)
+  const revision = raw.source.revision === undefined ? undefined : parseDailyRevision(raw.source.revision, `${field}.source.revision`)
+  const sourceStatus = parseDailyEnum(raw.sourceStatus, ['open', 'in-progress', 'done', 'cancelled', 'unknown'] as const, `${field}.sourceStatus`)
+  const planPlacement = parseDailyEnum(raw.planPlacement, ['unassigned', 'core', 'optional', 'not-today'] as const, `${field}.planPlacement`)
+  const contextConfidence = parseDailyEnum(raw.contextConfidence, ['verified', 'partial', 'unknown', 'conflict'] as const, `${field}.contextConfidence`)
+
+  for (const parsed of [sourceKind, recordId, revision, sourceStatus, planPlacement, contextConfidence]) {if (isParseFailure(parsed)) {return parsed}}
+
+  if (typeof raw.sourceMutationAllowed !== 'boolean') {return { error: `${field}.sourceMutationAllowed must be boolean`, ok: false }}
+
+  if (sourceKind === 'calendar' && raw.sourceMutationAllowed) {return { error: `${field} Calendar source mutation must be false`, ok: false }}
+
+  const priority = parseTaskPriority(raw.priority)
+
+  if (isParseFailure(priority)) {return priority}
+  const dueDate = raw.dueDate === undefined ? undefined : parseDailyDate(raw.dueDate, `${field}.dueDate`, true)
+
+  if (isParseFailure(dueDate)) {return dueDate}
+
+  if (raw.durationMinutes !== undefined && (!Number.isInteger(raw.durationMinutes) || (raw.durationMinutes as number) < 1 || (raw.durationMinutes as number) > 1440)) {return { error: `${field}.durationMinutes is invalid`, ok: false }}
+  const energy = raw.energy === undefined ? undefined : parseDailyEnum(raw.energy, ['low', 'medium', 'high', 'unknown'] as const, `${field}.energy`)
+  const suggestionConfidence = raw.suggestionConfidence === undefined ? undefined : parseDailyEnum(raw.suggestionConfidence, ['low', 'medium', 'high'] as const, `${field}.suggestionConfidence`)
+
+  if (isParseFailure(energy) || isParseFailure(suggestionConfidence)) {return isParseFailure(energy) ? energy : suggestionConfidence as HermesUiArtifactParseFailure}
+
+  let temporal: HermesUiDailyPlanningTemporal | undefined
+
+  if (raw.temporal !== undefined) {
+    if (!isRecord(raw.temporal) || dailyHasUnsupportedKeys(raw.temporal, new Set(['allDay', 'endTime', 'startTime']))) {return { error: `${field}.temporal is invalid`, ok: false }}
+    const { allDay, endTime, startTime } = raw.temporal
+
+    if (allDay !== undefined && typeof allDay !== 'boolean') {return { error: `${field}.temporal.allDay must be boolean`, ok: false }}
+
+    if (startTime !== undefined && (typeof startTime !== 'string' || !TIME_ONLY_RE.test(startTime))) {return { error: `${field}.temporal.startTime is invalid`, ok: false }}
+
+    if (endTime !== undefined && (typeof endTime !== 'string' || !TIME_ONLY_RE.test(endTime))) {return { error: `${field}.temporal.endTime is invalid`, ok: false }}
+    temporal = { allDay, endTime: endTime as string | undefined, startTime: startTime as string | undefined }
+  }
+
+  let context: HermesUiDailyPlanningContextEntry[] | undefined
+
+  if (raw.context !== undefined) {
+    if (!Array.isArray(raw.context) || raw.context.length > DAILY_MAX_CONTEXT_ENTRIES) {return { error: `${field}.context must be a bounded array`, ok: false }}
+    context = []
+
+    for (const [index, entry] of raw.context.entries()) {
+      if (!isRecord(entry) || dailyHasUnsupportedKeys(entry, new Set(['id', 'text']))) {return { error: `${field}.context[${index}] is invalid`, ok: false }}
+      const entryId = parseDailyIdentity(entry.id, `${field}.context[${index}].id`)
+      const entryText = normalizeText(entry.text, DAILY_MAX_TEXT, `${field}.context[${index}].text`)
+
+      if (isParseFailure(entryId) || typeof entryText !== 'string' || !entryText) {return isParseFailure(entryId) ? entryId : { error: `${field}.context[${index}].text is required`, ok: false }}
+      context.push({ id: entryId, text: entryText })
+    }
+  }
+
+  const provenance = parseDailyProvenance(raw.provenance, `${field}.provenance`)
+
+  if (isParseFailure(provenance)) {return provenance}
+  const learnedClaims: HermesUiDailyPlanningLearnedClaim[] = []
+
+  if (raw.learnedClaims !== undefined) {
+    if (!Array.isArray(raw.learnedClaims) || raw.learnedClaims.length > DAILY_MAX_NESTED_ITEMS) {return { error: `${field}.learnedClaims must be a bounded array`, ok: false }}
+
+    for (const [index, claim] of raw.learnedClaims.entries()) {
+      if (!isRecord(claim) || dailyHasUnsupportedKeys(claim, new Set(['id', 'provenance', 'scope', 'state', 'supersedesClaimId', 'text']))) {return { error: `${field}.learnedClaims[${index}] is invalid`, ok: false }}
+      const claimId = parseDailyIdentity(claim.id, `${field}.learnedClaims[${index}].id`)
+      const text = normalizeText(claim.text, DAILY_MAX_TEXT, `${field}.learnedClaims[${index}].text`)
+      const scope = parseDailyScope(claim.scope, `${field}.learnedClaims[${index}].scope`)
+      const claimProvenance = parseDailyProvenance(claim.provenance, `${field}.learnedClaims[${index}].provenance`)
+      const state = parseDailyEnum(claim.state, ['active', 'superseded'] as const, `${field}.learnedClaims[${index}].state`)
+      const supersedesClaimId = claim.supersedesClaimId === undefined ? undefined : parseDailyIdentity(claim.supersedesClaimId, `${field}.learnedClaims[${index}].supersedesClaimId`)
+
+      for (const parsed of [claimId, scope, claimProvenance, state, supersedesClaimId]) {if (isParseFailure(parsed)) {return parsed}}
+      const validProvenance = claimProvenance as HermesUiDailyPlanningProvenanceEntry[] | undefined
+
+      if (typeof text !== 'string' || !text || !validProvenance?.length) {return { error: `${field}.learnedClaims[${index}] is incomplete`, ok: false }}
+      learnedClaims.push({
+        id: claimId as string,
+        provenance: validProvenance,
+        scope: scope as HermesUiDailyPlanningClaimScope,
+        state: state as 'active' | 'superseded',
+        supersedesClaimId: supersedesClaimId as string | undefined,
+        text
+      })
+    }
+  }
+
+  const learningConflicts: HermesUiDailyPlanningLearningConflict[] = []
+
+  if (raw.learningConflicts !== undefined) {
+    if (!Array.isArray(raw.learningConflicts) || raw.learningConflicts.length > DAILY_MAX_NESTED_ITEMS) {return { error: `${field}.learningConflicts must be a bounded array`, ok: false }}
+
+    for (const [index, conflict] of raw.learningConflicts.entries()) {
+      if (!isRecord(conflict) || dailyHasUnsupportedKeys(conflict, new Set(['id', 'newClaimId', 'priorClaimId']))) {return { error: `${field}.learningConflicts[${index}] is invalid`, ok: false }}
+      const conflictId = parseDailyIdentity(conflict.id, `${field}.learningConflicts[${index}].id`)
+      const newClaimId = parseDailyIdentity(conflict.newClaimId, `${field}.learningConflicts[${index}].newClaimId`)
+      const priorClaimId = parseDailyIdentity(conflict.priorClaimId, `${field}.learningConflicts[${index}].priorClaimId`)
+
+      for (const parsed of [conflictId, newClaimId, priorClaimId]) {if (isParseFailure(parsed)) {return parsed}}
+      learningConflicts.push({ id: conflictId as string, newClaimId: newClaimId as string, priorClaimId: priorClaimId as string })
+    }
+  }
+
+  const generalizationProposals: HermesUiDailyPlanningGeneralizationProposal[] = []
+
+  if (raw.generalizationProposals !== undefined) {
+    if (!Array.isArray(raw.generalizationProposals) || raw.generalizationProposals.length > DAILY_MAX_NESTED_ITEMS) {return { error: `${field}.generalizationProposals must be a bounded array`, ok: false }}
+
+    for (const [index, proposal] of raw.generalizationProposals.entries()) {
+      if (!isRecord(proposal) || dailyHasUnsupportedKeys(proposal, new Set(['claimId', 'id', 'rationale', 'scope']))) {return { error: `${field}.generalizationProposals[${index}] is invalid`, ok: false }}
+      const proposalId = parseDailyIdentity(proposal.id, `${field}.generalizationProposals[${index}].id`)
+      const claimId = parseDailyIdentity(proposal.claimId, `${field}.generalizationProposals[${index}].claimId`)
+      const scope = parseDailyScope(proposal.scope, `${field}.generalizationProposals[${index}].scope`)
+      const rationale = normalizeText(proposal.rationale, MAX_RATIONALE_LENGTH, `${field}.generalizationProposals[${index}].rationale`)
+
+      for (const parsed of [proposalId, claimId, scope]) {if (isParseFailure(parsed)) {return parsed}}
+
+      if (typeof rationale !== 'string' || !rationale) {return { error: `${field}.generalizationProposals[${index}].rationale is required`, ok: false }}
+      generalizationProposals.push({ claimId: claimId as string, id: proposalId as string, rationale, scope: scope as HermesUiDailyPlanningClaimScope })
+    }
+  }
+
+  let quickActions: HermesUiDailyPlanningQuickAction[] | undefined
+
+  if (raw.quickActions !== undefined) {
+    if (!Array.isArray(raw.quickActions) || raw.quickActions.length > 6) {return { error: `${field}.quickActions must be a bounded array`, ok: false }}
+    quickActions = []
+
+    for (const [index, action] of raw.quickActions.entries()) {
+      if (!isRecord(action) || dailyHasUnsupportedKeys(action, new Set(['id', 'label']))) {return { error: `${field}.quickActions[${index}] is invalid`, ok: false }}
+      const actionId = parseDailyEnum(action.id, ['mark-done', 'start', 'defer', 'open-source', 'add-to-plan', 'remove-from-plan'] as const, `${field}.quickActions[${index}].id`)
+      const label = normalizeText(action.label, MAX_ACTION_LABEL_LENGTH, `${field}.quickActions[${index}].label`)
+
+      if (isParseFailure(actionId) || typeof label !== 'string' || !label) {return isParseFailure(actionId) ? actionId : { error: `${field}.quickActions[${index}].label is required`, ok: false }}
+      quickActions.push({ id: actionId, label })
+    }
+  }
+
+  const optionalFields = ['doneEnough', 'expectedImpact', 'nextStep', 'suggestionRationale'] as const
+  const texts: Partial<Record<typeof optionalFields[number], string>> = {}
+
+  for (const key of optionalFields) {
+    const text = optionalText(raw[key], DAILY_MAX_TEXT, `${field}.${key}`)
+
+    if (isParseFailure(text)) {return text}
+
+    if (text) {texts[key] = text}
+  }
+
+  return {
+    ...texts, context, contextConfidence: contextConfidence as HermesUiDailyPlanningContextConfidence,
+    dueDate: dueDate as string | null | undefined, durationMinutes: raw.durationMinutes as number | undefined,
+    energy: energy as HermesUiDailyPlanningEnergy | undefined,
+    generalizationProposals: generalizationProposals.length ? generalizationProposals : undefined, id: id as string,
+    learnedClaims: learnedClaims.length ? learnedClaims : undefined,
+    learningConflicts: learningConflicts.length ? learningConflicts : undefined,
+    planPlacement: planPlacement as HermesUiDailyPlanningPlanPlacement, priority,
+    provenance, quickActions,
+    source: {
+      kind: sourceKind as HermesUiDailyPlanningSourceKind,
+      recordId: recordId as string,
+      revision: revision as string | undefined
+    },
+    sourceMutationAllowed: raw.sourceMutationAllowed,
+    sourceStatus: sourceStatus as HermesUiDailyPlanningSourceStatus,
+    suggestionConfidence: suggestionConfidence as HermesUiConfidence | undefined, temporal, title
+  }
+}
+
+function parseDailyPlanningListArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
+  if (dailyHasUnsupportedKeys(parsed, DAILY_ARTIFACT_KEYS)) {return { error: 'daily-planning-list contains unsupported properties', ok: false }}
+
+  if (parsed.schemaVersion !== 1) {return { error: 'schemaVersion must be 1', ok: false }}
+  const id = parseDailyIdentity(parsed.id, 'id')
+  const baselineId = parseDailyIdentity(parsed.baselineId, 'baselineId')
+  const title = normalizeText(parsed.title, MAX_TITLE_LENGTH, 'title')
+  const description = optionalText(parsed.description, MAX_DESCRIPTION_LENGTH, 'description')
+  const date = parseDailyDate(parsed.date, 'date')
+  const timezone = parseDailyTimezone(parsed.timezone)
+  const direction = normalizeDirection(parsed.direction)
+
+  for (const value of [id, baselineId, description, date, timezone, direction]) {if (isParseFailure(value)) {return value}}
+
+  if (typeof title !== 'string' || !title) {return { error: 'title is required', ok: false }}
+
+  if (!Array.isArray(parsed.sections) || parsed.sections.length !== 5) {return { error: 'daily-planning-list requires exactly five sections', ok: false }}
+  const seenSectionIds = new Set<string>()
+  const seenRowIds = new Set<string>()
+  const sections: HermesUiDailyPlanningSection[] = []
+  let unresolvedChoiceCount = 0
+
+  for (const [index, section] of parsed.sections.entries()) {
+    if (!isRecord(section) || dailyHasUnsupportedKeys(section, DAILY_SECTION_KEYS)) {return { error: `sections[${index}] contains unsupported properties`, ok: false }}
+    const sectionId = parseDailyIdentity(section.id, `sections[${index}].id`)
+    const sectionTitle = normalizeText(section.title, MAX_TITLE_LENGTH, `sections[${index}].title`)
+
+    if (isParseFailure(sectionId) || typeof sectionTitle !== 'string' || !sectionTitle) {return isParseFailure(sectionId) ? sectionId : { error: `sections[${index}].title is required`, ok: false }}
+
+    if (seenSectionIds.has(sectionId)) {return { error: `Duplicate section id: ${sectionId}`, ok: false }}
+    seenSectionIds.add(sectionId)
+
+    if (section.kind !== DAILY_SECTION_ORDER[index]) {return { error: `sections[${index}].kind must be ${DAILY_SECTION_ORDER[index]}`, ok: false }}
+
+    if (!Array.isArray(section.rows)) {return { error: `sections[${index}].rows must be an array`, ok: false }}
+
+    if (section.kind === 'suggestions' && section.rows.length > 3) {return { error: 'suggestions may contain at most three rows', ok: false }}
+
+    if (section.kind === 'calendar' && section.rows.length > DAILY_MAX_CALENDAR_ROWS) {return { error: 'calendar may contain at most eight relevant constraints', ok: false }}
+
+    if (section.kind !== 'calendar') {unresolvedChoiceCount += section.rows.length}
+
+    if (unresolvedChoiceCount > DAILY_MAX_UNRESOLVED_CHOICES) {return { error: 'daily-planning-list may contain at most three unresolved choices', ok: false }}
+
+    const rows: HermesUiDailyPlanningRow[] = []
+
+    for (const [rowIndex, rawRow] of section.rows.entries()) {
+      const row = parseDailyRow(rawRow, `sections[${index}].rows[${rowIndex}]`)
+
+      if (isParseFailure(row)) {return row}
+
+      if (seenRowIds.has(row.id)) {return { error: `Duplicate row id: ${row.id}`, ok: false }}
+      seenRowIds.add(row.id)
+
+      if (section.kind === 'suggestions' && (!row.suggestionRationale || !row.suggestionConfidence || !row.expectedImpact)) {return { error: 'suggestions rows require rationale, confidence, and expected impact', ok: false }}
+
+      if (section.kind === 'calendar' && row.source.kind !== 'calendar') {return { error: 'calendar rows must use Calendar source', ok: false }}
+      rows.push(row)
+    }
+
+    sections.push({ id: sectionId as string, kind: section.kind as HermesUiDailyPlanningSectionKind, rows, title: sectionTitle })
+  }
+
+  return {
+    artifact: {
+      baselineId: baselineId as string,
+      date: date as string,
+      description: description as string | undefined,
+      direction: direction as HermesUiDailyPlanningListArtifact['direction'],
+      id: id as string,
+      schemaVersion: 1,
+      sections: sections as HermesUiDailyPlanningListArtifact['sections'],
+      timezone: timezone as string,
+      title,
+      type: 'daily-planning-list'
+    },
+    ok: true
+  }
+}
+
 export function parseHermesUiArtifact(source: string): HermesUiArtifactParseResult {
   let parsed: unknown
 
@@ -3162,6 +3671,12 @@ export function parseHermesUiArtifact(source: string): HermesUiArtifactParseResu
 
   if (!isRecord(parsed)) {
     return { error: 'Artifact must be an object', ok: false }
+  }
+
+  if (parsed.type === 'daily-planning-list') {
+    if (source.length > 2 * 1024 * 1024) {return { error: 'daily-planning-list is too large', ok: false }}
+
+    return parseDailyPlanningListArtifact(parsed)
   }
 
   if (parsed.type === 'checklist') {
@@ -3262,11 +3777,205 @@ function stableHash(value: string): string {
   return (hash >>> 0).toString(36)
 }
 
+export type HermesUiDailyPlanningConflictDecision = 'keep-prior' | 'activate-new' | 'keep-both'
+
+export interface HermesUiDailyPlanningDraftRow {
+  approvedGeneralizationIds: string[]
+  conflictResolutions: Record<string, HermesUiDailyPlanningConflictDecision>
+  context: HermesUiDailyPlanningContextEntry[]
+  contextConfidence: HermesUiDailyPlanningContextConfidence
+  doneEnough?: string
+  dueDate?: string | null
+  durationMinutes?: number
+  energy?: HermesUiDailyPlanningEnergy
+  nextStep?: string
+  planPlacement: HermesUiDailyPlanningPlanPlacement
+  priority?: HermesUiTaskPriority
+  proposedLearningClaims: HermesUiDailyPlanningLearnedClaim[]
+  sourceStatus: HermesUiDailyPlanningSourceStatus
+  suggestionSelected: boolean
+}
+
+export interface HermesUiDailyPlanningDraft {
+  rows: Record<string, HermesUiDailyPlanningDraftRow>
+}
+
+export interface HermesUiDailyPlanningFieldDiff<T = unknown> {
+  after: T
+  before: T
+}
+
+export interface HermesUiDailyPlanningSourceChange {
+  changes: Partial<Record<'dueDate' | 'priority' | 'sourceStatus', HermesUiDailyPlanningFieldDiff>>
+  rowId: string
+  source: HermesUiDailyPlanningSourceIdentity
+}
+
+export interface HermesUiDailyPlanningDayPlanChange {
+  changes: Partial<Record<'context' | 'contextConfidence' | 'doneEnough' | 'durationMinutes' | 'energy' | 'nextStep' | 'planPlacement' | 'suggestionSelected', HermesUiDailyPlanningFieldDiff>>
+  rowId: string
+  source: HermesUiDailyPlanningSourceIdentity
+}
+
+export interface HermesUiDailyPlanningLearningChange {
+  claims: HermesUiDailyPlanningLearnedClaim[]
+  rowId: string
+  source: HermesUiDailyPlanningSourceIdentity
+}
+
+export interface HermesUiDailyPlanningConflictResolution {
+  conflictId: string
+  decision: HermesUiDailyPlanningConflictDecision
+  rowId: string
+}
+
+export interface HermesUiDailyPlanningApprovedGeneralization {
+  proposal: HermesUiDailyPlanningGeneralizationProposal
+  rowId: string
+}
+
+export interface HermesUiDailyPlanningListResponse {
+  action: 'request-preview'
+  artifactId: string
+  baselineId: string
+  conflictResolutions: HermesUiDailyPlanningConflictResolution[]
+  continuationInstruction: string
+  dayPlanChanges: HermesUiDailyPlanningDayPlanChange[]
+  generalizationProposals: HermesUiDailyPlanningApprovedGeneralization[]
+  idempotencyKey: string
+  learningChanges: HermesUiDailyPlanningLearningChange[]
+  schemaVersion: 1
+  sourceChanges: HermesUiDailyPlanningSourceChange[]
+  sourceRevisions: Array<{ revision: string; source: HermesUiDailyPlanningSourceIdentity }>
+  type: 'daily-planning-list-response'
+}
+
+function dailyPlanningRows(artifact: HermesUiDailyPlanningListArtifact): Array<{ row: HermesUiDailyPlanningRow; suggestion: boolean }> {
+  return artifact.sections.flatMap(section => section.rows.map(row => ({
+    row,
+    suggestion: section.kind === 'suggestions' || section.kind === 'more-suggestions'
+  })))
+}
+
+export function createHermesUiDailyPlanningDraft(artifact: HermesUiDailyPlanningListArtifact): HermesUiDailyPlanningDraft {
+  return {
+    rows: Object.fromEntries(dailyPlanningRows(artifact).map(({ row, suggestion }) => [row.id, {
+      approvedGeneralizationIds: [],
+      conflictResolutions: {},
+      context: row.context ? structuredClone(row.context) : [],
+      contextConfidence: row.contextConfidence,
+      doneEnough: row.doneEnough,
+      dueDate: row.dueDate,
+      durationMinutes: row.durationMinutes,
+      energy: row.energy,
+      nextStep: row.nextStep,
+      planPlacement: row.planPlacement,
+      priority: row.priority,
+      proposedLearningClaims: [],
+      sourceStatus: row.sourceStatus,
+      suggestionSelected: !suggestion
+    }]))
+  }
+}
+
+function addDailyDiff(
+  target: Record<string, HermesUiDailyPlanningFieldDiff>,
+  field: string,
+  before: unknown,
+  after: unknown
+): void {
+  if (stableStringify(before) !== stableStringify(after)) {target[field] = { after: after ?? null, before: before ?? null }}
+}
+
+export function buildHermesUiDailyPlanningListResponse(
+  artifact: HermesUiDailyPlanningListArtifact,
+  draft: HermesUiDailyPlanningDraft
+): HermesUiDailyPlanningListResponse {
+  const sourceChanges: HermesUiDailyPlanningSourceChange[] = []
+  const dayPlanChanges: HermesUiDailyPlanningDayPlanChange[] = []
+  const learningChanges: HermesUiDailyPlanningLearningChange[] = []
+  const conflictResolutions: HermesUiDailyPlanningConflictResolution[] = []
+  const generalizationProposals: HermesUiDailyPlanningApprovedGeneralization[] = []
+
+  for (const { row, suggestion } of dailyPlanningRows(artifact)) {
+    const current = draft.rows[row.id]
+
+    if (!current) {throw new Error(`Missing daily planning draft row: ${row.id}`)}
+    const sourceDiffs: Record<string, HermesUiDailyPlanningFieldDiff> = {}
+    addDailyDiff(sourceDiffs, 'sourceStatus', row.sourceStatus, current.sourceStatus)
+    addDailyDiff(sourceDiffs, 'priority', row.priority, current.priority)
+    addDailyDiff(sourceDiffs, 'dueDate', row.dueDate, current.dueDate)
+
+    if (Object.keys(sourceDiffs).length) {
+      if (!row.sourceMutationAllowed || row.source.kind === 'calendar') {throw new Error(`Source row ${row.id} is read-only`)}
+      sourceChanges.push({ changes: sourceDiffs, rowId: row.id, source: row.source })
+    }
+
+    const dayPlanDiffs: Record<string, HermesUiDailyPlanningFieldDiff> = {}
+    addDailyDiff(dayPlanDiffs, 'planPlacement', row.planPlacement, current.planPlacement)
+    addDailyDiff(dayPlanDiffs, 'contextConfidence', row.contextConfidence, current.contextConfidence)
+    addDailyDiff(dayPlanDiffs, 'durationMinutes', row.durationMinutes, current.durationMinutes)
+    addDailyDiff(dayPlanDiffs, 'energy', row.energy, current.energy)
+    addDailyDiff(dayPlanDiffs, 'context', row.context ?? [], current.context)
+    addDailyDiff(dayPlanDiffs, 'nextStep', row.nextStep, current.nextStep)
+    addDailyDiff(dayPlanDiffs, 'doneEnough', row.doneEnough, current.doneEnough)
+
+    if (suggestion) {addDailyDiff(dayPlanDiffs, 'suggestionSelected', false, current.suggestionSelected)}
+
+    if (Object.keys(dayPlanDiffs).length) {dayPlanChanges.push({ changes: dayPlanDiffs, rowId: row.id, source: row.source })}
+
+    if (current.proposedLearningClaims.length) {
+      for (const conflict of row.learningConflicts ?? []) {
+        const decision = current.conflictResolutions[conflict.id]
+
+        if (!decision) {throw new Error(`Learning conflict ${conflict.id} requires a resolution`)}
+        conflictResolutions.push({ conflictId: conflict.id, decision, rowId: row.id })
+      }
+
+      learningChanges.push({ claims: structuredClone(current.proposedLearningClaims), rowId: row.id, source: row.source })
+    }
+
+    for (const proposalId of [...new Set(current.approvedGeneralizationIds)].sort()) {
+      const proposal = row.generalizationProposals?.find(candidate => candidate.id === proposalId)
+
+      if (!proposal) {throw new Error(`Unknown generalization proposal: ${proposalId}`)}
+      generalizationProposals.push({ proposal, rowId: row.id })
+    }
+  }
+
+  const sourceRevisions = dailyPlanningRows(artifact)
+    .map(({ row }) => row.source)
+    .filter((source): source is HermesUiDailyPlanningSourceIdentity & { revision: string } => Boolean(source.revision))
+    .sort((left, right) => `${left.kind}:${left.recordId}`.localeCompare(`${right.kind}:${right.recordId}`))
+    .map(source => ({ revision: source.revision, source }))
+
+  const responseCore = {
+    action: 'request-preview' as const,
+    artifactId: artifact.id,
+    baselineId: artifact.baselineId,
+    conflictResolutions,
+    continuationInstruction: 'Validate IDs and revisions, re-read affected records, then produce typed source previews and a separate learning preview with append-only claims. Do not apply any change until the user explicitly approves each preview.',
+    dayPlanChanges,
+    generalizationProposals,
+    learningChanges,
+    schemaVersion: 1 as const,
+    sourceChanges,
+    sourceRevisions,
+    type: 'daily-planning-list-response' as const
+  }
+
+  return {
+    ...responseCore,
+    idempotencyKey: `daily-planning-list:${stableHash(stableStringify(responseCore))}`
+  }
+}
+
 export type HermesUiFormValue = boolean | string | string[]
 
 export interface HermesUiFormResponse {
   actionId: 'submit'
   artifactId: string
+  continuationInstruction: string
   idempotencyKey: string
   schemaVersion: 1
   type: 'form-response'
@@ -3291,6 +4000,8 @@ export function buildHermesUiFormResponse(
   return {
     actionId: 'submit',
     artifactId,
+    continuationInstruction:
+      'Continue the active workflow after processing this response. Supporting tool results are not completion; stop only when the workflow is complete or another user answer is required.',
     idempotencyKey,
     schemaVersion: 1,
     type: 'form-response',

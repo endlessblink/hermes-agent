@@ -1,13 +1,108 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildHermesUiDailyPlanningListResponse,
   buildHermesUiFormResponse,
+  createHermesUiDailyPlanningDraft,
   type HermesUiChecklistArtifact,
   type HermesUiFormArtifact,
   parseHermesUiArtifact,
   parseHermesUiTaskBreakdownDraftSteps,
   stableArtifactStorageKey
 } from './hermes-ui-artifacts'
+
+const dailyPlanningArtifact = {
+  baselineId: 'daily:2026-07-16:r7',
+  date: '2026-07-16',
+  direction: 'rtl',
+  id: 'daily-plan-2026-07-16',
+  schemaVersion: 1,
+  sections: [
+    {
+      id: 'calendar',
+      kind: 'calendar',
+      rows: [{
+        context: [{ id: 'context-1', text: 'פגישה במשרד' }],
+        contextConfidence: 'verified',
+        energy: 'medium',
+        id: 'row-calendar-1',
+        planPlacement: 'core',
+        provenance: [{ capturedAt: '2026-07-16T06:00:00Z', id: 'prov-1', sourceKind: 'calendar', text: 'Google Calendar' }],
+        quickActions: [{ id: 'open-source', label: 'פתיחה ביומן' }],
+        source: { kind: 'calendar', recordId: 'event-123', revision: 'etag-7' },
+        sourceMutationAllowed: false,
+        sourceStatus: 'open',
+        temporal: { endTime: '10:00', startTime: '09:00' },
+        title: 'פגישת צוות'
+      }],
+      title: 'אירועי היום'
+    },
+    {
+      id: 'due',
+      kind: 'due-today',
+      rows: [{
+        contextConfidence: 'unknown',
+        dueDate: '2026-07-16',
+        durationMinutes: 30,
+        energy: 'high',
+        generalizationProposals: [{
+          claimId: 'claim-new',
+          id: 'generalize-1',
+          rationale: 'עשוי להתאים לכל הפרויקט',
+          scope: { kind: 'project', referenceId: 'project-client' }
+        }],
+        id: 'row-task-1',
+        learnedClaims: [
+          {
+            id: 'claim-old',
+            provenance: [{ capturedAt: '2026-07-10T08:00:00Z', id: 'prov-old', sourceKind: 'obsidian', text: 'תיקון קודם' }],
+            scope: { kind: 'exact-task', referenceId: 'task-1' },
+            state: 'active',
+            text: 'המשימה קצרה'
+          },
+          {
+            id: 'claim-new',
+            provenance: [{ capturedAt: '2026-07-16T07:00:00Z', id: 'prov-new', sourceKind: 'hermes', text: 'מידע חדש' }],
+            scope: { kind: 'exact-task', referenceId: 'task-1' },
+            state: 'superseded',
+            text: 'המשימה ארוכה'
+          }
+        ],
+        learningConflicts: [{ id: 'conflict-1', newClaimId: 'claim-new', priorClaimId: 'claim-old' }],
+        planPlacement: 'core',
+        priority: 'high',
+        source: { kind: 'flowstate', recordId: 'task-1', revision: '42' },
+        sourceMutationAllowed: true,
+        sourceStatus: 'open',
+        title: 'לסיים את המצגת'
+      }],
+      title: 'להיום'
+    },
+    { id: 'overdue', kind: 'overdue', rows: [], title: 'באיחור' },
+    {
+      id: 'suggestions',
+      kind: 'suggestions',
+      rows: [{
+        contextConfidence: 'partial',
+        energy: 'low',
+        expectedImpact: 'מפנה חסימה',
+        id: 'suggestion-1',
+        planPlacement: 'unassigned',
+        source: { kind: 'notion', recordId: 'page-1', revision: 'rev-a' },
+        sourceMutationAllowed: true,
+        sourceStatus: 'open',
+        suggestionConfidence: 'high',
+        suggestionRationale: 'ממתין מאתמול',
+        title: 'לשלוח תשובה'
+      }],
+      title: 'הצעות'
+    },
+    { id: 'more', kind: 'more-suggestions', rows: [], title: 'הצעות נוספות' }
+  ],
+  timezone: 'Asia/Jerusalem',
+  title: 'תכנון יומי',
+  type: 'daily-planning-list'
+}
 
 const validChecklist = {
   description: 'Interactive checklist rendered inline by Hermes Desktop.',
@@ -40,6 +135,181 @@ const validForm: HermesUiFormArtifact = {
   type: 'form'
 }
 
+describe('daily planning list artifacts', () => {
+  it('preserves opaque Calendar record ids that begin with an underscore', () => {
+    const withOpaqueCalendarId = structuredClone(dailyPlanningArtifact)
+
+    withOpaqueCalendarId.sections[0].rows[0].source.recordId =
+      '_6phj8e316or3cb9l6hgm8b9kckrj4bb2cosm6b9kcorjapb66so3acr268'
+    const result = parseHermesUiArtifact(JSON.stringify(withOpaqueCalendarId))
+
+    expect(result.ok).toBe(true)
+    expect(
+      result.ok
+      && result.artifact.type === 'daily-planning-list'
+      && result.artifact.sections[0].rows[0].source.recordId
+    ).toBe('_6phj8e316or3cb9l6hgm8b9kckrj4bb2cosm6b9kcorjapb66so3acr268')
+  })
+
+  it('preserves bounded Unicode Obsidian paths as external record ids', () => {
+    const withObsidianPath = structuredClone(dailyPlanningArtifact)
+    const row = withObsidianPath.sections[1].rows[0]
+
+    row.source.kind = 'obsidian'
+    row.source.recordId = 'Projects/לקוח/תוכנית עבודה.md'
+    row.sourceMutationAllowed = false
+    const result = parseHermesUiArtifact(JSON.stringify(withObsidianPath))
+
+    expect(result.ok).toBe(true)
+    expect(
+      result.ok
+      && result.artifact.type === 'daily-planning-list'
+      && result.artifact.sections[1].rows[0].source.recordId
+    ).toBe('Projects/לקוח/תוכנית עבודה.md')
+  })
+
+  it('accepts collapsed additional suggestions without explanation metadata', () => {
+    const withCompactSuggestion = structuredClone(dailyPlanningArtifact) as unknown as {
+      sections: Array<{ rows: Array<Record<string, unknown>> }>
+    }
+
+    withCompactSuggestion.sections[4].rows.push({
+      contextConfidence: 'unknown',
+      id: 'suggestion-compact',
+      planPlacement: 'unassigned',
+      source: { kind: 'hermes', recordId: 'suggestion-compact' },
+      sourceMutationAllowed: false,
+      sourceStatus: 'unknown',
+      title: 'הצעה נוספת מקוצרת'
+    })
+
+    expect(parseHermesUiArtifact(JSON.stringify(withCompactSuggestion)).ok).toBe(true)
+  })
+
+  it('parses the strict Hebrew RTL five-section contract and preserves revision evidence', () => {
+    const result = parseHermesUiArtifact(JSON.stringify(dailyPlanningArtifact))
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'daily-planning-list' && result.artifact).toMatchObject({
+      baselineId: 'daily:2026-07-16:r7',
+      direction: 'rtl',
+      sections: dailyPlanningArtifact.sections,
+      timezone: 'Asia/Jerusalem'
+    })
+  })
+
+  it('rejects duplicate global identities, invalid metadata, unsafe keys, and too many visible suggestions', () => {
+    const duplicateRow = structuredClone(dailyPlanningArtifact) as unknown as {
+      sections: Array<{ rows: Array<Record<string, unknown>> }>
+    }
+
+    duplicateRow.sections[2].rows.push({ ...duplicateRow.sections[1].rows[0] })
+    expect(parseHermesUiArtifact(JSON.stringify(duplicateRow)).ok).toBe(false)
+
+    for (const artifact of [
+      { ...dailyPlanningArtifact, date: '2026-02-30' },
+      { ...dailyPlanningArtifact, timezone: 'Mars/Olympus' },
+      { ...dailyPlanningArtifact, baselineId: '' },
+      { ...dailyPlanningArtifact, onSubmit: 'unsafe' }
+    ]) {
+      expect(parseHermesUiArtifact(JSON.stringify(artifact)).ok).toBe(false)
+    }
+
+    const tooManySuggestions = structuredClone(dailyPlanningArtifact) as unknown as {
+      sections: Array<{ rows: Array<Record<string, unknown>> }>
+    }
+
+    tooManySuggestions.sections[3].rows = Array.from({ length: 4 }, (_, index) => ({
+      ...tooManySuggestions.sections[3].rows[0],
+      id: `suggestion-${index}`,
+      source: {
+        ...(tooManySuggestions.sections[3].rows[0].source as Record<string, unknown>),
+        recordId: `page-${index}`
+      }
+    }))
+    expect(parseHermesUiArtifact(JSON.stringify(tooManySuggestions)).ok).toBe(false)
+
+    const tooManyDecisions = structuredClone(dailyPlanningArtifact) as unknown as {
+      sections: Array<{ rows: Array<Record<string, unknown>> }>
+    }
+
+    const decisionTemplate = tooManyDecisions.sections[1].rows[0]
+
+    tooManyDecisions.sections[1].rows = Array.from({ length: 4 }, (_, index) => ({
+      ...decisionTemplate,
+      id: `decision-${index}`,
+      source: { kind: 'flowstate', recordId: `decision-source-${index}`, revision: `rev-${index}` }
+    }))
+    tooManyDecisions.sections[2].rows = []
+    tooManyDecisions.sections[3].rows = []
+    tooManyDecisions.sections[4].rows = []
+    expect(parseHermesUiArtifact(JSON.stringify(tooManyDecisions))).toMatchObject({
+      error: 'daily-planning-list may contain at most three unresolved choices',
+      ok: false
+    })
+  })
+
+  it('keeps independent row dimensions and builds exact deterministic response diffs', () => {
+    const parsed = parseHermesUiArtifact(JSON.stringify(dailyPlanningArtifact))
+    expect(parsed.ok).toBe(true)
+
+    if (!parsed.ok || parsed.artifact.type !== 'daily-planning-list') {return}
+
+    const draft = createHermesUiDailyPlanningDraft(parsed.artifact)
+    draft.rows['row-task-1'] = {
+      ...draft.rows['row-task-1'],
+      planPlacement: 'optional',
+      sourceStatus: 'done'
+    }
+
+    const response = buildHermesUiDailyPlanningListResponse(parsed.artifact, draft)
+    expect(response).toMatchObject({
+      action: 'request-preview',
+      artifactId: 'daily-plan-2026-07-16',
+      baselineId: 'daily:2026-07-16:r7',
+      dayPlanChanges: [{ changes: { planPlacement: { after: 'optional', before: 'core' } }, rowId: 'row-task-1' }],
+      learningChanges: [],
+      sourceChanges: [{ changes: { sourceStatus: { after: 'done', before: 'open' } }, rowId: 'row-task-1' }],
+      type: 'daily-planning-list-response'
+    })
+    expect(response.idempotencyKey).toMatch(/^daily-planning-list:/)
+    expect(buildHermesUiDailyPlanningListResponse(parsed.artifact, draft)).toEqual(response)
+  })
+
+  it('rejects source mutations for Calendar rows', () => {
+    const parsed = parseHermesUiArtifact(JSON.stringify(dailyPlanningArtifact))
+    expect(parsed.ok).toBe(true)
+
+    if (!parsed.ok || parsed.artifact.type !== 'daily-planning-list') {return}
+
+    const artifact = parsed.artifact
+    const draft = createHermesUiDailyPlanningDraft(artifact)
+    draft.rows['row-calendar-1'] = { ...draft.rows['row-calendar-1'], sourceStatus: 'done' }
+    expect(() => buildHermesUiDailyPlanningListResponse(artifact, draft)).toThrow(/read-only/i)
+  })
+
+  it('blocks unresolved learning conflicts and keeps generalization explicitly opt-in', () => {
+    const parsed = parseHermesUiArtifact(JSON.stringify(dailyPlanningArtifact))
+
+    if (!parsed.ok || parsed.artifact.type !== 'daily-planning-list') {throw new Error('fixture must parse')}
+    const artifact = parsed.artifact
+    const row = artifact.sections[1].rows[0]
+    const draft = createHermesUiDailyPlanningDraft(artifact)
+    draft.rows[row.id].proposedLearningClaims = [row.learnedClaims?.[1] as NonNullable<typeof row.learnedClaims>[number]]
+
+    expect(() => buildHermesUiDailyPlanningListResponse(artifact, draft)).toThrow(/requires a resolution/i)
+    draft.rows[row.id].conflictResolutions['conflict-1'] = 'activate-new'
+    const withoutGeneralization = buildHermesUiDailyPlanningListResponse(artifact, draft)
+    expect(withoutGeneralization.generalizationProposals).toEqual([])
+    expect(withoutGeneralization.conflictResolutions).toEqual([
+      { conflictId: 'conflict-1', decision: 'activate-new', rowId: 'row-task-1' }
+    ])
+
+    draft.rows[row.id].approvedGeneralizationIds = ['generalize-1']
+    expect(buildHermesUiDailyPlanningListResponse(artifact, draft).generalizationProposals).toHaveLength(1)
+  })
+})
+
 describe('form artifacts', () => {
   it('builds a canonical response with a stable idempotency key', () => {
     const first = buildHermesUiFormResponse(validForm, { outcome: 'מצגת', energy: 'high' })
@@ -49,6 +319,8 @@ describe('form artifacts', () => {
     expect(first).toEqual({
       actionId: 'submit',
       artifactId: 'morning-outcome',
+      continuationInstruction:
+        'Continue the active workflow after processing this response. Supporting tool results are not completion; stop only when the workflow is complete or another user answer is required.',
       idempotencyKey: expect.stringMatching(/^form:/),
       schemaVersion: 1,
       type: 'form-response',

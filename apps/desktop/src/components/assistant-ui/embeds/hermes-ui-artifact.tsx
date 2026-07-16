@@ -35,6 +35,7 @@ import {
 import { readKey, writeKey } from '@/lib/storage'
 import { cn } from '@/lib/utils'
 
+import { DailyPlanningListCard } from './daily-planning-list-card'
 import type { RichFenceProps } from './types'
 
 function readChecklistState(key: string, itemIds: ReadonlySet<string>): Record<string, boolean> {
@@ -2000,6 +2001,10 @@ export default function HermesUiArtifactRenderer({ code }: RichFenceProps) {
 
   if (result.artifact.type === 'flowstate-planning-session') {
     return <FlowStatePlanningSessionCard artifact={result.artifact} />
+  }
+
+  if (result.artifact.type === 'daily-planning-list') {
+    return <DailyPlanningListCard artifact={result.artifact} />
   }
 
   if (result.artifact.type === 'flowstate-next-block') {

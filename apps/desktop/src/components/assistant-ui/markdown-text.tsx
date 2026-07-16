@@ -106,6 +106,12 @@ function parseMarkdownIntoBlocksCached(markdown: string): string[] {
   return blocks
 }
 
+function exactHermesUiFence(text: string): string | null {
+  const match = text.match(/^\s*```hermes-ui[ \t]*\r?\n([\s\S]*?)\r?\n```\s*$/i)
+
+  return match?.[1]?.trim() || null
+}
+
 async function mediaSrc(path: string): Promise<string> {
   if (/^(?:https?|data):/i.test(path)) {
     return path
@@ -694,6 +700,19 @@ interface MarkdownTextContentProps extends MarkdownTextSurfaceProps {
 }
 
 export function MarkdownTextContent({ isRunning, text, ...surfaceProps }: MarkdownTextContentProps) {
+  const hermesUiCode = exactHermesUiFence(text)
+
+  if (hermesUiCode) {
+    return (
+      <RichCodeBlock
+        code={hermesUiCode}
+        fallback={<div className="my-3 rounded-xl border border-border/80 bg-muted/25 px-3 py-2 text-sm text-muted-foreground">Preparing interactive form…</div>}
+        language="hermes-ui"
+        streaming={isRunning}
+      />
+    )
+  }
+
   return (
     <TextMessagePartProvider isRunning={isRunning} text={text}>
       <SmoothStreamingText>
