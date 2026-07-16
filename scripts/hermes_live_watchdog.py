@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -402,7 +403,11 @@ def profile_for_monitor_ledger(home: Path, ledger: Path, fallback: str) -> str:
 def process_snapshot() -> list[str]:
     try:
         result = subprocess.run(
-            ["pgrep", "-af", "Hermes|hermes.*serve|slash_worker"],
+            [
+                "pgrep",
+                "-af",
+                "Hermes|hermes.*(serve|dashboard|--tui)|tui_gateway|slash_worker",
+            ],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -412,6 +417,177 @@ def process_snapshot() -> list[str]:
     except Exception:
         return []
     return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def systemd_user_unit_active(unit: str) -> bool:
+    """Return whether a user service is verifiably active."""
+
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", unit],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+def systemd_monitor_targets_profile(profile_home: Path) -> bool:
+    """Verify the singleton monitor service is configured for this profile."""
+
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                "hermes-personal-assistant-monitor.service",
+                "--property=ExecStart",
+                "--value",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        tokens = shlex.split(result.stdout.replace("argv[]=", " "))
+    except ValueError:
+        return False
+    expected = str(profile_home)
+    for index, token in enumerate(tokens[:-1]):
+        if token != "--profile-home":
+            continue
+        candidate = tokens[index + 1].rstrip(";} ")
+        if candidate == expected:
+            return True
+    return False
+
+
+def _command_belongs_to_profile(tokens: list[str], profile_home: Path) -> bool:
+    profile = profile_home.name if profile_home.parent.name == "profiles" else ""
+    home_lc = str(profile_home).lower()
+    tokens_lc = [token.lower() for token in tokens]
+    selected_profiles: list[str] = []
+    for index, token in enumerate(tokens_lc):
+        if token in {"--profile", "-p"} and index + 1 < len(tokens_lc):
+            selected_profiles.append(tokens_lc[index + 1])
+        elif token.startswith("--profile=") or token.startswith("-p="):
+            selected_profiles.append(token.split("=", 1)[1])
+    explicit_homes = [
+        token.split("=", 1)[1]
+        for token in tokens_lc
+        if token.startswith("hermes_home=")
+    ]
+    if profile:
+        return profile.lower() in selected_profiles or home_lc in explicit_homes
+    if selected_profiles:
+        return False
+    return not explicit_homes or home_lc in explicit_homes
+
+
+def _consumer_host_command(
+    command: str,
+    profile_home: Path,
+    *,
+    owner_pid: int,
+) -> bool:
+    """Recognize a live Desktop/TUI backend bound to this exact profile."""
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens or not tokens[0].isdigit() or int(tokens[0]) != owner_pid:
+        return False
+    tokens = tokens[1:]
+    if not tokens:
+        return False
+    joined = " ".join(tokens)
+    joined_lc = joined.lower()
+    tokens_lc = [token.lower() for token in tokens]
+    has_hermes_entry = (
+        "hermes_cli.main" in joined_lc
+        or "hermes_cli/main.py" in joined_lc
+        or "tui_gateway.entry" in joined_lc
+        or "tui_gateway/entry.py" in joined_lc
+        or any(
+            token.rsplit("/", 1)[-1].lower() in {"hermes", "hermes.exe"}
+            for token in tokens
+        )
+    )
+    if not has_hermes_entry:
+        return False
+    is_consumer_host = (
+        "serve" in tokens_lc
+        or "dashboard" in tokens_lc
+        or "--tui" in tokens_lc
+        or "tui_gateway.entry" in joined_lc
+        or "tui_gateway/entry.py" in joined_lc
+    )
+    if not is_consumer_host:
+        return False
+    if "tui_gateway.entry" in joined_lc or "tui_gateway/entry.py" in joined_lc:
+        return True
+    return _command_belongs_to_profile(tokens, profile_home)
+
+
+def monitor_consumer_owner_alive(
+    profile_home: Path,
+    owner_pid: int | None,
+    owner_start_ticks: int | None,
+) -> bool:
+    if (
+        not isinstance(owner_pid, int)
+        or isinstance(owner_pid, bool)
+        or owner_pid <= 0
+        or not isinstance(owner_start_ticks, int)
+        or isinstance(owner_start_ticks, bool)
+        or owner_start_ticks <= 0
+        or not producer_identity_alive(owner_pid, owner_start_ticks)
+    ):
+        return False
+    return any(
+        _consumer_host_command(command, profile_home, owner_pid=owner_pid)
+        for command in process_snapshot()
+    )
+
+
+def monitor_producer_owner_alive(profile_home: Path) -> bool:
+    return systemd_user_unit_active(
+        "hermes-personal-assistant-monitor.timer"
+    ) and systemd_monitor_targets_profile(profile_home)
+
+
+def monitor_owner_alive(
+    *,
+    home: Path,
+    ledger: Path,
+    source: str,
+    fallback_profile: str,
+    owner_pid: int | None = None,
+    owner_start_ticks: int | None = None,
+) -> bool:
+    profile = profile_for_monitor_ledger(home, ledger, fallback_profile)
+    profile_home = home / "profiles" / profile if profile else home
+    if source == "producer":
+        return monitor_producer_owner_alive(profile_home)
+    if source != "consumer":
+        return False
+    return monitor_consumer_owner_alive(
+        profile_home,
+        owner_pid,
+        owner_start_ticks,
+    )
 
 
 def desktop_notify(title: str, body: str) -> None:
@@ -787,8 +963,18 @@ def build_incident_alert(row: dict[str, Any], ledger: Path) -> dict[str, Any] | 
     }
 
 
+MONITOR_LIVENESS_EVENTS = {
+    "producer": "producer_check",
+    "consumer": "consumer_heartbeat",
+}
+MONITOR_OWNER_PROBE_SECONDS = 30.0
+
+
 def monitor_heartbeat_timestamp(row: dict[str, Any]) -> float | None:
     if row.get("component") != "personal_assistant_monitor":
+        return None
+    source = str(row.get("source") or "")
+    if row.get("event") != MONITOR_LIVENESS_EVENTS.get(source):
         return None
     try:
         value = str(row.get("ts") or "").replace("Z", "+00:00")
@@ -819,6 +1005,64 @@ def seed_monitor_heartbeats(path: Path) -> dict[str, float]:
         if heartbeat_at is not None and source in latest:
             latest[source] = max(latest[source], heartbeat_at)
     return latest
+
+
+def seed_monitor_owner_identities(path: Path) -> dict[str, tuple[int, int]]:
+    """Restore the last process identity attached to a valid liveness event."""
+
+    if path.name != "personal-assistant-monitor.jsonl" or not path.is_file():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-1000:]
+    except OSError:
+        return {}
+    owners: dict[str, tuple[int, int]] = {}
+    for line in lines:
+        row = load_json(line)
+        if row is None or monitor_heartbeat_timestamp(row) is None:
+            continue
+        source = str(row.get("source") or "")
+        owners.pop(source, None)
+        owner_pid = row.get("owner_pid")
+        owner_start_ticks = row.get("owner_start_ticks")
+        if (
+            source in MONITOR_LIVENESS_EVENTS
+            and isinstance(owner_pid, int)
+            and not isinstance(owner_pid, bool)
+            and owner_pid > 0
+            and isinstance(owner_start_ticks, int)
+            and not isinstance(owner_start_ticks, bool)
+            and owner_start_ticks > 0
+        ):
+            owners[source] = (owner_pid, owner_start_ticks)
+    return owners
+
+
+def seed_monitor_incidents(path: Path) -> dict[str, set[str]]:
+    """Restore unresolved monitor incidents without replaying old alerts."""
+
+    if path.name != "personal-assistant-monitor.jsonl" or not path.is_file():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-1000:]
+    except OSError:
+        return {}
+    incidents: dict[str, set[str]] = {}
+    for line in lines:
+        row = load_json(line)
+        if row is None or row.get("component") != "personal_assistant_monitor":
+            continue
+        source = str(row.get("source") or "")
+        event = str(row.get("event") or "")
+        if source not in {"producer", "consumer"}:
+            continue
+        if event in {"connector_failure", "dead_letter"}:
+            incidents.setdefault(source, set()).add(event)
+        elif event == MONITOR_LIVENESS_EVENTS.get(source):
+            incidents.setdefault(source, set()).discard("connector_failure")
+        elif event == "dead_letter_resolved":
+            incidents.setdefault(source, set()).discard("dead_letter")
+    return {source: kinds for source, kinds in incidents.items() if kinds}
 
 
 def build_monitor_stale_alert(
@@ -873,6 +1117,10 @@ def run(args: argparse.Namespace) -> int:
     incident_alerted_at: dict[tuple[str, str], float] = {}
     monitor_heartbeats: dict[tuple[Path, str], float] = {}
     monitor_heartbeat_seen: set[tuple[Path, str]] = set()
+    monitor_incidents: dict[tuple[Path, str], set[str]] = {}
+    monitor_owner_pids: dict[tuple[Path, str], int] = {}
+    monitor_owner_start_ticks: dict[tuple[Path, str], int] = {}
+    monitor_owner_checks: dict[tuple[Path, str], tuple[float, bool]] = {}
     tails: dict[Path, LedgerTail] = {}
     last_ledger_refresh = 0.0
     stopped = False
@@ -895,6 +1143,12 @@ def run(args: argparse.Namespace) -> int:
         ):
             if path not in tails:
                 seeded = seed_monitor_heartbeats(path)
+                for source, identity in seed_monitor_owner_identities(path).items():
+                    owner_pid, owner_start_ticks = identity
+                    monitor_owner_pids[(path, source)] = owner_pid
+                    monitor_owner_start_ticks[(path, source)] = owner_start_ticks
+                for source, kinds in seed_monitor_incidents(path).items():
+                    monitor_incidents[(path, source)] = set(kinds)
                 sources = {"producer", "consumer"} if path == expected_monitor else set(seeded)
                 for source in sources:
                     heartbeat_at = seeded.get(source, 0.0)
@@ -942,12 +1196,46 @@ def run(args: argparse.Namespace) -> int:
         for ledger, tail in list(tails.items()):
             for row in tail.rows():
                 sid = str(row.get("session_id") or "")
+                monitor_source = str(row.get("source") or "")[:64]
+                monitor_event = str(row.get("event") or "")
+                monitor_key = (ledger, monitor_source)
+                if (
+                    row.get("component") == "personal_assistant_monitor"
+                    and monitor_source in {"producer", "consumer"}
+                ):
+                    if monitor_event in {"connector_failure", "dead_letter"}:
+                        monitor_incidents.setdefault(monitor_key, set()).add(
+                            monitor_event
+                        )
+                    elif monitor_event == MONITOR_LIVENESS_EVENTS.get(monitor_source):
+                        monitor_incidents.setdefault(monitor_key, set()).discard(
+                            "connector_failure"
+                        )
+                    elif monitor_event == "dead_letter_resolved":
+                        monitor_incidents.setdefault(monitor_key, set()).discard(
+                            "dead_letter"
+                        )
                 heartbeat_at = monitor_heartbeat_timestamp(row)
                 if heartbeat_at is not None:
                     source = str(row.get("source") or "unknown")[:64]
                     key = (ledger, source)
                     monitor_heartbeats[key] = heartbeat_at
                     monitor_heartbeat_seen.add(key)
+                    monitor_owner_pids.pop(key, None)
+                    monitor_owner_start_ticks.pop(key, None)
+                    monitor_owner_checks.pop(key, None)
+                    owner_pid = row.get("owner_pid")
+                    owner_start_ticks = row.get("owner_start_ticks")
+                    if (
+                        isinstance(owner_pid, int)
+                        and not isinstance(owner_pid, bool)
+                        and owner_pid > 0
+                        and isinstance(owner_start_ticks, int)
+                        and not isinstance(owner_start_ticks, bool)
+                        and owner_start_ticks > 0
+                    ):
+                        monitor_owner_pids[key] = owner_pid
+                        monitor_owner_start_ticks[key] = owner_start_ticks
                 incident = build_incident_alert(row, ledger)
                 if incident is not None:
                     incident_key = (sid or "desktop", str(incident["event"]))
@@ -1062,10 +1350,30 @@ def run(args: argparse.Namespace) -> int:
             age = now - heartbeat_at
             if age < threshold:
                 continue
+            active_incidents = monitor_incidents.get((ledger, source), set())
+            if "connector_failure" in active_incidents:
+                continue
             event_name = f"personal_assistant_monitor_{source}_stale"
             incident_key = (str(ledger), event_name)
             last_incident = incident_alerted_at.get(incident_key, 0.0)
             if now - last_incident < monitor_stale_alert_cooldown(args, source):
+                continue
+            owner_key = (ledger, source)
+            owner_checked_at, owner_alive = monitor_owner_checks.get(
+                owner_key,
+                (0.0, False),
+            )
+            if now - owner_checked_at >= MONITOR_OWNER_PROBE_SECONDS:
+                owner_alive = monitor_owner_alive(
+                    home=home,
+                    ledger=ledger,
+                    source=source,
+                    fallback_profile=args.monitor_profile,
+                    owner_pid=monitor_owner_pids.get(owner_key),
+                    owner_start_ticks=monitor_owner_start_ticks.get(owner_key),
+                )
+                monitor_owner_checks[owner_key] = (now, owner_alive)
+            if not owner_alive:
                 continue
             incident_alerted_at[incident_key] = now
             alert = build_monitor_stale_alert(
@@ -1076,10 +1384,14 @@ def run(args: argparse.Namespace) -> int:
                 heartbeat_seen=(ledger, source) in monitor_heartbeat_seen,
             )
             append_jsonl(alerts, alert)
-            latest.write_text(
-                json.dumps(alert, ensure_ascii=False, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
+            if not any(
+                incident_ledger == ledger and kinds
+                for (incident_ledger, _incident_source), kinds in monitor_incidents.items()
+            ):
+                latest.write_text(
+                    json.dumps(alert, ensure_ascii=False, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
             line = (
                 "[hermes-live-watchdog] PERSONAL_ASSISTANT_MONITOR_STALE "
                 f"source={source} age={age:.1f}s ledger={ledger}"

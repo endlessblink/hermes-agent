@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import urllib.error
@@ -7,11 +8,13 @@ import pytest
 from agent.personal_assistant_monitor import (
     ConnectorResponseError,
     ack_candidate_event,
+    dead_letter_count,
     defer_candidate_event,
     fetch_flowstate_context,
     lease_candidate_event,
     main,
     retry_candidate_event,
+    record_dead_letter_resolution,
     settle_candidate_event,
     run_cli_monitor_check,
     run_monitor_check,
@@ -416,6 +419,73 @@ def test_failed_delivery_retries_after_backoff_then_dead_letters_without_raw_err
     )
     assert '"event":"dead_letter"' in health_text
     assert "event-" not in health_text
+    assert dead_letter_count(tmp_path) == 1
+    assert record_dead_letter_resolution(tmp_path) is False
+    assert '"event":"dead_letter_resolved"' not in (
+        tmp_path / "logs" / "personal-assistant-monitor.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_dead_letter_count_fails_closed_on_unreadable_or_invalid_queue(tmp_path):
+    queue_path = tmp_path / "state" / "personal-assistant-monitor" / "queue.json"
+    queue_path.parent.mkdir(parents=True)
+    queue_path.write_text("not-json", encoding="utf-8")
+
+    assert dead_letter_count(tmp_path) is None
+
+    queue_path.write_text(json.dumps({"version": 2, "events": []}), encoding="utf-8")
+    assert dead_letter_count(tmp_path) == 0
+
+
+def test_dead_letter_resolution_is_appended_while_queue_lock_is_held(
+    tmp_path, monkeypatch
+):
+    import agent.personal_assistant_monitor as monitor
+
+    root = tmp_path / "state" / "personal-assistant-monitor"
+    root.mkdir(parents=True)
+    (root / "queue.json").write_text(
+        json.dumps({"version": 2, "events": []}),
+        encoding="utf-8",
+    )
+    lock_held = False
+    rows = []
+
+    @contextmanager
+    def locked(_profile_home):
+        nonlocal lock_held
+        lock_held = True
+        try:
+            yield root
+        finally:
+            lock_held = False
+
+    def record(_profile_home, **row):
+        assert lock_held is True
+        rows.append(row)
+        return True
+
+    monkeypatch.setattr(monitor, "_locked", locked)
+    monkeypatch.setattr(monitor, "record_monitor_health", record)
+
+    assert record_dead_letter_resolution(tmp_path) is True
+    assert [row["event"] for row in rows] == ["dead_letter_resolved"]
+
+
+def test_dead_letter_resolution_fails_closed_when_lock_cannot_be_acquired(
+    tmp_path, monkeypatch
+):
+    import agent.personal_assistant_monitor as monitor
+
+    @contextmanager
+    def locked(_profile_home):
+        raise OSError("lock unavailable")
+        yield
+
+    monkeypatch.setattr(monitor, "_locked", locked)
+
+    assert dead_letter_count(tmp_path) is None
+    assert record_dead_letter_resolution(tmp_path) is False
 
 
 def test_repeated_expired_leases_dead_letter_after_the_bounded_attempt_limit(tmp_path):

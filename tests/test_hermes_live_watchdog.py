@@ -86,8 +86,143 @@ def test_discover_sources_includes_expected_monitor_before_its_first_heartbeat(t
     assert expected in watchdog.discover_sources(home, monitor_profile="office-work")
 
 
-def test_missing_expected_monitor_alerts_after_startup_grace(tmp_path, monkeypatch):
-    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+def test_consumer_owner_requires_a_profile_bound_backend_process(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    profile_home = home / "profiles" / "office-work"
+    monkeypatch.setattr(watchdog, "producer_identity_alive", lambda _pid, _ticks: True)
+    monkeypatch.setattr(
+        watchdog,
+        "process_snapshot",
+        lambda: [
+            "41 python -m hermes_cli.main --profile other serve --port 0",
+            "42 /opt/Hermes --type=renderer",
+        ],
+    )
+
+    assert watchdog.monitor_consumer_owner_alive(profile_home, 43, 900) is False
+
+    monkeypatch.setattr(
+        watchdog,
+        "process_snapshot",
+        lambda: [
+            "43 python -m hermes_cli.main --profile office-work serve --port 0"
+        ],
+    )
+    assert watchdog.monitor_consumer_owner_alive(profile_home, 43, 900) is True
+
+    monkeypatch.setattr(
+        watchdog,
+        "process_snapshot",
+        lambda: ["44 hermes --profile office-work --tui"],
+    )
+    assert watchdog.monitor_consumer_owner_alive(profile_home, 44, 901) is True
+
+
+def test_consumer_owner_rejects_missing_identity_and_messaging_gateway(tmp_path, monkeypatch):
+    profile_home = tmp_path / ".hermes" / "profiles" / "office-work"
+    monkeypatch.setattr(
+        watchdog,
+        "process_snapshot",
+        lambda: ["52 python -m hermes_cli.main --profile office-work gateway"],
+    )
+
+    monkeypatch.setattr(watchdog, "producer_identity_alive", lambda _pid, _ticks: True)
+    assert watchdog.monitor_consumer_owner_alive(profile_home, None, None) is False
+    assert watchdog.monitor_consumer_owner_alive(profile_home, 52, 902) is False
+
+
+def test_consumer_owner_rejects_a_recycled_pid(tmp_path, monkeypatch):
+    profile_home = tmp_path / ".hermes" / "profiles" / "office-work"
+    monkeypatch.setattr(
+        watchdog,
+        "process_snapshot",
+        lambda: ["53 python -m tui_gateway.entry"],
+    )
+    monkeypatch.setattr(watchdog, "producer_identity_alive", lambda _pid, _ticks: False)
+
+    assert watchdog.monitor_consumer_owner_alive(profile_home, 53, 903) is False
+
+
+def test_producer_owner_requires_active_timer_and_exact_profile(tmp_path, monkeypatch):
+    profile_home = tmp_path / ".hermes" / "profiles" / "office-work"
+    monkeypatch.setattr(watchdog, "systemd_user_unit_active", lambda _unit: False)
+    monkeypatch.setattr(watchdog, "systemd_monitor_targets_profile", lambda _home: True)
+    assert watchdog.monitor_producer_owner_alive(profile_home) is False
+
+    monkeypatch.setattr(watchdog, "systemd_user_unit_active", lambda _unit: True)
+    monkeypatch.setattr(watchdog, "systemd_monitor_targets_profile", lambda _home: False)
+    assert watchdog.monitor_producer_owner_alive(profile_home) is False
+
+    monkeypatch.setattr(watchdog, "systemd_monitor_targets_profile", lambda _home: True)
+    assert watchdog.monitor_producer_owner_alive(profile_home) is True
+
+
+def test_systemd_owner_probe_requires_an_active_unit(monkeypatch):
+    calls = []
+
+    def active(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="active\n")
+
+    monkeypatch.setattr(watchdog.subprocess, "run", active)
+    assert watchdog.systemd_user_unit_active("monitor.timer") is True
+    assert calls == [["systemctl", "--user", "is-active", "monitor.timer"]]
+
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=3, stdout="inactive\n"),
+    )
+    assert watchdog.systemd_user_unit_active("monitor.timer") is False
+
+
+def test_systemd_monitor_owner_is_bound_to_the_exact_profile(tmp_path, monkeypatch):
+    profile_home = tmp_path / ".hermes" / "profiles" / "office-work"
+    other_home = tmp_path / ".hermes" / "profiles" / "other"
+    stdout = (
+        "{ path=/usr/bin/python ; argv[]=/usr/bin/python -m "
+        f"agent.personal_assistant_monitor --profile-home {profile_home} ; }}\n"
+    )
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout),
+    )
+
+    assert watchdog.systemd_monitor_targets_profile(profile_home) is True
+    assert watchdog.systemd_monitor_targets_profile(other_home) is False
+
+
+def test_missing_expected_monitor_stays_quiet_without_verified_owners(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "monitor_owner_alive", lambda **_kwargs: False)
+    ticks = iter([1000.0, 1002.0])
+    monkeypatch.setattr(watchdog.time, "time", lambda: next(ticks))
+    home = tmp_path / ".hermes"
+
+    args = watchdog.parse_args(
+        [
+            "--home",
+            str(home),
+            "--once",
+            "--monitor-profile",
+            "office-work",
+            "--monitor-producer-stale-seconds",
+            "1",
+            "--monitor-consumer-stale-seconds",
+            "1",
+        ]
+    )
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    assert not any(
+        row["event"].startswith("personal_assistant_monitor_") for row in emitted
+    )
+
+
+def test_missing_expected_monitor_alerts_for_verified_alive_owners(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "monitor_owner_alive", lambda **_kwargs: True)
     ticks = iter([1000.0, 1002.0])
     monkeypatch.setattr(watchdog.time, "time", lambda: next(ticks))
     home = tmp_path / ".hermes"
@@ -153,6 +288,74 @@ def test_monitor_connector_failure_alert_is_privacy_safe(tmp_path, monkeypatch):
     serialized = json.dumps(alert)
     assert "evidence" not in serialized
     assert "taskId" not in serialized
+
+
+def test_active_connector_failure_is_not_overwritten_by_a_stale_alert(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(watchdog, "monitor_owner_alive", lambda **_kwargs: True)
+    monkeypatch.setattr(watchdog, "process_snapshot", lambda: ["owner alive"])
+    monkeypatch.setattr(
+        watchdog,
+        "attempt_flowstate_recovery",
+        lambda **_kwargs: {
+            "action": "none",
+            "outcome": "auth_required",
+            "reason": "flowstate_sign_in_required",
+        },
+    )
+    home = tmp_path / ".hermes"
+    health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
+    health.parent.mkdir(parents=True)
+    old = datetime.fromtimestamp(time.time() - 60, timezone.utc).isoformat()
+    health.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": old,
+                        "component": "personal_assistant_monitor",
+                        "source": "producer",
+                        "event": "producer_check",
+                        "status": "available",
+                        "count": 0,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": old,
+                        "component": "personal_assistant_monitor",
+                        "source": "producer",
+                        "event": "connector_failure",
+                        "status": "not_signed_in",
+                        "count": 0,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(
+        [
+            "--home",
+            str(home),
+            "--from-start",
+            "--once",
+            "--monitor-producer-stale-seconds",
+            "1",
+        ]
+    )
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    events = [json.loads(line)["event"] for line in alerts.read_text().splitlines()]
+    assert "personal_assistant_monitor_connector_failure" in events
+    assert "personal_assistant_monitor_producer_stale" not in events
+    assert "personal_assistant_monitor_consumer_stale" in events
+    latest = json.loads(alerts.with_suffix(".latest.json").read_text())
+    assert latest["event"] == "personal_assistant_monitor_connector_failure"
 
 
 def test_flowstate_recovery_requires_sign_in_instead_of_restarting():
@@ -395,7 +598,7 @@ def test_successful_flowstate_launch_is_verified_and_emits_safe_improvement_even
 
 
 def test_stale_monitor_consumer_heartbeat_alerts(tmp_path, monkeypatch):
-    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    monkeypatch.setattr(watchdog, "monitor_owner_alive", lambda **_kwargs: True)
     home = tmp_path / ".hermes"
     health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
     health.parent.mkdir(parents=True)
@@ -436,10 +639,53 @@ def test_stale_monitor_consumer_heartbeat_alerts(tmp_path, monkeypatch):
     assert alert["age_seconds"] >= 59
 
 
-def test_from_end_seeds_existing_monitor_heartbeats_without_replaying_incidents(
+def test_stale_monitor_consumer_heartbeat_is_suppressed_after_owner_exits(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(watchdog, "process_snapshot", lambda: [])
+    monkeypatch.setattr(watchdog, "monitor_owner_alive", lambda **_kwargs: False)
+    home = tmp_path / ".hermes"
+    health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
+    health.parent.mkdir(parents=True)
+    old = datetime.fromtimestamp(time.time() - 60, timezone.utc).isoformat()
+    health.write_text(
+        json.dumps(
+            {
+                "ts": old,
+                "component": "personal_assistant_monitor",
+                "source": "consumer",
+                "event": "consumer_heartbeat",
+                "status": "available",
+                "count": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    args = watchdog.parse_args(
+        [
+            "--home",
+            str(home),
+            "--from-start",
+            "--once",
+            "--monitor-consumer-stale-seconds",
+            "1",
+        ]
+    )
+    assert watchdog.run(args) == 0
+
+    alerts = home / "logs" / "live-watchdog-alerts.jsonl"
+    emitted = [json.loads(line) for line in alerts.read_text(encoding="utf-8").splitlines()]
+    assert not any(
+        row["event"] == "personal_assistant_monitor_consumer_stale"
+        for row in emitted
+    )
+
+
+def test_from_end_retains_connector_failure_without_replaying_or_overwriting_it(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(watchdog, "monitor_owner_alive", lambda **_kwargs: True)
     home = tmp_path / ".hermes"
     health = home / "profiles" / "office-work" / "logs" / "personal-assistant-monitor.jsonl"
     health.parent.mkdir(parents=True)
@@ -452,7 +698,7 @@ def test_from_end_seeds_existing_monitor_heartbeats_without_replaying_incidents(
                         "ts": old,
                         "component": "personal_assistant_monitor",
                         "source": "producer",
-                        "event": "producer_heartbeat",
+                        "event": "producer_check",
                         "status": "available",
                         "count": 0,
                     }
@@ -489,9 +735,114 @@ def test_from_end_seeds_existing_monitor_heartbeats_without_replaying_incidents(
 
     alerts = home / "logs" / "live-watchdog-alerts.jsonl"
     events = [json.loads(line)["event"] for line in alerts.read_text(encoding="utf-8").splitlines()]
-    assert "personal_assistant_monitor_producer_stale" in events
+    assert "personal_assistant_monitor_producer_stale" not in events
     assert "personal_assistant_monitor_consumer_stale" in events
     assert "personal_assistant_monitor_connector_failure" not in events
+
+
+def test_real_producer_check_resolves_seeded_connector_failure(tmp_path):
+    health = tmp_path / "personal-assistant-monitor.jsonl"
+    health.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-07-13T20:00:00+00:00",
+                        "component": "personal_assistant_monitor",
+                        "source": "producer",
+                        "event": "connector_failure",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-07-13T20:01:00+00:00",
+                        "component": "personal_assistant_monitor",
+                        "source": "producer",
+                        "event": "producer_check",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert watchdog.seed_monitor_incidents(health) == {}
+
+
+def test_invented_producer_heartbeat_is_not_treated_as_real_liveness():
+    row = {
+        "ts": "2026-07-13T20:01:00+00:00",
+        "component": "personal_assistant_monitor",
+        "source": "producer",
+        "event": "producer_heartbeat",
+    }
+
+    assert watchdog.monitor_heartbeat_timestamp(row) is None
+
+
+def test_consumer_heartbeat_does_not_resolve_a_dead_letter(tmp_path):
+    health = tmp_path / "personal-assistant-monitor.jsonl"
+    health.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-07-13T20:00:00+00:00",
+                        "component": "personal_assistant_monitor",
+                        "source": "consumer",
+                        "event": "dead_letter",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-07-13T20:01:00+00:00",
+                        "component": "personal_assistant_monitor",
+                        "source": "consumer",
+                        "event": "consumer_heartbeat",
+                        "owner_pid": 41,
+                        "owner_start_ticks": 900,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert watchdog.seed_monitor_incidents(health) == {"consumer": {"dead_letter"}}
+
+
+def test_newer_liveness_without_identity_clears_seeded_consumer_owner(tmp_path):
+    health = tmp_path / "personal-assistant-monitor.jsonl"
+    health.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-07-13T20:00:00+00:00",
+                        "component": "personal_assistant_monitor",
+                        "source": "consumer",
+                        "event": "consumer_heartbeat",
+                        "owner_pid": 41,
+                        "owner_start_ticks": 900,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-07-13T20:01:00+00:00",
+                        "component": "personal_assistant_monitor",
+                        "source": "consumer",
+                        "event": "consumer_heartbeat",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert watchdog.seed_monitor_owner_identities(health) == {}
 
 
 def test_hidden_sidebar_sessions_are_alerted_immediately_without_private_data(tmp_path, monkeypatch):

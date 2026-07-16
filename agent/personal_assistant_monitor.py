@@ -49,7 +49,9 @@ def record_monitor_health(
     status: str,
     count: int = 0,
     now: datetime | None = None,
-) -> None:
+    owner_pid: int | None = None,
+    owner_start_ticks: int | None = None,
+) -> bool:
     """Append a privacy-safe producer/consumer heartbeat for the live watchdog."""
     def safe(value: Any) -> str:
         return "".join(
@@ -64,14 +66,23 @@ def record_monitor_health(
         "status": safe(status) or "unknown",
         "count": max(0, int(count)),
     }
+    if isinstance(owner_pid, int) and not isinstance(owner_pid, bool) and owner_pid > 0:
+        row["owner_pid"] = owner_pid
+    if (
+        isinstance(owner_start_ticks, int)
+        and not isinstance(owner_start_ticks, bool)
+        and owner_start_ticks > 0
+    ):
+        row["owner_start_ticks"] = owner_start_ticks
     path = Path(profile_home) / "logs" / "personal-assistant-monitor.jsonl"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        return True
     except OSError:
         # Monitoring must never make the task queue less reliable.
-        return
+        return False
 
 
 @contextmanager
@@ -422,6 +433,50 @@ def _load_queue(path: Path) -> tuple[dict[str, Any], bool]:
         if event is not None:
             events.append(event)
     return {"version": SCHEMA_VERSION, "events": events}, changed
+
+
+def _dead_letter_count_from_path(path: Path) -> int | None:
+    if not path.exists():
+        return 0
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    events = raw.get("events") if isinstance(raw, Mapping) else None
+    if not isinstance(events, list):
+        return None
+    return sum(
+        1
+        for event in events
+        if isinstance(event, Mapping) and event.get("status") == "dead_letter"
+    )
+
+
+def dead_letter_count(profile_home: Path) -> int | None:
+    """Return an authoritative terminal-delivery count, or None if unreadable."""
+
+    try:
+        with _locked(profile_home) as root:
+            return _dead_letter_count_from_path(root / "queue.json")
+    except OSError:
+        return None
+
+
+def record_dead_letter_resolution(profile_home: Path) -> bool:
+    """Append resolution while still holding the queue's mutation lock."""
+
+    try:
+        with _locked(profile_home) as root:
+            if _dead_letter_count_from_path(root / "queue.json") != 0:
+                return False
+            return record_monitor_health(
+                profile_home,
+                component="consumer",
+                event="dead_letter_resolved",
+                status="available",
+            )
+    except OSError:
+        return False
 
 
 def run_monitor_check(
