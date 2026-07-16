@@ -89,7 +89,9 @@ def record_monitor_health(
     status: str,
     count: int = 0,
     now: datetime | None = None,
-) -> None:
+    owner_pid: int | None = None,
+    owner_start_ticks: int | None = None,
+) -> bool:
     """Append a privacy-safe producer/consumer heartbeat for the live watchdog."""
     def safe(value: Any) -> str:
         return "".join(
@@ -99,19 +101,29 @@ def record_monitor_health(
     row = {
         "ts": (now or datetime.now(timezone.utc)).isoformat(),
         "component": "personal_assistant_monitor",
+        "profile": safe(Path(profile_home).name) or "unknown",
         "source": safe(component) or "unknown",
         "event": safe(event) or "heartbeat",
         "status": safe(status) or "unknown",
         "count": max(0, int(count)),
     }
+    if isinstance(owner_pid, int) and not isinstance(owner_pid, bool) and owner_pid > 0:
+        row["owner_pid"] = owner_pid
+    if (
+        isinstance(owner_start_ticks, int)
+        and not isinstance(owner_start_ticks, bool)
+        and owner_start_ticks > 0
+    ):
+        row["owner_start_ticks"] = owner_start_ticks
     path = Path(profile_home) / "logs" / "personal-assistant-monitor.jsonl"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        return True
     except OSError:
         # Monitoring must never make the task queue less reliable.
-        return
+        return False
 
 
 @contextmanager
@@ -457,7 +469,50 @@ def _load_queue(path: Path) -> tuple[dict[str, Any], bool]:
         changed = changed or migrated
         if event is not None:
             events.append(event)
-    return {"version": SCHEMA_VERSION, "events": events}, changed
+    queue = {"version": SCHEMA_VERSION, "events": events}
+    for key in ("dead_letter_resolutions", "health_outbox"):
+        value = raw.get(key) if isinstance(raw, dict) else None
+        if key == "dead_letter_resolutions" and isinstance(value, dict):
+            queue[key] = value
+        elif key == "health_outbox" and isinstance(value, list):
+            queue[key] = value
+    return queue, changed
+
+
+def _health_time(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _flush_health_outbox(profile_home: Path) -> None:
+    """Best-effort flush durable monitor receipts without losing retry state."""
+
+    with _locked(profile_home) as root:
+        path = root / "queue.json"
+        queue, _ = _load_queue(path)
+        pending = queue.get("health_outbox")
+        if not isinstance(pending, list) or not pending:
+            return
+        remaining = []
+        for row in pending:
+            try:
+                count = max(0, int(row.get("count") or 0))
+            except (AttributeError, TypeError, ValueError):
+                count = 0
+            if not isinstance(row, dict) or not record_monitor_health(
+                profile_home,
+                component=str(row.get("component") or "consumer"),
+                event=str(row.get("event") or "receipt"),
+                status=str(row.get("status") or "handled"),
+                count=count,
+                now=_health_time(row.get("ts")),
+            ):
+                remaining.append(row)
+        queue["health_outbox"] = remaining
+        atomic_json_write(path, queue, mode=0o600, sort_keys=True)
 
 
 def run_monitor_check(
@@ -801,6 +856,65 @@ def defer_candidate_event(
     return False
 
 
+def resolve_dead_letters(
+    profile_home: Path,
+    *,
+    operation_id: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Explicitly mark every currently retained dead letter handled and receipt it."""
+
+    resolved_at = now or datetime.now(timezone.utc)
+    if not str(operation_id).strip():
+        raise ValueError("operation_id is required")
+    receipt_id = hashlib.sha256(
+        f"dead-letter-resolution:{operation_id}".encode()
+    ).hexdigest()[:32]
+    with _locked(profile_home) as root:
+        path = root / "queue.json"
+        queue, _ = _load_queue(path)
+        known = queue.get("dead_letter_resolutions")
+        known = known if isinstance(known, dict) else {}
+        existing = known.get(receipt_id)
+        if isinstance(existing, dict):
+            result = dict(existing)
+        else:
+            count = 0
+            for event in queue.get("events", []):
+                if event.get("status") != "dead_letter":
+                    continue
+                count += 1
+                event["status"] = "handled"
+                event["disposition"] = "handled"
+                event["acked"] = True
+                event["resolved_at"] = resolved_at.isoformat()
+                event["resolution_receipt_id"] = receipt_id
+            result = {
+                "status": "resolved",
+                "count": count,
+                "receipt_id": receipt_id,
+            }
+            known[receipt_id] = result
+            queue["dead_letter_resolutions"] = known
+            outbox = queue.get("health_outbox")
+            outbox = list(outbox) if isinstance(outbox, list) else []
+            outbox.append(
+                {
+                    "receipt_id": receipt_id,
+                    "component": "consumer",
+                    "event": "dead_letter_resolved",
+                    "status": "handled",
+                    "count": count,
+                    "ts": resolved_at.isoformat(),
+                }
+            )
+            queue["health_outbox"] = outbox
+            queue["events"] = _compact_events(queue.get("events", []))
+            atomic_json_write(path, queue, mode=0o600, sort_keys=True)
+    _flush_health_outbox(profile_home)
+    return result
+
+
 def _desktop_notify(title: str, body: str) -> None:
     executable = shutil.which("notify-send")
     if not executable:
@@ -830,6 +944,7 @@ def run_cli_monitor_check(
 ) -> dict[str, Any]:
     """Run one CLI check and best-effort notify only for newly queued work."""
 
+    _flush_health_outbox(profile_home)
     result = run_monitor_check(
         profile_home,
         assistant_context,
@@ -993,7 +1108,19 @@ def fetch_flowstate_context(request=None) -> dict[str, Any]:
 def main(argv: list[str] | None = None, *, fetch_context=None) -> int:
     parser = argparse.ArgumentParser(description="Check FlowState for personal-assistant change candidates")
     parser.add_argument("--profile-home", required=True, type=Path)
+    parser.add_argument(
+        "--resolve-dead-letters",
+        metavar="OPERATION_ID",
+        help="Explicitly mark all retained dead letters handled and emit a receipt",
+    )
     args = parser.parse_args(argv)
+    if args.resolve_dead_letters:
+        result = resolve_dead_letters(
+            args.profile_home,
+            operation_id=args.resolve_dead_letters,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["status"] == "resolved" else 1
     try:
         context = (fetch_context or fetch_flowstate_context)()
         if not isinstance(context, Mapping):

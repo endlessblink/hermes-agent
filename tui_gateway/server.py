@@ -4237,6 +4237,32 @@ def _(rid, params: dict) -> dict:
         )
 
 
+def _process_start_ticks(pid: int) -> int | None:
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
+        closing_paren = raw.rfind(")")
+        if closing_paren < 0:
+            return None
+        fields = raw[closing_paren + 1 :].split()
+        return int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _record_personal_assistant_consumer_heartbeat(profile_home: Path) -> None:
+    from agent.personal_assistant_monitor import record_monitor_health
+
+    pid = os.getpid()
+    record_monitor_health(
+        profile_home,
+        component="consumer",
+        event="consumer_heartbeat",
+        status="available",
+        owner_pid=pid,
+        owner_start_ticks=_process_start_ticks(pid),
+    )
+
+
 def start_personal_assistant_monitor_consumer() -> threading.Event | None:
     """Start the office-work monitor consumer once for this gateway process."""
 
@@ -4261,16 +4287,7 @@ def start_personal_assistant_monitor_consumer() -> threading.Event | None:
                     pass
                 monotonic_now = time.monotonic()
                 if monotonic_now - last_heartbeat >= 60:
-                    from agent.personal_assistant_monitor import (
-                        record_monitor_health,
-                    )
-
-                    record_monitor_health(
-                        profile_home,
-                        component="consumer",
-                        event="consumer_heartbeat",
-                        status="available",
-                    )
+                    _record_personal_assistant_consumer_heartbeat(profile_home)
                     last_heartbeat = monotonic_now
             except Exception:
                 logger.warning(

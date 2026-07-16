@@ -749,3 +749,32 @@ def test_monitor_merges_known_plan_overlap_but_launches_external_changes(monkeyp
     }
     assert dispositions["event-1"] == "merged"
     assert dispositions["event-2"] == "processing"
+
+
+def test_consumer_heartbeat_records_exact_process_identity(monkeypatch, tmp_path):
+    import agent.personal_assistant_monitor as monitor
+    import tui_gateway.server as server
+
+    rows = []
+    monkeypatch.setattr(
+        monitor,
+        "record_monitor_health",
+        lambda _home, **row: rows.append(row),
+    )
+    monkeypatch.setattr(server.os, "getpid", lambda: 41)
+    monkeypatch.setattr(server, "_process_start_ticks", lambda _pid: 900)
+
+    server._record_personal_assistant_consumer_heartbeat(tmp_path)
+
+    assert [row["event"] for row in rows] == ["consumer_heartbeat"]
+    assert rows[-1]["owner_pid"] == 41
+    assert rows[-1]["owner_start_ticks"] == 900
+
+
+def test_process_start_ticks_handles_spaces_in_process_name(monkeypatch):
+    import tui_gateway.server as server
+
+    stat = "41 (Hermes Gateway Worker) S " + " ".join(str(i) for i in range(4, 23))
+    monkeypatch.setattr(server.Path, "read_text", lambda *args, **kwargs: stat)
+
+    assert server._process_start_ticks(41) == 22

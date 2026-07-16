@@ -12,6 +12,7 @@ from agent.personal_assistant_monitor import (
     lease_candidate_event,
     main,
     retry_candidate_event,
+    resolve_dead_letters,
     settle_candidate_event,
     run_cli_monitor_check,
     run_monitor_check,
@@ -452,6 +453,124 @@ def test_repeated_expired_leases_dead_letter_after_the_bounded_attempt_limit(tmp
     assert '"event":"dead_letter"' in health
 
 
+def test_dead_letters_require_explicit_resolution_and_return_a_stable_receipt(tmp_path):
+    run_monitor_check(tmp_path, {"taskPressure": {"overdue": 0}}, now=NOW)
+    run_monitor_check(
+        tmp_path,
+        {"taskPressure": {"overdue": 1}},
+        now=NOW + timedelta(minutes=15),
+    )
+    leased = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+    assert leased is not None
+    for attempt in range(3):
+        if attempt:
+            leased = lease_candidate_event(
+                tmp_path,
+                "gateway",
+                now=NOW + timedelta(minutes=16 + attempt * 2),
+            )
+            assert leased is not None
+        assert retry_candidate_event(
+            tmp_path,
+            leased["id"],
+            leased["lease_id"],
+            RuntimeError("private failure"),
+            now=NOW + timedelta(minutes=16 + attempt * 2),
+            backoff=timedelta(0),
+        )
+
+    result = resolve_dead_letters(
+        tmp_path,
+        operation_id="resolve-review-2026-07-16",
+        now=NOW + timedelta(minutes=30),
+    )
+
+    assert result["status"] == "resolved"
+    assert result["count"] == 1
+    assert len(result["receipt_id"]) == 32
+    queue = json.loads(
+        (tmp_path / "state" / "personal-assistant-monitor" / "queue.json").read_text()
+    )
+    resolved = queue["events"][0]
+    assert resolved["status"] == "handled"
+    assert resolved["disposition"] == "handled"
+    assert resolved["resolution_receipt_id"] == result["receipt_id"]
+    health = (
+        tmp_path / "logs" / "personal-assistant-monitor.jsonl"
+    ).read_text(encoding="utf-8")
+    assert '"event":"dead_letter_resolved"' in health
+    assert (
+        resolve_dead_letters(
+            tmp_path,
+            operation_id="resolve-review-2026-07-16",
+            now=NOW + timedelta(minutes=31),
+        )
+        == result
+    )
+
+
+def test_dead_letter_resolution_cli_does_not_fetch_flowstate(tmp_path, capsys):
+    def forbidden():
+        raise AssertionError("FlowState fetch must not run")
+
+    assert (
+        main(
+            [
+                "--profile-home",
+                str(tmp_path),
+                "--resolve-dead-letters",
+                "resolve-empty-review",
+            ],
+            fetch_context=forbidden,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "resolved"
+    assert receipt["count"] == 0
+
+
+def test_dead_letter_resolution_recovers_same_receipt_after_health_write_failure(
+    tmp_path, monkeypatch
+):
+    import agent.personal_assistant_monitor as monitor
+
+    root = tmp_path / "state" / "personal-assistant-monitor"
+    root.mkdir(parents=True)
+    queue_path = root / "queue.json"
+    queue_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "events": [
+                    {
+                        "id": "dead-1",
+                        "status": "dead_letter",
+                        "disposition": "dead_letter",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    health_results = iter([False, True])
+    monkeypatch.setattr(
+        monitor,
+        "record_monitor_health",
+        lambda *_args, **_kwargs: next(health_results),
+    )
+
+    first = resolve_dead_letters(tmp_path, operation_id="retry-safe-resolution")
+    committed = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert committed["events"][0]["status"] == "handled"
+    assert len(committed["health_outbox"]) == 1
+
+    second = resolve_dead_letters(tmp_path, operation_id="retry-safe-resolution")
+    recovered = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert second == first
+    assert recovered["health_outbox"] == []
+
+
 def test_v1_acked_and_pending_queue_entries_migrate_without_redelivery_or_loss(tmp_path):
     queue_path = tmp_path / "state" / "personal-assistant-monitor" / "queue.json"
     queue_path.parent.mkdir(parents=True)
@@ -776,6 +895,7 @@ def test_cli_connector_failures_are_typed_persisted_redacted_and_nonzero(
         "component": "personal_assistant_monitor",
         "count": 0,
         "event": "connector_failure",
+        "profile": category,
         "source": "producer",
         "status": category,
         "ts": health["ts"],
