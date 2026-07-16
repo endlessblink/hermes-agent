@@ -9434,18 +9434,28 @@ def _cmd_update_impl(args, gateway_mode: bool):
         or not (sys.stdin.isatty() and sys.stdout.isatty())
     )
     discard_local_changes = False
+    keep_local_changes = False
     if _non_interactive_update:
+        # Default: "keep" — an unattended update must never stash, switch, or
+        # reset a tree that has local source changes. The old default
+        # ("stash") auto-stashed in-flight fixes, force-switched pinned dev
+        # checkouts to the update branch, and hard-reset on restore conflicts
+        # (2026-07-13 incident: conversation_loop.py / tui_gateway WIP landed
+        # in a stash while the tree moved to a clean new HEAD). "stash" and
+        # "discard" remain available as explicit opt-ins.
+        _mode = "keep"
         try:
             from hermes_cli.config import load_config
 
             _update_cfg = (load_config() or {}).get("updates", {})
             if isinstance(_update_cfg, dict):
-                _mode = str(_update_cfg.get("non_interactive_local_changes", "stash")).lower()
-                discard_local_changes = _mode == "discard"
+                _mode = str(_update_cfg.get("non_interactive_local_changes", "keep")).lower()
         except Exception as exc:
             # Never let a config read failure change the safe default.
             logger.debug("Could not read updates.non_interactive_local_changes: %s", exc)
-            discard_local_changes = False
+            _mode = "keep"
+        discard_local_changes = _mode == "discard"
+        keep_local_changes = _mode not in {"stash", "discard"}
 
     print("⚕ Updating Hermes Agent...")
     print()
@@ -9603,6 +9613,28 @@ def _cmd_update_impl(args, gateway_mode: bool):
             check=True,
         )
         current_branch = result.stdout.strip()
+
+        # Unattended updates never touch a dirty tree (policy "keep", the
+        # default): no stash, no checkout, no pull, no reset. Everything the
+        # update would have mutated stays exactly as the developer left it.
+        if keep_local_changes:
+            _dirty = subprocess.run(
+                git_cmd + ["status", "--porcelain"],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if _dirty.stdout.strip():
+                print(
+                    "⚠ Local source changes detected — skipping source update "
+                    "(updates.non_interactive_local_changes=keep)."
+                )
+                print("  Nothing was stashed, switched, or reset; the working tree is untouched.")
+                print("  Update options: run `hermes update` in an interactive terminal (stash prompt),")
+                print("  commit/stash your changes yourself, or set")
+                print("  updates.non_interactive_local_changes to 'stash' or 'discard' to opt in.")
+                _invalidate_update_cache()
+                return
 
         # If user is on a different branch than the update target, switch
         # to the target. When the target is "main" this is the historical

@@ -228,6 +228,10 @@ _AUTO_FOCUS_MAX_CHARS = 700
 # high for small/light tails, but using all 20 as a hard floor here would bring
 # back the old large-tool-output case where nothing can be compacted.
 _MAX_TAIL_MESSAGE_FLOOR = 8
+# Memory-backed drop keeps the exact transcript archived on disk, so its live
+# tail should stay small enough for a prompt to return quickly even when the
+# advertised model window is one million tokens or more.
+_MEMORY_BACKED_DROP_TAIL_TOKEN_CAP = 20_000
 
 # Models with context windows below this get their compression threshold
 # floored at ``_SMALL_CTX_THRESHOLD_PERCENT`` (raise-only — an explicitly
@@ -912,13 +916,21 @@ class ContextCompressor(ContextEngine):
         # passes the new value explicitly. (#43547)
         if max_tokens is not None:
             self.max_tokens = self._coerce_max_tokens(max_tokens)
-        self.threshold_tokens = self._compute_threshold_tokens(
-            context_length, self.threshold_percent, self.max_tokens,
+        self.threshold_tokens = self._apply_interactive_threshold(
+            self._compute_threshold_tokens(
+                context_length,
+                self.threshold_percent,
+                self.max_tokens,
+            )
         )
         # Recalculate token budgets for the new context length so the
         # compressor stays calibrated after a model switch (e.g. 200K → 32K).
         target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
-        self.tail_token_budget = target_tokens
+        self.tail_token_budget = (
+            min(target_tokens, _MEMORY_BACKED_DROP_TAIL_TOKEN_CAP)
+            if getattr(self, "summary_mode", "llm") == "drop"
+            else target_tokens
+        )
         self.max_summary_tokens = min(
             int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
@@ -1028,6 +1040,18 @@ class ContextCompressor(ContextEngine):
                               effective_window - 1))
         return floored
 
+    def _apply_interactive_threshold(self, model_threshold: int) -> int:
+        """Cap the live prompt for latency without changing model capacity.
+
+        The model window remains authoritative for hard compatibility, while
+        this optional lower ceiling keeps interactive clients from waiting on
+        enormous prompts that technically fit but take minutes to process.
+        Exact removed rows remain in the session store; only the active prompt
+        is compacted sooner.
+        """
+        cap = getattr(self, "interactive_threshold_tokens", None)
+        return min(model_threshold, cap) if cap else model_threshold
+
     def __init__(
         self,
         model: str,
@@ -1045,6 +1069,7 @@ class ContextCompressor(ContextEngine):
         abort_on_summary_failure: bool = False,
         max_tokens: int | None = None,
         summary_mode: str = "llm",
+        interactive_threshold_tokens: int | None = None,
     ):
         self.model = model
         self.base_url = base_url
@@ -1068,6 +1093,12 @@ class ContextCompressor(ContextEngine):
         # When False (default = historical behavior), insert a
         # deterministic "summary unavailable" handoff and drop the middle window.
         self.abort_on_summary_failure = abort_on_summary_failure
+        self.summary_mode = summary_mode or "llm"
+        try:
+            interactive_cap = int(interactive_threshold_tokens or 0)
+        except (TypeError, ValueError):
+            interactive_cap = 0
+        self.interactive_threshold_tokens = interactive_cap if interactive_cap > 0 else None
 
         self.context_length = get_model_context_length(
             model, base_url=base_url, api_key=api_key,
@@ -1092,14 +1123,22 @@ class ContextCompressor(ContextEngine):
         # for models right at the minimum. _compute_threshold_tokens also
         # guards the degenerate case where the floor would equal/exceed the
         # window (small models), so auto-compression can still fire (#14690).
-        self.threshold_tokens = self._compute_threshold_tokens(
-            self.context_length, threshold_percent, self.max_tokens,
+        self.threshold_tokens = self._apply_interactive_threshold(
+            self._compute_threshold_tokens(
+                self.context_length,
+                threshold_percent,
+                self.max_tokens,
+            )
         )
         self.compression_count = 0
 
         # Derive token budgets: ratio is relative to the threshold, not total context
         target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
-        self.tail_token_budget = target_tokens
+        self.tail_token_budget = (
+            min(target_tokens, _MEMORY_BACKED_DROP_TAIL_TOKEN_CAP)
+            if self.summary_mode == "drop"
+            else target_tokens
+        )
         self.max_summary_tokens = min(
             int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
@@ -1129,7 +1168,6 @@ class ContextCompressor(ContextEngine):
         # are dropped from the active window but stay on disk (searchable with
         # session_search) and their facts are in memory, so compaction is
         # instant and the watchdog can never fire.
-        self.summary_mode = summary_mode or "llm"
         self._session_db: Any = None
         self._session_id: str = ""
 
@@ -2873,7 +2911,6 @@ This compaction should PRIORITISE preserving all information related to the focu
             return messages
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
-        message_tokens_before = estimate_messages_tokens_rough(messages)
 
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
@@ -3024,6 +3061,20 @@ This compaction should PRIORITISE preserving all information related to the focu
         compressed = []
         for i in range(compress_start):
             msg = _fresh_compaction_message_copy(messages[i])
+            # Prior handoff summaries sitting in the protected head (they are
+            # re-injected right after the system prompt on resume / gateway
+            # restart) are already rehydrated into ``_previous_summary`` and
+            # folded into the fresh summary generated below. Copying them
+            # forward as well stacks a new blob on top of the old ones every
+            # pass, so the payload RATCHETS upward across compactions instead
+            # of shrinking (observed: 157k-token requests with a 70k-char
+            # "[PRIOR CONTEXT]" fossil at index 0, and "compression done"
+            # reporting more tokens than it started with).
+            if (
+                (i > 0 or msg.get("role") != "system")
+                and self._is_context_summary_content(msg.get("content"))
+            ):
+                continue
             if i == 0 and msg.get("role") == "system":
                 existing = msg.get("content")
                 _compression_note = "[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work. Your persistent memory (MEMORY.md, USER.md) remains fully authoritative regardless of compaction.]"
@@ -3165,18 +3216,10 @@ This compaction should PRIORITISE preserving all information related to the focu
         compressed = _strip_historical_media(compressed)
 
         new_estimate = estimate_messages_tokens_rough(compressed)
-        # Compression can only remove message content. Provider prompt usage
-        # also includes fixed system/tool schemas, so comparing the compacted
-        # messages against that larger total makes a no-op look highly
-        # effective and defeats the anti-thrashing guard.
-        saved_estimate = message_tokens_before - new_estimate
+        saved_estimate = display_tokens - new_estimate
 
         # Anti-thrashing: track compression effectiveness
-        savings_pct = (
-            saved_estimate / message_tokens_before * 100
-            if message_tokens_before > 0
-            else 0
-        )
+        savings_pct = (saved_estimate / display_tokens * 100) if display_tokens > 0 else 0
         self._last_compression_savings_pct = savings_pct
         if savings_pct < 10:
             self._ineffective_compression_count += 1
