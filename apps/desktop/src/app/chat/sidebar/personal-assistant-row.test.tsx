@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type * as React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -92,5 +92,34 @@ describe('PersonalAssistantSidebarRow', () => {
     await waitFor(() => expect(onOpenSession).toHaveBeenCalledWith('assistant-home'))
     expect(request).toHaveBeenCalledWith('personal_assistant.home', { profile: 'office-work' })
     expect(screen.queryByLabelText(/unread assistant update/)).toBeNull()
+  })
+
+  it('retries hydration and refreshes later unread attention while mounted', async () => {
+    let poll: (() => void) | undefined
+
+    const interval = vi.spyOn(window, 'setInterval').mockImplementation(callback => {
+      poll = callback as () => void
+
+      return 41 as never
+    })
+
+    request.mockRejectedValueOnce(new Error('owner gateway starting'))
+
+    try {
+      row()
+      await act(async () => undefined)
+      expect(request).toHaveBeenCalledTimes(1)
+      expect(poll).toBeTypeOf('function')
+
+      request.mockResolvedValueOnce({ state: assistantState(4, 2) })
+      await act(async () => poll?.())
+      expect(screen.getByLabelText('2 unread assistant updates').textContent).toContain('2')
+
+      request.mockResolvedValueOnce({ state: assistantState(5, 4) })
+      await act(async () => poll?.())
+      expect(screen.getByLabelText('4 unread assistant updates').textContent).toContain('4')
+    } finally {
+      interval.mockRestore()
+    }
   })
 })

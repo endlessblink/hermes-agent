@@ -53,6 +53,20 @@ describe('personal assistant home', () => {
     expect($personalAssistantState.get()?.unreadCount).toBe(3)
   })
 
+  it('retries a failed hydrate and accepts newer unread state', async () => {
+    request.mockRejectedValueOnce(new Error('owner gateway starting'))
+
+    await expect(hydratePersonalAssistantStateWhenReady('open')).rejects.toThrow('owner gateway starting')
+
+    request.mockResolvedValueOnce({ state: state(4, 1) })
+    await hydratePersonalAssistantStateWhenReady('open')
+    expect($personalAssistantState.get()?.unreadCount).toBe(1)
+
+    request.mockResolvedValueOnce({ state: state(5, 3) })
+    await hydratePersonalAssistantStateWhenReady('open')
+    expect($personalAssistantState.get()?.unreadCount).toBe(3)
+  })
+
   it('opens the canonical home and keeps the returned backend snapshot', async () => {
     request.mockResolvedValue({
       canonical_session_id: 'assistant-home',

@@ -10,7 +10,8 @@ import { notifyError } from '@/store/notifications'
 import {
   $personalAssistantState,
   hydratePersonalAssistantStateWhenReady,
-  openPersonalAssistantHome
+  openPersonalAssistantHome,
+  PERSONAL_ASSISTANT_REFRESH_MS
 } from '@/store/personal-assistant'
 
 import type { AppView } from '../../routes'
@@ -37,7 +38,18 @@ export function PersonalAssistantSidebarRow({
   const [opening, setOpening] = useState(false)
 
   useEffect(() => {
-    void hydratePersonalAssistantStateWhenReady(gatewayState).catch(() => undefined)
+    if (gatewayState !== 'open') {
+      return
+    }
+
+    const refresh = () => {
+      void hydratePersonalAssistantStateWhenReady(gatewayState).catch(() => undefined)
+    }
+
+    refresh()
+    const timer = window.setInterval(refresh, PERSONAL_ASSISTANT_REFRESH_MS)
+
+    return () => window.clearInterval(timer)
   }, [gatewayState])
 
   const selected = useMemo(() => {

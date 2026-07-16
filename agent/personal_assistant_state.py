@@ -29,13 +29,14 @@ def _thread_lock(path: Path) -> threading.RLock:
 def _locked_file(path: Path):
     """Serialize state mutations across processes on Windows and POSIX."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if os.name == "nt" and (not path.exists() or path.stat().st_size == 0):
-        path.write_text(" ", encoding="utf-8")
-
-    with path.open("r+" if os.name == "nt" else "a+", encoding="utf-8") as lock:
+    with path.open("a+b") as lock:
         if os.name == "nt":
             import msvcrt
 
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"\0")
+                lock.flush()
             lock.seek(0)
             msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
         else:
@@ -106,16 +107,41 @@ class PersonalAssistantStateStore:
     def read(self) -> dict[str, Any]:
         return copy.deepcopy(self._read())
 
+    def _persist(self, state: dict[str, Any]) -> dict[str, Any]:
+        state["revision"] = int(state.get("revision") or 0) + 1
+        state["version"] = state["revision"]
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        atomic_json_write(self.path, state, indent=2, mode=0o600)
+        return copy.deepcopy(state)
+
     def update(self, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with _thread_lock(self.lock_path), _locked_file(self.lock_path):
             state = self._read()
             mutate(state)
-            state["revision"] = int(state.get("revision") or 0) + 1
-            state["version"] = state["revision"]
-            state["updated_at"] = datetime.now(timezone.utc).isoformat()
-            atomic_json_write(self.path, state, indent=2, mode=0o600)
-            return copy.deepcopy(state)
+            return self._persist(state)
+
+    def resolve_canonical_session(
+        self,
+        resolver: Callable[[str | None], tuple[str, Any]],
+    ) -> tuple[dict[str, Any], Any, bool]:
+        """Resolve and, if needed, claim the one home under the profile lock."""
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with _thread_lock(self.lock_path), _locked_file(self.lock_path):
+            state = self._read()
+            current = str(state.get("canonical_session_id") or "") or None
+            canonical, result = resolver(current)
+            canonical = str(canonical or "").strip()
+            if not canonical:
+                raise ValueError("personal assistant resolver returned no session")
+            changed = canonical != current
+            if changed:
+                state["canonical_session_id"] = canonical
+                state = self._persist(state)
+            else:
+                state = copy.deepcopy(state)
+            return state, result, changed
 
     def set_canonical_session(self, session_id: str | None) -> dict[str, Any]:
         return self.update(lambda state: state.__setitem__("canonical_session_id", session_id))

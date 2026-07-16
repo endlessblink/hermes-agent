@@ -1665,7 +1665,7 @@ def _register_session_cwd(session: dict | None) -> None:
         pass
 
 
-def _ensure_session_db_row(session: dict) -> None:
+def _ensure_session_db_row(session: dict) -> bool:
     """Idempotently persist the session's DB row on first real activity.
 
     Called from prompt.submit so a row only exists once the user actually sends
@@ -1682,7 +1682,7 @@ def _ensure_session_db_row(session: dict) -> None:
     """
     key = session.get("session_key")
     if not key:
-        return
+        return False
     # Persist into the session's own profile db (global remote mode), not the
     # launch profile's — otherwise the row lands in the wrong state.db, the
     # unified list mis-tags it, and resume 404s ("session not found").
@@ -1694,13 +1694,13 @@ def _ensure_session_db_row(session: dict) -> None:
             db = SessionDB(db_path=Path(profile_home) / "state.db")
         except Exception:
             logger.debug("failed to open profile db for session row", exc_info=True)
-            return
+            return False
         close_db = True
     else:
         db = _get_db()
         close_db = False
     if db is None:
-        return
+        return False
     # The session's own model/effort/fast pick — the composer override shipped on
     # session.create, or a restored /model switch — must own the row's model +
     # model_config. The agent isn't built yet at first prompt.submit, so derive
@@ -1763,8 +1763,20 @@ def _ensure_session_db_row(session: dict) -> None:
             parent_session_id=parent_session_id,
             cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
         )
+        row = db.get_session(key)
+        if row is None:
+            return False
+        pending_title = str(session.get("pending_title") or "").strip()
+        if pending_title:
+            db.set_session_title(key, pending_title)
+            row = db.get_session(key)
+            if row is None or str(row.get("title") or "") != pending_title:
+                return False
+            session["pending_title"] = None
+        return True
     except Exception:
         logger.debug("failed to persist desktop session row", exc_info=True)
+        return False
     finally:
         if close_db:
             try:
@@ -3340,6 +3352,10 @@ _PERSONAL_ASSISTANT_OWNER_PROFILE = "office-work"
 _personal_assistant_home_lock = threading.RLock()
 
 
+class _PersonalAssistantHomeAbort(RuntimeError):
+    pass
+
+
 def _personal_assistant_store_for_request(rid, params: dict):
     """Resolve the single owner profile without falling back to another home."""
     from agent.personal_assistant_state import PersonalAssistantStateStore
@@ -3392,23 +3408,58 @@ def _(rid, params: dict) -> dict:
         return error
 
     with _personal_assistant_home_lock:
-        canonical = str(store.read().get("canonical_session_id") or "")
-        session_id = ""
-        if canonical:
-            resumed = _methods["session.resume"](
-                rid,
-                {
-                    "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
-                    "session_id": canonical,
-                    "source": "desktop",
-                },
-            )
-            if "error" not in resumed:
-                session_id = str((resumed.get("result") or {}).get("session_id") or "")
-            elif (resumed.get("error") or {}).get("code") != 4007:
-                return resumed
+        failure_response: dict | None = None
+        provisional_session_id = ""
+        provisional_session: dict | None = None
 
-        if not session_id:
+        def rollback_provisional_home() -> None:
+            nonlocal provisional_session_id, provisional_session
+            if provisional_session_id:
+                _close_session_by_id(
+                    provisional_session_id,
+                    end_reason="personal_assistant_home_rollback",
+                )
+            session = provisional_session
+            key = str((session or {}).get("session_key") or "")
+            if session is not None and key:
+                try:
+                    with _session_db(session) as db:
+                        if db is not None and db.get_session(key) is not None:
+                            db.delete_session(key)
+                        if db is not None and db.get_session(key) is not None:
+                            logger.error(
+                                "personal assistant provisional row survived rollback: %s",
+                                key,
+                            )
+                except Exception:
+                    logger.exception(
+                        "failed to roll back personal assistant provisional row: %s",
+                        key,
+                    )
+            provisional_session_id = ""
+            provisional_session = None
+
+        def resolve(canonical: str | None):
+            nonlocal failure_response, provisional_session_id, provisional_session
+            if canonical:
+                resumed = _methods["session.resume"](
+                    rid,
+                    {
+                        "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
+                        "session_id": canonical,
+                        "source": "desktop",
+                    },
+                )
+                if "error" not in resumed:
+                    session_id = str(
+                        (resumed.get("result") or {}).get("session_id") or ""
+                    )
+                    if session_id:
+                        return canonical, {"session_id": session_id}
+                elif (resumed.get("error") or {}).get("code") != 4007:
+                    failure_response = resumed
+                    raise _PersonalAssistantHomeAbort
+
             created = _methods["session.create"](
                 rid,
                 {
@@ -3418,19 +3469,45 @@ def _(rid, params: dict) -> dict:
                 },
             )
             if "error" in created:
-                return created
+                failure_response = created
+                raise _PersonalAssistantHomeAbort
             result = created.get("result") or {}
             session_id = str(result.get("session_id") or "")
-            canonical = str(result.get("stored_session_id") or session_id)
-            if not session_id or not canonical:
-                return _err(
+            claimed = str(result.get("stored_session_id") or session_id)
+            if not session_id or not claimed:
+                failure_response = _err(
                     rid, 5000, "personal assistant home creation returned no session"
                 )
-            store.set_canonical_session(canonical)
+                raise _PersonalAssistantHomeAbort
             with _sessions_lock:
                 home_session = _sessions.get(session_id)
-            if home_session is not None:
-                _ensure_session_db_row(home_session)
+            provisional_session_id = session_id
+            provisional_session = home_session
+            if home_session is None or not _ensure_session_db_row(home_session):
+                failure_response = _err(
+                    rid,
+                    5036,
+                    "personal assistant home could not be persisted",
+                )
+                raise _PersonalAssistantHomeAbort
+            return claimed, {"session_id": session_id}
+
+        try:
+            _claimed_state, resolution, _changed = store.resolve_canonical_session(
+                resolve
+            )
+        except _PersonalAssistantHomeAbort:
+            rollback_provisional_home()
+            return failure_response or _err(
+                rid, 5000, "personal assistant home could not be resolved"
+            )
+        except Exception:
+            rollback_provisional_home()
+            logger.exception("personal assistant canonical home resolution failed")
+            return _err(rid, 5036, "personal assistant home could not be persisted")
+
+        canonical = str(_claimed_state.get("canonical_session_id") or "")
+        session_id = str(resolution.get("session_id") or "")
 
         state = store.mark_read()
         return _ok(

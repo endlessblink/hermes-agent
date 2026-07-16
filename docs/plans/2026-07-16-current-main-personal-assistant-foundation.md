@@ -36,4 +36,3 @@ the current gateway, session, sidebar, and renderer seams.
 - Desktop tests prove the entry always targets the `office-work` owner and
   navigates to the canonical session identity returned by the gateway.
 - Existing current-main session/sidebar tests remain green.
-

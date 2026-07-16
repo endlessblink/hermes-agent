@@ -3,6 +3,7 @@ import { atom } from 'nanostores'
 import { gatewayForProfile } from '@/store/gateway'
 
 export const PERSONAL_ASSISTANT_OWNER_PROFILE = 'office-work'
+export const PERSONAL_ASSISTANT_REFRESH_MS = 30_000
 
 export interface AssistantStateItem {
   id?: string
@@ -94,7 +95,7 @@ export async function refreshPersonalAssistantState(): Promise<AssistantState> {
 export async function hydratePersonalAssistantStateWhenReady(gatewayState: string): Promise<AssistantState | null> {
   const current = $personalAssistantState.get()
 
-  if (gatewayState !== 'open' || current) {
+  if (gatewayState !== 'open') {
     return current
   }
 
