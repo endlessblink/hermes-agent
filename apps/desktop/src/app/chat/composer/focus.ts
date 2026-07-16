@@ -40,6 +40,7 @@ const VOICE_TOGGLE_EVENT = 'hermes:composer-voice-toggle'
 interface SubmitDetail {
   acknowledge?: (accepted: boolean) => void
   flowstateDecision?: Record<string, unknown>
+  notionDecision?: Record<string, unknown>
   hidden?: boolean
   target: ComposerTarget
   text: string
@@ -122,10 +123,12 @@ export const requestComposerSubmit = (
   text: string,
   {
     flowstateDecision,
+    notionDecision,
     hidden,
     target = 'active'
   }: {
     flowstateDecision?: Record<string, unknown>
+    notionDecision?: Record<string, unknown>
     hidden?: boolean
     target?: ComposerTarget | 'active'
   } = {}
@@ -154,6 +157,7 @@ export const requestComposerSubmit = (
     dispatch<SubmitDetail>(SUBMIT_EVENT, {
       acknowledge: settle,
       flowstateDecision,
+      notionDecision,
       hidden,
       target: resolve(target),
       text: trimmed

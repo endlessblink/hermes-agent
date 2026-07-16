@@ -110,6 +110,25 @@ class TestFlowStateBreakdownGuidance:
         assert "Editing is never approval" in stable
 
 
+class TestNotionFlowStateBridgeGuidance:
+    def test_desktop_bridge_tools_receive_interactive_approval_guidance(self):
+        stable = _stable_prompt(_make_agent(
+            platform="desktop",
+            valid_tool_names=["notion_mutation", "notion_flowstate_activate"],
+        ))
+        assert "Notion pages as the project source of truth" in stable
+        assert "type=notion-mutation-preview" in stable
+        assert "copy its exact `approval_request` unchanged" in stable
+        assert "ordinary chat reply is not approval" in stable
+        assert "Starting work and changing Notion status are separate" in stable
+
+    def test_bridge_guidance_is_absent_without_both_mutation_tools(self):
+        stable = _stable_prompt(_make_agent(
+            platform="desktop", valid_tool_names=["notion_mutation"]
+        ))
+        assert "type=notion-mutation-preview" not in stable
+
+
 class TestCodingContextBlock:
     def test_injected_when_active(self, monkeypatch, tmp_path):
         _init_code_repo(tmp_path)

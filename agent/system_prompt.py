@@ -34,6 +34,7 @@ from agent.prompt_builder import (
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
     MEMORY_GUIDANCE,
+    NOTION_FLOWSTATE_BRIDGE_GUIDANCE,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
@@ -225,6 +226,15 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         or is_truthy_value(os.getenv("HERMES_DESKTOP"))
     ):
         stable_parts.append(FLOWSTATE_SUBTASK_BREAKDOWN_GUIDANCE)
+
+    if {
+        "notion_mutation",
+        "notion_flowstate_activate",
+    }.issubset(agent.valid_tool_names) and (
+        (agent.platform or "").lower() == "desktop"
+        or is_truthy_value(os.getenv("HERMES_DESKTOP"))
+    ):
+        stable_parts.append(NOTION_FLOWSTATE_BRIDGE_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []

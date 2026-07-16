@@ -125,8 +125,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       let startingRouteToken = getRouteToken()
 
       const sessionContextDrifted = (): boolean =>
-        selectedStoredSessionIdRef.current !== startingStoredSessionId ||
-        getRouteToken() !== startingRouteToken
+        selectedStoredSessionIdRef.current !== startingStoredSessionId || getRouteToken() !== startingRouteToken
 
       // One submit in flight per session — drop any concurrent re-fire so a
       // stalled turn can't stack the same prompt into multiple real turns.
@@ -338,10 +337,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         if (options?.flowstateDecision) {
           const decision = options.flowstateDecision
 
-          const registration = await requestGateway<{ approvalCapability?: string }>(
-            'flowstate.approval.register',
-            { decision, session_id: sessionId }
-          )
+          const registration = await requestGateway<{ approvalCapability?: string }>('flowstate.approval.register', {
+            decision,
+            session_id: sessionId
+          })
 
           const approvalCapability = registration?.approvalCapability
 
@@ -358,6 +357,25 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           })}`
         }
 
+        if (options?.notionDecision) {
+          if (options.flowstateDecision) {
+            throw new Error('Only one trusted mutation decision may be submitted')
+          }
+
+          const decision = options.notionDecision
+
+          const registration = await requestGateway<{ status?: string }>('notion.approval.register', {
+            decision,
+            session_id: sessionId
+          })
+
+          if (decision.decision === 'approve' && registration?.status !== 'approved') {
+            throw new Error('Notion approval was not registered')
+          }
+
+          text = `Hermes UI trusted Notion mutation decision:\n${JSON.stringify(decision)}`
+        }
+
         // On sleep/wake the gateway's in-memory session may have been cleared
         // while the desktop app still holds the old session ID. Detect this,
         // resume the stored session to re-register it, and retry once.
@@ -368,10 +386,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             requestGateway('prompt.submit', { session_id: sessionId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
           )
         } catch (firstErr) {
-          if (
-            (isSessionNotFoundError(firstErr) || isGatewayTimeoutError(firstErr)) &&
-            startingStoredSessionId
-          ) {
+          if ((isSessionNotFoundError(firstErr) || isGatewayTimeoutError(firstErr)) && startingStoredSessionId) {
             // Re-register the session in the gateway and get a fresh live ID.
             // Timeouts recover the same way as "session not found": a starved
             // backend loop (#55578 symptom d) rejects the submit even though
