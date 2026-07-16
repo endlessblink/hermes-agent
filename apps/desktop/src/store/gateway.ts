@@ -181,15 +181,15 @@ function createSecondary(profile: string): Secondary {
   return entry
 }
 
-// Make `profile` the active gateway, lazily opening its socket if needed. The
-// primary is a no-op fast path. Background sockets are never closed here.
-export async function ensureGatewayForProfile(profile: string): Promise<void> {
+// Lazily open (or reuse) a profile gateway without changing the foreground
+// profile. Background-owned surfaces such as Personal assistant must be able to
+// read their authoritative profile without moving the user's composer or
+// sidebar scope.
+export async function gatewayForProfile(profile: string): Promise<HermesGateway | null> {
   const key = normKey(profile)
 
   if (key === primaryProfile) {
-    setActive(key)
-
-    return
+    return primaryGateway
   }
 
   let entry = secondaries.get(key)
@@ -211,6 +211,15 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
     }
   }
 
+  return entry.gateway
+}
+
+// Make `profile` the active gateway, lazily opening its socket if needed. The
+// primary is a no-op fast path. Background sockets are never closed here.
+export async function ensureGatewayForProfile(profile: string): Promise<void> {
+  const key = normKey(profile)
+
+  await gatewayForProfile(key)
   setActive(key)
 }
 

@@ -1465,10 +1465,13 @@ export const ja = defineLocale({
   sidebar: {
     nav: {
       'new-session': '新しいセッション',
+      'personal-assistant': 'パーソナルアシスタント',
       skills: 'スキルとツール',
       messaging: 'メッセージング',
       artifacts: 'アーティファクト'
     },
+    personalAssistantOpenFailed: 'パーソナルアシスタントを開けませんでした',
+    personalAssistantUnread: count => `アシスタントの未読更新 ${count} 件`,
     searchAria: 'セッションを検索',
     searchPlaceholder: 'セッションを検索…',
     clearSearch: '検索をクリア',

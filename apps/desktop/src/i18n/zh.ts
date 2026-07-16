@@ -1701,10 +1701,13 @@ export const zh: Translations = {
   sidebar: {
     nav: {
       'new-session': '新建会话',
+      'personal-assistant': '个人助理',
       skills: '技能与工具',
       messaging: '消息平台',
       artifacts: '产物'
     },
+    personalAssistantOpenFailed: '无法打开个人助理',
+    personalAssistantUnread: count => `${count} 条未读助理更新`,
     searchAria: '搜索会话',
     searchPlaceholder: '搜索会话…',
     clearSearch: '清除搜索',

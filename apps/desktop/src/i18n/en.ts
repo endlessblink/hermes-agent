@@ -1524,10 +1524,13 @@ export const en: Translations = {
   sidebar: {
     nav: {
       'new-session': 'New session',
+      'personal-assistant': 'Personal assistant',
       skills: 'Capabilities',
       messaging: 'Messaging',
       artifacts: 'Artifacts'
     },
+    personalAssistantOpenFailed: 'Could not open Personal assistant',
+    personalAssistantUnread: count => `${count} unread assistant update${count === 1 ? '' : 's'}`,
     searchAria: 'Search sessions',
     searchPlaceholder: 'Search sessions…',
     clearSearch: 'Clear search',

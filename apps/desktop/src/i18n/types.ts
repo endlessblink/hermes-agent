@@ -1256,6 +1256,8 @@ export interface Translations {
 
   sidebar: {
     nav: Record<string, string>
+    personalAssistantOpenFailed: string
+    personalAssistantUnread: (count: number) => string
     searchAria: string
     searchPlaceholder: string
     clearSearch: string
