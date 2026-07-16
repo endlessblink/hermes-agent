@@ -3,6 +3,9 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { useEffect, useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
+import { setActiveSessionId } from '@/store/session'
+
 import { Thread } from '.'
 
 const createdAt = new Date('2026-05-01T00:00:00.000Z')
@@ -48,6 +51,7 @@ vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
   window.setTimeout(() => callback(performance.now()), 0)
 )
 vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
+vi.stubGlobal('CSS', { ...globalThis.CSS, escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '\\$&') })
 
 Element.prototype.scrollTo = function scrollTo() {}
 
@@ -395,6 +399,8 @@ function DismissibleErrorHarness({ onDismissError }: { onDismissError: (messageI
 describe('assistant-ui streaming renderer', () => {
   beforeEach(() => {
     resizeObservers.clear()
+    clearClarifyRequest()
+    setActiveSessionId(null)
   })
 
   it('renders assistant text incrementally before completion', async () => {
@@ -497,6 +503,23 @@ describe('assistant-ui streaming renderer', () => {
     expect(container.querySelector('[data-slot="aui_reasoning-text"]')?.textContent).toBe(
       'The user is asking what this file is.'
     )
+  })
+
+  it('shows that a running reasoning turn is waiting for the user instead of thinking', () => {
+    setActiveSessionId('session-waiting')
+    setClarifyRequest({
+      choices: ['Continue', 'Stop'],
+      question: 'What should I do?',
+      requestId: 'clarify-waiting',
+      sessionId: 'session-waiting'
+    })
+
+    const { container } = render(<RunningReasoningHarness />)
+    const disclosure = container.querySelector('[data-slot="aui_thinking-disclosure"]')
+
+    expect(within(disclosure as HTMLElement).getByRole('button', { name: /waiting for your answer/i })).toBeTruthy()
+    expect(disclosure?.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
+    expect(disclosure?.textContent).not.toContain('Thinking')
   })
 
   it('groups consecutive reasoning parts under one thinking disclosure', () => {

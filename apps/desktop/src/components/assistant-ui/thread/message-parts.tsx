@@ -12,6 +12,7 @@ import { GeneratedImage } from '@/components/chat/generated-image-result'
 import { useI18n } from '@/i18n'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
+import { $activeSessionAwaitingInput } from '@/store/prompts'
 import { $turnStartedAt } from '@/store/session'
 
 const ImageGenerateTool: FC<ToolCallMessagePartProps> = ({ args, result }) => {
@@ -49,18 +50,21 @@ const ThinkingDisclosure: FC<{
   timerKey?: string
 }> = ({ children, messageRunning = false, pending = false, startedAtMs, timerKey }) => {
   const { t } = useI18n()
+  const awaitingInput = useStore($activeSessionAwaitingInput)
+  const pausedForInput = messageRunning && awaitingInput
+  const effectivelyPending = pending && !pausedForInput
   // `null` = no explicit user toggle yet, defer to the streaming default.
   // The default is "auto-open while streaming, auto-collapse when done" so
   // reasoning surfaces a live preview without manual interaction. The first
   // explicit toggle wins from then on.
   const [userOpen, setUserOpen] = useState<boolean | null>(null)
-  const elapsed = useElapsedSeconds(pending, timerKey, startedAtMs)
+  const elapsed = useElapsedSeconds(effectivelyPending, timerKey, startedAtMs)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
-  const enterRef = useEnterAnimation(messageRunning, timerKey)
+  const enterRef = useEnterAnimation(messageRunning && !pausedForInput, timerKey)
 
-  const open = userOpen ?? pending
-  const isPreview = pending && userOpen === null
+  const open = userOpen ?? effectivelyPending
+  const isPreview = effectivelyPending && userOpen === null
 
   // While the preview is live, pin the scroll container to the bottom on
   // every content growth so the latest tokens are always visible. Combined
@@ -102,12 +106,12 @@ const ThinkingDisclosure: FC<{
           <span
             className={cn(
               'text-[length:var(--conversation-tool-font-size)] font-medium leading-(--conversation-line-height) text-(--ui-text-secondary)',
-              pending && 'shimmer text-foreground/55'
+              effectivelyPending && 'shimmer text-foreground/55'
             )}
           >
-            {t.assistant.thread.thinking}
+            {pausedForInput ? t.sidebar.row.waitingForAnswer : t.assistant.thread.thinking}
           </span>
-          {pending && (
+          {effectivelyPending && (
             <ActivityTimerText
               className="text-[length:var(--conversation-caption-font-size)] tabular-nums text-(--ui-text-tertiary)"
               seconds={elapsed}

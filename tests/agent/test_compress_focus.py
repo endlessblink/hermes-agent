@@ -24,6 +24,8 @@ def _make_compressor():
     compressor.last_prompt_tokens = 0
     compressor._previous_summary = None
     compressor._summary_failure_cooldown_until = 0.0
+    compressor._last_compression_savings_pct = 100.0
+    compressor._ineffective_compression_count = 0
     compressor.summary_model = None
     compressor.summary_mode = "llm"
     compressor.model = "test-model"

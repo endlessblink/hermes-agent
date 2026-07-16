@@ -642,6 +642,34 @@ def build_turn_context(
     except Exception:
         working_state_context = ""
 
+    # Automatic current-conversation RAG: exact rows removed from the active
+    # prompt by compaction remain in SQLite, so retrieve a small cited subset
+    # for the current request. This is API-only context (merged into the same
+    # fenced memory block below), never appended to durable conversation rows.
+    # The dedicated DB query admits compacted rows only and cannot surface
+    # rewound/undone turns.
+    agent._last_archived_recall_chars = 0
+    try:
+        from agent.conversation_recall import build_archived_conversation_context
+
+        _archived_recall = build_archived_conversation_context(
+            getattr(agent, "_session_db", None),
+            session_id=getattr(agent, "session_id", "") or "",
+            user_message=(
+                original_user_message if isinstance(original_user_message, str) else ""
+            ),
+            fallback_query_context=working_state_context,
+        )
+        if _archived_recall:
+            ext_prefetch_cache = (
+                f"{ext_prefetch_cache}\n\n{_archived_recall}"
+                if ext_prefetch_cache
+                else _archived_recall
+            )
+            agent._last_archived_recall_chars = len(_archived_recall)
+    except Exception:
+        logger.debug("automatic archived conversation recall failed", exc_info=True)
+
     # Arm the pre-action gate: on a vague continuation with no confirmed project
     # this session, refuse repo-touching tools until the model confirms which
     # project (via clarify) instead of presuming one. Fail-open: any error

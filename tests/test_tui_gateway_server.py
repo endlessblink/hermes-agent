@@ -1080,7 +1080,11 @@ def test_live_session_resume_rehydrates_saved_pending_turn(monkeypatch, tmp_path
         "user_ordinal": 0,
     }
     assert unclaimed_state["pending_turn"]["state"] == "running"
-    assert claimed_response["result"]["recoverable_turn"] == response["result"]["recoverable_turn"]
+    claimed_turn = claimed_response["result"]["recoverable_turn"]
+    assert claimed_turn["kind"] == response["result"]["recoverable_turn"]["kind"]
+    assert claimed_turn["text"] == response["result"]["recoverable_turn"]["text"]
+    assert claimed_turn["user_ordinal"] == 0
+    assert claimed_turn["recovery_claim_id"] == claimed_state["pending_turn"]["claim_id"]
     assert claimed_state["pending_turn"]["state"] == "claimed"
     assert live["history"][0]["role"] == "user"
     assert live["history"][0]["content"] == "finish the report"
@@ -6747,7 +6751,12 @@ def test_compression_completion_restarts_turn_idle_budget(monkeypatch):
     }
     monkeypatch.setitem(server._sessions, "sid", session)
     monkeypatch.setattr(server.time, "time", lambda: 125.0)
-    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
     monkeypatch.setattr(server, "_emit_diagnostic_event", lambda *args, **kwargs: None)
 
     server._status_update("sid", "compression_complete", "Compression complete")
@@ -6755,6 +6764,8 @@ def test_compression_completion_restarts_turn_idle_budget(monkeypatch):
     assert session["turn_last_progress_at"] == 125.0
     assert session["turn_last_progress_event"] == "compression.complete"
     assert "compression_started_at" not in session
+    status = [event for event in emitted if event[0] == "status.update"]
+    assert status[-1][2]["kind"] == "compression_complete"
 
 
 def test_compression_watchdog_timeout_marks_turn_terminal(monkeypatch):

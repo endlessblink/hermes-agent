@@ -55,6 +55,7 @@ import {
   setCommandPaletteOpen
 } from '@/store/command-palette'
 import { $bindings } from '@/store/keybinds'
+import { $sidebarAgentsGrouped } from '@/store/layout'
 import { openPetGenerate } from '@/store/pet-generate'
 import { requestStartWorkSession } from '@/store/projects'
 import { runGatewayRestart } from '@/store/system-actions'
@@ -294,6 +295,7 @@ export function CommandPalette() {
   const pendingPage = useStore($commandPalettePage)
   const bindings = useStore($bindings)
   const worktrees = useStore($repoWorktrees)
+  const worktreeUiEnabled = useStore($sidebarAgentsGrouped)
   const navigate = useNavigate()
   const { availableThemes, resolvedMode, setMode, setTheme, themeName } = useTheme()
   const [search, setSearch] = useState('')
@@ -377,7 +379,7 @@ export function CommandPalette() {
     // session anchored to that worktree's checkout (requestStartWorkSession),
     // so git is the source of truth and edits land in the right tree.
     const branchGroup: PaletteGroup[] =
-      worktrees.length > 0
+      worktreeUiEnabled && worktrees.length > 0
         ? [
             {
               heading: cc.branches,
@@ -561,7 +563,7 @@ export function CommandPalette() {
         ]
       }
     ]
-  }, [go, settingsSectionLabel, t, worktrees])
+  }, [go, settingsSectionLabel, t, worktrees, worktreeUiEnabled])
 
   // The long, granular lists (settings fields, API keys, MCP servers, archived
   // chats) only surface once the user types — otherwise they'd bury the

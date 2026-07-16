@@ -1,51 +1,101 @@
-"""Strict validation for canonical FlowState mutation receipts."""
+"""Validation helpers for canonical FlowState mutation receipts.
+
+FlowState owns durable state.  Hermes treats a mutation as successful only
+after the receipt is bound to the expected operation and request and the
+canonical read-back hash has been recomputed locally.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
+import secrets
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 
-_SHA256_HEX_LENGTH = 64
-_VALID_STATUSES = frozenset({"committed", "replayed"})
-_CANONICAL_CONTRACT_VERSION = "task-v1"
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_SAFE_INTEGER = 2**53 - 1
 
 
 class CanonicalReceiptError(ValueError):
-    """A successful HTTP response could not prove a canonical mutation."""
+    """A safe, typed receipt rejection suitable for user-facing handling."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
-def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def _canonical_json(value: Any) -> str:
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise TypeError("Canonical JSON rejects unpaired surrogate strings")
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if value is None or isinstance(value, bool):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) <= _MAX_SAFE_INTEGER:
+            return str(value)
+        raise TypeError("Canonical JSON supports only safe integers")
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical_json(item) for item in value) + "]"
+    if isinstance(value, dict):
+        if not all(
+            isinstance(key, str)
+            and all(0x20 <= ord(character) <= 0x7E for character in key)
+            for key in value
+        ):
+            raise TypeError("Canonical JSON object keys must be printable ASCII")
+        return "{" + ",".join(
+            f"{json.dumps(key, ensure_ascii=False)}:{_canonical_json(value[key])}"
+            for key in sorted(value)
+        ) + "}"
+    raise TypeError("Canonical JSON supports only safe-integer JSON values")
 
 
-def canonical_json_hash(value: Any) -> str:
-    """Hash compact, sorted, UTF-8 JSON without accepting non-JSON floats."""
-    serialized = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return _sha256(serialized)
+def canonical_json_sha256(value: Any) -> str:
+    """Return SHA-256 over stable UTF-8 JSON shared with FlowState."""
+
+    canonical = _canonical_json(value)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _postgres_jsonb_text(value: Any) -> str:
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise TypeError("PostgreSQL JSONB rejects unpaired surrogate strings")
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if value is None or isinstance(value, bool):
+        return json.dumps(value, separators=(",", ":"))
+    if isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) <= _MAX_SAFE_INTEGER:
+            return str(value)
+        raise TypeError("PostgreSQL JSONB receipt numbers must be safe integers")
+    if isinstance(value, list):
+        return "[" + ", ".join(_postgres_jsonb_text(item) for item in value) + "]"
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("PostgreSQL JSONB object keys must be strings")
+        keys = sorted(value, key=lambda key: (len(key.encode("utf-8")), key.encode("utf-8")))
+        return "{" + ", ".join(
+            f"{json.dumps(key, ensure_ascii=False)}: {_postgres_jsonb_text(value[key])}"
+            for key in keys
+        ) + "}"
+    raise TypeError("PostgreSQL JSONB receipt contains unsupported values")
+
+
+def postgres_jsonb_sha256(value: Any) -> str:
+    """Hash the JSONB text format used by existing FlowState database RPCs."""
+
+    return hashlib.sha256(_postgres_jsonb_text(value).encode("utf-8")).hexdigest()
 
 
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
-def _digest(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == _SHA256_HEX_LENGTH
-        and all(char in "0123456789abcdef" for char in value)
-    )
-
-
-def _timestamp(value: Any) -> bool:
+def _aware_iso_timestamp(value: Any) -> bool:
     if not isinstance(value, str) or "T" not in value:
         return False
     try:
@@ -55,201 +105,110 @@ def _timestamp(value: Any) -> bool:
     return parsed.tzinfo is not None
 
 
-def _primary_task_state_matches(
-    primary_read_back: Mapping[str, Any],
-    top_read_back: Mapping[str, Any],
+def _sha256(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SHA256_HEX_RE.fullmatch(value))
+
+
+def validate_nested_canonical_receipt(
     receipt: Mapping[str, Any],
-) -> bool:
-    primary_entity_id = receipt.get("entityId")
-    primary_revision = receipt.get("canonicalRevision")
-    if (
-        primary_read_back.get("id") != primary_entity_id
-        or top_read_back.get("id") != primary_entity_id
-        or primary_read_back.get("canonicalRevision") != primary_revision
-        or top_read_back.get("canonicalRevision") != primary_revision
-        or any(
-            key not in top_read_back or top_read_back[key] != value
-            for key, value in primary_read_back.items()
-        )
-    ):
-        return False
-    primary_updated_at = primary_read_back.get("canonicalUpdatedAt")
-    top_updated_at = top_read_back.get("canonicalUpdatedAt")
-    primary_status = primary_read_back.get("status")
-    top_status = top_read_back.get("status")
-    return (
-        _timestamp(primary_updated_at)
-        and primary_updated_at == top_updated_at
-        and isinstance(primary_status, str)
-        and bool(primary_status)
-        and primary_status == top_status
-    )
-
-
-def _validate_affected(
-    value: Any,
     *,
-    required: bool,
-    expected_actions: Mapping[str, str] | None,
-    receipt: Mapping[str, Any],
-    primary_read_back: Mapping[str, Any],
-) -> None:
-    if value is None and not required and expected_actions is None:
-        return
-    if not isinstance(value, list) or not value:
-        raise CanonicalReceiptError("canonical receipt affected entries are invalid")
+    expected: Mapping[str, Any],
+    valid_read_back: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> Mapping[str, Any]:
+    """Validate the nested receipt shape returned by current FlowState RPCs."""
 
-    actual_actions: dict[str, str] = {}
-    actual_action_items: list[tuple[str, str]] = []
-    for entry in value:
-        if not isinstance(entry, Mapping):
-            raise CanonicalReceiptError("canonical receipt affected entries are invalid")
-        entity_type = entry.get("entityType")
-        entity_id = entry.get("entityId")
-        action = entry.get("action")
-        if (
-            entity_type != "task"
-            or not isinstance(entity_id, str)
-            or not entity_id
-            or not isinstance(action, str)
-            or not action
-            or not _positive_int(entry.get("canonicalRevision"))
-            or not _positive_int(entry.get("changeSequence"))
-        ):
-            raise CanonicalReceiptError("canonical receipt affected entries are invalid")
-        if entity_id in actual_actions:
-            raise CanonicalReceiptError("canonical receipt affected entries are duplicated")
-        actual_actions[entity_id] = action
-        actual_action_items.append((entity_id, action))
-
-        affected_read_back = entry.get("readBack")
-        affected_read_back_hash = entry.get("readBackHash")
-        if expected_actions is not None and (
-            affected_read_back is None or affected_read_back_hash is None
-        ):
-            raise CanonicalReceiptError(
-                "canonical receipt affected read-back is required"
-            )
-        if affected_read_back is not None or affected_read_back_hash is not None:
-            if (
-                not isinstance(affected_read_back, Mapping)
-                or affected_read_back.get("id") != entity_id
-                or affected_read_back.get("canonicalRevision")
-                != entry.get("canonicalRevision")
-                or not _digest(affected_read_back_hash)
-            ):
-                raise CanonicalReceiptError(
-                    "canonical receipt affected read-back is invalid"
-                )
-            try:
-                expected_hash = canonical_json_hash(affected_read_back)
-            except (TypeError, ValueError):
-                raise CanonicalReceiptError(
-                    "canonical receipt affected read-back is invalid"
-                ) from None
-            if affected_read_back_hash != expected_hash:
-                raise CanonicalReceiptError(
-                    "canonical receipt affected read-back hash does not match"
-                )
-
-    if expected_actions is not None and actual_action_items != list(
-        expected_actions.items()
+    if not isinstance(receipt, Mapping) or any(
+        receipt.get(field) != value for field, value in expected.items()
     ):
-        raise CanonicalReceiptError("canonical receipt affected identities do not match")
-    if expected_actions is not None:
-        primary_entity_id = receipt.get("entityId")
-        if primary_entity_id not in actual_actions:
-            raise CanonicalReceiptError(
-                "canonical receipt primary affected identity does not match"
-            )
-        primary = next(
-            entry for entry in value if entry.get("entityId") == primary_entity_id
+        raise CanonicalReceiptError(
+            "receipt_identity_mismatch", "Canonical receipt identity does not match"
         )
-        affected_primary_read_back = primary.get("readBack")
-        if (
-            primary.get("canonicalRevision") != receipt.get("canonicalRevision")
-            or primary.get("changeSequence") != receipt.get("changeSequence")
-            or not isinstance(affected_primary_read_back, Mapping)
-            or not _primary_task_state_matches(
-                affected_primary_read_back,
-                primary_read_back,
-                receipt,
-            )
-        ):
-            raise CanonicalReceiptError(
-                "canonical receipt primary affected proof does not match"
-            )
+    revision = receipt.get("canonicalRevision")
+    read_back = receipt.get("readBack")
+    if (
+        not _positive_int(revision)
+        or not _aware_iso_timestamp(receipt.get("canonicalUpdatedAt"))
+        or not _positive_int(receipt.get("changeSequence"))
+        or not _aware_iso_timestamp(receipt.get("committedAt"))
+        or not isinstance(receipt.get("replayed"), bool)
+        or not isinstance(read_back, Mapping)
+        or read_back.get("id") != receipt.get("entityId")
+        or read_back.get("canonicalRevision") != revision
+        or read_back.get("canonicalUpdatedAt") != receipt.get("canonicalUpdatedAt")
+    ):
+        raise CanonicalReceiptError(
+            "invalid_nested_receipt", "Canonical receipt proof fields are incomplete"
+        )
+    try:
+        accepted_hashes = {
+            canonical_json_sha256(read_back),
+            postgres_jsonb_sha256(read_back),
+        }
+    except (TypeError, ValueError, UnicodeError):
+        raise CanonicalReceiptError(
+            "invalid_read_back", "Canonical receipt read-back is not valid JSON"
+        ) from None
+    if not _sha256(receipt.get("readBackHash")) or receipt["readBackHash"] not in accepted_hashes:
+        raise CanonicalReceiptError(
+            "read_back_hash_mismatch", "Canonical receipt read-back hash does not match"
+        )
+    if valid_read_back is not None and not valid_read_back(read_back):
+        raise CanonicalReceiptError(
+            "invalid_read_back", "Canonical receipt domain read-back is incomplete"
+        )
+    return receipt
 
 
 def validate_canonical_receipt(
-    response: Any,
+    receipt: Mapping[str, Any],
     *,
-    expected_operation_id: str,
-    expected_request_hash: str,
-    expected_action: str,
-    expected_entity_id: str,
-    expected_affected_actions: Mapping[str, str] | None = None,
-    require_affected: bool = False,
-    read_back_validator: Callable[[Mapping[str, Any], Mapping[str, Any]], bool] | None = None,
+    expected_operation_id: Optional[str] = None,
+    expected_request_hash: Optional[str] = None,
 ) -> Mapping[str, Any]:
-    """Validate an apply response without deriving the server-owned request hash."""
+    """Validate and return a committed or replayed canonical receipt.
+
+    The function deliberately accepts operation-specific extra fields while
+    enforcing the shared proof fields.  It never logs or returns request
+    payloads, credentials, or server diagnostics.
+    """
+
     if (
-        not isinstance(response, Mapping)
-        or response.get("ok") is not True
-        or response.get("result") != "committed"
-        or response.get("requestHash") != expected_request_hash
-        or not _digest(expected_request_hash)
+        not isinstance(receipt, Mapping)
+        or receipt.get("ok") is not True
+        or receipt.get("status") not in {"committed", "replayed"}
     ):
-        raise CanonicalReceiptError("canonical mutation response is invalid")
+        raise CanonicalReceiptError("not_committed", "FlowState did not return a committed canonical receipt")
 
-    receipt = response.get("receipt")
-    if not isinstance(receipt, Mapping):
-        raise CanonicalReceiptError("canonical mutation receipt is missing")
-    if (
-        receipt.get("ok") is not True
-        or receipt.get("status") not in _VALID_STATUSES
-        or receipt.get("operationId") != expected_operation_id
-        or receipt.get("requestHash") != expected_request_hash
-        or receipt.get("contractVersion") != _CANONICAL_CONTRACT_VERSION
-        or receipt.get("source") != "local-api"
-        or receipt.get("entityType") != "task"
-        or receipt.get("action") != expected_action
-        or receipt.get("entityId") != expected_entity_id
-        or not _positive_int(receipt.get("canonicalRevision"))
-        or not _positive_int(receipt.get("changeSequence"))
-        or not _timestamp(receipt.get("committedAt"))
-    ):
-        raise CanonicalReceiptError("canonical mutation receipt fields do not match")
+    operation_id = receipt.get("operationId")
+    if not isinstance(operation_id, str) or not operation_id.strip():
+        raise CanonicalReceiptError("invalid_operation", "Canonical receipt operation identity is missing")
+    if expected_operation_id is not None and not secrets.compare_digest(operation_id, expected_operation_id):
+        raise CanonicalReceiptError("operation_mismatch", "Canonical receipt belongs to another operation")
 
-    canonical_updated_at = receipt.get("canonicalUpdatedAt")
-    if canonical_updated_at is not None and not _timestamp(canonical_updated_at):
-        raise CanonicalReceiptError("canonical mutation receipt fields do not match")
+    request_hash = receipt.get("requestHash")
+    if not _sha256(request_hash):
+        raise CanonicalReceiptError("invalid_request_hash", "Canonical receipt request hash is invalid")
+    if expected_request_hash is not None:
+        if not _sha256(expected_request_hash) or not secrets.compare_digest(request_hash, expected_request_hash):
+            raise CanonicalReceiptError("request_mismatch", "Canonical receipt belongs to another request")
 
-    if "replayed" in receipt:
-        replayed = receipt.get("replayed")
-        if not isinstance(replayed, bool) or replayed != (
-            receipt.get("status") == "replayed"
-        ):
-            raise CanonicalReceiptError("canonical mutation replay fields do not match")
+    if not _positive_int(receipt.get("canonicalRevision")):
+        raise CanonicalReceiptError("invalid_revision", "Canonical receipt revision is invalid")
+    if not _positive_int(receipt.get("changeSequence")):
+        raise CanonicalReceiptError("invalid_sequence", "Canonical receipt change sequence is invalid")
+    if not _aware_iso_timestamp(receipt.get("committedAt")):
+        raise CanonicalReceiptError("invalid_committed_at", "Canonical receipt commit time is invalid")
 
     read_back = receipt.get("readBack")
-    read_back_hash = receipt.get("readBackHash")
-    if not isinstance(read_back, Mapping) or not _digest(read_back_hash):
-        raise CanonicalReceiptError("canonical mutation read-back is invalid")
+    if read_back is None:
+        raise CanonicalReceiptError("invalid_read_back", "Canonical receipt read-back is missing")
     try:
-        expected_read_back_hash = canonical_json_hash(read_back)
+        computed_hash = canonical_json_sha256(read_back)
     except (TypeError, ValueError):
-        raise CanonicalReceiptError("canonical mutation read-back is invalid") from None
-    if read_back_hash != expected_read_back_hash:
-        raise CanonicalReceiptError("canonical mutation read-back hash does not match")
-    if read_back_validator is not None and not read_back_validator(read_back, receipt):
-        raise CanonicalReceiptError("canonical mutation read-back does not match")
+        raise CanonicalReceiptError("invalid_read_back", "Canonical receipt read-back is not valid JSON") from None
 
-    _validate_affected(
-        receipt.get("affected"),
-        required=require_affected,
-        expected_actions=expected_affected_actions,
-        receipt=receipt,
-        primary_read_back=read_back,
-    )
+    read_back_hash = receipt.get("readBackHash")
+    if not _sha256(read_back_hash) or not secrets.compare_digest(read_back_hash, computed_hash):
+        raise CanonicalReceiptError("read_back_hash_mismatch", "Canonical receipt read-back hash does not match")
+
     return receipt

@@ -147,6 +147,11 @@ def openai_codex_stale_timeout_floor(est_tokens: int) -> float:
     return 0.0
 
 
+# Desktop stream watchdog budget (apps/desktop/src/store/session.ts:
+# SESSION_WATCHDOG_TIMEOUT_MS = 8 minutes of complete stream silence).
+_DESKTOP_UI_WATCHDOG_SECONDS = 480.0
+
+
 def effective_openai_codex_stale_timeout(
     agent: Any, computed_timeout: float, est_tokens: int
 ) -> float:
@@ -157,10 +162,28 @@ def effective_openai_codex_stale_timeout(
     one minute so the user gets a retry or terminal error instead of watching
     an apparently frozen turn for several minutes.
     """
-    timeout = max(computed_timeout, openai_codex_stale_timeout_floor(est_tokens))
+    floor = openai_codex_stale_timeout_floor(est_tokens)
+    timeout = max(computed_timeout, floor)
     if str(getattr(agent, "platform", "") or "").strip().lower() == "desktop":
-        return min(timeout, 60.0)
+        # The snappy 60s cap is only safe below the context floor. At
+        # gateway-scale payloads (tools + instructions alone are ~34k tokens)
+        # Codex admission/prefill legitimately exceeds 60s, so capping under
+        # the floor killed healthy calls at exactly 60s, twice, and failed the
+        # turn. Allow the floor up to one minute under the desktop UI stream
+        # watchdog (8 minutes, apps/desktop session.ts) so a retry or typed
+        # error still lands before the UI declares the session stuck.
+        return min(timeout, max(60.0, min(floor, _DESKTOP_UI_WATCHDOG_SECONDS - 60.0)))
     return timeout
+
+
+def _bounded_stale_timeout(base_timeout: float, override: Any) -> float:
+    """Apply a request-local upper bound after all provider timeout floors."""
+    if override is None:
+        return base_timeout
+    try:
+        return min(base_timeout, max(1.0, float(override)))
+    except (TypeError, ValueError):
+        return base_timeout
 
 
 def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
@@ -266,6 +289,10 @@ def interruptible_api_call(agent, api_kwargs: dict):
     the main retry loop can try again with backoff / credential rotation /
     provider fallback.
     """
+    api_kwargs = dict(api_kwargs)
+    _stale_timeout_override = api_kwargs.pop(
+        "__hermes_stale_timeout_seconds", None
+    )
     result = {"response": None, "error": None}
 
     # Cross-turn stale-call circuit breaker (#58962) — non-streaming sibling
@@ -426,6 +453,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
         _stale_timeout = effective_openai_codex_stale_timeout(
             agent, _stale_timeout, _est_tokens_for_codex_watchdog
         )
+    _stale_timeout = _bounded_stale_timeout(
+        _stale_timeout, _stale_timeout_override
+    )
 
     if _est_tokens_for_codex_watchdog > 100_000:
         _codex_idle_timeout_default = 180.0

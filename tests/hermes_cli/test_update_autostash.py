@@ -844,16 +844,76 @@ def test_interactive_update_ignores_discard_setting(monkeypatch, tmp_path):
     assert len(discard_calls) == 0
 
 
-def test_non_interactive_defaults_to_stash_when_setting_absent(monkeypatch, tmp_path):
-    """A config with no update section falls back to stash (safe default)."""
-    restore_calls, discard_calls, _ = _setup_setting_test(monkeypatch, tmp_path, "stash")
-    # Override load_config to return a config with NO update section at all.
-    monkeypatch.setattr(hermes_config, "load_config", lambda *a, **kw: {"model": {}})
+def _dirty_status_wrapper(side_effect, dirty=True):
+    """Answer `git status --porcelain` explicitly; delegate everything else."""
+    def wrapped(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "status" in joined and "--porcelain" in joined:
+            return SimpleNamespace(
+                stdout=" M agent/conversation_loop.py\n" if dirty else "",
+                stderr="",
+                returncode=0,
+            )
+        return side_effect(cmd, **kwargs)
+    return wrapped
+
+
+def test_non_interactive_keep_skips_update_when_tree_dirty(monkeypatch, tmp_path, capsys):
+    """keep mode (unattended default): a dirty tree is never stashed, reset,
+    or switched — the source update is skipped entirely. This is the 2026-07-13
+    incident guard: an auto-update stashed in-flight fixes, force-switched a
+    pinned dev checkout to main, hit conflicts, and hard-reset the tree."""
+    restore_calls, discard_calls, _ = _setup_setting_test(monkeypatch, tmp_path, "keep")
+    stash_calls = []
+    monkeypatch.setattr(
+        hermes_main, "_stash_local_changes_if_needed",
+        lambda *a, **kw: stash_calls.append(1) or "abc123deadbeef",
+    )
+    side_effect, recorded = _make_update_side_effect(current_branch="HEAD")
+    monkeypatch.setattr(hermes_main.subprocess, "run", _dirty_status_wrapper(side_effect))
 
     hermes_main.cmd_update(SimpleNamespace(gateway=True))
 
-    assert len(restore_calls) == 1
-    assert len(discard_calls) == 0
+    assert stash_calls == []
+    assert restore_calls == []
+    assert discard_calls == []
+    joined = [" ".join(str(c) for c in cmd) for cmd in recorded]
+    assert not [j for j in joined if "checkout" in j]
+    assert not [j for j in joined if "--ff-only" in j]
+    out = capsys.readouterr().out
+    assert "skipping source update" in out.lower()
+
+
+def test_non_interactive_defaults_to_keep_when_setting_absent(monkeypatch, tmp_path, capsys):
+    """No updates section configured: unattended updates must not touch a
+    dirty tree (keep is the safe default; stash/discard are explicit opt-ins)."""
+    restore_calls, discard_calls, _ = _setup_setting_test(monkeypatch, tmp_path, "keep")
+    monkeypatch.setattr(hermes_config, "load_config", lambda *a, **kw: {"model": {}})
+    stash_calls = []
+    monkeypatch.setattr(
+        hermes_main, "_stash_local_changes_if_needed",
+        lambda *a, **kw: stash_calls.append(1) or "abc123deadbeef",
+    )
+    side_effect, recorded = _make_update_side_effect()
+    monkeypatch.setattr(hermes_main.subprocess, "run", _dirty_status_wrapper(side_effect))
+
+    hermes_main.cmd_update(SimpleNamespace(gateway=True))
+
+    assert stash_calls == []
+    assert restore_calls == []
+    assert discard_calls == []
+
+
+def test_non_interactive_keep_proceeds_when_tree_clean(monkeypatch, tmp_path):
+    """keep mode with a clean tree updates normally."""
+    restore_calls, discard_calls, _ = _setup_setting_test(monkeypatch, tmp_path, "keep")
+    side_effect, recorded = _make_update_side_effect()
+    monkeypatch.setattr(hermes_main.subprocess, "run", _dirty_status_wrapper(side_effect, dirty=False))
+
+    hermes_main.cmd_update(SimpleNamespace(gateway=True))
+
+    joined = [" ".join(str(c) for c in cmd) for cmd in recorded]
+    assert [j for j in joined if "--ff-only" in j]
 
 
 def test_bootstrap_marker_not_autostashed_by_update(tmp_path):

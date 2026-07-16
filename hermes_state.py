@@ -17,6 +17,7 @@ Key design decisions:
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -30,6 +31,29 @@ from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
+
+
+def _compression_holder_process_is_dead(holder: str) -> bool:
+    """Return True only when a local lock holder can be proven stale."""
+    match = re.search(r"(?:^|:)pid=(\d+)(?::|$)", holder or "")
+    if not match:
+        return False
+    pid = int(match.group(1))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+
+    start_match = re.search(r"(?:^|:)start=([^:]+)(?::|$)", holder or "")
+    if not start_match:
+        return False
+    try:
+        current_start = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21]
+    except (OSError, IndexError):
+        return False
+    return current_start != start_match.group(1)
 
 def _delegate_from_json(col: str = "model_config") -> str:
     return f"json_extract(COALESCE({col}, '{{}}'), '$._delegate_from')"
@@ -2270,6 +2294,19 @@ class SessionDB:
                 "WHERE session_id = ? AND expires_at < ?",
                 (session_id, now),
             )
+            existing = conn.execute(
+                "SELECT holder FROM compression_locks WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_holder = (
+                    existing["holder"] if isinstance(existing, sqlite3.Row) else existing[0]
+                )
+                if _compression_holder_process_is_dead(existing_holder):
+                    conn.execute(
+                        "DELETE FROM compression_locks WHERE session_id = ? AND holder = ?",
+                        (session_id, existing_holder),
+                    )
             # Then: try to insert. INSERT OR IGNORE returns no rowcount
             # difference — verify ownership via SELECT.
             conn.execute(
@@ -2489,6 +2526,105 @@ class SessionDB:
                 normalized_patch[key] = normalized_value
         merged = self._merge_working_state(current, normalized_patch)
         return self.set_working_state(session_id, merged, source=source)
+
+    def claim_pending_turn(
+        self,
+        session_id: str,
+        prompt_hash: str,
+        claim_id: str,
+        *,
+        marker_key: str = "pending_turn",
+        claim_ttl_seconds: float = 30.0,
+        now: Optional[float] = None,
+        source: str = "",
+    ) -> bool:
+        """Atomically lease a recoverable turn to one recovery client."""
+        if marker_key not in {"pending_turn", "queued_turn"}:
+            return False
+        claimed_at = float(time.time() if now is None else now)
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT state_json FROM session_working_state WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                state = json.loads(row["state_json"] if isinstance(row, sqlite3.Row) else row[0])
+            except (TypeError, json.JSONDecodeError):
+                return False
+            marker = state.get(marker_key) if isinstance(state, dict) else None
+            if not isinstance(marker, dict) or marker.get("prompt_hash") != prompt_hash:
+                return False
+            marker_state = marker.get("state")
+            existing_claimed_at = float(marker.get("claimed_at") or 0.0)
+            if marker_state == "claimed" and claimed_at - existing_claimed_at < claim_ttl_seconds:
+                return False
+            if marker_state not in {"running", "queued", "claimed"}:
+                return False
+            marker.update(
+                {"state": "claimed", "claim_id": claim_id, "claimed_at": claimed_at}
+            )
+            if marker_key == "queued_turn":
+                # The queued user intent supersedes the interrupted live turn.
+                # Promote it into the existing pending-turn lease protocol so
+                # accept_pending_turn_claim remains the single consume gate.
+                state["pending_turn"] = marker
+                state["queued_turn"] = None
+            payload = json.dumps(state, ensure_ascii=False, sort_keys=True)
+            conn.execute(
+                "UPDATE session_working_state SET state_json = ?, revision = revision + 1, "
+                "updated_at = ?, source = ? WHERE session_id = ?",
+                (payload, claimed_at, source or "", session_id),
+            )
+            return True
+
+        return bool(self._execute_write(_do))
+
+    def accept_pending_turn_claim(
+        self,
+        session_id: str,
+        prompt_hash: str,
+        claim_id: str,
+        *,
+        now: Optional[float] = None,
+        source: str = "",
+    ) -> bool:
+        """Atomically consume a recovery claim and restore a running marker."""
+        accepted_at = float(time.time() if now is None else now)
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT state_json FROM session_working_state WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                state = json.loads(row["state_json"] if isinstance(row, sqlite3.Row) else row[0])
+            except (TypeError, json.JSONDecodeError):
+                return False
+            marker = state.get("pending_turn") if isinstance(state, dict) else None
+            if not isinstance(marker, dict) or (
+                marker.get("state") != "claimed"
+                or marker.get("prompt_hash") != prompt_hash
+                or marker.get("claim_id") != claim_id
+            ):
+                return False
+            marker.pop("claim_id", None)
+            marker.pop("claimed_at", None)
+            marker["state"] = "running"
+            marker["started_at"] = accepted_at
+            payload = json.dumps(state, ensure_ascii=False, sort_keys=True)
+            conn.execute(
+                "UPDATE session_working_state SET state_json = ?, revision = revision + 1, "
+                "updated_at = ?, source = ? WHERE session_id = ?",
+                (payload, accepted_at, source or "", session_id),
+            )
+            return True
+
+        return bool(self._execute_write(_do))
 
     def clear_working_state(self, session_id: str, reason: str = "") -> Dict[str, Any]:
         """Clear stale operational state for a session.
@@ -3122,6 +3258,38 @@ class SessionDB:
 
         return f"{base} #{max_num + 1}"
 
+    def _get_compression_continuation_id(self, parent_id: str) -> Optional[str]:
+        """Return the one canonical continuation child for a compressed parent."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                SELECT child.id
+                FROM sessions parent
+                JOIN sessions child ON child.parent_session_id = parent.id
+                WHERE parent.id = ?
+                  AND parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+                ORDER BY
+                  CASE
+                    WHEN child.end_reason = 'compression' THEN 0
+                    WHEN child.ended_at IS NULL THEN 1
+                    ELSE 2
+                  END,
+                  COALESCE(
+                    (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = child.id),
+                    child.started_at
+                  ) DESC,
+                  child.started_at DESC,
+                  child.id DESC
+                LIMIT 1
+                """,
+                (parent_id,),
+            )
+            row = cursor.fetchone()
+        return row["id"] if row is not None else None
+
     def get_compression_tip(self, session_id: str) -> Optional[str]:
         """Walk the compression-continuation chain forward and return the tip.
 
@@ -3148,37 +3316,9 @@ class SessionDB:
         # Bound the walk defensively — compression chains this deep are
         # pathological and shouldn't happen in practice. 100 = plenty.
         for _ in range(100):
-            with self._lock:
-                cursor = self._conn.execute(
-                    """
-                    SELECT child.id
-                    FROM sessions parent
-                    JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.id = ?
-                      AND parent.end_reason = 'compression'
-                      AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
-                      AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
-                      AND COALESCE(child.source, '') != 'tool'
-                    ORDER BY
-                      CASE
-                        WHEN child.end_reason = 'compression' THEN 0
-                        WHEN child.ended_at IS NULL THEN 1
-                        ELSE 2
-                      END,
-                      COALESCE(
-                        (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = child.id),
-                        child.started_at
-                      ) DESC,
-                      child.started_at DESC,
-                      child.id DESC
-                    LIMIT 1
-                    """,
-                    (current,),
-                )
-                row = cursor.fetchone()
-            if row is None:
+            child_id = self._get_compression_continuation_id(current)
+            if not child_id:
                 return current
-            child_id = row["id"]
             if not child_id or child_id in seen:
                 return current
             seen.add(child_id)
@@ -4805,6 +4945,153 @@ class SessionDB:
         """Count CJK characters in text."""
         return sum(1 for ch in text if cls._is_cjk_codepoint(ord(ch)))
 
+    def search_compacted_messages(
+        self,
+        session_ids: List[str],
+        query: str,
+        *,
+        role_filter: Optional[List[str]] = None,
+        limit: int = 12,
+        context_window: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """Search exact rows archived by compaction in one session lineage.
+
+        This is the safe primitive for automatic current-conversation recall.
+        Unlike the general cross-session search surface it requires an explicit
+        lineage and only admits ``active=0, compacted=1`` rows, so rewound turns
+        can never leak into model context. Exact message rows remain the source
+        of truth; callers decide how much of each returned neighborhood to inject.
+        """
+        lineage = [str(sid) for sid in session_ids if str(sid).strip()]
+        if not lineage or not query or not query.strip() or limit <= 0:
+            return []
+
+        raw_query = query[:MAX_FTS5_QUERY_CHARS].strip()
+        sanitized = self._sanitize_fts5_query(raw_query)
+        if not sanitized:
+            return []
+
+        lineage_placeholders = ",".join("?" for _ in lineage)
+        role_clause = ""
+        role_params: List[str] = []
+        if role_filter:
+            role_clause = f" AND m.role IN ({','.join('?' for _ in role_filter)})"
+            role_params = list(role_filter)
+
+        use_like = self._contains_cjk(raw_query) or not self._fts_enabled
+        if use_like:
+            terms = [
+                term.strip().strip('"')
+                for term in re.split(r"\s+(?:OR|AND)\s+", raw_query, flags=re.IGNORECASE)
+                if term.strip().strip('"')
+            ] or [raw_query]
+            match_clauses: List[str] = []
+            match_params: List[str] = []
+            for term in terms[:12]:
+                escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                match_clauses.append(
+                    "(COALESCE(m.content, '') LIKE ? ESCAPE '\\' "
+                    "OR COALESCE(m.tool_name, '') LIKE ? ESCAPE '\\' "
+                    "OR COALESCE(m.tool_calls, '') LIKE ? ESCAPE '\\')"
+                )
+                value = f"%{escaped}%"
+                match_params.extend([value, value, value])
+            sql = f"""
+                SELECT m.id, m.session_id, m.role, m.content, m.timestamp,
+                       m.tool_name, m.active, m.compacted
+                FROM messages m
+                WHERE m.session_id IN ({lineage_placeholders})
+                  AND m.active = 0 AND m.compacted = 1
+                  AND ({' OR '.join(match_clauses)})
+                  {role_clause}
+                ORDER BY m.timestamp DESC, m.id DESC
+                LIMIT ?
+            """
+            params: List[Any] = [*lineage, *match_params, *role_params, limit]
+        else:
+            sql = f"""
+                SELECT m.id, m.session_id, m.role, m.content, m.timestamp,
+                       m.tool_name, m.active, m.compacted, bm25(messages_fts) AS rank
+                FROM messages_fts
+                JOIN messages m ON m.id = messages_fts.rowid
+                WHERE messages_fts MATCH ?
+                  AND m.session_id IN ({lineage_placeholders})
+                  AND m.active = 0 AND m.compacted = 1
+                  {role_clause}
+                ORDER BY m.timestamp DESC, m.id DESC, rank
+                LIMIT ?
+            """
+            params = [sanitized, *lineage, *role_params, limit]
+
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                return []
+
+        results: List[Dict[str, Any]] = []
+        neighbor_count = max(0, min(int(context_window), 3))
+        for row in rows:
+            match = dict(row)
+            match["content"] = self._decode_content(match.get("content"))
+            context_rows: List[Any] = []
+            if neighbor_count:
+                with self._lock:
+                    before = self._conn.execute(
+                        "SELECT id, role, content, tool_name FROM messages "
+                        "WHERE session_id = ? AND id < ? "
+                        "AND active = 0 AND compacted = 1 "
+                        "ORDER BY id DESC LIMIT ?",
+                        (match["session_id"], match["id"], neighbor_count),
+                    ).fetchall()
+                    after = self._conn.execute(
+                        "SELECT id, role, content, tool_name FROM messages "
+                        "WHERE session_id = ? AND id > ? "
+                        "AND active = 0 AND compacted = 1 "
+                        "ORDER BY id ASC LIMIT ?",
+                        (match["session_id"], match["id"], neighbor_count),
+                    ).fetchall()
+                context_rows = list(reversed(before)) + [row] + list(after)
+            else:
+                context_rows = [row]
+
+            context: List[Dict[str, Any]] = []
+            for context_row in context_rows:
+                shaped = dict(context_row)
+                shaped["content"] = self._decode_content(shaped.get("content"))
+                context.append(shaped)
+            match["context"] = context
+            results.append(match)
+        return results
+
+    def get_prompt_storage_counts(self, session_id: str) -> Dict[str, int]:
+        """Return live/archive/rewind row counts for one compression lineage."""
+        lineage = self.get_compression_lineage(session_id)
+        if not lineage:
+            return {"active": 0, "compacted": 0, "rewound": 0, "total": 0}
+        placeholders = ",".join("?" for _ in lineage)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT
+                    SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS active_count,
+                    SUM(CASE WHEN active = 0 AND compacted = 1 THEN 1 ELSE 0 END)
+                        AS compacted_count,
+                    SUM(CASE WHEN active = 0 AND compacted = 0 THEN 1 ELSE 0 END)
+                        AS rewound_count,
+                    COUNT(*) AS total_count
+                FROM messages
+                WHERE session_id IN ({placeholders})
+                """,
+                tuple(lineage),
+            ).fetchone()
+        return {
+            "active": int(row["active_count"] or 0),
+            "compacted": int(row["compacted_count"] or 0),
+            "rewound": int(row["rewound_count"] or 0),
+            "total": int(row["total_count"] or 0),
+        }
+
     def search_messages(
         self,
         query: str,
@@ -5020,6 +5307,11 @@ class SessionDB:
                     )
                     like_params += [f"%{esc}%", f"%{esc}%", f"%{esc}%"]
                 like_where = [f"({' OR '.join(token_clauses)})"]
+                if not include_inactive:
+                    # Match the unicode61 and trigram paths: archived
+                    # compaction rows remain searchable, while rows removed by
+                    # rewind/undo must stay hidden from normal retrieval.
+                    like_where.append("(m.active = 1 OR m.compacted = 1)")
                 if source_filter is not None:
                     like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
                     like_params.extend(source_filter)
@@ -5318,8 +5610,7 @@ class SessionDB:
         parent_id = child.get("parent_session_id")
         if not parent_id or self._is_branch_child_row(child):
             return False
-        parent = self.get_session(parent_id)
-        return bool(parent and parent.get("end_reason") == "compression")
+        return self._get_compression_continuation_id(parent_id) == child.get("id")
 
     def get_compression_lineage(self, session_id: str) -> List[str]:
         """Return compression ancestors through tip in chronological order."""
@@ -5337,21 +5628,10 @@ class SessionDB:
         lineage = [root["id"]]
         current = root
         while current.get("end_reason") == "compression":
-            with self._lock:
-                rows = self._conn.execute(
-                    """
-                    SELECT * FROM sessions
-                    WHERE parent_session_id = ?
-                    ORDER BY started_at ASC
-                    """,
-                    (current["id"],),
-                ).fetchall()
-            next_child = None
-            for row in rows:
-                candidate = dict(row)
-                if not self._is_branch_child_row(candidate):
-                    next_child = candidate
-                    break
+            next_child_id = self._get_compression_continuation_id(current["id"])
+            if not next_child_id:
+                break
+            next_child = self.get_session(next_child_id)
             if not next_child:
                 break
             lineage.append(next_child["id"])
@@ -5363,11 +5643,11 @@ class SessionDB:
         return lineage if session_id in lineage else [session_id]
 
     def export_session(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Export a single session with all its messages as a dict."""
+        """Export a single session with every exact active and archived row."""
         session = self.get_session(session_id)
         if not session:
             return None
-        messages = self.get_messages(session_id)
+        messages = self.get_messages(session_id, include_inactive=True)
         return {**session, "messages": messages}
 
     def export_session_lineage(self, session_id: str) -> Optional[Dict[str, Any]]:

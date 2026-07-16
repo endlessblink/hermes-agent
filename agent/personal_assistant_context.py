@@ -33,17 +33,20 @@ _CAPABILITY_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "break large tasks into steps",
         (
             ("flowstate_list_subtasks", "read subtasks"),
-            ("flowstate_create_subtask", "create subtasks"),
-            ("flowstate_update_subtask", "update and reorder subtasks"),
-            ("flowstate_delete_subtask", "remove subtasks"),
-            ("flowstate_subtask_batch", "apply an approved subtask plan"),
+            (
+                "flowstate_subtask_batch",
+                "preview or atomically apply an approved ordered subtask plan",
+            ),
         ),
     ),
     (
         "plan time for my work",
         (
             ("flowstate_list_task_instances", "read scheduled work blocks"),
-            ("flowstate_schedule_task_instance", "preview or schedule a work block"),
+            ("flowstate_create_work_block", "preview or create a verified work block"),
+            ("flowstate_move_work_block", "preview or move a verified work block"),
+            ("flowstate_resize_work_block", "preview or resize a verified work block"),
+            ("flowstate_remove_work_block", "preview or remove a verified work block"),
         ),
     ),
 )

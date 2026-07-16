@@ -1907,6 +1907,13 @@ _LONG_LIVED_FOREGROUND_PATTERNS = (
     re.compile(r"\bpython(?:3)?\s+-m\s+http\.server\b", re.IGNORECASE),
 )
 
+_BOUNDED_BACKGROUND_PATTERNS = (
+    re.compile(r"\bvercel\b.*\b(?:deploy|prod|production)\b", re.IGNORECASE),
+    re.compile(r"\bnetlify\s+deploy\b", re.IGNORECASE),
+    re.compile(r"\bfirebase\s+deploy\b", re.IGNORECASE),
+    re.compile(r"\bwrangler\s+deploy\b", re.IGNORECASE),
+)
+
 
 def _looks_like_help_or_version_command(command: str) -> bool:
     """Return True for informational invocations that should never be blocked."""
@@ -1951,6 +1958,14 @@ def _foreground_background_guidance(command: str) -> str | None:
                 "This foreground command appears to start a long-lived server/watch process. "
                 "Run it with background=true, verify readiness (health endpoint/log signal), "
                 "then execute tests in a separate command."
+            )
+
+    for pattern in _BOUNDED_BACKGROUND_PATTERNS:
+        if pattern.search(unquoted):
+            return (
+                "This deployment command can block for minutes without output. "
+                "Run it with background=true and notify_on_complete=true so Hermes can "
+                "continue, report completion, and avoid stranding the turn."
             )
 
     return None

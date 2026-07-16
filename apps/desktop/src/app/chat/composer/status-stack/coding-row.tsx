@@ -27,6 +27,7 @@ import type { HermesGitBranch } from '@/global'
 import { useI18n } from '@/i18n'
 import { gitRef } from '@/lib/sanitize'
 import { $repoStatus, $repoWorktrees } from '@/store/coding-status'
+import { $sidebarAgentsGrouped } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
 import { $newWorktreeRequest } from '@/store/projects'
 
@@ -86,6 +87,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
   const p = t.sidebar.projects
   const status = useStore($repoStatus)
   const worktrees = useStore($repoWorktrees)
+  const worktreeUiEnabled = useStore($sidebarAgentsGrouped)
 
   const [branchOpen, setBranchOpen] = useState(false)
   const [branchName, setBranchName] = useState('')
@@ -165,7 +167,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
 
     lastWorktreeReqRef.current = worktreeReq
 
-    if (!onBranchOff) {
+    if (!worktreeUiEnabled || !onBranchOff) {
       return
     }
 
@@ -173,7 +175,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
     setBranchName('')
     setConvertMode(false)
     setBranchOpen(true)
-  }, [onBranchOff, worktreeReq])
+  }, [onBranchOff, worktreeReq, worktreeUiEnabled])
 
   const submitBranch = async () => {
     const branch = branchName.trim()
@@ -238,7 +240,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
 
   // Other worktrees to jump into — everything except the one we're already in
   // (matched by its checked-out branch) and the bare/main placeholder entry.
-  const otherWorktrees = onOpenWorktree
+  const otherWorktrees = worktreeUiEnabled && onOpenWorktree
     ? worktrees.filter(w => w.path && !w.detached && w.branch && w.branch !== current)
     : []
 
@@ -272,7 +274,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
               ALWAYS laid out; only its opacity flips on hover/focus/open, so
               revealing it never reflows the row (no layout shift). pointer-events
               follow opacity so the invisible trigger isn't clickable at rest. */}
-          {onBranchOff && (
+          {worktreeUiEnabled && onBranchOff && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button

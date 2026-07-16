@@ -114,13 +114,23 @@ def _relevant_files_from_messages(messages: list[dict[str, Any]], limit: int = 1
     return list(seen)
 
 
-def _record_compaction_working_state(agent: Any, messages: list, compressed: list) -> None:
+def _record_compaction_working_state(
+    agent: Any,
+    messages: list,
+    compressed: list,
+    *,
+    source_session_id: str | None = None,
+) -> None:
     db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", "") or ""
     if db is None or not session_id:
         return
     try:
+        prior_state = {}
+        if source_session_id:
+            prior_state = db.get_working_state(source_session_id) or {}
         patch = {
+            **prior_state,
             "active_task": _latest_user_text(messages),
             "status": "compacted",
             "phase": "continuing after context compaction",
@@ -145,8 +155,16 @@ def _compression_lock_holder(agent: Any) -> str:
     we want each acquire to be unique).
     """
     import threading
+    start_token = ""
+    try:
+        stat_fields = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8").split()
+        start_token = stat_fields[21]
+    except (OSError, IndexError):
+        pass
+    start_part = f":start={start_token}" if start_token else ""
     return (
         f"pid={os.getpid()}"
+        f"{start_part}"
         f":tid={threading.get_ident()}"
         f":agent={id(agent):x}"
         f":nonce={uuid.uuid4().hex[:8]}"
@@ -154,7 +172,7 @@ def _compression_lock_holder(agent: Any) -> str:
 
 
 def _schedule_pre_compress_memory_capture(agent: Any, messages: list) -> None:
-    """Capture inferred memory from a snapshot without blocking compaction."""
+    """Capture memory from an immutable snapshot without blocking compaction."""
     manager = getattr(agent, "_memory_manager", None)
     if manager is None:
         return
@@ -608,14 +626,6 @@ def compress_context(
     # Set True once the in-place DB write actually completes (the DB block can
     # raise and skip it). Surfaced to the gateway via agent._last_compaction_in_place.
     compacted_in_place = False
-    logger.info(
-        "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
-        agent.session_id or "none", _pre_msg_count,
-        f"{approx_tokens:,}" if approx_tokens else "unknown", agent.model,
-        focus_topic,
-    )
-    agent._emit_status(COMPACTION_STATUS)
-
     # ── Compression lock ────────────────────────────────────────────────
     # Atomic, state.db-backed lock per session_id.  Without this, two
     # AIAgent instances that share the same session_id (most commonly the
@@ -729,8 +739,29 @@ def compress_context(
             except Exception as _rel_err:
                 logger.debug("compression lock release failed: %s", _rel_err)
 
+    _compression_status_active = True
+    logger.info(
+        "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
+        agent.session_id or "none", _pre_msg_count,
+        f"{approx_tokens:,}" if approx_tokens else "unknown", agent.model,
+        focus_topic,
+    )
+    agent._emit_status(COMPACTION_STATUS)
+
+    def _finish_compression_status() -> None:
+        nonlocal _compression_status_active
+        if not _compression_status_active:
+            return
+        _compression_status_active = False
+        callback = getattr(agent, "status_callback", None)
+        if callback:
+            try:
+                callback("compression_complete", "Context compression finished")
+            except Exception:
+                logger.debug("status_callback error after compression", exc_info=True)
+
     # The durable transcript is already stored by SessionDB. Additional
-    # inferred-memory extraction must not block the active chat turn.
+    # inferred-memory extraction must never block the active chat turn.
     _schedule_pre_compress_memory_capture(agent, messages)
 
     try:
@@ -741,21 +772,15 @@ def compress_context(
         try:
             compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
         except BaseException:
+            _finish_compression_status()
             _release_lock()
             raise
     except BaseException:
         # ANY exception during compress() must release the lock so the
         # session isn't permanently blocked from future compression.
+        _finish_compression_status()
         _release_lock()
         raise
-
-    if bool(getattr(agent, "_compression_watchdog_abandoned", False)):
-        agent._compression_watchdog_abandoned = False
-        _existing_sp = getattr(agent, "_cached_system_prompt", None)
-        if not _existing_sp:
-            _existing_sp = agent._build_system_prompt(system_message)
-        _release_lock()
-        return messages, _existing_sp
 
     # If compression aborted (aux LLM failed to produce a usable summary)
     # the compressor returns the input messages unchanged.  Surface the
@@ -777,22 +802,20 @@ def compress_context(
                 _existing_sp = agent._build_system_prompt(system_message)
             return messages, _existing_sp
         finally:
+            _finish_compression_status()
             _release_lock()
 
     # A schema-heavy request can cross the provider threshold even when the
-    # conversation itself has no compressible middle. Do not turn that no-op
-    # into a durable compaction by appending another task snapshot and
-    # rewriting the same history.
+    # conversation itself has no compressible middle. Keep that no-op truly
+    # non-mutating: do not append another task snapshot or rewrite history.
     if compressed == messages:
         try:
-            callback = getattr(agent, "status_callback", None)
-            if callback:
-                callback("compression_complete", "Context compression finished")
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
                 _existing_sp = agent._build_system_prompt(system_message)
             return messages, _existing_sp
         finally:
+            _finish_compression_status()
             _release_lock()
 
     try:
@@ -833,11 +856,16 @@ def compress_context(
 
         if agent._session_db:
             try:
-                # Trigger memory extraction on the current session before the
-                # transcript is rewritten (runs in BOTH modes — the logical
-                # conversation's pre-compaction turns are about to be summarized
-                # away regardless of whether the id rotates).
-                agent.commit_memory_session(messages)
+                # Rotation is a real session boundary, so preserve its existing
+                # synchronous end-before-switch ordering. In-place compaction is
+                # not a session end: its exact pre-compaction transcript remains
+                # archived under the same id, and normal turn finalization owns
+                # memory sync. Launching model-based session extraction here made
+                # the live compaction path wait behind that auxiliary request.
+                if not in_place:
+                    # Rotation changes provider identity, so preserve the
+                    # existing synchronous end-before-switch ordering there.
+                    agent.commit_memory_session(messages)
 
                 if in_place:
                     # ── In-place compaction: keep the same session_id ──────────
@@ -859,6 +887,25 @@ def compress_context(
                     # WITHOUT destroying history, unlike a hard replace_messages).
                     # See #38763.
                     agent._session_db.archive_and_compact(agent.session_id, compressed)
+                    # The archive commit is the producer boundary for semantic
+                    # retrieval. Schedule derived indexing immediately so the
+                    # first later paraphrased query can search a warm cache;
+                    # the daemon worker is bounded and fail-open.
+                    try:
+                        from agent.semantic_history_index import (
+                            start_background_history_index,
+                        )
+
+                        start_background_history_index(
+                            agent._session_db,
+                            agent.session_id,
+                            timeout=60.0,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "semantic history indexing failed to start after compaction",
+                            exc_info=True,
+                        )
                     # Reset the flush identity set so the next turn's appends are
                     # diffed against the COMPACTED transcript: the compacted dicts
                     # are passed as conversation_history next turn and skipped by
@@ -976,7 +1023,14 @@ def compress_context(
                 # refresh the stored system prompt and reset the flush cursor so the
                 # next turn re-bases its append diff.
                 agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
-                _record_compaction_working_state(agent, messages, compressed)
+                _record_compaction_working_state(
+                    agent,
+                    messages,
+                    compressed,
+                    source_session_id=(
+                        locals().get("old_session_id") or agent.session_id
+                    ),
+                )
                 agent._last_flushed_db_idx = 0
             except Exception as e:
                 # If the rotation rolled back to the parent (orphan-avoidance
@@ -1099,13 +1153,6 @@ def compress_context(
             agent.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
-        if getattr(agent, "status_callback", None):
-            try:
-                agent.status_callback(
-                    "compression_complete", "Context compression finished"
-                )
-            except Exception:
-                logger.debug("status_callback error after compression", exc_info=True)
         return compressed, new_system_prompt
     finally:
         # Release the lock on the OLD session_id only AFTER rotation completed
@@ -1113,6 +1160,7 @@ def compress_context(
         # file dedup) ran. A concurrent path that wakes up the moment we
         # release will see the NEW session_id in state.db / SessionEntry and
         # acquire on that — no race against our just-finished work.
+        _finish_compression_status()
         _release_lock()
 
 
@@ -1176,7 +1224,15 @@ def _compress_context_via_codex_app_server(
     except Exception:
         pass
 
-    result = codex_session.compact_thread()
+    try:
+        result = codex_session.compact_thread()
+    finally:
+        callback = getattr(agent, "status_callback", None)
+        if callback:
+            try:
+                callback("compression_complete", "Context compression finished")
+            except Exception:
+                logger.debug("status_callback error after Codex compaction", exc_info=True)
     if getattr(result, "should_retire", False):
         try:
             codex_session.close()

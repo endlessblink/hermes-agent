@@ -508,6 +508,49 @@ def _discover(
     role_list = role_filter if role_filter else ["user", "assistant"]
     current_lineage_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
     title_result = _title_match_result(db, query, current_lineage_root)
+    current_archive_result = None
+    if current_session_id:
+        try:
+            lineage = db.get_compression_lineage(current_session_id)
+            archived = db.search_compacted_messages(
+                lineage,
+                query,
+                role_filter=role_list,
+                limit=1,
+                context_window=2,
+            )
+            if archived:
+                match = archived[0]
+                hit_sid = match.get("session_id") or current_session_id
+                session_meta = db.get_session(hit_sid) or {}
+                msg_id = match.get("id")
+                current_archive_result = {
+                    "session_id": hit_sid,
+                    "when": _format_timestamp(
+                        session_meta.get("started_at") or match.get("timestamp")
+                    ),
+                    "source": session_meta.get("source", "unknown"),
+                    "model": session_meta.get("model") or "unknown",
+                    "title": session_meta.get("title") or None,
+                    "matched_role": match.get("role"),
+                    "match_message_id": msg_id,
+                    "snippet": match.get("content") or "",
+                    "bookend_start": [],
+                    "messages": [
+                        _shape_message(message, anchor_id=msg_id)
+                        for message in (match.get("context") or [])
+                    ],
+                    "bookend_end": [],
+                    "messages_before": None,
+                    "messages_after": None,
+                    "archived_current_lineage": True,
+                }
+        except Exception:
+            logging.debug(
+                "current-lineage archived search failed for %s",
+                current_session_id,
+                exc_info=True,
+            )
 
     try:
         raw_results = db.search_messages(
@@ -530,7 +573,7 @@ def _discover(
     # within each class.
     raw_results = _order_for_recall(raw_results)
 
-    if not raw_results and not title_result:
+    if not raw_results and not title_result and not current_archive_result:
         return json.dumps({
             "success": True,
             "mode": "discover",
@@ -545,6 +588,11 @@ def _discover(
     # window. parent_session_id is exposed separately when different.
     seen_sessions = {}
     results = []
+
+    if current_archive_result:
+        results.append(current_archive_result)
+        if current_lineage_root:
+            seen_sessions[current_lineage_root] = {"_current_archive": True}
 
     if title_result:
         title_lineage = title_result.pop("_lineage_root", None)
@@ -570,7 +618,7 @@ def _discover(
             break
 
     for lineage_root, match_info in seen_sessions.items():
-        if match_info.get("_title_only"):
+        if match_info.get("_title_only") or match_info.get("_current_archive"):
             continue
         hit_sid = match_info.get("session_id") or lineage_root
         msg_id = match_info.get("id")

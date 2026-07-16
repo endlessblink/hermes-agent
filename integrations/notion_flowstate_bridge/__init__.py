@@ -88,20 +88,19 @@ def _handler(method: str) -> Callable[..., str]:
 _SCHEMAS = {
     "notion_data_source_schema": {
         "name": "notion_data_source_schema",
-        "description": "Read a Notion data-source schema without changing it.",
+        "description": "Read the configured Notion data-source schema without changing it.",
         "parameters": {
             "type": "object",
-            "properties": {"data_source_id": {"type": "string"}},
+            "properties": {},
             "additionalProperties": False,
         },
     },
     "notion_data_source_list": {
         "name": "notion_data_source_list",
-        "description": "List pages in a Notion data source with a bounded filter and page size.",
+        "description": "List pages in the configured Notion data source with a bounded filter and page size.",
         "parameters": {
             "type": "object",
             "properties": {
-                "data_source_id": {"type": "string"},
                 "filter": {"type": "object"},
                 "sorts": {"type": "array", "maxItems": 10},
                 "page_size": {"type": "integer", "minimum": 1, "maximum": 100},
@@ -122,14 +121,13 @@ _SCHEMAS = {
     },
     "notion_mutation": {
         "name": "notion_mutation",
-        "description": "Preview or apply a receipt-backed Notion page create/property update. Defaults to preview.",
+        "description": "Preview or apply a receipt-backed create/property update in the configured Notion data source. Defaults to preview.",
         "parameters": {
             "type": "object",
             "properties": {
                 "mode": {"type": "string", "enum": ["preview", "apply"], "default": "preview"},
                 "operation_id": {"type": "string"},
                 "action": {"type": "string", "enum": ["create", "property_update"]},
-                "data_source_id": {"type": "string"},
                 "page_id": {"type": "string"},
                 "properties": {"type": "object"},
                 "preview_digest": {"type": "string"},
@@ -140,13 +138,12 @@ _SCHEMAS = {
     },
     "notion_flowstate_activate": {
         "name": "notion_flowstate_activate",
-        "description": "Preview or apply activation of an exact Notion page in canonical FlowState.",
+        "description": "Preview or apply activation of an exact page from the configured Notion data source in canonical FlowState.",
         "parameters": {
             "type": "object",
             "properties": {
                 "mode": {"type": "string", "enum": ["preview", "apply"], "default": "preview"},
                 "operation_id": {"type": "string"},
-                "data_source_id": {"type": "string"},
                 "page_id": {"type": "string"},
                 "task": {
                     "type": "object",

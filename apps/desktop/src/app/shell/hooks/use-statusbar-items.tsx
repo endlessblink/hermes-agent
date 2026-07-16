@@ -13,6 +13,7 @@ import type { RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { contextBarLabel, LiveDuration, usageContextLabel } from '@/lib/statusbar'
 import { cn } from '@/lib/utils'
 import { setGlobalYolo, setSessionYolo } from '@/lib/yolo-session'
+import { $activeSessionAwaitingInput } from '@/store/prompts'
 import {
   $activeSessionId,
   $busy,
@@ -75,6 +76,7 @@ export function useStatusbarItems({
   const terminalTakeover = useStore($terminalTakeover)
   const yoloActive = useStore($yoloActive)
   const busy = useStore($busy)
+  const awaitingInput = useStore($activeSessionAwaitingInput)
   const currentUsage = useStore($currentUsage)
   const gatewayRestarting = useStore($gatewayRestarting)
   const sessionStartedAt = useStore($sessionStartedAt)
@@ -353,8 +355,16 @@ export function useStatusbarItems({
   const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
       {
+        hidden: !awaitingInput,
+        icon: <AlertCircle className="size-3" />,
+        id: 'waiting-input',
+        label: t.sidebar.row.needsInput,
+        title: t.sidebar.row.waitingForAnswer,
+        variant: 'text'
+      },
+      {
         detail: <LiveDuration since={turnStartedAt} />,
-        hidden: !busy || !turnStartedAt,
+        hidden: !busy || !turnStartedAt || awaitingInput,
         icon: <Loader2 className="size-3 animate-spin" />,
         id: 'running-timer',
         label: copy.turnRunning,
@@ -421,7 +431,10 @@ export function useStatusbarItems({
       sessionStartedAt,
       showYoloToggle,
       terminalTakeover,
+      t.sidebar.row.needsInput,
+      t.sidebar.row.waitingForAnswer,
       toggleYolo,
+      awaitingInput,
       turnStartedAt,
       yoloActive
     ]

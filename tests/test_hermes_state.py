@@ -5412,6 +5412,26 @@ def test_expired_compression_failure_cooldown_is_ignored(db):
     assert db.get_compression_failure_cooldown("s1") is None
 
 
+def test_pending_turn_recovery_claim_is_leased_and_consumed_once(db):
+    db.create_session("s1", "cli")
+    prompt_hash = "abc123"
+    db.patch_working_state(
+        "s1",
+        {"pending_turn": {"prompt_hash": prompt_hash, "started_at": 1.0, "state": "running"}},
+        source="test",
+    )
+
+    assert db.claim_pending_turn("s1", prompt_hash, "claim-a", now=10.0)
+    assert not db.claim_pending_turn("s1", prompt_hash, "claim-b", now=20.0)
+    assert db.claim_pending_turn("s1", prompt_hash, "claim-b", now=41.0)
+    assert not db.accept_pending_turn_claim("s1", prompt_hash, "claim-a", now=42.0)
+    assert db.accept_pending_turn_claim("s1", prompt_hash, "claim-b", now=42.0)
+    assert not db.accept_pending_turn_claim("s1", prompt_hash, "claim-b", now=43.0)
+    marker = db.get_working_state("s1")["pending_turn"]
+    assert marker["state"] == "running"
+    assert "claim_id" not in marker
+
+
 def test_refresh_compression_lock_requires_holder_and_preserves_reclaimability(db, monkeypatch):
     db.create_session("s1", "cli")
 

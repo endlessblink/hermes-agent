@@ -183,6 +183,8 @@ function ResumeHarness({
   sessionStateByRuntimeIdRef?: MutableRefObject<Map<string, ClientSessionState>>
 }) {
   const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
+  const runtimeIds = runtimeIdByStoredSessionIdRef ?? ref(new Map<string, string>())
+  const sessionStates = sessionStateByRuntimeIdRef ?? ref(new Map<string, ClientSessionState>())
 
   const actions = useSessionActions({
     activeSessionId: null,
@@ -193,12 +195,18 @@ function ResumeHarness({
     getRouteToken: () => 'token',
     navigate: vi.fn() as never,
     requestGateway,
-    runtimeIdByStoredSessionIdRef: runtimeIdByStoredSessionIdRef ?? ref(new Map<string, string>()),
+    runtimeIdByStoredSessionIdRef: runtimeIds,
     selectedStoredSessionId: null,
     selectedStoredSessionIdRef: ref<string | null>(null),
-    sessionStateByRuntimeIdRef: sessionStateByRuntimeIdRef ?? ref(new Map<string, ClientSessionState>()),
+    sessionStateByRuntimeIdRef: sessionStates,
     syncSessionStateToView: vi.fn(),
-    updateSessionState: (_sessionId, updater) => updater({} as ClientSessionState)
+    updateSessionState: (sessionId, updater, storedSessionId) => {
+      const current = sessionStates.current.get(sessionId) ?? createClientSessionState(storedSessionId ?? null)
+      const next = updater(current)
+      sessionStates.current.set(sessionId, next)
+
+      return next
+    }
   })
 
   useEffect(() => {
@@ -363,7 +371,7 @@ describe('resumeSession failure recovery', () => {
 
     expect(resumeParams).not.toHaveProperty('lazy')
     expect(resumeParams).not.toHaveProperty('eager_build')
-    expect(resumeParams).toMatchObject({ source: 'desktop' })
+    expect(resumeParams).toMatchObject({ claim_recoverable_turn: true, source: 'desktop' })
   })
 
   it('replays one safely recoverable restart-interrupted turn without duplicating its user row', async () => {
@@ -372,6 +380,7 @@ describe('resumeSession failure recovery', () => {
         return {
           recoverable_turn: {
             kind: 'restart_interrupted',
+            recovery_claim_id: 'claim-restart',
             text: 'retry this',
             user_ordinal: 0
           },
@@ -393,6 +402,7 @@ describe('resumeSession failure recovery', () => {
     await runResume(requestGateway)
 
     expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      recovery_claim_id: 'claim-restart',
       recovery_kind: 'restart_interrupted',
       session_id: 'runtime-1',
       text: 'retry this',
@@ -406,6 +416,7 @@ describe('resumeSession failure recovery', () => {
         return {
           recoverable_turn: {
             kind: 'continue_interrupted',
+            recovery_claim_id: 'claim-continue',
             text: 'Continue the interrupted request above using the saved tool results.',
             user_ordinal: 0
           },
@@ -433,6 +444,7 @@ describe('resumeSession failure recovery', () => {
     await runResume(requestGateway)
 
     expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+      recovery_claim_id: 'claim-continue',
       recovery_kind: 'continue_interrupted',
       session_id: 'runtime-1',
       text: 'Continue the interrupted request above using the saved tool results.'
@@ -657,20 +669,49 @@ describe('resumeSession warm-cache mapping integrity', () => {
     expect(sessionStateByRuntimeIdRef.current.has('rt-recycled')).toBe(false)
   })
 
-  it('honours a warm cache entry whose stored id matches (no needless refetch)', async () => {
+  it('reactivates an idle warm session and settles an orphaned pending turn', async () => {
     // Correctly-wired mapping: 'rt-A' <-> 'stored-A'. The fast-path should trust
     // it and never reach session.resume (only the lightweight usage probe).
     const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
       current: new Map([['stored-A', 'rt-A']])
     }
 
+    const pendingMessage = {
+      id: 'assistant-pending',
+      parts: [],
+      pending: true,
+      role: 'assistant' as const
+    }
+
     const sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>> = {
-      current: new Map([['rt-A', clientState('stored-A')]])
+      current: new Map([
+        [
+          'rt-A',
+          {
+            ...clientState('stored-A'),
+            awaitingResponse: true,
+            busy: true,
+            messages: [pendingMessage],
+            streamId: pendingMessage.id,
+            turnStartedAt: 1_700_000_000_000
+          }
+        ]
+      ])
     }
 
     const requestGateway = vi.fn(async (method: string) => {
-      if (method === 'session.usage') {
-        return { input: 0, output: 0, total: 0 } as never
+      if (method === 'session.activate') {
+        return {
+          info: {},
+          message_count: 2,
+          messages: [
+            { content: 'hello', role: 'user', timestamp: 1 },
+            { content: 'done', role: 'assistant', timestamp: 2 }
+          ],
+          running: false,
+          session_id: 'rt-A',
+          session_key: 'stored-A'
+        } as never
       }
 
       return {} as never
@@ -688,10 +729,80 @@ describe('resumeSession warm-cache mapping integrity', () => {
     await waitFor(() => expect(resume).not.toBeNull())
     await resume!('stored-A', true)
 
-    // Fast-path served the session from cache: no full resume RPC, mapping intact.
+    const state = sessionStateByRuntimeIdRef.current.get('rt-A')
     const methods = requestGateway.mock.calls.map(([method]) => method)
+
+    expect(methods).toContain('session.activate')
     expect(methods).not.toContain('session.resume')
     expect(runtimeIdByStoredSessionIdRef.current.get('stored-A')).toBe('rt-A')
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(state?.streamId).toBeNull()
+    expect(state?.turnStartedAt).toBeNull()
+    expect(state?.messages).toHaveLength(2)
+    expect(state?.messages.every(message => !message.pending)).toBe(true)
+  })
+
+  it('reactivates a running warm session without dropping its optimistic transcript', async () => {
+    const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
+      current: new Map([['stored-A', 'rt-A']])
+    }
+
+    const optimisticMessages = [
+      { id: 'user-local', parts: [], role: 'user' as const },
+      { id: 'assistant-stream', parts: [], pending: true, role: 'assistant' as const }
+    ]
+
+    const sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>> = {
+      current: new Map([
+        [
+          'rt-A',
+          {
+            ...clientState('stored-A'),
+            awaitingResponse: true,
+            busy: true,
+            messages: optimisticMessages,
+            streamId: 'assistant-stream',
+            turnStartedAt: 1_700_000_000_000
+          }
+        ]
+      ])
+    }
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.activate') {
+        return {
+          info: {},
+          message_count: 0,
+          messages: [],
+          running: true,
+          session_id: 'rt-A',
+          session_key: 'stored-A'
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
+    render(
+      <ResumeHarness
+        onReady={r => (resume = r)}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        sessionStateByRuntimeIdRef={sessionStateByRuntimeIdRef}
+      />
+    )
+    await waitFor(() => expect(resume).not.toBeNull())
+    await resume!('stored-A', true)
+
+    const state = sessionStateByRuntimeIdRef.current.get('rt-A')
+    expect(requestGateway).toHaveBeenCalledWith('session.activate', { session_id: 'rt-A' })
+    expect(state?.busy).toBe(true)
+    expect(state?.awaitingResponse).toBe(true)
+    expect(state?.messages).toBe(optimisticMessages)
+    expect(state?.streamId).toBe('assistant-stream')
+    expect(state?.turnStartedAt).toBe(1_700_000_000_000)
   })
 
   it('clears reply-ready markers stored under the compression lineage when opening the tip session', async () => {

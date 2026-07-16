@@ -3267,6 +3267,7 @@ export type HermesUiFormValue = boolean | string | string[]
 export interface HermesUiFormResponse {
   actionId: 'submit'
   artifactId: string
+  continuationInstruction: string
   idempotencyKey: string
   schemaVersion: 1
   type: 'form-response'
@@ -3291,6 +3292,8 @@ export function buildHermesUiFormResponse(
   return {
     actionId: 'submit',
     artifactId,
+    continuationInstruction:
+      'Continue the active workflow after processing this response. Supporting tool results are not completion; stop only when the workflow is complete or another user answer is required.',
     idempotencyKey,
     schemaVersion: 1,
     type: 'form-response',

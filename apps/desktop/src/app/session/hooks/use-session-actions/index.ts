@@ -45,7 +45,7 @@ import {
 } from '@/store/session'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { isWatchWindow } from '@/store/windows'
-import type { SessionCreateResponse, SessionInfo, SessionResumeResponse, UsageStats } from '@/types/hermes'
+import type { SessionCreateResponse, SessionInfo, SessionResumeResponse } from '@/types/hermes'
 
 import { NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
 import type { ClientSessionState, SidebarNavItem } from '../../../types'
@@ -410,15 +410,49 @@ export function useSessionActions({
           setSessionStartedAt(Date.now())
 
           try {
-            const usage = await requestGateway<UsageStats>('session.usage', { session_id: cachedRuntimeId })
+            // A liveness-only probe is insufficient after a websocket reconnect:
+            // the runtime can still exist while its events remain attached to
+            // the dead transport. Activating both proves liveness and rebinds
+            // the session stream to this connection.
+            const activated = await requestGateway<SessionResumeResponse>('session.activate', {
+              session_id: cachedRuntimeId
+            })
 
             if (!isCurrentResume()) {
               return
             }
 
-            if (usage) {
-              setCurrentUsage(current => ({ ...current, ...usage }))
-            }
+            const running = Boolean(activated.running)
+            const runtimeInfo = applyRuntimeInfo(activated.info)
+            patchSessionWorkspace(storedSessionId, runtimeInfo?.cwd)
+
+            const authoritativeMessages = running
+              ? cachedViewState.messages
+              : preserveLocalAssistantErrors(
+                  reconcileResumeMessages(toChatMessages(activated.messages), cachedViewState.messages),
+                  cachedViewState.messages
+                ).map(message => (message.pending ? { ...message, pending: false } : message))
+
+            const activatedState = updateSessionState(
+              cachedRuntimeId,
+              state => ({
+                ...state,
+                ...(runtimeInfo ?? {}),
+                messages: authoritativeMessages,
+                busy: running,
+                awaitingResponse: running ? state.awaitingResponse || state.busy : false,
+                ...(running
+                  ? {}
+                  : {
+                      pendingBranchGroup: null,
+                      streamId: null,
+                      turnStartedAt: null
+                    })
+              }),
+              storedSessionId
+            )
+
+            syncSessionStateToView(cachedRuntimeId, activatedState)
 
             return
           } catch {
@@ -477,6 +511,7 @@ export function useSessionActions({
         const prefetchPromise = watchWindow ? null : getSessionMessages(storedSessionId, sessionProfile)
 
         const resumePromise = requestGateway<SessionResumeResponse>('session.resume', {
+          ...(!watchWindow ? { claim_recoverable_turn: true } : {}),
           session_id: storedSessionId,
           cols: 96,
           source: 'desktop',
@@ -587,6 +622,7 @@ export function useSessionActions({
 
         if (validRecovery) {
           await requestGateway('prompt.submit', {
+            recovery_claim_id: validRecovery.recovery_claim_id,
             recovery_kind: validRecovery.kind,
             session_id: resumed.session_id,
             text: validRecovery.text,

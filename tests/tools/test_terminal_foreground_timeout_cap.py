@@ -75,6 +75,20 @@ class TestForegroundTimeoutCap:
         assert "long-lived" in result["error"].lower()
         assert "background=true" in result["error"]
 
+    def test_foreground_rejects_bounded_deployment_command(self):
+        """Deploys must run as tracked background work instead of freezing a turn."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"):
+
+            result = json.loads(terminal_tool(command="vercel --prod --yes"))
+
+        assert result["exit_code"] == -1
+        assert "deployment" in result["error"].lower()
+        assert "background=true" in result["error"]
+        assert "notify_on_complete=true" in result["error"]
+
     def test_foreground_allows_help_variant_for_server_command(self):
         """Informational variants like '--help' should not be blocked."""
         from tools.terminal_tool import terminal_tool

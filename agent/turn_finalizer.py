@@ -383,10 +383,14 @@ def finalize_turn(
         # holds regardless of which path produced it. (#43849 / #44100)
         if final_response and not interrupted:
             try:
-                _tail_role = messages[-1].get("role") if messages else None
+                _tail_message = messages[-1] if messages else None
+                _tail_role = _tail_message.get("role") if _tail_message else None
             except Exception:
+                _tail_message = None
                 _tail_role = None
-            if _tail_role != "assistant":
+            if _tail_role != "assistant" or bool(
+                isinstance(_tail_message, dict) and _tail_message.get("tool_calls")
+            ):
                 messages.append({"role": "assistant", "content": final_response})
 
         agent._persist_session(messages, conversation_history)
@@ -401,6 +405,8 @@ def finalize_turn(
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
         logger.error("finalize_turn: _persist_session failed: %s", _persist_err, exc_info=True)
+
+    _persisted_visible_response = final_response
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────
     # Always logged at INFO so agent.log captures WHY every turn ended.
@@ -551,6 +557,42 @@ def finalize_turn(
                     break  # First non-empty string wins
         except Exception as exc:
             logger.warning("transform_llm_output hook failed: %s", exc)
+
+    # Footers, completion explanations, and output-transform plugins run after
+    # the first cleanup persistence pass. Reconcile the durable assistant tail
+    # with the exact text the caller will receive so reconnect hydration cannot
+    # resurrect the earlier untransformed/blank response.
+    if (
+        final_response
+        and not interrupted
+        and final_response != _persisted_visible_response
+    ):
+        try:
+            _tail_is_visible_assistant = bool(
+                messages
+                and messages[-1].get("role") == "assistant"
+                and not messages[-1].get("tool_calls")
+            )
+            if not _tail_is_visible_assistant:
+                messages.append({"role": "assistant", "content": final_response})
+            elif messages[-1].get("content") != final_response:
+                messages[-1]["content"] = final_response
+            agent._persist_session(messages, conversation_history)
+            _patch_completed_turn_working_state(
+                agent,
+                original_user_message=original_user_message,
+                final_response=final_response,
+                messages=messages,
+                interrupted=interrupted,
+                failed=failed,
+            )
+        except Exception as _final_persist_err:
+            _cleanup_errors.append(f"persist_final_response: {_final_persist_err}")
+            logger.error(
+                "finalize_turn: final response persistence failed: %s",
+                _final_persist_err,
+                exc_info=True,
+            )
 
     # Plugin hook: post_llm_call
     # Fired once per turn after the tool-calling loop completes.

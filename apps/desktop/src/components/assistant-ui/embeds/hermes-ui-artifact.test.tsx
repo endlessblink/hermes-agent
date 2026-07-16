@@ -182,6 +182,8 @@ describe('ChecklistArtifactCard', () => {
     expect(response).toEqual({
       actionId: 'submit',
       artifactId: 'morning-outcome',
+      continuationInstruction:
+        'Continue the active workflow after processing this response. Supporting tool results are not completion; stop only when the workflow is complete or another user answer is required.',
       idempotencyKey: expect.stringMatching(/^form:/),
       schemaVersion: 1,
       type: 'form-response',

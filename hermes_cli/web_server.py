@@ -10240,7 +10240,20 @@ def _call_cron_for_profile(target_profile: Optional[str], func_name: str, *args,
     token = set_hermes_home_override(str(home))
     try:
         with cron_jobs.use_cron_store(home):
-            result = getattr(cron_jobs, func_name)(*args, **kwargs)
+            operation = getattr(cron_jobs, func_name)
+            if func_name in {
+                "create_job",
+                "pause_job",
+                "remove_job",
+                "resume_job",
+                "trigger_job",
+                "update_job",
+            }:
+                from cron.mutations import mutate_job_store
+
+                result = mutate_job_store(operation, *args, **kwargs)
+            else:
+                result = operation(*args, **kwargs)
     finally:
         reset_hermes_home_override(token)
 

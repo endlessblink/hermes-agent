@@ -1573,6 +1573,21 @@ def init_agent(
     ).strip().lower()
     if compression_summary_mode not in {"llm", "drop"}:
         compression_summary_mode = "llm"
+    # Large prompts can fit the provider window while still taking several
+    # minutes to produce the first token. Interactive Desktop sessions therefore
+    # compact at a latency ceiling by default; exact removed rows stay archived
+    # in the session database. Other platforms retain the model-derived policy
+    # unless explicitly configured.
+    _interactive_threshold_raw = _compression_cfg.get(
+        "interactive_threshold_tokens",
+        120_000 if agent.platform == "desktop" else None,
+    )
+    try:
+        compression_interactive_threshold = int(_interactive_threshold_raw or 0)
+    except (TypeError, ValueError):
+        compression_interactive_threshold = 0
+    if compression_interactive_threshold <= 0:
+        compression_interactive_threshold = None
     # In-place compaction: when True, compress_context() rewrites the message
     # list + rebuilds the system prompt WITHOUT rotating the session id (no
     # parent_session_id chain, no `name #N` renumber). See #38763 and
@@ -1837,6 +1852,7 @@ def init_agent(
             abort_on_summary_failure=compression_abort_on_summary_failure,
             max_tokens=agent.max_tokens,
             summary_mode=compression_summary_mode,
+            interactive_threshold_tokens=compression_interactive_threshold,
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):

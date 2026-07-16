@@ -1788,9 +1788,14 @@ def _cron_pause(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if len(args) != 1:
         raise ConsoleCommandError("Usage: cron pause <job>")
     from cron.jobs import AmbiguousJobReference, pause_job
+    from cron.mutations import mutate_job_store
 
     try:
-        job = pause_job(args[0], reason="paused from hermes console")
+        job = mutate_job_store(
+            pause_job,
+            args[0],
+            reason="paused from hermes console",
+        )
     except AmbiguousJobReference as exc:
         raise ConsoleCommandError(str(exc)) from exc
     if not job:
@@ -1802,9 +1807,10 @@ def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if len(args) != 1:
         raise ConsoleCommandError("Usage: cron resume <job>")
     from cron.jobs import AmbiguousJobReference, resume_job
+    from cron.mutations import mutate_job_store
 
     try:
-        job = resume_job(args[0])
+        job = mutate_job_store(resume_job, args[0])
     except AmbiguousJobReference as exc:
         raise ConsoleCommandError(str(exc)) from exc
     if not job:
@@ -1816,9 +1822,10 @@ def _cron_run(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if len(args) != 1:
         raise ConsoleCommandError("Usage: cron run <job>")
     from cron.jobs import AmbiguousJobReference, trigger_job
+    from cron.mutations import mutate_job_store
 
     try:
-        job = trigger_job(args[0])
+        job = mutate_job_store(trigger_job, args[0])
     except AmbiguousJobReference as exc:
         raise ConsoleCommandError(str(exc)) from exc
     if not job:

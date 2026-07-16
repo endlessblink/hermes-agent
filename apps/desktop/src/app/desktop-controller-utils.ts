@@ -11,6 +11,7 @@ export type CompressionContinuationResponse = SessionCreateResponse & {
   dropoff_message_count?: number
   recoverable_turn?: {
     kind: 'continue_interrupted' | 'restart_interrupted'
+    recovery_claim_id: string
     text: string
     user_ordinal: number
   }
@@ -158,22 +159,25 @@ export function compressionRecoveryTarget(
 
 export function activeRuntimeSessionRow(
   rows: LiveSessionStatusRow[] | null | undefined,
-  runtimeSessionId: string | null | undefined
+  runtimeSessionId: string | null | undefined,
+  storedSessionId?: string | null
 ): LiveSessionStatusRow | null {
   const id = runtimeSessionId?.trim()
+  const storedId = storedSessionId?.trim()
 
-  if (!id) {
+  if (!id && !storedId) {
     return null
   }
 
-  return rows?.find(item => item?.id === id) ?? null
+  return rows?.find(item => item?.id === id) ?? rows?.find(item => item?.session_key === storedId) ?? null
 }
 
 export function activeRuntimeSessionStatus(
   rows: LiveSessionStatusRow[] | null | undefined,
-  runtimeSessionId: string | null | undefined
+  runtimeSessionId: string | null | undefined,
+  storedSessionId?: string | null
 ): string {
-  const row = activeRuntimeSessionRow(rows, runtimeSessionId)
+  const row = activeRuntimeSessionRow(rows, runtimeSessionId, storedSessionId)
 
   return typeof row?.status === 'string' ? row.status : ''
 }
@@ -202,6 +206,7 @@ export async function recoverSameSessionFromCompression(
   }
 
   await requestGateway('prompt.submit', {
+    recovery_claim_id: recovery.recovery_claim_id,
     recovery_kind: recovery.kind,
     session_id: recoveredRuntimeId,
     text: recovery.text,

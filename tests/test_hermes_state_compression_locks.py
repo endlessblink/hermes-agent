@@ -99,6 +99,24 @@ def test_non_expired_lock_is_held(db: SessionDB) -> None:
     assert db.try_acquire_compression_lock("sess1", "holder2") is False
 
 
+def test_non_expired_lock_from_dead_local_pid_is_reclaimed(db: SessionDB) -> None:
+    dead_holder = "pid=999999999:tid=1:agent=dead:nonce=deadbeef"
+    assert db.try_acquire_compression_lock("sess1", dead_holder, ttl_seconds=60)
+
+    fresh_holder = f"pid={__import__('os').getpid()}:tid=1:agent=fresh:nonce=f00dbabe"
+    assert db.try_acquire_compression_lock("sess1", fresh_holder, ttl_seconds=60)
+    assert db.get_compression_lock_holder("sess1") == fresh_holder
+
+
+def test_non_expired_lock_from_live_local_pid_still_blocks(db: SessionDB) -> None:
+    import os
+
+    live_holder = f"pid={os.getpid()}:tid=1:agent=live:nonce=deadbeef"
+    assert db.try_acquire_compression_lock("sess1", live_holder, ttl_seconds=60)
+    assert db.try_acquire_compression_lock("sess1", "holder2", ttl_seconds=60) is False
+    assert db.get_compression_lock_holder("sess1") == live_holder
+
+
 # ----------------------------------------------------------------------
 # Empty / invalid input
 # ----------------------------------------------------------------------

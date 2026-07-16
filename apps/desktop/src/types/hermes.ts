@@ -391,9 +391,11 @@ export interface SessionResumeResponse {
   messages: SessionMessage[]
   recoverable_turn?: {
     kind: 'restart_interrupted' | 'continue_interrupted'
+    recovery_claim_id: string
     text: string
     user_ordinal: number
   }
+  running?: boolean
   resumed: string
   session_id: string
 }

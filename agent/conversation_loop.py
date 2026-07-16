@@ -628,7 +628,11 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    silent_timeout_compaction_attempted = False
+    silent_timeout_terminal = False
+    post_compaction_probe_pending = False
     foreground_tool_batches = 0
+    tool_execution_occurred = False
     force_visible_response = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
@@ -943,6 +947,7 @@ def run_conversation(
         # retain the exact tool result so the control instruction cannot leak
         # into persistence or suppress tools on a later user turn.
         if force_visible_response:
+            _visible_response_instruction_applied = False
             for tool_message in reversed(api_messages):
                 if tool_message.get("role") != "tool":
                     continue
@@ -955,7 +960,21 @@ def run_conversation(
                         "using the verified results above, and offer deeper work "
                         "separately if needed.]"
                     )
+                    _visible_response_instruction_applied = True
                 break
+            if not _visible_response_instruction_applied:
+                for user_message_copy in reversed(api_messages):
+                    if user_message_copy.get("role") != "user":
+                        continue
+                    content = user_message_copy.get("content")
+                    if isinstance(content, str):
+                        user_message_copy["content"] = (
+                            f"{content}\n\n"
+                            "[Recovery after completed tool work: do not call or repeat "
+                            "tools. Return one concise useful response now from the "
+                            "preserved verified results.]"
+                        )
+                    break
 
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,
@@ -1006,6 +1025,43 @@ def run_conversation(
         approx_tokens = estimate_messages_tokens_rough(api_messages)
         request_pressure_tokens = estimate_request_tokens_rough(
             api_messages, tools=agent.tools or None
+        )
+        _prompt_storage_counts = {
+            "active": len(messages),
+            "compacted": 0,
+            "rewound": 0,
+            "total": len(messages),
+        }
+        try:
+            if agent._session_db and agent.session_id:
+                _prompt_storage_counts = agent._session_db.get_prompt_storage_counts(
+                    agent.session_id
+                )
+        except Exception:
+            logger.debug("prompt storage count probe failed", exc_info=True)
+        _pressure_threshold = int(
+            getattr(agent.context_compressor, "threshold_tokens", 0) or 0
+        )
+        _pressure_reason = (
+            "compression_disabled"
+            if not agent.compression_enabled
+            else "threshold_exceeded"
+            if _pressure_threshold and request_pressure_tokens >= _pressure_threshold
+            else "below_threshold"
+        )
+        logger.info(
+            "Prompt pressure: tokens=%d threshold=%d active_rows=%d "
+            "archived_rows=%d rewound_rows=%d total_rows=%d "
+            "archived_recall_chars=%d decision=%s session=%s",
+            request_pressure_tokens,
+            _pressure_threshold,
+            _prompt_storage_counts["active"],
+            _prompt_storage_counts["compacted"],
+            _prompt_storage_counts["rewound"],
+            _prompt_storage_counts["total"],
+            int(getattr(agent, "_last_archived_recall_chars", 0) or 0),
+            _pressure_reason,
+            agent.session_id or "none",
         )
 
         _runtime_context_error = _ollama_context_limit_error(
@@ -1360,6 +1416,7 @@ def run_conversation(
                         _use_streaming = False
 
                 def _perform_api_call(next_api_kwargs):
+                    nonlocal post_compaction_probe_pending
                     # Execution middleware may replace the request payload.
                     # Keep the final-response backstop authoritative at the
                     # terminal provider boundary as well.
@@ -1367,6 +1424,12 @@ def run_conversation(
                         next_api_kwargs = dict(next_api_kwargs)
                         for key in ("tools", "tool_choice", "parallel_tool_calls"):
                             next_api_kwargs.pop(key, None)
+                    if post_compaction_probe_pending and (
+                        agent.api_mode == "codex_responses" or not _use_streaming
+                    ):
+                        next_api_kwargs = dict(next_api_kwargs)
+                        next_api_kwargs["__hermes_stale_timeout_seconds"] = 30.0
+                        post_compaction_probe_pending = False
                     if _use_streaming:
                         return agent._interruptible_streaming_api_call(
                             next_api_kwargs, on_first_delta=_stop_spinner
@@ -3141,10 +3204,15 @@ def run_conversation(
                 # state, active task, pending user turn, cwd, and title remain
                 # attached to the same conversation.
                 if _stop_retrying_silent_timeout(agent, api_error):
-                    if not getattr(agent, "compression_enabled", True):
+                    if (
+                        silent_timeout_compaction_attempted
+                        or not getattr(agent, "compression_enabled", True)
+                    ):
+                        silent_timeout_terminal = True
                         max_retries = retry_count
                         _retry.primary_recovery_attempted = True
                     else:
+                        silent_timeout_compaction_attempted = True
                         compression_attempts += 1
                         original_len = len(messages)
                         original_tokens = estimate_messages_tokens_rough(messages)
@@ -3165,6 +3233,13 @@ def run_conversation(
                             or (new_tokens > 0 and new_tokens < original_tokens * 0.95)
                         )
                         if compacted:
+                            # A tool already completed before the provider went
+                            # silent. The recovery probe is answer-only so a
+                            # duplicated side effect is impossible even if the
+                            # compacted summary still describes the tool call.
+                            if tool_execution_occurred:
+                                force_visible_response = True
+                            post_compaction_probe_pending = True
                             agent._buffer_status(
                                 "🗜️ The provider stopped responding. Context was preserved "
                                 "and compacted in this conversation; retrying the pending turn."
@@ -4013,9 +4088,9 @@ def run_conversation(
                         agent._fallback_activated = False
                         continue
                     # Try fallback before giving up entirely
-                    if agent._has_pending_fallback():
+                    if not silent_timeout_terminal and agent._has_pending_fallback():
                         agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
-                    if agent._try_activate_fallback():
+                    if not silent_timeout_terminal and agent._try_activate_fallback():
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0
@@ -4785,6 +4860,7 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                tool_execution_occurred = True
 
                 try:
                     foreground_tool_batch_limit = int(

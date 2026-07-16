@@ -326,8 +326,8 @@ export function DesktopController() {
         LIVE_BUSY_RECONCILE_TIMEOUT_MS
       )
 
-      const row = activeRuntimeSessionRow(result?.sessions, runtimeSessionId)
-      const status = activeRuntimeSessionStatus(result?.sessions, runtimeSessionId)
+      const row = activeRuntimeSessionRow(result?.sessions, runtimeSessionId, selectedStoredSessionId)
+      const status = activeRuntimeSessionStatus(result?.sessions, runtimeSessionId, selectedStoredSessionId)
 
       if (status === 'waiting' && row?.pending_prompt?.kind === 'clarify') {
         const pending = row.pending_prompt
@@ -381,7 +381,7 @@ export function DesktopController() {
       // primary lifecycle path; failures here must never create user-facing
       // noise or interfere with an in-flight turn.
     }
-  }, [activeSessionIdRef, busyRef, gatewayRef, requestGateway, updateSessionState])
+  }, [activeSessionIdRef, busyRef, gatewayRef, requestGateway, selectedStoredSessionId, updateSessionState])
 
   useEffect(() => {
     if (!busy) {

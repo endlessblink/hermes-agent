@@ -304,8 +304,9 @@ def handle_blueprint_command(
 
     try:
         from cron.jobs import create_job
+        from cron.mutations import mutate_job_store
 
-        job = create_job(**spec)
+        job = mutate_job_store(create_job, **spec)
     except Exception as e:
         logger.debug("blueprint create_job failed: %s", e)
         return BlueprintCommandResult(f"Failed to create the job: {e}")

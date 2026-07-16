@@ -122,8 +122,11 @@ describe('live session status reconciliation', () => {
     ).toBe('idle')
   })
 
-  it('does not match stored session keys when reconciling runtime state', () => {
-    expect(activeRuntimeSessionStatus([{ id: 'runtime-id', session_key: 'stored-id', status: 'idle' }], 'stored-id')).toBe('')
+  it('falls back to the stored session key when the cached runtime id drifted', () => {
+    const rows = [{ id: 'runtime-current', session_key: 'stored-id', status: 'idle' }]
+
+    expect(activeRuntimeSessionRow(rows, 'runtime-stale', 'stored-id')).toEqual(rows[0])
+    expect(activeRuntimeSessionStatus(rows, 'runtime-stale', 'stored-id')).toBe('idle')
   })
 
   it('settles only on explicit idle live status', () => {
@@ -243,6 +246,7 @@ describe('recoverSameSessionFromCompression', () => {
           session_id: 'recovered-runtime',
           recoverable_turn: {
             kind: 'restart_interrupted',
+            recovery_claim_id: 'claim-1',
             text: 'continue',
             user_ordinal: 3
           }
@@ -267,6 +271,7 @@ describe('recoverSameSessionFromCompression', () => {
       source: 'desktop'
     })
     expect(calls[1]?.params).toMatchObject({
+      recovery_claim_id: 'claim-1',
       recovery_kind: 'restart_interrupted',
       session_id: 'recovered-runtime',
       text: 'continue',

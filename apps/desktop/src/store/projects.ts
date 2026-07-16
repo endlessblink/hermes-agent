@@ -8,7 +8,7 @@ import { desktopGit } from '@/lib/desktop-git'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { persistentAtom } from '@/lib/persisted'
 import { activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
-import { setSidebarAgentsGrouped } from '@/store/layout'
+import { $sidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
 import { requestFreshSession } from '@/store/profile'
 import { $selectedStoredSessionId, $sessions, workspaceCwdForNewSession } from '@/store/session'
@@ -198,12 +198,9 @@ export async function followActiveSessionCwd(cwd: string): Promise<void> {
   // Resolve only after the refresh, so a just-created/auto project is in the tree.
   const projectId = projectIdForCwd(target)
 
-  if (projectId) {
-    // The Projects tree only renders in grouped mode, so flip the sidebar into
-    // it — otherwise following from the flat Sessions list would change scope
-    // invisibly. Then drill into the thread's project.
-    setSidebarAgentsGrouped(true)
-
+  // Following a cwd is navigation inside the Projects view, never permission to
+  // replace the user's folder-first sidebar preference.
+  if (projectId && $sidebarAgentsGrouped.get()) {
     if (projectId !== $projectScope.get()) {
       enterProject(projectId)
     }
@@ -488,7 +485,6 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
       $activeProjectId.set(created.id)
     }
 
-    setSidebarAgentsGrouped(true)
   }
 
   reconcileProjects()
@@ -685,6 +681,10 @@ export async function startWorkInRepo(
   repoPath: string,
   options?: { name?: string; branch?: string; base?: string; existingBranch?: string }
 ): Promise<null | { path: string; branch: string }> {
+  if (!$sidebarAgentsGrouped.get()) {
+    return null
+  }
+
   const git = desktopGit()
 
   if (!git || !repoPath) {
@@ -742,12 +742,20 @@ export const $startWorkSessionRequest = atom<StartWorkSessionRequest | null>(nul
 export const $newWorktreeRequest = atom(0)
 
 export function requestNewWorktree(): void {
+  if (!$sidebarAgentsGrouped.get()) {
+    return
+  }
+
   $newWorktreeRequest.set($newWorktreeRequest.get() + 1)
 }
 
 let startWorkToken = 0
 
 export function requestStartWorkSession(path: string, draft?: string): void {
+  if (!$sidebarAgentsGrouped.get()) {
+    return
+  }
+
   const target = path.trim()
 
   if (!target) {
