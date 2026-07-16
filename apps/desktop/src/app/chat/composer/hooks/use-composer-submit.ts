@@ -73,9 +73,16 @@ export function useComposerSubmit({
 }: UseComposerSubmitArgs) {
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
-  const dispatchSubmit = (text: string, attachments?: ComposerAttachment[]) => {
+  const dispatchSubmit = async (
+    text: string,
+    options?: {
+      attachments?: ComposerAttachment[]
+      flowstateDecision?: Record<string, unknown>
+      hidden?: boolean
+    }
+  ) => {
     const submittedScope = activeQueueSessionKeyRef.current
-    const submittedAttachments = attachments ?? []
+    const submittedAttachments = options?.attachments ?? []
 
     const restore = () => {
       loadIntoComposer(text, submittedAttachments)
@@ -86,9 +93,27 @@ export function useComposerSubmit({
       stashAt(submittedScope, text, submittedAttachments)
     }
 
-    void Promise.resolve(attachments ? onSubmit(text, { attachments }) : onSubmit(text))
-      .then(accepted => void (accepted === false ? restore() : clearSessionDraft(submittedScope)))
-      .catch(restore)
+    try {
+      const accepted = await onSubmit(text, options)
+
+      if (accepted === false) {
+        if (!options?.hidden) {
+          restore()
+        }
+
+        return false
+      }
+
+      clearSessionDraft(submittedScope)
+
+      return true
+    } catch {
+      if (!options?.hidden) {
+        restore()
+      }
+
+      return false
+    }
   }
 
   // External "submit this prompt" requests (e.g. the review pane's agent-ship
@@ -99,9 +124,16 @@ export function useComposerSubmit({
 
   useEffect(
     () =>
-      onComposerSubmitRequest(({ target, text }) => {
+      onComposerSubmitRequest(({ acknowledge, flowstateDecision, hidden, target, text }) => {
         if (target === 'main' && !inputDisabled) {
-          dispatchSubmitRef.current(text)
+          void dispatchSubmitRef
+            .current(
+              text,
+              flowstateDecision || hidden ? { flowstateDecision, hidden } : undefined
+            )
+            .then(accepted => acknowledge?.(accepted))
+        } else {
+          acknowledge?.(false)
         }
       }),
     [inputDisabled]
@@ -164,7 +196,7 @@ export function useComposerSubmit({
       resetBrowseState(sessionId)
       clearDraft()
       clearComposerAttachments()
-      dispatchSubmit(text, submittedAttachments)
+      dispatchSubmit(text, { attachments: submittedAttachments })
     }
 
     focusInput()

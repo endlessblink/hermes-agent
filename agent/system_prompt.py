@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
+    FLOWSTATE_SUBTASK_BREAKDOWN_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
@@ -215,6 +216,15 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # (default True) and only injected when tools are actually loaded.
     if getattr(agent, "_parallel_tool_call_guidance", True) and agent.valid_tool_names:
         stable_parts.append(PARALLEL_TOOL_CALL_GUIDANCE)
+
+    if {
+        "flowstate_list_subtasks",
+        "flowstate_subtask_batch",
+    }.issubset(agent.valid_tool_names) and (
+        (agent.platform or "").lower() == "desktop"
+        or is_truthy_value(os.getenv("HERMES_DESKTOP"))
+    ):
+        stable_parts.append(FLOWSTATE_SUBTASK_BREAKDOWN_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []

@@ -2107,6 +2107,60 @@ export interface Translations {
     openLogs: string
   }
 
+  assistantUi: {
+    addStep: string
+    approveExact: string
+    approvedAndSent: string
+    after: string
+    baseRevision: string
+    before: string
+    canonicalPreview: string
+    correction: string
+    correctionPlaceholder: string
+    doneEnough: string
+    estimateMinutes: string
+    exactOperations: string
+    expired: string
+    invalidDescription: string
+    invalidTitle: string
+    moveDown: string
+    moveUp: string
+    mutationFields: Record<
+      | 'canvasPosition'
+      | 'clientId'
+      | 'completedPomodoros'
+      | 'description'
+      | 'doneEnough'
+      | 'estimateMinutes'
+      | 'isCompleted'
+      | 'order'
+      | 'subtaskId'
+      | 'title',
+      string
+    >
+    no: string
+    operationKinds: Record<'create' | 'delete' | 'update', string>
+    optional: string
+    preparing: string
+    previewLabel: string
+    remove: string
+    requestPreview: string
+    resend: string
+    resendPrompt: string
+    risk: string
+    scope: Record<'full-delivery' | 'next-move' | 'working-session', string>
+    sendFailed: string
+    sending: string
+    sent: string
+    step: string
+    stoppingRule: string
+    targetOutcome: string
+    untouched: string
+    unknown: string
+    updateBreakdown: string
+    yes: string
+  }
+
   ui: {
     search: {
       clear: string

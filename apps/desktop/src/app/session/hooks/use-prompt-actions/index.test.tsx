@@ -3,7 +3,7 @@ import type { MutableRefObject } from 'react'
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { textPart } from '@/lib/chat-messages'
+import { textPart, toChatMessages } from '@/lib/chat-messages'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
 import { $busy, $connection, $messages, $sessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
@@ -47,7 +47,15 @@ interface HarnessHandle {
   cancelRun: () => Promise<void>
   restoreToMessage: (messageId: string, target?: { text?: string; userOrdinal?: number | null }) => Promise<void>
   steerPrompt: (text: string) => Promise<boolean>
-  submitText: (text: string, options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }) => Promise<boolean>
+  submitText: (
+    text: string,
+    options?: {
+      attachments?: ComposerAttachment[]
+      flowstateDecision?: Record<string, unknown>
+      fromQueue?: boolean
+      hidden?: boolean
+    }
+  ) => Promise<boolean>
 }
 
 function Harness({
@@ -609,6 +617,183 @@ describe('usePromptActions submit / queue drain semantics', () => {
 
     expect(accepted).toBe(false)
     expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
+  })
+
+  it('does not let a trusted FlowState decision bypass the current-turn guard', async () => {
+    const busyRef = { current: true }
+    const requestGateway = vi.fn(async () => ({ approvalCapability: 'must-not-be-issued' }) as never)
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        busyRef={busyRef}
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(
+      await handle!.submitText('approve', {
+        flowstateDecision: { approval: true, decision: 'approve' },
+        hidden: true
+      })
+    ).toBe(false)
+    expect(requestGateway).not.toHaveBeenCalled()
+  })
+
+  it('registers an exact FlowState approval before submitting its trusted capability', async () => {
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const seeds: Record<string, unknown>[] = []
+
+    const decision = {
+      approval: true,
+      decision: 'approve',
+      operationId: 'breakdown:proposal-1:r3',
+      proposalId: 'proposal-1',
+      proposalRevision: 3,
+      type: 'flowstate-mutation-decision'
+    }
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return (method === 'flowstate.approval.register'
+        ? { approvalCapability: 'capability-123' }
+        : {}) as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => seeds.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('untrusted decision text', { flowstateDecision: decision, hidden: true })).toBe(
+      true
+    )
+    expect(calls.map(call => call.method)).toEqual(['flowstate.approval.register', 'prompt.submit'])
+    expect(calls[0]?.params).toEqual({ decision, session_id: RUNTIME_SESSION_ID })
+    expect(calls[1]?.params).toEqual({
+      session_id: RUNTIME_SESSION_ID,
+      text: `Hermes UI trusted FlowState mutation decision:\n${JSON.stringify({
+        ...decision,
+        approvalCapability: 'capability-123'
+      })}`
+    })
+    expect(
+      seeds.some(state =>
+        (state.messages as Array<{ hidden?: boolean }> | undefined)?.some(message => message.hidden === true)
+      )
+    ).toBe(true)
+  })
+
+  it('fails closed when approval registration returns no capability', async () => {
+    const requestGateway = vi.fn(async () => ({} as never))
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(
+      await handle!.submitText('approve', {
+        flowstateDecision: { approval: true, decision: 'approve' },
+        hidden: true
+      })
+    ).toBe(false)
+    expect(requestGateway).toHaveBeenCalledWith('flowstate.approval.register', {
+      decision: { approval: true, decision: 'approve' },
+      session_id: RUNTIME_SESSION_ID
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
+  })
+
+  it('submits revision decisions without an approval capability', async () => {
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+
+    const decision = {
+      approval: false,
+      decision: 'revise',
+      proposalId: 'proposal-1',
+      proposalRevision: 2,
+      steps: [{ clientId: 'draft', doneEnough: 'A draft exists', title: 'Draft it' }],
+      type: 'task-breakdown-revision'
+    }
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return (method === 'flowstate.approval.register'
+        ? { approvalCapability: 'must-not-follow-a-revision' }
+        : {}) as never
+    })
+
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('revise', { flowstateDecision: decision, hidden: true })).toBe(true)
+    expect(calls.map(call => call.method)).toEqual(['flowstate.approval.register', 'prompt.submit'])
+    expect(calls[1]?.params?.text).toBe(
+      `Hermes UI trusted FlowState mutation decision:\n${JSON.stringify(decision)}`
+    )
+
+    const [persisted] = toChatMessages([{
+      content: calls[1]?.params?.text as string,
+      role: 'user',
+      timestamp: 1
+    }])
+
+    expect(persisted.hidden).toBe(true)
+  })
+
+  it('restores retryability after approval registration is rejected', async () => {
+    let registrationAttempt = 0
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'flowstate.approval.register') {
+        registrationAttempt += 1
+
+        if (registrationAttempt === 1) {
+          throw new Error('registration refused')
+        }
+
+        return { approvalCapability: 'capability-retry' } as never
+      }
+
+      return {} as never
+    })
+
+    const decision = { approval: true, decision: 'approve', proposalId: 'proposal-retry' }
+    let handle: HarnessHandle | null = null
+
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('approve', { flowstateDecision: decision, hidden: true })).toBe(false)
+    expect(await handle!.submitText('approve', { flowstateDecision: decision, hidden: true })).toBe(true)
+    expect(requestGateway.mock.calls.filter(([method]) => method === 'prompt.submit')).toHaveLength(1)
   })
 })
 

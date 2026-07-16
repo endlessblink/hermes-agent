@@ -76,6 +76,40 @@ def _init_code_repo(path):
     (path / "main.py").write_text("print('hi')\n")
 
 
+class TestFlowStateBreakdownGuidance:
+    def test_desktop_flowstate_tools_receive_stable_preview_guidance(self):
+        stable = _stable_prompt(_make_agent(
+            platform="desktop",
+            valid_tool_names=["flowstate_list_subtasks", "flowstate_subtask_batch"],
+        ))
+
+        assert "fresh `flowstate_list_subtasks`" in stable
+        assert "stable proposalId" in stable
+        assert "Editing is never approval" in stable
+        assert "approvalRequest" in stable
+        assert "flowstate-mutation-decision" in stable
+        assert "type=task-breakdown" in stable
+        assert "canonicalApproval" in stable
+        assert "Do not print the artifact as generic JSON" in stable
+        assert "invalid_existing_subtasks" in stable
+        assert "never overwrite or synthesize" in stable
+        assert "read every relevant page" in stable
+        assert "nextCursor" in stable
+
+    def test_guidance_is_absent_without_both_flowstate_tools(self):
+        stable = _stable_prompt(_make_agent(
+            platform="desktop", valid_tool_names=["flowstate_list_subtasks"]
+        ))
+        assert "Editing is never approval" not in stable
+
+    def test_desktop_backend_env_receives_guidance(self, monkeypatch):
+        monkeypatch.setenv("HERMES_DESKTOP", "1")
+        stable = _stable_prompt(_make_agent(
+            valid_tool_names=["flowstate_list_subtasks", "flowstate_subtask_batch"]
+        ))
+        assert "Editing is never approval" in stable
+
+
 class TestCodingContextBlock:
     def test_injected_when_active(self, monkeypatch, tmp_path):
         _init_code_repo(tmp_path)

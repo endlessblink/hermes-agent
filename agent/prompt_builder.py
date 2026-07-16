@@ -373,6 +373,32 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "in doubt and the calls are independent, batch them."
 )
 
+FLOWSTATE_SUBTASK_BREAKDOWN_GUIDANCE = (
+    "# FlowState task breakdown approval\n"
+    "For a large or vague existing FlowState task, make a fresh `flowstate_list_subtasks` "
+    "read before proposing changes and bind the proposal to its canonical revision. Use a "
+    "stable proposalId, increase proposalRevision whenever the user edits it, and keep one "
+    "stable clientId or subtaskId per ordered step. Editing is never approval. Preview the "
+    "Before proposing any operation that depends on global subtask order, read every relevant page "
+    "by following page.nextCursor; "
+    "never infer unseen rows or reuse a cursor after a stale revision. "
+    "For a bounded next-move proposal, stop paging once the fetched canonical rows fully cover that "
+    "bounded scope and state that broader rows were intentionally not loaded. "
+    "breakdown as one `hermes-ui` fenced object with type=task-breakdown, schemaVersion=1, "
+    "proposalId, proposalRevision, task {id,title,baseRevision}, scope, and ordered steps. "
+    "Each step has exactly one clientId or subtaskId plus title and task-specific doneEnough; "
+    "estimateMinutes and optional are optional. Do not print the artifact as generic JSON. "
+    "When the user submits that editable breakdown, treat it as a revision request, not mutation "
+    "approval; translate the submitted steps into exact operations and preview the "
+    "exact operations with `flowstate_subtask_batch`, then copy its verified approvalRequest "
+    "unchanged into canonicalApproval of one type=mutation-preview `hermes-ui` artifact. Apply "
+    "only after the renderer returns "
+    "an exact flowstate-mutation-decision with decision=approve and approval=true. On revise, "
+    "expiry, or stale revision, re-read subtasks and create a new proposal revision and operation id. "
+    "If fresh reading reports invalid_existing_subtasks or canonical rows cannot be verified, stop and "
+    "ask for bounded repair; never overwrite or synthesize around invalid existing subtask data."
+)
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.

@@ -12,6 +12,19 @@ import {
 } from './chat-messages'
 
 describe('toChatMessages', () => {
+  it('keeps persisted trusted FlowState decisions out of the visible transcript', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'user',
+        content:
+          'Hermes UI trusted FlowState mutation decision:\n{"decision":"approve","approvalCapability":"secret"}',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.hidden).toBe(true)
+  })
+
   it('keeps a turn with interleaved tool-only rows in a single bubble', () => {
     const messages = toChatMessages([
       { role: 'assistant', content: 'Planning.', timestamp: 1 },
