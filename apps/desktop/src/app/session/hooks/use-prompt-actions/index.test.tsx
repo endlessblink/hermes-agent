@@ -67,6 +67,7 @@ interface HarnessHandle {
     options?: {
       allowWhileBusy?: boolean
       attachments?: ComposerAttachment[]
+      flowstateDecision?: Record<string, unknown>
       fromQueue?: boolean
       hidden?: boolean
     }
@@ -598,6 +599,99 @@ describe('usePromptActions submit / queue drain semantics', () => {
         )
       )
     ).toBe(true)
+  })
+
+  it('registers an exact FlowState approval before submitting its trusted capability', async () => {
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+
+    const decision = {
+      approval: true,
+      decision: 'approve',
+      operationId: 'breakdown:proposal-1:r3',
+      proposalId: 'proposal-1',
+      proposalRevision: 3,
+      type: 'flowstate-mutation-decision'
+    }
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return (method === 'flowstate.approval.register'
+        ? { approvalCapability: 'capability-123' }
+        : {}) as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('untrusted decision text', {
+      flowstateDecision: decision,
+      hidden: true
+    })).toBe(true)
+
+    expect(calls.map(call => call.method)).toEqual(['flowstate.approval.register', 'prompt.submit'])
+    expect(calls[0]?.params).toEqual({ decision, session_id: RUNTIME_SESSION_ID })
+    expect(calls[1]?.params).toEqual({
+      session_id: RUNTIME_SESSION_ID,
+      text: `Hermes UI trusted FlowState mutation decision:\n${JSON.stringify({
+        ...decision,
+        approvalCapability: 'capability-123'
+      })}`
+    })
+  })
+
+  it('fails closed when the gateway does not issue an approval capability', async () => {
+    const requestGateway = vi.fn(async () => ({} as never))
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('approve', {
+      flowstateDecision: { approval: true, decision: 'approve' },
+      hidden: true
+    })).toBe(false)
+    expect(requestGateway).toHaveBeenCalledWith('flowstate.approval.register', {
+      decision: { approval: true, decision: 'approve' },
+      session_id: RUNTIME_SESSION_ID
+    })
+    expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything(), expect.anything())
+  })
+
+  it('registers a revision as a revocation and submits no approval capability', async () => {
+    const calls: Array<{ method: string; params?: Record<string, unknown> }> = []
+    const decision = { approval: false, decision: 'revise', proposalId: 'proposal-1' }
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    expect(await handle!.submitText('revise', { flowstateDecision: decision, hidden: true })).toBe(true)
+    expect(calls.map(call => call.method)).toEqual(['flowstate.approval.register', 'prompt.submit'])
+    expect(calls[1]?.params?.text).toBe(
+      `Hermes UI trusted FlowState mutation decision:\n${JSON.stringify(decision)}`
+    )
   })
 
   it('a fromQueue drain uses the live session ref when rendered activeSessionId is stale', async () => {

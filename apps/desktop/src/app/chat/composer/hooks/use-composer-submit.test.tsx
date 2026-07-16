@@ -94,7 +94,7 @@ describe('useComposerSubmit clarify routing', () => {
     const onSubmit = vi.fn(() => false)
     const { getByTestId } = render(<Harness onQueue={onQueue} onSubmit={onSubmit} />)
 
-    requestComposerSubmit('Hermes UI form response:\n{"type":"form-response"}', {
+    const accepted = requestComposerSubmit('Hermes UI form response:\n{"type":"form-response"}', {
       allowWhileBusy: true,
       hidden: true,
       target: 'main'
@@ -103,6 +103,7 @@ describe('useComposerSubmit clarify routing', () => {
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledWith(expect.any(String), { allowWhileBusy: true, hidden: true })
     })
+    expect(await accepted).toBe(false)
     expect(getByTestId('editor').textContent).toBe('')
   })
 

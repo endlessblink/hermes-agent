@@ -353,7 +353,34 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // (Images keep their inline base64 preview — see optimisticAttachmentRef.)
         attachmentRefs = syncedAttachments.map(optimisticAttachmentRef).filter((r): r is string => Boolean(r))
         rewriteOptimistic(sessionId)
-        const text = buildContextText(syncedAttachments)
+        let text = buildContextText(syncedAttachments)
+
+        if (options?.flowstateDecision) {
+          const decision = options.flowstateDecision
+
+          const registration = await requestGateway<{ approvalCapability?: string }>(
+            'flowstate.approval.register',
+            { decision, session_id: sessionId }
+          )
+
+          const approvalCapability = registration?.approvalCapability
+
+          if (
+            decision.decision === 'approve' &&
+            (
+              typeof approvalCapability !== 'string' ||
+              !approvalCapability ||
+              approvalCapability.length > 256
+            )
+          ) {
+            throw new Error('FlowState approval capability was not issued')
+          }
+
+          text = `Hermes UI trusted FlowState mutation decision:\n${JSON.stringify({
+            ...decision,
+            ...(approvalCapability ? { approvalCapability } : {})
+          })}`
+        }
 
         // On sleep/wake the gateway's in-memory session may have been cleared
         // while the desktop app still holds the old session ID. Detect this and

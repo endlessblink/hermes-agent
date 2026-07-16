@@ -1,6 +1,6 @@
 'use client'
 
-import { type CSSProperties, type ReactNode, useId, useMemo, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useId, useMemo, useState } from 'react'
 
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import {
@@ -1367,6 +1367,28 @@ function readTaskBreakdownDraft(
   }
 }
 
+function nextTaskBreakdownClientId(artifact: HermesUiTaskBreakdownArtifact, steps: HermesUiTaskBreakdownArtifact['steps']): string {
+  const used = new Set(steps.flatMap(step => (step.clientId ? [step.clientId] : [])))
+  let index = 1
+
+  while (true) {
+    const suffix = `-new-${index}`
+    const prefix = artifact.proposalId.slice(0, 120 - suffix.length)
+    const candidate = `${prefix}${suffix}`
+
+    if (!used.has(candidate)) {return candidate}
+    index += 1
+  }
+}
+
+function taskBreakdownStepIdentity(step: HermesUiTaskBreakdownArtifact['steps'][number]): string {
+  if (step.subtaskId) {return `subtaskId:${step.subtaskId}`}
+
+  if (step.clientId) {return `clientId:${step.clientId}`}
+
+  throw new Error('Task breakdown step is missing a stable identity')
+}
+
 export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdownArtifact }) {
   const direction = artifactDirection(artifact)
   const isRtl = direction === 'rtl'
@@ -1374,6 +1396,18 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
   const storageKey = useMemo(() => stableArtifactStorageKey(artifact), [artifact])
   const [steps, setSteps] = useState(() => readTaskBreakdownDraft(storageKey, artifact))
   const [submitted, setSubmitted] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [submissionError, setSubmissionError] = useState(false)
+
+  useEffect(() => {
+    setSteps(readTaskBreakdownDraft(storageKey, artifact))
+    setSubmitted(false)
+    setSubmitting(false)
+    setSubmissionError(false)
+  // A proposal revision is immutable. Parent rerenders may reconstruct the
+  // artifact object, so only its scoped persistence identity may reset edits.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey])
 
   const replaceSteps = (
     updater: (current: HermesUiTaskBreakdownArtifact['steps']) => HermesUiTaskBreakdownArtifact['steps']
@@ -1386,9 +1420,10 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
     })
   }
 
-  const updateStep = (id: string, patch: Partial<HermesUiTaskBreakdownArtifact['steps'][number]>) => {
+  const updateStep = (identity: string, patch: Partial<HermesUiTaskBreakdownArtifact['steps'][number]>) => {
     setSubmitted(false)
-    replaceSteps(current => current.map(step => (step.id === id ? { ...step, ...patch } : step)))
+    setSubmissionError(false)
+    replaceSteps(current => current.map(step => (taskBreakdownStepIdentity(step) === identity ? { ...step, ...patch } : step)))
   }
 
   const moveStep = (index: number, offset: -1 | 1) => {
@@ -1405,62 +1440,74 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
     })
   }
 
-  const removeStep = (id: string) => {
+  const removeStep = (identity: string) => {
     if (steps.length <= 1) {return}
     setSubmitted(false)
-    replaceSteps(current => current.filter(step => step.id !== id))
+    replaceSteps(current => current.filter(step => taskBreakdownStepIdentity(step) !== identity))
   }
 
   const addStep = () => {
     if (steps.length >= 12) {return}
-    const used = new Set(steps.map(step => step.id))
-    let index = steps.length + 1
-
-    while (used.has(`draft-${index}`)) {index += 1}
     setSubmitted(false)
     replaceSteps(current => [
       ...current,
       {
+        clientId: nextTaskBreakdownClientId(artifact, current),
         doneEnough: '',
-        id: `draft-${index}`,
         title: ''
       }
     ])
   }
 
-  const valid = steps.every(step => step.title.trim() && step.doneEnough.trim())
+  const valid = steps.every(step =>
+    step.title.trim() &&
+    step.doneEnough.trim() &&
+    (step.estimateMinutes === undefined || (Number.isInteger(step.estimateMinutes) && step.estimateMinutes >= 1 && step.estimateMinutes <= 480))
+  )
 
-  const submit = () => {
-    if (!valid) {return}
+  const submit = async () => {
+    if (!valid || submitting) {return}
 
-    const response = [
-      `I revised the task breakdown for taskId=${artifact.task.id}.`,
-      `scope=${artifact.scope}`,
-      artifact.targetOutcome ? `Target outcome: ${artifact.targetOutcome}` : '',
-      artifact.stoppingRule ? `Stopping rule: ${artifact.stoppingRule}` : '',
-      'Ordered steps:',
-      ...steps.map(
-        (step, index) =>
-          `${index + 1}. ${step.title.trim()} | done enough: ${step.doneEnough.trim()}` +
-          (step.estimateMinutes ? ` | estimate: ${step.estimateMinutes} minutes` : '') +
-          (step.optional ? ' | optional' : '')
-      ),
-      'Use this exact revision to regenerate the preview; do not apply or create FlowState subtasks until I explicitly approve that new preview.'
-    ]
-      .filter(Boolean)
-      .join('\n')
+    const response = {
+      action: 'revise',
+      approval: false,
+      proposalId: artifact.proposalId,
+      proposalRevision: artifact.proposalRevision,
+      schemaVersion: artifact.schemaVersion,
+      scope: artifact.scope,
+      steps: steps.map(step => ({
+        ...(step.subtaskId ? { subtaskId: step.subtaskId } : { clientId: step.clientId }),
+        doneEnough: step.doneEnough.trim(),
+        ...(step.estimateMinutes === undefined ? {} : { estimateMinutes: step.estimateMinutes }),
+        optional: step.optional === true,
+        title: step.title.trim()
+      })),
+      stoppingRule: artifact.stoppingRule,
+      targetOutcome: artifact.targetOutcome,
+      task: artifact.task,
+      type: 'task-breakdown-revision'
+    }
 
-    requestComposerSubmit(response, { target: 'main' })
-    setSubmitted(true)
+    setSubmitting(true)
+    setSubmissionError(false)
+
+    const accepted = await requestComposerSubmit(
+      `Hermes UI task breakdown revision (not approval):\n${JSON.stringify(response)}`,
+      { flowstateDecision: response, hidden: true, target: 'main' }
+    )
+
+    setSubmitting(false)
+    setSubmitted(accepted)
+    setSubmissionError(!accepted)
   }
 
   const labels = isRtl
     ? {
-        add: 'הוסף צעד', doneEnough: 'מה נחשב מספיק', down: 'העבר את', optional: 'אופציונלי',
+        add: 'הוסף צעד', doneEnough: 'מה נחשב מספיק', down: 'העבר את', estimate: 'הערכת דקות', optional: 'אופציונלי',
         remove: 'הסר את', step: 'צעד', stopping: 'כלל עצירה', target: 'תוצאה רצויה', up: 'העבר את'
       }
     : {
-        add: 'Add step', doneEnough: 'Done enough', down: 'Move', optional: 'Optional',
+        add: 'Add step', doneEnough: 'Done enough', down: 'Move', estimate: 'Estimate minutes', optional: 'Optional',
         remove: 'Remove', step: 'Step', stopping: 'Stopping rule', target: 'Target outcome', up: 'Move'
       }
 
@@ -1505,8 +1552,11 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
       )}
 
       <div className="space-y-2 px-3 py-3">
-        {steps.map((step, index) => (
-          <div className="rounded-lg border border-border/60 bg-background/35 p-2.5" key={step.id}>
+        {steps.map((step, index) => {
+          const identity = taskBreakdownStepIdentity(step)
+
+          return (
+          <div className="rounded-lg border border-border/60 bg-background/35 p-2.5" key={identity}>
             <div className={cn('mb-1.5 flex items-center justify-between gap-2', isRtl && 'flex-row-reverse')}>
               <div className={cn('flex items-center gap-1.5', isRtl && 'flex-row-reverse')}>
                 <span className="inline-flex size-5 items-center justify-center rounded-full bg-foreground text-[0.65rem] font-semibold text-background">
@@ -1520,34 +1570,69 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
               <div className={cn('flex items-center gap-1', isRtl && 'flex-row-reverse')}>
                 <button aria-label={`${labels.up} ${step.title} ${isRtl ? 'למעלה' : 'up'}`} disabled={index === 0} onClick={() => moveStep(index, -1)} type="button">↑</button>
                 <button aria-label={`${labels.down} ${step.title} ${isRtl ? 'למטה' : 'down'}`} disabled={index === steps.length - 1} onClick={() => moveStep(index, 1)} type="button">↓</button>
-                <button aria-label={`${labels.remove} ${step.title}`} disabled={steps.length === 1} onClick={() => removeStep(step.id)} type="button">×</button>
+                <button aria-label={`${labels.remove} ${step.title}`} disabled={steps.length === 1} onClick={() => removeStep(identity)} type="button">×</button>
               </div>
             </div>
             <input
               aria-label={`${labels.step} ${index + 1}`}
               className="w-full rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.76rem] text-foreground"
               maxLength={HERMES_UI_TASK_BREAKDOWN_LIMITS.titleLength}
-              onChange={event => updateStep(step.id, { title: event.target.value })}
+              onChange={event => updateStep(identity, { title: event.target.value })}
               value={step.title}
             />
             <input
               aria-label={`${labels.doneEnough} ${index + 1}`}
               className="mt-1.5 w-full rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.72rem] text-foreground"
               maxLength={HERMES_UI_TASK_BREAKDOWN_LIMITS.doneEnoughLength}
-              onChange={event => updateStep(step.id, { doneEnough: event.target.value })}
+              onChange={event => updateStep(identity, { doneEnough: event.target.value })}
               placeholder={labels.doneEnough}
               value={step.doneEnough}
             />
+            <div className={cn('mt-1.5 flex flex-wrap items-center gap-3', isRtl && 'justify-end')}>
+              <label className="text-[0.68rem] text-muted-foreground">
+                {labels.estimate}
+                <input
+                  aria-label={`${labels.estimate} ${index + 1}`}
+                  className="mx-1 w-20 rounded-md border border-border/70 bg-background px-2 py-1 text-[0.72rem] text-foreground"
+                  max={480}
+                  min={1}
+                  onChange={event => updateStep(identity, {
+                    estimateMinutes: event.currentTarget.value === '' ? undefined : event.currentTarget.valueAsNumber
+                  })}
+                  type="number"
+                  value={step.estimateMinutes ?? ''}
+                />
+              </label>
+              <label className="inline-flex items-center gap-1.5 text-[0.68rem] text-muted-foreground">
+                <input
+                  aria-label={`${labels.optional} ${index + 1}`}
+                  checked={step.optional === true}
+                  onChange={event => updateStep(identity, { optional: event.currentTarget.checked })}
+                  type="checkbox"
+                />
+                {labels.optional}
+              </label>
+            </div>
           </div>
-        ))}
+          )
+        })}
       </div>
 
       <div className={cn('flex flex-wrap items-center gap-2 border-t border-border/65 px-3 py-2.5', isRtl && 'justify-end')}>
         <button className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.72rem]" disabled={steps.length >= 12} onClick={addStep} type="button">
           {labels.add}
         </button>
-        <button className="rounded-md bg-foreground px-2.5 py-1 text-[0.72rem] font-medium text-background disabled:opacity-45" disabled={!valid} onClick={submit} type="button">
-          {submitted ? (isRtl ? 'נשלח ל־Hermes' : 'Sent to Hermes') : artifact.submitLabel || (isRtl ? 'עדכן את הפירוק' : 'Update breakdown')}
+        {submissionError ? (
+          <span className="text-[0.68rem] font-medium text-destructive">
+            {isRtl ? 'השליחה נכשלה. אפשר לנסות שוב.' : 'Send failed. You can retry.'}
+          </span>
+        ) : null}
+        <button className="rounded-md bg-foreground px-2.5 py-1 text-[0.72rem] font-medium text-background disabled:opacity-45" disabled={!valid || submitting} onClick={() => void submit()} type="button">
+          {submitting
+            ? (isRtl ? 'שולח…' : 'Sending…')
+            : submitted
+              ? (isRtl ? 'נשלח ל־Hermes' : 'Sent to Hermes')
+              : artifact.submitLabel || (isRtl ? 'עדכן את הפירוק' : 'Update breakdown')}
         </button>
       </div>
     </section>
@@ -1816,12 +1901,82 @@ export function DayTimelineCard({ artifact }: { artifact: HermesUiDayTimelineArt
 
 export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPreviewArtifact }) {
   const { direction, directionalStyle, isRtl } = useArtifactDirection(artifact)
+  const [correction, setCorrection] = useState('')
+  const [submittedDecision, setSubmittedDecision] = useState<'approve' | 'revise' | null>(null)
+  const [submittingDecision, setSubmittingDecision] = useState<'approve' | 'revise' | null>(null)
+  const [submissionError, setSubmissionError] = useState(false)
+  const canonicalApproval = artifact.canonicalApproval
+
+  const approvalIdentity = useMemo(
+    () => canonicalApproval
+      ? JSON.stringify(canonicalApproval)
+      : JSON.stringify({ changes: artifact.changes, id: artifact.id || null }),
+    [artifact.changes, artifact.id, canonicalApproval]
+  )
+
+  const previewExpiryMs = canonicalApproval ? Date.parse(canonicalApproval.previewExpiresAt) : null
+  const [currentTimeMs, setCurrentTimeMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    setCorrection('')
+    setSubmittedDecision(null)
+    setSubmittingDecision(null)
+    setSubmissionError(false)
+    setCurrentTimeMs(Date.now())
+  }, [approvalIdentity])
+
+  useEffect(() => {
+    if (previewExpiryMs === null || previewExpiryMs <= currentTimeMs) {return}
+
+    const timeout = window.setTimeout(
+      () => setCurrentTimeMs(Date.now()),
+      Math.min(previewExpiryMs - currentTimeMs + 10, 2_147_483_647)
+    )
+
+    return () => window.clearTimeout(timeout)
+  }, [currentTimeMs, previewExpiryMs])
+
+  const expired = canonicalApproval
+    ? previewExpiryMs !== null && previewExpiryMs <= currentTimeMs
+    : false
+
+  const submitCanonicalDecision = async (decision: 'approve' | 'revise') => {
+    if (!canonicalApproval || submittedDecision || submittingDecision) {return}
+
+    if (
+      decision === 'approve' &&
+      (Date.parse(canonicalApproval.previewExpiresAt) <= Date.now() || correction.trim())
+    ) {return}
+
+    const payload = {
+      ...canonicalApproval,
+      approval: decision === 'approve',
+      ...(decision === 'revise' ? { correction: correction.trim() } : {}),
+      decision,
+      schemaVersion: 1,
+      type: 'flowstate-mutation-decision'
+    }
+
+    setSubmittingDecision(decision)
+    setSubmissionError(false)
+
+    const accepted = await requestComposerSubmit(
+      `Hermes UI canonical mutation decision:\n${JSON.stringify(payload)}`,
+      { flowstateDecision: payload, hidden: true, target: 'main' }
+    )
+
+    setSubmittingDecision(null)
+    setSubmittedDecision(accepted ? decision : null)
+    setSubmissionError(!accepted)
+  }
 
   return (
     <ArtifactShell artifact={artifact} label={isRtl ? 'תצוגת שינוי לפני אישור' : 'Mutation preview'}>
       <div className="space-y-2 px-3 py-3" dir={direction} style={directionalStyle}>
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[0.72rem] font-medium text-amber-800 dark:text-amber-200">
-          {isRtl ? 'Preview בלבד. לא מתבצע שינוי ב־FlowState מהרכיב הזה.' : 'Preview only. This component does not write to FlowState.'}
+          {canonicalApproval
+            ? (isRtl ? 'תצוגה מקדימה קנונית. השינוי המדויק יתבצע רק לאחר אישור מפורש.' : 'Canonical preview. The exact change runs only after explicit approval.')
+            : (isRtl ? 'Preview בלבד. לא מתבצע שינוי ב־FlowState מהרכיב הזה.' : 'Preview only. This component does not write to FlowState.')}
         </div>
         {artifact.changes.map(change => (
           <div className="rounded-md border border-border/60 bg-background/30 px-2.5 py-2" key={`${change.taskId}:${change.operation}`}>
@@ -1861,7 +2016,114 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
             ) : null}
           </div>
         ))}
-        <PlanningActionButtons actions={artifact.actions} isRtl={isRtl} />
+        {canonicalApproval ? (
+          <div className="space-y-2 rounded-md border border-border/60 bg-background/30 p-2.5">
+            <div className="text-[0.68rem] text-muted-foreground">
+              {isRtl ? 'פעולות מדויקות' : 'Exact operations'}: {canonicalApproval.operations.length}
+              {' · '}
+              {isRtl ? 'גרסת בסיס' : 'Base revision'}: {canonicalApproval.baseRevision}
+            </div>
+            <div className="space-y-1">
+              {canonicalApproval.operations.map((operation, index) => (
+                <div className="text-[0.68rem] text-foreground" key={`${operation.kind}:${'clientId' in operation ? operation.clientId : operation.subtaskId}`}>
+                  {index + 1}. {operation.kind} · {'title' in operation && operation.title ? operation.title : ('clientId' in operation ? operation.clientId : operation.subtaskId)}
+                </div>
+              ))}
+            </div>
+            <label className="block text-[0.7rem] font-medium text-foreground">
+              {isRtl ? 'תיקון או הקשר חסר' : 'Correction or missing context'}
+              <textarea
+                aria-label={isRtl ? 'תיקון או הקשר חסר' : 'Correction or missing context'}
+                className="mt-1 min-h-20 w-full resize-y rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.72rem] text-foreground"
+                disabled={submittedDecision !== null}
+                maxLength={1000}
+                onChange={event => {
+                  setCorrection(event.currentTarget.value)
+                }}
+                placeholder={isRtl ? 'אפשר לכתוב כאן שינוי לפני אישור' : 'Write any change needed before approval'}
+                value={correction}
+              />
+            </label>
+            {expired ? (
+              <div className="text-[0.68rem] font-medium text-amber-700 dark:text-amber-300">
+                {isRtl ? 'תוקף התצוגה פג. יש לבקש תצוגה חדשה.' : 'This preview expired. Request a new preview.'}
+              </div>
+            ) : null}
+            {submissionError ? (
+              <div className="text-[0.68rem] font-medium text-destructive">
+                {isRtl ? 'השליחה נכשלה. אפשר לנסות שוב.' : 'Send failed. You can retry.'}
+              </div>
+            ) : null}
+            <div className={cn('flex flex-wrap gap-1.5', isRtl && 'justify-end')}>
+              <button
+                className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.7rem] font-medium text-foreground enabled:hover:bg-muted/70 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={submittedDecision !== null || submittingDecision !== null}
+                onClick={() => void submitCanonicalDecision('revise')}
+                type="button"
+              >
+                {submittingDecision === 'revise'
+                  ? (isRtl ? 'שולח…' : 'Sending…')
+                  : submittedDecision === 'revise'
+                  ? (isRtl ? 'נשלח ל־Hermes' : 'Sent to Hermes')
+                  : (isRtl ? 'בקש תצוגה חדשה' : 'Request a new preview')}
+              </button>
+              <button
+                className="rounded-md border border-emerald-600/50 bg-emerald-600/10 px-2 py-1 text-[0.7rem] font-semibold text-emerald-800 enabled:hover:bg-emerald-600/20 disabled:cursor-not-allowed disabled:opacity-50 dark:text-emerald-200"
+                disabled={expired || Boolean(correction.trim()) || submittedDecision !== null || submittingDecision !== null}
+                onClick={() => void submitCanonicalDecision('approve')}
+                type="button"
+              >
+                {submittingDecision === 'approve'
+                  ? (isRtl ? 'שולח…' : 'Sending…')
+                  : submittedDecision === 'approve'
+                  ? (isRtl ? 'אושר ונשלח' : 'Approved and sent')
+                  : (isRtl ? 'אשר את השינויים המדויקים' : 'Approve exact changes')}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <label className="block text-[0.7rem] font-medium text-foreground">
+              {isRtl ? 'תיקון או הקשר חסר' : 'Correction or missing context'}
+              <textarea
+                aria-label={isRtl ? 'תיקון או הקשר חסר' : 'Correction or missing context'}
+                className="mt-1 min-h-20 w-full resize-y rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.72rem] text-foreground"
+                disabled={submittedDecision !== null}
+                maxLength={1000}
+                onChange={event => setCorrection(event.currentTarget.value)}
+                placeholder={isRtl ? 'אפשר לכתוב כאן שינוי לפני אישור' : 'Write any change needed before approval'}
+                value={correction}
+              />
+            </label>
+            {correction.trim() ? (
+              <button
+                className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.7rem] font-medium text-foreground enabled:hover:bg-muted/70 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={submittedDecision !== null}
+                onClick={() => {
+                  if (submittedDecision) {return}
+                  setSubmittedDecision('revise')
+                  requestComposerSubmit(
+                    `Hermes UI mutation preview correction:\n${JSON.stringify({
+                      approval: false,
+                      artifactId: artifact.id,
+                      correction: correction.trim(),
+                      taskIds: artifact.changes.map(change => change.taskId),
+                      type: 'mutation-preview-correction'
+                    })}`,
+                    { hidden: true, target: 'main' }
+                  )
+                }}
+                type="button"
+              >
+                {submittedDecision === 'revise'
+                  ? (isRtl ? 'נשלח ל־Hermes' : 'Sent to Hermes')
+                  : (isRtl ? 'שלח תיקון' : 'Send correction')}
+              </button>
+            ) : (
+              <PlanningActionButtons actions={artifact.actions} isRtl={isRtl} />
+            )}
+          </div>
+        )}
       </div>
     </ArtifactShell>
   )

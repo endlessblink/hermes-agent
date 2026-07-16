@@ -2433,7 +2433,20 @@ def test_list_subtasks_uses_parent_task_route(monkeypatch):
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        _capturing_urlopen(seen, {"ok": True, "subtasks": []}),
+        _capturing_urlopen(
+            seen,
+            {
+                "ok": True,
+                "task": {
+                    "id": "task/one",
+                    "title": "Parent task",
+                    "workspaceId": "123e4567-e89b-42d3-a456-426614174000",
+                    "canonicalRevision": 4,
+                    "canonicalUpdatedAt": "2026-07-16T09:00:00.000Z",
+                },
+                "subtasks": [],
+            },
+        ),
     )
 
     result = json.loads(fst._handle_list_subtasks({"taskId": "task/one"}))

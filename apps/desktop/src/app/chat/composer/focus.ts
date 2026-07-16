@@ -38,7 +38,9 @@ const SUBMIT_EVENT = 'hermes:composer-submit'
 const VOICE_TOGGLE_EVENT = 'hermes:composer-voice-toggle'
 
 interface SubmitDetail {
+  acknowledge?: (accepted: boolean) => void
   allowWhileBusy?: boolean
+  flowstateDecision?: Record<string, unknown>
   hidden?: boolean
   target: ComposerTarget
   text: string
@@ -121,15 +123,43 @@ export const requestComposerSubmit = (
   text: string,
   {
     allowWhileBusy,
+    flowstateDecision,
     hidden,
     target = 'active'
-  }: { allowWhileBusy?: boolean; hidden?: boolean; target?: ComposerTarget | 'active' } = {}
+  }: {
+    allowWhileBusy?: boolean
+    flowstateDecision?: Record<string, unknown>
+    hidden?: boolean
+    target?: ComposerTarget | 'active'
+  } = {}
 ) => {
   const trimmed = text.trim()
 
-  if (trimmed) {
-    dispatch<SubmitDetail>(SUBMIT_EVENT, { allowWhileBusy, hidden, target: resolve(target), text: trimmed })
+  if (!trimmed || typeof window === 'undefined') {
+    return Promise.resolve(false)
   }
+
+  return new Promise<boolean>(resolveRequest => {
+    let settled = false
+
+    const settle = (accepted: boolean) => {
+      if (settled) {return}
+      settled = true
+      window.clearTimeout(timeout)
+      resolveRequest(accepted)
+    }
+
+    const timeout = window.setTimeout(() => settle(false), 30_000)
+
+    dispatch<SubmitDetail>(SUBMIT_EVENT, {
+      acknowledge: settle,
+      allowWhileBusy,
+      flowstateDecision,
+      hidden,
+      target: resolve(target),
+      text: trimmed
+    })
+  })
 }
 
 export const onComposerSubmitRequest = (handler: (detail: SubmitDetail) => void) =>

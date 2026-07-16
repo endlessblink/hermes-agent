@@ -715,6 +715,15 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
     except Exception:
         pass
     try:
+        from agent.subtask_approval_capabilities import (
+            subtask_approval_capabilities,
+        )
+
+        if key := session.get("session_key"):
+            subtask_approval_capabilities.revoke_session(key)
+    except Exception:
+        pass
+    try:
         agent = session.get("agent")
         if agent is not None and hasattr(agent, "close"):
             agent.close()
@@ -12366,6 +12375,158 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5004, str(e))
+
+
+_FLOWSTATE_DECISION_PROOF_KEYS = {
+    "action",
+    "baseRevision",
+    "contractVersion",
+    "operationId",
+    "operations",
+    "previewDigest",
+    "previewExpiresAt",
+    "proposalId",
+    "proposalRevision",
+    "requestHash",
+    "taskId",
+}
+
+
+def _flowstate_approval_proof(decision: Any) -> tuple[str, dict[str, Any]]:
+    if not isinstance(decision, dict):
+        raise ValueError("decision must be an object")
+    if decision.get("type") == "task-breakdown-revision":
+        expected = {
+            "action", "approval", "proposalId", "proposalRevision", "schemaVersion",
+            "scope", "steps", "stoppingRule", "targetOutcome", "task", "type",
+        }
+        task = decision.get("task")
+        if (
+            set(decision) != expected
+            or decision.get("action") != "revise"
+            or decision.get("approval") is not False
+            or decision.get("schemaVersion") != 1
+            or decision.get("scope") not in {"full-delivery", "next-move", "working-session"}
+            or not isinstance(decision.get("steps"), list)
+            or not 1 <= len(decision["steps"]) <= 12
+            or not isinstance(task, dict)
+            or set(task) != {"baseRevision", "id", "title"}
+            or not isinstance(task.get("id"), str)
+            or not task["id"]
+            or task["id"] != task["id"].strip()
+            or len(task["id"]) > 160
+            or not isinstance(task.get("baseRevision"), int)
+            or isinstance(task["baseRevision"], bool)
+            or not 1 <= task["baseRevision"] <= 2**53 - 1
+            or not isinstance(decision.get("proposalId"), str)
+            or not decision["proposalId"]
+            or decision["proposalId"] != decision["proposalId"].strip()
+            or len(decision["proposalId"]) > 120
+            or not isinstance(decision.get("proposalRevision"), int)
+            or isinstance(decision["proposalRevision"], bool)
+            or not 1 <= decision["proposalRevision"] <= 2**53 - 1
+        ):
+            raise ValueError("breakdown revision contract is invalid")
+        return "breakdown-revise", {
+            "baseRevision": task["baseRevision"],
+            "proposalId": decision["proposalId"],
+            "proposalRevision": decision["proposalRevision"],
+            "taskId": task["id"],
+        }
+
+    choice = decision.get("decision")
+    expected = _FLOWSTATE_DECISION_PROOF_KEYS | {
+        "approval",
+        "decision",
+        "schemaVersion",
+        "type",
+    }
+    if choice == "revise":
+        expected.add("correction")
+    if set(decision) != expected:
+        raise ValueError("decision fields are invalid")
+    if (
+        decision.get("type") != "flowstate-mutation-decision"
+        or decision.get("schemaVersion") != 1
+        or decision.get("action") != "subtask_batch"
+        or decision.get("contractVersion") != "task-v1"
+        or choice not in {"approve", "revise"}
+        or decision.get("approval") is not (choice == "approve")
+    ):
+        raise ValueError("decision contract is invalid")
+    if choice == "revise":
+        correction = decision.get("correction")
+        if (
+            not isinstance(correction, str)
+            or correction != correction.strip()
+            or len(correction) > 2_000
+        ):
+            raise ValueError("revision correction is invalid")
+
+    from tools.flowstate_tool import _normalize_subtask_operation
+
+    raw_operations = decision.get("operations")
+    if not isinstance(raw_operations, list) or not 1 <= len(raw_operations) <= 50:
+        raise ValueError("decision operations are invalid")
+    operations: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for raw in raw_operations:
+        normalized, error = _normalize_subtask_operation(raw)
+        if error or normalized != raw:
+            raise ValueError("decision operations are invalid")
+        identity = (
+            f"clientId:{normalized['clientId']}"
+            if normalized["kind"] == "create"
+            else f"subtaskId:{normalized['subtaskId']}"
+        )
+        if identity in identities:
+            raise ValueError("decision operation identities are duplicated")
+        identities.add(identity)
+        operations.append(normalized)
+
+    proof = {
+        key: decision[key]
+        for key in (
+            "taskId",
+            "operationId",
+            "baseRevision",
+            "previewDigest",
+            "previewExpiresAt",
+            "requestHash",
+            "proposalId",
+            "proposalRevision",
+        )
+    }
+    proof["operations"] = operations
+    return choice, proof
+
+
+@method("flowstate.approval.register")
+def _(rid, params: dict) -> dict:
+    if set(params) != {"session_id", "decision"}:
+        return _err(rid, 4002, "invalid FlowState approval decision")
+    session, error = _sess_nowait(params, rid)
+    if error:
+        return error
+    try:
+        from agent.subtask_approval_capabilities import (
+            subtask_approval_capabilities,
+        )
+
+        choice, proof = _flowstate_approval_proof(params.get("decision"))
+        session_key = str(session.get("session_key") or "")
+        if choice in {"breakdown-revise", "revise"}:
+            revoked = subtask_approval_capabilities.invalidate_proposal(
+                session_key,
+                proof["taskId"],
+                proof["proposalId"],
+                proof["proposalRevision"],
+            )
+            return _ok(rid, {"revoked": revoked, "status": "revised"})
+        capability = subtask_approval_capabilities.register(session_key, proof)
+        return _ok(rid, {"approvalCapability": capability})
+    except (KeyError, TypeError, ValueError):
+        return _err(rid, 4002, "invalid FlowState approval decision")
 
 
 # ── Methods: config ──────────────────────────────────────────────────

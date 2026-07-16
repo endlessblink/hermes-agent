@@ -7,6 +7,7 @@ API. Flow State remains the source of truth; Hermes is only a client.
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -95,18 +96,67 @@ _UUID_RE = re.compile(
     re.IGNORECASE,
 )
 _SCOPE_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
+_CANONICAL_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$"
+)
 _READ_THROUGH_CACHE_VERSION = 1
 _READ_THROUGH_CACHE_MAX_AGE_SECONDS = 300
+_MAX_SAFE_JSON_INTEGER = 2**53 - 1
+_CANONICAL_SUBTASK_FIELDS = {
+    "id",
+    "title",
+    "order",
+    "parentTaskId",
+    "clientId",
+    "description",
+    "isCompleted",
+    "doneEnough",
+    "estimateMinutes",
+    "completedPomodoros",
+    "canvasPosition",
+    "createdAt",
+    "updatedAt",
+}
+_CANONICAL_SUBTASK_DESCRIPTION_LIMIT = 10_000
+_CANONICAL_SUBTASK_DONE_ENOUGH_LIMIT = 2_000
+_CANONICAL_SUBTASK_TIMESTAMP_LIMIT = 64
+_CANONICAL_SUBTASK_ARRAY_LIMIT = 10_001
+
+
+def _safe_flowstate_conflict_details(
+    code: str, details: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Keep only bounded conflict facts the model can safely act on."""
+
+    if code != "stale_revision" or not isinstance(details, dict):
+        return {}
+    current_revision = details.get("currentRevision")
+    if (
+        isinstance(current_revision, int)
+        and not isinstance(current_revision, bool)
+        and 0 < current_revision <= _MAX_SAFE_JSON_INTEGER
+    ):
+        return {"currentRevision": current_revision}
+    return {}
 
 
 class _FlowStateApiError(RuntimeError):
     """Safe, typed Local Task API error with no request credentials attached."""
 
-    def __init__(self, message: str, *, code: str, status: int, action: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        status: int,
+        action: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.code = code
         self.status = status
         self.action = action
+        self.details = _safe_flowstate_conflict_details(code, details)
 
 
 def _get_env_value(key: str) -> Optional[str]:
@@ -265,6 +315,7 @@ def _is_valid_date_or_due_filter(value: str) -> bool:
 
 def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
     action = None
+    details: Dict[str, Any] = {}
     try:
         raw = exc.read().decode("utf-8", errors="replace")
         payload = json.loads(raw) if raw else {}
@@ -272,6 +323,14 @@ def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
         if isinstance(error, dict):
             message = error.get("message")
             code = error.get("code")
+            current_revision = error.get("currentRevision")
+            if (
+                code == "stale_revision"
+                and isinstance(current_revision, int)
+                and not isinstance(current_revision, bool)
+                and 0 < current_revision <= _MAX_SAFE_JSON_INTEGER
+            ):
+                details["currentRevision"] = current_revision
         else:
             message = error
             code = payload.get("code") if isinstance(payload, dict) else None
@@ -298,6 +357,7 @@ def _compact_http_error(exc: urllib.error.HTTPError) -> _FlowStateApiError:
         code=str(code or f"http_{exc.code}"),
         status=exc.code,
         action=str(action) if action else None,
+        details=details,
     )
 
 
@@ -366,6 +426,7 @@ def _typed_tool_error(exc: _FlowStateApiError) -> str:
     extra = {"code": exc.code, "status": exc.status}
     if exc.action:
         extra["action"] = exc.action
+    extra.update(exc.details)
     return tool_error(str(exc), **extra)
 
 
@@ -763,6 +824,7 @@ def _handle_task_lifecycle(action: str, args: dict) -> str:
                 code=exc.code,
                 status=exc.status,
                 action="stop_mutations_and_report_recurrence_history",
+                details=exc.details,
             )
         return _typed_tool_error(exc)
     except RuntimeError as exc:
@@ -1054,6 +1116,7 @@ def _handle_complete_task(args: dict, **kw) -> str:
                 code=exc.code,
                 status=exc.status,
                 action="stop_mutations_and_use_done_for_now",
+                details=exc.details,
             )
         return _typed_tool_error(exc)
     except RuntimeError as exc:
@@ -1803,6 +1866,115 @@ def _subtask_path(task_id: str, subtask_id: Optional[str] = None) -> str:
     return path
 
 
+def _bounded_trimmed_text(value: Any, limit: int) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and len(value) <= limit
+    )
+
+
+def _finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _valid_canonical_subtask_row(
+    value: Any, index: int, parent_task_id: str
+) -> bool:
+    if not isinstance(value, dict) or set(value) - _CANONICAL_SUBTASK_FIELDS:
+        return False
+    if not _bounded_trimmed_text(value.get("id"), 256):
+        return False
+    if not _bounded_trimmed_text(value.get("title"), 500):
+        return False
+    if (
+        not isinstance(value.get("order"), int)
+        or isinstance(value["order"], bool)
+        or value["order"] != index
+    ):
+        return False
+
+    if "parentTaskId" in value:
+        if not _bounded_trimmed_text(value["parentTaskId"], 256):
+            return False
+        if value["parentTaskId"] != parent_task_id:
+            return False
+    if "clientId" in value and not _bounded_trimmed_text(value["clientId"], 160):
+        return False
+    if "description" in value and not (
+        isinstance(value["description"], str)
+        and len(value["description"]) <= _CANONICAL_SUBTASK_DESCRIPTION_LIMIT
+    ):
+        return False
+    if "isCompleted" in value and not isinstance(value["isCompleted"], bool):
+        return False
+    if "doneEnough" in value and not (
+        value["doneEnough"] is None
+        or (
+            isinstance(value["doneEnough"], str)
+            and len(value["doneEnough"]) <= _CANONICAL_SUBTASK_DONE_ENOUGH_LIMIT
+        )
+    ):
+        return False
+    if "estimateMinutes" in value and not (
+        value["estimateMinutes"] is None
+        or (
+            _is_positive_int(value["estimateMinutes"])
+            and value["estimateMinutes"] <= 1_440
+        )
+    ):
+        return False
+    if "completedPomodoros" in value and not (
+        isinstance(value["completedPomodoros"], int)
+        and not isinstance(value["completedPomodoros"], bool)
+        and 0 <= value["completedPomodoros"] <= 1_000_000
+    ):
+        return False
+    if "canvasPosition" in value and not (
+        value["canvasPosition"] is None
+        or (
+            isinstance(value["canvasPosition"], dict)
+            and set(value["canvasPosition"]) == {"x", "y"}
+            and _finite_number(value["canvasPosition"]["x"])
+            and _finite_number(value["canvasPosition"]["y"])
+        )
+    ):
+        return False
+    if "createdAt" in value and not (
+        isinstance(value["createdAt"], str)
+        and len(value["createdAt"]) <= _CANONICAL_SUBTASK_TIMESTAMP_LIMIT
+        and bool(_CANONICAL_TIMESTAMP_RE.fullmatch(value["createdAt"]))
+        and _is_iso_timestamp(value["createdAt"])
+    ):
+        return False
+    if "updatedAt" in value and not (
+        isinstance(value["updatedAt"], str)
+        and len(value["updatedAt"]) <= _CANONICAL_SUBTASK_TIMESTAMP_LIMIT
+        and bool(_CANONICAL_TIMESTAMP_RE.fullmatch(value["updatedAt"]))
+        and _is_iso_timestamp(value["updatedAt"])
+    ):
+        return False
+    return True
+
+
+def _typed_list_subtasks_error(exc: _FlowStateApiError) -> str:
+    stable_messages = {
+        (500, "read_failed"): "subtasks could not be read",
+        (404, "not_found"): "task not found",
+    }
+    message = stable_messages.get((exc.status, exc.code))
+    if message is None:
+        message = "Fresh canonical subtask state could not be verified"
+    return _typed_tool_error(
+        _FlowStateApiError(message, code=exc.code, status=exc.status)
+    )
+
+
 def _normalize_subtask_operation(operation: Any) -> tuple[Optional[dict], Optional[str]]:
     if not isinstance(operation, dict):
         return None, "each subtask operation must be an object"
@@ -1827,14 +1999,29 @@ def _normalize_subtask_operation(operation: Any) -> tuple[Optional[dict], Option
     if kind == "create":
         client_id = operation.get("clientId")
         title = operation.get("title")
-        if not isinstance(client_id, str) or not client_id.strip() or client_id != client_id.strip():
+        if (
+            not isinstance(client_id, str)
+            or not client_id.strip()
+            or client_id != client_id.strip()
+            or len(client_id) > 160
+        ):
             return None, "create operations require a trimmed clientId"
-        if not isinstance(title, str) or not title.strip() or title != title.strip():
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or title != title.strip()
+            or len(title) > 500
+        ):
             return None, "create operations require a trimmed title"
         normalized.update({"clientId": client_id, "title": title})
     else:
         subtask_id = operation.get("subtaskId")
-        if not isinstance(subtask_id, str) or not subtask_id.strip() or subtask_id != subtask_id.strip():
+        if (
+            not isinstance(subtask_id, str)
+            or not subtask_id.strip()
+            or subtask_id != subtask_id.strip()
+            or len(subtask_id) > 256
+        ):
             return None, f"{kind} operations require a trimmed subtaskId"
         normalized["subtaskId"] = subtask_id
     if kind == "delete":
@@ -1848,8 +2035,14 @@ def _normalize_subtask_operation(operation: Any) -> tuple[Optional[dict], Option
             continue
         if not isinstance(value, str) or (key == "title" and not value.strip()):
             return None, f"{key} must be text{'' if key != 'title' else ' and non-empty'}"
-        if key == "title" and value != value.strip():
+        if key == "title" and (value != value.strip() or len(value) > 500):
             return None, "title must not contain surrounding whitespace"
+        if key == "description" and len(value) > 10_000:
+            return None, "description must be at most 10000 characters"
+        if key == "doneEnough":
+            value = value.strip()
+            if len(value) > 2_000:
+                return None, "doneEnough must be at most 2000 characters"
         normalized[key] = value
     if "estimateMinutes" in operation:
         estimate = operation["estimateMinutes"]
@@ -1858,7 +2051,12 @@ def _normalize_subtask_operation(operation: Any) -> tuple[Optional[dict], Option
         normalized["estimateMinutes"] = estimate
     if "completedPomodoros" in operation:
         completed = operation["completedPomodoros"]
-        if not isinstance(completed, int) or isinstance(completed, bool) or completed < 0:
+        if (
+            not isinstance(completed, int)
+            or isinstance(completed, bool)
+            or completed < 0
+            or completed > 1_000_000
+        ):
             return None, "completedPomodoros must be a non-negative integer"
         normalized["completedPomodoros"] = completed
     if "canvasPosition" in operation:
@@ -1866,7 +2064,12 @@ def _normalize_subtask_operation(operation: Any) -> tuple[Optional[dict], Option
         if position is not None and (
             not isinstance(position, dict)
             or set(position) != {"x", "y"}
-            or any(not isinstance(position[axis], (int, float)) or isinstance(position[axis], bool) for axis in ("x", "y"))
+            or any(
+                not isinstance(position[axis], (int, float))
+                or isinstance(position[axis], bool)
+                or not math.isfinite(position[axis])
+                for axis in ("x", "y")
+            )
         ):
             return None, "canvasPosition must be null or an object with numeric x and y"
         normalized["canvasPosition"] = position
@@ -1993,10 +2196,68 @@ def _handle_list_subtasks(args: dict, **kw) -> str:
     if not task_id:
         return _tool_error("taskId is required")
     try:
-        return _tool_result(_request("GET", _subtask_path(task_id)))
+        payload = _request(
+            "GET",
+            _subtask_path(task_id),
+            allow_stale_cache=False,
+        )
+        task = payload.get("task") if isinstance(payload, dict) else None
+        subtasks = payload.get("subtasks") if isinstance(payload, dict) else None
+        if not (
+            isinstance(payload, dict)
+            and payload.get("ok") is True
+            and "_hermesReadThrough" not in payload
+            and isinstance(task, dict)
+            and task.get("id") == task_id
+            and isinstance(task.get("title"), str)
+            and (
+                task.get("workspaceId") is None
+                or (
+                    isinstance(task.get("workspaceId"), str)
+                    and bool(_UUID_RE.fullmatch(task["workspaceId"]))
+                )
+            )
+            and _is_positive_int(task.get("canonicalRevision"))
+            and task["canonicalRevision"] <= _MAX_SAFE_JSON_INTEGER
+            and _is_iso_timestamp(task.get("canonicalUpdatedAt"))
+            and isinstance(subtasks, list)
+            and len(subtasks) <= _CANONICAL_SUBTASK_ARRAY_LIMIT
+            and all(
+                _valid_canonical_subtask_row(item, index, task_id)
+                for index, item in enumerate(subtasks)
+            )
+            and len({item["id"] for item in subtasks}) == len(subtasks)
+            and len(
+                {item["clientId"] for item in subtasks if "clientId" in item}
+            )
+            == sum("clientId" in item for item in subtasks)
+        ):
+            return _tool_error(
+                "Fresh canonical subtask state could not be verified"
+            )
+        return _tool_result(
+            {
+                "ok": True,
+                "task": {
+                    "id": task["id"],
+                    "title": task["title"],
+                    "workspaceId": task["workspaceId"],
+                    "canonicalRevision": task["canonicalRevision"],
+                    "canonicalUpdatedAt": task["canonicalUpdatedAt"],
+                },
+                "subtasks": subtasks,
+            }
+        )
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_list_subtasks API error: status=%s code=%s",
+            exc.status,
+            exc.code,
+        )
+        return _typed_list_subtasks_error(exc)
     except Exception as exc:
-        logger.error("flowstate_list_subtasks error: %s", exc)
-        return _tool_error(str(exc))
+        logger.error("flowstate_list_subtasks error: %s", type(exc).__name__)
+        return _tool_error("Fresh canonical subtask state could not be verified")
 
 
 def _handle_create_subtask(args: dict, **kw) -> str:
@@ -2071,11 +2332,66 @@ def _handle_subtask_batch(args: dict, **kw) -> str:
     if error:
         return _tool_error(error)
     assert body is not None
+    if not body["preview"]:
+        proposal_id = args.get("proposalId")
+        proposal_revision = args.get("proposalRevision")
+        if (
+            not isinstance(proposal_id, str)
+            or not proposal_id
+            or proposal_id != proposal_id.strip()
+            or len(proposal_id) > 120
+            or not isinstance(proposal_revision, int)
+            or isinstance(proposal_revision, bool)
+            or proposal_revision < 1
+            or proposal_revision > 2**53 - 1
+        ):
+            return _tool_error("proposalId and proposalRevision are required for apply")
+        capability = args.get("approvalCapability")
+        if not isinstance(capability, str) or not capability:
+            return _tool_error("approvalCapability is required for apply")
+        try:
+            from agent.subtask_approval_capabilities import (
+                ApprovalCapabilityError,
+                subtask_approval_capabilities,
+            )
+            from tools.approval import get_current_session_key
+
+            subtask_approval_capabilities.authorize(
+                get_current_session_key(default=""),
+                capability,
+                {
+                    "taskId": task_id,
+                    "operationId": body["operationId"],
+                    "baseRevision": body["baseRevision"],
+                    "operations": body["operations"],
+                    "previewDigest": body["previewDigest"],
+                    "previewExpiresAt": body["previewExpiresAt"],
+                    "requestHash": body["requestHash"],
+                    "proposalId": proposal_id,
+                    "proposalRevision": proposal_revision,
+                },
+            )
+        except ApprovalCapabilityError:
+            return _tool_error("approvalCapability is invalid for this exact apply")
     try:
         payload = _request("POST", f"{_subtask_path(task_id)}/batch", body)
         if body["preview"]:
             if not _valid_subtask_preview(payload, task_id, body):
                 return _tool_error("Canonical subtask preview could not be verified")
+            payload = {
+                **payload,
+                "approvalRequest": {
+                    "action": "subtask_batch",
+                    "baseRevision": body["baseRevision"],
+                    "contractVersion": "task-v1",
+                    "operationId": body["operationId"],
+                    "operations": body["operations"],
+                    "previewDigest": payload["previewDigest"],
+                    "previewExpiresAt": payload["previewExpiresAt"],
+                    "requestHash": payload["requestHash"],
+                    "taskId": task_id,
+                },
+            }
         else:
             if (
                 not isinstance(payload, dict)
@@ -2619,11 +2935,33 @@ _SUBTASK_MUTATION_PROPERTIES = {
         "type": "string",
         "description": "Server-issued request hash required unchanged for apply.",
     },
+    "approvalCapability": {
+        "type": "string",
+        "maxLength": 256,
+        "description": (
+            "Trusted gateway capability required for apply. It is issued only after the user "
+            "approves the exact canonical preview and cannot be created by the model."
+        ),
+    },
+    "proposalId": {
+        "type": "string",
+        "maxLength": 120,
+        "description": "Exact interactive proposal identity bound to the trusted approval capability.",
+    },
+    "proposalRevision": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Exact interactive proposal revision bound to the trusted approval capability.",
+    },
 }
 
 FLOWSTATE_LIST_SUBTASKS_SCHEMA = {
     "name": "flowstate_list_subtasks",
-    "description": "List the ordered subtasks stored by FlowState for one exact parent task id.",
+    "description": (
+        "Read fresh mutation-authoritative ordered subtasks for one exact parent task id. "
+        "This read never falls back to Hermes' stale profile cache and exposes the parent "
+        "workspaceId, canonicalRevision, and canonicalUpdatedAt required for a safe preview."
+    ),
     "parameters": {
         "type": "object",
         "properties": {"taskId": {"type": "string", "description": "Exact parent task id."}},
@@ -2709,7 +3047,9 @@ FLOWSTATE_SUBTASK_BATCH_SCHEMA = {
     "name": "flowstate_subtask_batch",
     "description": (
         "Preview or atomically apply 1-50 ordered subtask create, update, and delete operations. "
-        "Defaults to preview and returns one receipt for the full approved outcome."
+        "Defaults to preview and returns one receipt for the full approved outcome. A verified preview "
+        "also returns approvalRequest with the exact tool-level operations and immutable proof fields; "
+        "copy it unchanged into the canonical approval UI and later apply it unchanged."
     ),
     "parameters": {
         "type": "object",
@@ -2723,11 +3063,11 @@ FLOWSTATE_SUBTASK_BATCH_SCHEMA = {
                     "type": "object",
                     "properties": {
                         "kind": {"type": "string", "enum": ["create", "update", "delete"]},
-                        "clientId": {"type": "string"},
-                        "subtaskId": {"type": "string"},
-                        "title": {"type": "string"},
-                        "description": {"type": "string"},
-                        "doneEnough": {"type": ["string", "null"]},
+                        "clientId": {"type": "string", "maxLength": 160},
+                        "subtaskId": {"type": "string", "maxLength": 256},
+                        "title": {"type": "string", "maxLength": 500},
+                        "description": {"type": "string", "maxLength": 10000},
+                        "doneEnough": {"type": ["string", "null"], "maxLength": 2000},
                         "estimateMinutes": {"type": ["integer", "null"], "minimum": 1, "maximum": 1440},
                         "completedPomodoros": {"type": "integer", "minimum": 0},
                         "canvasPosition": {

@@ -16,7 +16,7 @@ import type {
   HermesUiTaskTableArtifact
 } from '@/lib/hermes-ui-artifacts'
 
-const requestComposerSubmit = vi.fn()
+const requestComposerSubmit = vi.fn(async (_text: string, _options?: unknown): Promise<boolean> => true)
 
 vi.mock('@/app/chat/composer/focus', () => ({
   requestComposerSubmit: (text: string, opts?: unknown) => requestComposerSubmit(text, opts)
@@ -621,16 +621,19 @@ describe('Planning interview primitives', () => {
   const taskBreakdown: HermesUiTaskBreakdownArtifact = {
     direction: 'rtl',
     id: 'breakdown-vague-task',
+    proposalId: 'proposal-vague-task',
+    proposalRevision: 2,
+    schemaVersion: 1,
     scope: 'working-session',
     steps: [
-      { id: 'discover', title: 'לברר מה חסר', doneEnough: 'יש רשימה של שלוש אי־ודאויות' },
-      { id: 'draft', title: 'לכתוב טיוטה קצרה', doneEnough: 'יש טיוטה שאפשר לקבל עליה תגובה', estimateMinutes: 25 },
-      { id: 'polish', title: 'ללטש את כל המימוש', doneEnough: 'הכול מושלם', optional: true }
+      { subtaskId: 'discover', title: 'לברר מה חסר', doneEnough: 'יש רשימה של שלוש אי־ודאויות' },
+      { clientId: 'draft', title: 'לכתוב טיוטה קצרה', doneEnough: 'יש טיוטה שאפשר לקבל עליה תגובה', estimateMinutes: 25 },
+      { clientId: 'polish', title: 'ללטש את כל המימוש', doneEnough: 'הכול מושלם', optional: true }
     ],
     stoppingRule: 'עוצרים אחרי טיוטה שניתנת לבדיקה; ליטוש מלא נשאר אופציונלי.',
     submitLabel: 'עדכן את הפירוק',
     targetOutcome: 'להפוך משימה עמומה להתקדמות שאפשר להתחיל עכשיו',
-    task: { id: 'task-vague', title: 'לקדם את אתר בינה' },
+    task: { baseRevision: 11, id: 'task-vague', title: 'לקדם את אתר בינה' },
     title: 'פירוק עבודה לעריכה',
     type: 'task-breakdown'
   }
@@ -698,7 +701,7 @@ describe('Planning interview primitives', () => {
 
     expect(screen.getByText('פירוק עבודה לעריכה')).toBeTruthy()
     expect(screen.getByText('סשן עבודה')).toBeTruthy()
-    expect(screen.getByText('אופציונלי')).toBeTruthy()
+    expect(screen.getAllByText('אופציונלי').length).toBeGreaterThan(0)
 
     fireEvent.change(screen.getByDisplayValue('לכתוב טיוטה קצרה'), { target: { value: 'לכתוב שלד של הטיוטה' } })
     fireEvent.change(screen.getByDisplayValue('יש טיוטה שאפשר לקבל עליה תגובה'), {
@@ -706,16 +709,41 @@ describe('Planning interview primitives', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: 'העבר את לכתוב שלד של הטיוטה למעלה' }))
     fireEvent.click(screen.getByRole('button', { name: 'הסר את ללטש את כל המימוש' }))
+    fireEvent.change(screen.getByLabelText('הערכת דקות 1'), { target: { value: '18' } })
+    fireEvent.click(screen.getByLabelText('אופציונלי 1'))
     fireEvent.click(screen.getByRole('button', { name: 'עדכן את הפירוק' }))
 
     const submitted = requestComposerSubmit.mock.calls[0]?.[0] as string
-    expect(submitted).toContain('taskId=task-vague')
-    expect(submitted).toContain('scope=working-session')
-    expect(submitted.indexOf('לכתוב שלד של הטיוטה')).toBeLessThan(submitted.indexOf('לברר מה חסר'))
-    expect(submitted).toContain('יש שלד עם כותרת ושלושה סעיפים')
-    expect(submitted).not.toContain('ללטש את כל המימוש')
-    expect(submitted).toContain('regenerate the preview')
-    expect(submitted).toContain('do not apply')
+    const response = JSON.parse(submitted.slice(submitted.indexOf('\n') + 1))
+    expect(response).toMatchObject({
+      action: 'revise',
+      approval: false,
+      proposalId: 'proposal-vague-task',
+      proposalRevision: 2,
+      schemaVersion: 1,
+      scope: 'working-session',
+      task: { baseRevision: 11, id: 'task-vague' },
+      type: 'task-breakdown-revision'
+    })
+    expect(response.steps.map((step: { clientId?: string; subtaskId?: string }) => step.clientId || step.subtaskId)).toEqual(['draft', 'discover'])
+    expect(response.steps[0]).toEqual({
+      clientId: 'draft',
+      doneEnough: 'יש שלד עם כותרת ושלושה סעיפים',
+      estimateMinutes: 18,
+      optional: true,
+      title: 'לכתוב שלד של הטיוטה'
+    })
+    expect(response.steps[1]).toEqual({
+      doneEnough: 'יש רשימה של שלוש אי־ודאויות',
+      optional: false,
+      subtaskId: 'discover',
+      title: 'לברר מה חסר'
+    })
+    expect(requestComposerSubmit.mock.calls[0]?.[1]).toEqual({
+      flowstateDecision: response,
+      hidden: true,
+      target: 'main'
+    })
   })
 
   it('restores an unfinished breakdown draft after the card remounts', () => {
@@ -728,6 +756,105 @@ describe('Planning interview primitives', () => {
     expect(screen.getByDisplayValue('לברר מי מאשר')).toBeTruthy()
   })
 
+  it('keeps a breakdown revision retryable when trusted registration fails', async () => {
+    requestComposerSubmit.mockResolvedValueOnce(false)
+    render(<TaskBreakdownCard artifact={taskBreakdown} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'עדכן את הפירוק' }))
+
+    await waitFor(() => expect(screen.getByText('השליחה נכשלה. אפשר לנסות שוב.')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'עדכן את הפירוק' }).hasAttribute('disabled')).toBe(false)
+    expect(screen.queryByRole('button', { name: 'נשלח ל־Hermes' })).toBeNull()
+  })
+
+  it('does not restore a stale draft after the proposal revision changes', () => {
+    const { unmount } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.change(screen.getByDisplayValue('לברר מה חסר'), { target: { value: 'טיוטה ישנה' } })
+    unmount()
+
+    render(<TaskBreakdownCard artifact={{ ...taskBreakdown, proposalRevision: 3 }} />)
+
+    expect(screen.queryByDisplayValue('טיוטה ישנה')).toBeNull()
+    expect(screen.getByDisplayValue('לברר מה חסר')).toBeTruthy()
+  })
+
+  it('does not restore a stale draft after the canonical task revision changes', () => {
+    const { unmount } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.change(screen.getByDisplayValue('לברר מה חסר'), { target: { value: 'טיוטה מבסיס ישן' } })
+    unmount()
+
+    render(<TaskBreakdownCard artifact={{
+      ...taskBreakdown,
+      task: { ...taskBreakdown.task, baseRevision: 12 }
+    }} />)
+
+    expect(screen.queryByDisplayValue('טיוטה מבסיס ישן')).toBeNull()
+    expect(screen.getByDisplayValue('לברר מה חסר')).toBeTruthy()
+  })
+
+  it('resets mounted breakdown state when its proposal proof changes', async () => {
+    const { rerender } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.change(screen.getByDisplayValue('לברר מה חסר'), { target: { value: 'טיוטה מהרכיב הישן' } })
+
+    rerender(<TaskBreakdownCard artifact={{
+      ...taskBreakdown,
+      proposalRevision: 3,
+      steps: [{ clientId: 'fresh', doneEnough: 'מוכן לבדיקה', title: 'צעד קנוני חדש' }]
+    }} />)
+
+    await waitFor(() => expect(screen.queryByDisplayValue('טיוטה מהרכיב הישן')).toBeNull())
+    expect(screen.getByDisplayValue('צעד קנוני חדש')).toBeTruthy()
+  })
+
+  it('scopes mounted breakdown state to the canonical task identity', async () => {
+    const { rerender } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.change(screen.getByDisplayValue('לברר מה חסר'), { target: { value: 'טיוטה למשימה הראשונה' } })
+
+    rerender(<TaskBreakdownCard artifact={{
+      ...taskBreakdown,
+      task: { ...taskBreakdown.task, id: 'task-other', title: 'משימה אחרת' }
+    }} />)
+
+    await waitFor(() => expect(screen.queryByDisplayValue('טיוטה למשימה הראשונה')).toBeNull())
+    expect(screen.getByDisplayValue('לברר מה חסר')).toBeTruthy()
+  })
+
+  it('assigns a stable client identity to a newly added row and preserves it in submission', () => {
+    const { unmount } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.click(screen.getByRole('button', { name: 'הוסף צעד' }))
+    fireEvent.change(screen.getByLabelText('צעד 4'), { target: { value: 'צעד חדש' } })
+    fireEvent.change(screen.getByLabelText('מה נחשב מספיק 4'), { target: { value: 'מספיק חדש' } })
+    unmount()
+
+    render(<TaskBreakdownCard artifact={taskBreakdown} />)
+    fireEvent.click(screen.getByRole('button', { name: 'עדכן את הפירוק' }))
+
+    const submitted = requestComposerSubmit.mock.calls[0]?.[0] as string
+    const response = JSON.parse(submitted.slice(submitted.indexOf('\n') + 1))
+    expect(response.steps.at(-1)).toMatchObject({
+      clientId: 'proposal-vague-task-new-1',
+      doneEnough: 'מספיק חדש',
+      title: 'צעד חדש'
+    })
+  })
+
+  it('bounds a generated client identity when the proposal identity is at its maximum length', () => {
+    const maxProposal = { ...taskBreakdown, proposalId: 'p'.repeat(120) }
+    const { unmount } = render(<TaskBreakdownCard artifact={maxProposal} />)
+    fireEvent.click(screen.getByRole('button', { name: 'הוסף צעד' }))
+    fireEvent.change(screen.getByLabelText('צעד 4'), { target: { value: 'צעד תחום' } })
+    fireEvent.change(screen.getByLabelText('מה נחשב מספיק 4'), { target: { value: 'מוכן' } })
+    unmount()
+
+    render(<TaskBreakdownCard artifact={maxProposal} />)
+    fireEvent.click(screen.getByRole('button', { name: 'עדכן את הפירוק' }))
+
+    const submitted = requestComposerSubmit.mock.calls[0]?.[0] as string
+    const response = JSON.parse(submitted.slice(submitted.indexOf('\n') + 1))
+    expect(response.steps.at(-1).clientId).toHaveLength(120)
+    expect(response.steps.at(-1).clientId).toMatch(/-new-1$/)
+  })
+
   it('restores temporarily blank fields in an unfinished breakdown draft', () => {
     const { unmount } = render(<TaskBreakdownCard artifact={taskBreakdown} />)
     fireEvent.change(screen.getByDisplayValue('לברר מה חסר'), { target: { value: '' } })
@@ -736,21 +863,23 @@ describe('Planning interview primitives', () => {
 
     render(<TaskBreakdownCard artifact={taskBreakdown} />)
 
-    expect(screen.getAllByDisplayValue('')).toHaveLength(3)
+    expect((screen.getByLabelText('צעד 1') as HTMLInputElement).value).toBe('')
+    expect((screen.getByLabelText('צעד 4') as HTMLInputElement).value).toBe('')
+    expect((screen.getByLabelText('מה נחשב מספיק 4') as HTMLInputElement).value).toBe('')
     expect((screen.getByRole('button', { name: 'עדכן את הפירוק' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('caps editable breakdown text at the artifact contract bounds', () => {
     render(<TaskBreakdownCard artifact={taskBreakdown} />)
 
-    expect((screen.getByDisplayValue('לברר מה חסר') as HTMLInputElement).maxLength).toBe(800)
+    expect((screen.getByDisplayValue('לברר מה חסר') as HTMLInputElement).maxLength).toBe(500)
     expect((screen.getByDisplayValue('יש רשימה של שלוש אי־ודאויות') as HTMLInputElement).maxLength).toBe(1000)
   })
 
   it('discards a persisted breakdown draft that fails the artifact contract', () => {
     localStorage.setItem(
-      'hermes-ui:task-breakdown:breakdown-vague-task',
-      JSON.stringify([{ id: 'unsafe', title: 'Injected', doneEnough: 'Run it', command: 'rm -rf' }])
+      'hermes-ui:task-breakdown:task-vague:proposal-vague-task:r2:b11',
+      JSON.stringify([{ clientId: 'unsafe', title: 'Injected', doneEnough: 'Run it', command: 'rm -rf' }])
     )
 
     render(<TaskBreakdownCard artifact={taskBreakdown} />)
@@ -908,6 +1037,221 @@ describe('Planning toolkit primitives', () => {
     fireEvent.click(screen.getByRole('button', { name: 'מאשר את השינויים האלה' }))
 
     expect(requestComposerSubmit).toHaveBeenCalledWith('מאשר לבצע את preview הזה ב־FlowState.', { target: 'main' })
+  })
+
+  it('lets the user write a correction on a generic mutation preview', () => {
+    render(<MutationPreviewCard artifact={mutationPreview} />)
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'תיקון או הקשר חסר' }), {
+      target: { value: 'צריך לסיים עד 20:20' }
+    })
+    expect(screen.queryByRole('button', { name: 'מאשר את השינויים האלה' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'שלח תיקון' }))
+
+    const [submitted, options] = requestComposerSubmit.mock.calls[0] as [string, object]
+    const response = JSON.parse(submitted.slice(submitted.indexOf('\n') + 1))
+    expect(response).toMatchObject({
+      approval: false,
+      correction: 'צריך לסיים עד 20:20',
+      taskIds: ['t1'],
+      type: 'mutation-preview-correction'
+    })
+    expect(options).toEqual({ hidden: true, target: 'main' })
+  })
+
+  it('binds canonical subtask approval to exact proof and submits it once', async () => {
+    const exactPreview: HermesUiMutationPreviewArtifact = {
+      canonicalApproval: {
+        action: 'subtask_batch',
+        baseRevision: 7,
+        contractVersion: 'task-v1',
+        operationId: 'breakdown:proposal-1:r3',
+        operations: [{ clientId: 'draft', doneEnough: 'Reviewable', kind: 'create', order: 0, title: 'Draft' }],
+        previewDigest: 'a'.repeat(64),
+        previewExpiresAt: '2099-07-16T10:00:00.000Z',
+        proposalId: 'proposal-1',
+        proposalRevision: 3,
+        requestHash: 'b'.repeat(64),
+        taskId: 'task-1'
+      },
+      changes: [{ after: { steps: 1 }, before: { steps: 0 }, operation: 'update', taskId: 'task-1', title: 'Prepare launch' }],
+      direction: 'ltr',
+      title: 'Approve exact breakdown',
+      type: 'mutation-preview'
+    }
+
+    render(<MutationPreviewCard artifact={exactPreview} />)
+
+    expect(screen.getByRole('textbox', { name: 'Correction or missing context' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Approve exact changes' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approved and sent' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Approved and sent' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledTimes(1)
+    const [submitted, options] = requestComposerSubmit.mock.calls[0] as [string, object]
+    const decision = JSON.parse(submitted.slice(submitted.indexOf('\n') + 1))
+    expect(decision).toMatchObject({
+      action: 'subtask_batch',
+      approval: true,
+      baseRevision: 7,
+      decision: 'approve',
+      operationId: 'breakdown:proposal-1:r3',
+      previewDigest: 'a'.repeat(64),
+      proposalId: 'proposal-1',
+      proposalRevision: 3,
+      requestHash: 'b'.repeat(64),
+      taskId: 'task-1',
+      type: 'flowstate-mutation-decision'
+    })
+    expect(decision.operations).toEqual(exactPreview.canonicalApproval?.operations)
+    expect(options).toEqual({
+      flowstateDecision: decision,
+      hidden: true,
+      target: 'main'
+    })
+  })
+
+  it('keeps canonical approval retryable when the gateway refuses submission', async () => {
+    requestComposerSubmit.mockResolvedValueOnce(false)
+    render(<MutationPreviewCard artifact={{
+      canonicalApproval: {
+        action: 'subtask_batch',
+        baseRevision: 7,
+        contractVersion: 'task-v1',
+        operationId: 'breakdown:proposal-retry:r1',
+        operations: [{ clientId: 'draft', kind: 'create', order: 0, title: 'Draft' }],
+        previewDigest: 'a'.repeat(64),
+        previewExpiresAt: '2099-07-16T10:00:00.000Z',
+        proposalId: 'proposal-retry',
+        proposalRevision: 1,
+        requestHash: 'b'.repeat(64),
+        taskId: 'task-retry'
+      },
+      changes: [{ operation: 'update', taskId: 'task-retry', title: 'Retry task' }],
+      direction: 'ltr',
+      type: 'mutation-preview'
+    }} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve exact changes' }))
+
+    await waitFor(() => expect(screen.getByText('Send failed. You can retry.')).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'Approve exact changes' }).hasAttribute('disabled')).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Approved and sent' })).toBeNull()
+  })
+
+  it('clears mounted correction and submission state when canonical proof changes', async () => {
+    const canonicalApproval = {
+      action: 'subtask_batch' as const,
+      baseRevision: 7,
+      contractVersion: 'task-v1' as const,
+      operationId: 'breakdown:proposal-1:r3',
+      operations: [{ clientId: 'draft', kind: 'create' as const, order: 0, title: 'Draft' }],
+      previewDigest: 'a'.repeat(64),
+      previewExpiresAt: '2099-07-16T10:00:00.000Z',
+      proposalId: 'proposal-1',
+      proposalRevision: 3,
+      requestHash: 'b'.repeat(64),
+      taskId: 'task-1'
+    }
+
+    const artifact: HermesUiMutationPreviewArtifact = {
+      canonicalApproval,
+      changes: [{ operation: 'update', taskId: 'task-1', title: 'Prepare launch' }],
+      direction: 'ltr',
+      type: 'mutation-preview'
+    }
+
+    const { rerender } = render(<MutationPreviewCard artifact={artifact} />)
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Correction or missing context' }), {
+      target: { value: 'Use a shorter first step.' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Request a new preview' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sent to Hermes' })).toBeTruthy())
+
+    rerender(<MutationPreviewCard artifact={{
+      ...artifact,
+      canonicalApproval: {
+        ...canonicalApproval,
+        baseRevision: 8,
+        operationId: 'breakdown:proposal-1:r4',
+        previewDigest: 'c'.repeat(64),
+        proposalRevision: 4,
+        requestHash: 'd'.repeat(64)
+      }
+    }} />)
+
+    await waitFor(() => expect((screen.getByRole('textbox', { name: 'Correction or missing context' }) as HTMLTextAreaElement).value).toBe(''))
+    expect(screen.getByRole('button', { name: 'Approve exact changes' }).hasAttribute('disabled')).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Sent to Hermes' })).toBeNull()
+  })
+
+  it('visually disables a canonical approval when its proof expires while mounted', async () => {
+    const previewExpiresAt = new Date(Date.now() + 40).toISOString()
+    render(<MutationPreviewCard artifact={{
+      canonicalApproval: {
+        action: 'subtask_batch',
+        baseRevision: 7,
+        contractVersion: 'task-v1',
+        operationId: 'breakdown:proposal-expiry:r1',
+        operations: [{ clientId: 'draft', kind: 'create', order: 0, title: 'Draft' }],
+        previewDigest: 'a'.repeat(64),
+        previewExpiresAt,
+        proposalId: 'proposal-expiry',
+        proposalRevision: 1,
+        requestHash: 'b'.repeat(64),
+        taskId: 'task-expiry'
+      },
+      changes: [{ operation: 'update', taskId: 'task-expiry', title: 'Expiring task' }],
+      direction: 'ltr',
+      type: 'mutation-preview'
+    }} />)
+
+    expect(screen.getByRole('button', { name: 'Approve exact changes' }).hasAttribute('disabled')).toBe(false)
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: 'Approve exact changes' }).hasAttribute('disabled')).toBe(true),
+      { timeout: 1000 }
+    )
+    expect(screen.getByText('This preview expired. Request a new preview.')).toBeTruthy()
+  })
+
+  it('sends correction as revision-not-approval and blocks applying expired proof', () => {
+    const exactPreview: HermesUiMutationPreviewArtifact = {
+      canonicalApproval: {
+        action: 'subtask_batch',
+        baseRevision: 7,
+        contractVersion: 'task-v1',
+        operationId: 'breakdown:proposal-1:r3',
+        operations: [{ clientId: 'draft', kind: 'create', order: 0, title: 'Draft' }],
+        previewDigest: 'a'.repeat(64),
+        previewExpiresAt: '2000-01-01T00:00:00.000Z',
+        proposalId: 'proposal-1',
+        proposalRevision: 3,
+        requestHash: 'b'.repeat(64),
+        taskId: 'task-1'
+      },
+      changes: [{ operation: 'update', taskId: 'task-1', title: 'Prepare launch' }],
+      direction: 'ltr',
+      type: 'mutation-preview'
+    }
+
+    render(<MutationPreviewCard artifact={exactPreview} />)
+
+    expect(screen.getByRole('button', { name: 'Approve exact changes' }).hasAttribute('disabled')).toBe(true)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Correction or missing context' }), {
+      target: { value: 'Keep the research step optional.' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Request a new preview' }))
+
+    const submitted = requestComposerSubmit.mock.calls[0]?.[0] as string
+    const decision = JSON.parse(submitted.slice(submitted.indexOf('\n') + 1))
+    expect(decision).toMatchObject({
+      approval: false,
+      correction: 'Keep the research step optional.',
+      decision: 'revise',
+      operationId: 'breakdown:proposal-1:r3',
+      type: 'flowstate-mutation-decision'
+    })
   })
 
   it('renders matrix, workload bars, and task graph primitives', () => {

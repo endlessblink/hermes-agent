@@ -226,6 +226,7 @@ export function visibleUserIndexAtOrdinal(messages: readonly ChatMessage[], targ
 export interface SubmitTextOptions {
   allowWhileBusy?: boolean
   attachments?: ComposerAttachment[]
+  flowstateDecision?: Record<string, unknown>
   fromQueue?: boolean
   hidden?: boolean
 }

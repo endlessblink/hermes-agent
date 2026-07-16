@@ -61,7 +61,13 @@ export interface ChatBarProps {
   onSteer?: (text: string) => Promise<boolean> | boolean
   onSubmit: (
     value: string,
-    options?: { allowWhileBusy?: boolean; attachments?: ComposerAttachment[]; fromQueue?: boolean; hidden?: boolean }
+    options?: {
+      allowWhileBusy?: boolean
+      attachments?: ComposerAttachment[]
+      flowstateDecision?: Record<string, unknown>
+      fromQueue?: boolean
+      hidden?: boolean
+    }
   ) => Promise<boolean> | boolean
   onTranscribeAudio?: (audio: Blob) => Promise<string>
 }

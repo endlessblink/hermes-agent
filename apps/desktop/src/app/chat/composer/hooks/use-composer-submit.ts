@@ -83,9 +83,14 @@ export function useComposerSubmit({
 }: UseComposerSubmitArgs) {
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
-  const dispatchSubmit = (
+  const dispatchSubmit = async (
     text: string,
-    options?: { allowWhileBusy?: boolean; attachments?: ComposerAttachment[]; hidden?: boolean }
+    options?: {
+      allowWhileBusy?: boolean
+      attachments?: ComposerAttachment[]
+      flowstateDecision?: Record<string, unknown>
+      hidden?: boolean
+    }
   ) => {
     const submittedScope = activeQueueSessionKeyRef.current
     const submittedAttachments = options?.attachments ?? []
@@ -96,22 +101,24 @@ export function useComposerSubmit({
       stashAt(activeQueueSessionKeyRef.current, text, submittedAttachments)
     }
 
-    void Promise.resolve(onSubmit(submittedText, options))
-      .then(accepted => {
-        if (accepted === false) {
-          if (!options?.hidden) {
-            restore()
-          }
-        } else {
-          clearSessionDraft(submittedScope)
-          onSubmitAccepted?.()
-        }
-      })
-      .catch(() => {
-        if (!options?.hidden) {
-          restore()
-        }
-      })
+    try {
+      const accepted = await onSubmit(submittedText, options)
+
+      if (accepted === false) {
+        if (!options?.hidden) {restore()}
+
+        return false
+      }
+
+      clearSessionDraft(submittedScope)
+      onSubmitAccepted?.()
+
+      return true
+    } catch {
+      if (!options?.hidden) {restore()}
+
+      return false
+    }
   }
 
   // External "submit this prompt" requests (e.g. the review pane's agent-ship
@@ -150,9 +157,16 @@ export function useComposerSubmit({
 
   useEffect(
     () =>
-      onComposerSubmitRequest(({ allowWhileBusy, hidden, target, text }) => {
+      onComposerSubmitRequest(({ acknowledge, allowWhileBusy, flowstateDecision, hidden, target, text }) => {
         if (target === 'main' && !inputDisabled) {
-          dispatchSubmitRef.current(text, allowWhileBusy || hidden ? { allowWhileBusy, hidden } : undefined)
+          void dispatchSubmitRef.current(
+            text,
+            allowWhileBusy || flowstateDecision || hidden
+              ? { allowWhileBusy, flowstateDecision, hidden }
+              : undefined
+          ).then(accepted => acknowledge?.(accepted))
+        } else {
+          acknowledge?.(false)
         }
       }),
     [inputDisabled]

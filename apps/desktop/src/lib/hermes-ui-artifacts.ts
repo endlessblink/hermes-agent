@@ -198,7 +198,8 @@ export interface HermesUiPlanningFunnelArtifact {
 export type HermesUiTaskBreakdownScope = 'next-move' | 'working-session' | 'full-delivery'
 
 export interface HermesUiTaskBreakdownStep {
-  id: string
+  clientId?: string
+  subtaskId?: string
   title: string
   doneEnough: string
   estimateMinutes?: number
@@ -207,11 +208,15 @@ export interface HermesUiTaskBreakdownStep {
 
 export interface HermesUiTaskBreakdownArtifact {
   type: 'task-breakdown'
+  schemaVersion: 1
+  proposalId: string
+  proposalRevision: number
   direction?: 'auto' | 'ltr' | 'rtl'
   id?: string
   title?: string
   description?: string
   task: {
+    baseRevision: number
     id: string
     title: string
   }
@@ -225,7 +230,7 @@ export interface HermesUiTaskBreakdownArtifact {
 export const HERMES_UI_TASK_BREAKDOWN_LIMITS = {
   doneEnoughLength: 1000,
   stepCount: 12,
-  titleLength: 800
+  titleLength: 500
 } as const
 
 export interface HermesUiTaskContextArtifact {
@@ -351,6 +356,47 @@ export interface HermesUiMutationPreviewChange {
   risk?: HermesUiMutationRisk
 }
 
+export type HermesUiCanonicalSubtaskOperation =
+  | {
+      kind: 'create'
+      clientId: string
+      title: string
+      description?: string
+      doneEnough?: string | null
+      estimateMinutes?: number | null
+      completedPomodoros?: number
+      canvasPosition?: { x: number; y: number } | null
+      isCompleted?: boolean
+      order?: number
+    }
+  | {
+      kind: 'update'
+      subtaskId: string
+      title?: string
+      description?: string
+      doneEnough?: string | null
+      estimateMinutes?: number | null
+      completedPomodoros?: number
+      canvasPosition?: { x: number; y: number } | null
+      isCompleted?: boolean
+      order?: number
+    }
+  | { kind: 'delete'; subtaskId: string }
+
+export interface HermesUiCanonicalSubtaskApproval {
+  action: 'subtask_batch'
+  baseRevision: number
+  contractVersion: 'task-v1'
+  operationId: string
+  operations: HermesUiCanonicalSubtaskOperation[]
+  previewDigest: string
+  previewExpiresAt: string
+  proposalId: string
+  proposalRevision: number
+  requestHash: string
+  taskId: string
+}
+
 export interface HermesUiMutationPreviewArtifact {
   type: 'mutation-preview'
   direction?: 'auto' | 'ltr' | 'rtl'
@@ -358,7 +404,8 @@ export interface HermesUiMutationPreviewArtifact {
   title?: string
   description?: string
   changes: HermesUiMutationPreviewChange[]
-  actions: HermesUiChecklistAction[]
+  actions?: HermesUiChecklistAction[]
+  canonicalApproval?: HermesUiCanonicalSubtaskApproval
 }
 
 export type HermesUiMatrixAxis = 'energy' | 'effort' | 'urgency' | 'impact'
@@ -494,6 +541,7 @@ const MAX_MINI_KANBAN_LANES = 5
 const MAX_MINI_KANBAN_TASKS = 8
 const MAX_TIMELINE_BLOCKS = 12
 const MAX_MUTATION_CHANGES = 10
+const MAX_CANONICAL_SUBTASK_OPERATIONS = 50
 const MAX_MUTATION_RECORD_FIELDS = 12
 const MAX_MATRIX_CELLS = 9
 const MAX_MATRIX_TASKS = 5
@@ -564,8 +612,39 @@ const SAFE_DAY_TIMELINE_BLOCK_KEYS = new Set([
   'taskId'
 ])
 
-const SAFE_MUTATION_PREVIEW_KEYS = new Set(['actions', 'changes', 'description', 'direction', 'id', 'title', 'type'])
+const SAFE_MUTATION_PREVIEW_KEYS = new Set(['actions', 'canonicalApproval', 'changes', 'description', 'direction', 'id', 'title', 'type'])
 const SAFE_MUTATION_CHANGE_KEYS = new Set(['after', 'before', 'operation', 'risk', 'taskId', 'title', 'untouched'])
+
+const SAFE_CANONICAL_SUBTASK_APPROVAL_KEYS = new Set([
+  'action',
+  'baseRevision',
+  'contractVersion',
+  'operationId',
+  'operations',
+  'previewDigest',
+  'previewExpiresAt',
+  'proposalId',
+  'proposalRevision',
+  'requestHash',
+  'taskId'
+])
+
+const SAFE_CANONICAL_SUBTASK_OPERATION_KEYS = new Set([
+  'canvasPosition',
+  'clientId',
+  'completedPomodoros',
+  'description',
+  'doneEnough',
+  'estimateMinutes',
+  'isCompleted',
+  'kind',
+  'order',
+  'subtaskId',
+  'title'
+])
+
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/
+const CANONICAL_ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
 const SAFE_MATRIX_KEYS = new Set(['cells', 'description', 'direction', 'id', 'title', 'type', 'xAxis', 'yAxis'])
 const SAFE_MATRIX_CELL_KEYS = new Set(['label', 'tasks', 'x', 'y'])
 const SAFE_TASK_CHIP_KEYS = new Set(['actions', 'confidence', 'dueDate', 'id', 'priority', 'title'])
@@ -579,6 +658,9 @@ const SAFE_TASK_BREAKDOWN_KEYS = new Set([
   'description',
   'direction',
   'id',
+  'proposalId',
+  'proposalRevision',
+  'schemaVersion',
   'scope',
   'steps',
   'stoppingRule',
@@ -589,8 +671,8 @@ const SAFE_TASK_BREAKDOWN_KEYS = new Set([
   'type'
 ])
 
-const SAFE_TASK_BREAKDOWN_TASK_KEYS = new Set(['id', 'title'])
-const SAFE_TASK_BREAKDOWN_STEP_KEYS = new Set(['doneEnough', 'estimateMinutes', 'id', 'optional', 'title'])
+const SAFE_TASK_BREAKDOWN_TASK_KEYS = new Set(['baseRevision', 'id', 'title'])
+const SAFE_TASK_BREAKDOWN_STEP_KEYS = new Set(['clientId', 'doneEnough', 'estimateMinutes', 'optional', 'subtaskId', 'title'])
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
 const TIME_ONLY_RE = /^([01]\d|2[0-3]):[0-5]\d$/
 
@@ -1584,7 +1666,7 @@ function parseTaskBreakdownSteps(
     return { error: 'task-breakdown has too many steps', ok: false }
   }
 
-  const seenIds = new Set<string>()
+  const seenIdentities = new Set<string>()
   const steps: HermesUiTaskBreakdownStep[] = []
 
   for (const [index, rawStep] of value.entries()) {
@@ -1594,14 +1676,29 @@ function parseTaskBreakdownSteps(
 
     if (unsupportedStep) {return unsupportedStep}
 
-    const id = normalizeText(rawStep.id, MAX_ITEM_ID_LENGTH, `steps[${index}].id`)
+    const hasClientId = rawStep.clientId !== undefined
+    const hasSubtaskId = rawStep.subtaskId !== undefined
 
-    if (typeof id !== 'string') {return id}
+    if (hasClientId === hasSubtaskId) {
+      return { error: `steps[${index}] must contain exactly one of subtaskId or clientId`, ok: false }
+    }
 
-    if (!id) {return { error: `steps[${index}].id is required`, ok: false }}
+    const identityField = hasSubtaskId ? 'subtaskId' : 'clientId'
 
-    if (seenIds.has(id)) {return { error: `Duplicate step id: ${id}`, ok: false }}
-    seenIds.add(id)
+    const identity = normalizeText(
+      rawStep[identityField],
+      hasSubtaskId ? 256 : 160,
+      `steps[${index}].${identityField}`
+    )
+
+    if (typeof identity !== 'string') {return identity}
+
+    if (!identity) {return { error: `steps[${index}].${identityField} is required`, ok: false }}
+
+    const identityKey = `${identityField}:${identity}`
+
+    if (seenIdentities.has(identityKey)) {return { error: `Duplicate step identity: ${identityKey}`, ok: false }}
+    seenIdentities.add(identityKey)
 
     const title = normalizeText(
       rawStep.title,
@@ -1645,7 +1742,14 @@ function parseTaskBreakdownSteps(
       return { error: `steps[${index}].optional must be a boolean`, ok: false }
     }
 
-    steps.push({ doneEnough, estimateMinutes, id, optional: rawStep.optional as boolean | undefined, title })
+    steps.push({
+      clientId: hasClientId ? identity : undefined,
+      doneEnough,
+      estimateMinutes,
+      optional: rawStep.optional as boolean | undefined,
+      subtaskId: hasSubtaskId ? identity : undefined,
+      title
+    })
   }
 
   return steps
@@ -1670,6 +1774,20 @@ function parseTaskBreakdownArtifact(parsed: Record<string, unknown>): HermesUiAr
     return base
   }
 
+  if (parsed.schemaVersion !== 1) {
+    return { error: 'schemaVersion must be 1', ok: false }
+  }
+
+  const proposalId = normalizeText(parsed.proposalId, MAX_ITEM_ID_LENGTH, 'proposalId')
+
+  if (typeof proposalId !== 'string') {return proposalId}
+
+  if (!proposalId) {return { error: 'proposalId is required', ok: false }}
+
+  if (typeof parsed.proposalRevision !== 'number' || !Number.isSafeInteger(parsed.proposalRevision) || parsed.proposalRevision < 1) {
+    return { error: 'proposalRevision must be a positive safe integer', ok: false }
+  }
+
   if (!isRecord(parsed.task)) {
     return { error: 'task-breakdown task is required', ok: false }
   }
@@ -1691,6 +1809,10 @@ function parseTaskBreakdownArtifact(parsed: Record<string, unknown>): HermesUiAr
   if (typeof taskTitle !== 'string') {return taskTitle}
 
   if (!taskTitle) {return { error: 'task.title is required', ok: false }}
+
+  if (typeof parsed.task.baseRevision !== 'number' || !Number.isSafeInteger(parsed.task.baseRevision) || parsed.task.baseRevision < 1) {
+    return { error: 'task.baseRevision must be a positive safe integer', ok: false }
+  }
 
   if (parsed.scope !== 'next-move' && parsed.scope !== 'working-session' && parsed.scope !== 'full-delivery') {
     return { error: 'scope must be next-move, working-session, or full-delivery', ok: false }
@@ -1715,12 +1837,15 @@ function parseTaskBreakdownArtifact(parsed: Record<string, unknown>): HermesUiAr
   return {
     artifact: {
       ...base.fields,
+      proposalId,
+      proposalRevision: parsed.proposalRevision,
+      schemaVersion: 1,
       scope: parsed.scope,
       steps,
       stoppingRule,
       submitLabel,
       targetOutcome,
-      task: { id: taskId, title: taskTitle },
+      task: { baseRevision: parsed.task.baseRevision, id: taskId, title: taskTitle },
       type: 'task-breakdown'
     },
     ok: true
@@ -2564,6 +2689,259 @@ function parseDayTimelineArtifact(parsed: Record<string, unknown>): HermesUiArti
   return { artifact: { ...base.fields, blocks, currentTime, date, type: 'day-timeline' }, ok: true }
 }
 
+function exactCanonicalText(
+  value: unknown,
+  maxLength: number,
+  field: string,
+  required = false
+): HermesUiArtifactParseFailure | string | undefined {
+  if (value === undefined) {
+    return required ? { error: `${field} is required`, ok: false } : undefined
+  }
+
+  if (typeof value !== 'string') {
+    return { error: `${field} must be a string`, ok: false }
+  }
+
+  if (value.length > maxLength) {
+    return { error: `${field} is too long`, ok: false }
+  }
+
+  if (required && (!value || value !== value.trim())) {
+    return { error: `${field} must be non-empty trimmed text`, ok: false }
+  }
+
+  return value
+}
+
+function parseCanonicalSubtaskOperation(
+  value: unknown,
+  index: number
+): HermesUiArtifactParseFailure | HermesUiCanonicalSubtaskOperation {
+  const field = `canonicalApproval.operations[${index}]`
+
+  if (!isRecord(value)) {
+    return { error: `${field} must be an object`, ok: false }
+  }
+
+  const unsupported = hasUnsupportedKeys(value, SAFE_CANONICAL_SUBTASK_OPERATION_KEYS, field)
+
+  if (unsupported) {return unsupported}
+
+  if (value.kind !== 'create' && value.kind !== 'update' && value.kind !== 'delete') {
+    return { error: `${field}.kind must be create, update, or delete`, ok: false }
+  }
+
+  const isCreate = value.kind === 'create'
+  const identityField = isCreate ? 'clientId' : 'subtaskId'
+  const forbiddenIdentity = isCreate ? 'subtaskId' : 'clientId'
+  const identity = exactCanonicalText(value[identityField], 160, `${field}.${identityField}`, true)
+
+  if (isParseFailure(identity)) {return identity}
+
+  if (value[forbiddenIdentity] !== undefined) {
+    return { error: `${field} contains an incompatible identity`, ok: false }
+  }
+
+  if (value.kind === 'delete') {
+    if (Object.keys(value).some(key => key !== 'kind' && key !== 'subtaskId')) {
+      return { error: `${field} delete contains unsupported mutation fields`, ok: false }
+    }
+
+    return { kind: 'delete', subtaskId: identity as string }
+  }
+
+  const title = exactCanonicalText(value.title, 500, `${field}.title`, isCreate)
+  const description = exactCanonicalText(value.description, 10_000, `${field}.description`)
+
+  if (isParseFailure(title)) {return title}
+
+  if (isParseFailure(description)) {return description}
+
+  if (title !== undefined && (!title || title !== title.trim())) {
+    return { error: `${field}.title must be non-empty trimmed text`, ok: false }
+  }
+
+  let doneEnough: string | null | undefined
+
+  if (value.doneEnough === null) {
+    doneEnough = null
+  } else {
+    const parsedDoneEnough = exactCanonicalText(value.doneEnough, 2_000, `${field}.doneEnough`)
+
+    if (isParseFailure(parsedDoneEnough)) {return parsedDoneEnough}
+    doneEnough = parsedDoneEnough
+  }
+
+  let estimateMinutes: number | null | undefined
+
+  if (value.estimateMinutes === null) {
+    estimateMinutes = null
+  } else if (value.estimateMinutes !== undefined) {
+    if (!Number.isSafeInteger(value.estimateMinutes) || (value.estimateMinutes as number) < 1 || (value.estimateMinutes as number) > 1440) {
+      return { error: `${field}.estimateMinutes must be null or an integer from 1 to 1440`, ok: false }
+    }
+
+    estimateMinutes = value.estimateMinutes as number
+  }
+
+  let completedPomodoros: number | undefined
+
+  if (value.completedPomodoros !== undefined) {
+    if (!Number.isSafeInteger(value.completedPomodoros) || (value.completedPomodoros as number) < 0) {
+      return { error: `${field}.completedPomodoros must be a non-negative safe integer`, ok: false }
+    }
+
+    completedPomodoros = value.completedPomodoros as number
+  }
+
+  let canvasPosition: { x: number; y: number } | null | undefined
+
+  if (value.canvasPosition === null) {
+    canvasPosition = null
+  } else if (value.canvasPosition !== undefined) {
+    if (
+      !isRecord(value.canvasPosition) ||
+      Object.keys(value.canvasPosition).length !== 2 ||
+      typeof value.canvasPosition.x !== 'number' ||
+      !Number.isFinite(value.canvasPosition.x) ||
+      typeof value.canvasPosition.y !== 'number' ||
+      !Number.isFinite(value.canvasPosition.y)
+    ) {
+      return { error: `${field}.canvasPosition must be null or finite x/y coordinates`, ok: false }
+    }
+
+    canvasPosition = { x: value.canvasPosition.x, y: value.canvasPosition.y }
+  }
+
+  if (value.isCompleted !== undefined && typeof value.isCompleted !== 'boolean') {
+    return { error: `${field}.isCompleted must be a boolean`, ok: false }
+  }
+
+  let order: number | undefined
+
+  if (value.order !== undefined) {
+    if (!Number.isSafeInteger(value.order) || (value.order as number) < 0) {
+      return { error: `${field}.order must be a non-negative safe integer`, ok: false }
+    }
+
+    order = value.order as number
+  }
+
+  const changed = [title, description, doneEnough, estimateMinutes, completedPomodoros, canvasPosition, value.isCompleted, order]
+    .some(item => item !== undefined)
+
+  if (!isCreate && !changed) {
+    return { error: `${field} update requires at least one changed field`, ok: false }
+  }
+
+  const mutable = {
+    ...(title === undefined ? {} : { title }),
+    ...(description === undefined ? {} : { description }),
+    ...(doneEnough === undefined ? {} : { doneEnough }),
+    ...(estimateMinutes === undefined ? {} : { estimateMinutes }),
+    ...(completedPomodoros === undefined ? {} : { completedPomodoros }),
+    ...(canvasPosition === undefined ? {} : { canvasPosition }),
+    ...(value.isCompleted === undefined ? {} : { isCompleted: value.isCompleted }),
+    ...(order === undefined ? {} : { order })
+  }
+
+  return isCreate
+    ? { clientId: identity as string, kind: 'create', title: title as string, ...mutable }
+    : { kind: 'update', subtaskId: identity as string, ...mutable }
+}
+
+function parseCanonicalSubtaskApproval(
+  value: unknown
+): HermesUiArtifactParseFailure | HermesUiCanonicalSubtaskApproval | undefined {
+  if (value === undefined) {return undefined}
+
+  if (!isRecord(value)) {
+    return { error: 'canonicalApproval must be an object', ok: false }
+  }
+
+  const unsupported = hasUnsupportedKeys(value, SAFE_CANONICAL_SUBTASK_APPROVAL_KEYS, 'canonicalApproval')
+
+  if (unsupported) {return unsupported}
+
+  if (value.contractVersion !== 'task-v1' || value.action !== 'subtask_batch') {
+    return { error: 'canonicalApproval contract/action is invalid', ok: false }
+  }
+
+  const operationId = exactCanonicalText(value.operationId, 160, 'canonicalApproval.operationId', true)
+  const taskId = exactCanonicalText(value.taskId, 160, 'canonicalApproval.taskId', true)
+  const proposalId = exactCanonicalText(value.proposalId, 120, 'canonicalApproval.proposalId', true)
+
+  if (isParseFailure(operationId)) {return operationId}
+
+  if (isParseFailure(taskId)) {return taskId}
+
+  if (isParseFailure(proposalId)) {return proposalId}
+
+  if (!Number.isSafeInteger(value.baseRevision) || (value.baseRevision as number) < 1) {
+    return { error: 'canonicalApproval.baseRevision must be a positive safe integer', ok: false }
+  }
+
+  if (!Number.isSafeInteger(value.proposalRevision) || (value.proposalRevision as number) < 1) {
+    return { error: 'canonicalApproval.proposalRevision must be a positive safe integer', ok: false }
+  }
+
+  if (typeof value.previewDigest !== 'string' || !SHA256_HEX_RE.test(value.previewDigest)) {
+    return { error: 'canonicalApproval.previewDigest must be a lowercase SHA-256 digest', ok: false }
+  }
+
+  if (typeof value.requestHash !== 'string' || !SHA256_HEX_RE.test(value.requestHash)) {
+    return { error: 'canonicalApproval.requestHash must be a lowercase SHA-256 digest', ok: false }
+  }
+
+  if (
+    typeof value.previewExpiresAt !== 'string' ||
+    value.previewExpiresAt.length > 64 ||
+    !CANONICAL_ISO_TIMESTAMP_RE.test(value.previewExpiresAt) ||
+    !Number.isFinite(Date.parse(value.previewExpiresAt))
+  ) {
+    return { error: 'canonicalApproval.previewExpiresAt must be an ISO timestamp', ok: false }
+  }
+
+  if (!Array.isArray(value.operations) || value.operations.length === 0 || value.operations.length > MAX_CANONICAL_SUBTASK_OPERATIONS) {
+    return { error: 'canonicalApproval.operations must contain 1 to 50 operations', ok: false }
+  }
+
+  const operations: HermesUiCanonicalSubtaskOperation[] = []
+  const identities = new Set<string>()
+
+  for (const [index, rawOperation] of value.operations.entries()) {
+    const operation = parseCanonicalSubtaskOperation(rawOperation, index)
+
+    if (isParseFailure(operation)) {return operation}
+
+    const identity = operation.kind === 'create'
+      ? `clientId:${operation.clientId}`
+      : `subtaskId:${operation.subtaskId}`
+
+    if (identities.has(identity)) {
+      return { error: `Duplicate canonical subtask operation identity: ${identity}`, ok: false }
+    }
+
+    identities.add(identity)
+    operations.push(operation)
+  }
+
+  return {
+    action: 'subtask_batch',
+    baseRevision: value.baseRevision as number,
+    contractVersion: 'task-v1',
+    operationId: operationId as string,
+    operations,
+    previewDigest: value.previewDigest,
+    previewExpiresAt: value.previewExpiresAt,
+    proposalId: proposalId as string,
+    proposalRevision: value.proposalRevision as number,
+    requestHash: value.requestHash,
+    taskId: taskId as string
+  }
+}
+
 function parseMutationPreviewArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
   const unsupported = hasUnsupportedKeys(parsed, SAFE_MUTATION_PREVIEW_KEYS, 'mutation-preview')
 
@@ -2668,13 +3046,41 @@ function parseMutationPreviewArtifact(parsed: Record<string, unknown>): HermesUi
     })
   }
 
-  const actions = parseSubmitActions(parsed.actions, 'actions', MAX_NEXT_BLOCK_ACTIONS, true)
+  const canonicalApproval = parseCanonicalSubtaskApproval(parsed.canonicalApproval)
+
+  if (isParseFailure(canonicalApproval)) {
+    return canonicalApproval
+  }
+
+  if (canonicalApproval && parsed.actions !== undefined) {
+    return { error: 'canonical mutation-preview actions are controlled by the renderer', ok: false }
+  }
+
+  if (canonicalApproval && changes.some(change => change.taskId !== canonicalApproval.taskId)) {
+    return { error: 'canonical mutation-preview changes must match taskId', ok: false }
+  }
+
+  const actions = parseSubmitActions(
+    parsed.actions,
+    'actions',
+    MAX_NEXT_BLOCK_ACTIONS,
+    canonicalApproval === undefined
+  )
 
   if (isParseFailure(actions)) {
     return actions
   }
 
-  return { artifact: { ...base.fields, actions: actions || [], changes, type: 'mutation-preview' }, ok: true }
+  return {
+    artifact: {
+      ...base.fields,
+      actions,
+      canonicalApproval,
+      changes,
+      type: 'mutation-preview'
+    },
+    ok: true
+  }
 }
 
 function parseUrgencyEnergyMatrixArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
@@ -3299,6 +3705,13 @@ export function buildHermesUiFormResponse(
 }
 
 export function stableArtifactStorageKey(artifact: HermesUiArtifact): string {
+  if (artifact.type === 'task-breakdown') {
+    const proposalIdentity = normalizeIdentity(artifact.proposalId) || stableHash(artifact.proposalId)
+    const taskIdentity = normalizeIdentity(artifact.task.id) || stableHash(artifact.task.id)
+
+    return `hermes-ui:task-breakdown:${taskIdentity}:${proposalIdentity}:r${artifact.proposalRevision}:b${artifact.task.baseRevision}`
+  }
+
   const identity = artifact.id ? normalizeIdentity(artifact.id) : ''
   const suffix = identity || stableHash(stableStringify(artifact))
 

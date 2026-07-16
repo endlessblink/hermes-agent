@@ -211,15 +211,18 @@ describe('parseHermesUiArtifact', () => {
       JSON.stringify({
         direction: 'rtl',
         id: 'launch-brief-breakdown',
+        proposalId: 'proposal-launch-brief',
+        proposalRevision: 3,
+        schemaVersion: 1,
         scope: 'working-session',
         steps: [
-          { doneEnough: 'יש רשימת קהלים', estimateMinutes: 15, id: 'audience', title: 'להגדיר קהל' },
-          { doneEnough: 'יש טיוטה מלאה אחת', id: 'draft', optional: true, title: 'לכתוב טיוטה' }
+          { doneEnough: 'יש רשימת קהלים', estimateMinutes: 15, subtaskId: 'audience', title: 'להגדיר קהל' },
+          { clientId: 'draft', doneEnough: 'יש טיוטה מלאה אחת', optional: true, title: 'לכתוב טיוטה' }
         ],
         stoppingRule: 'לעצור אחרי טיוטה שניתנת למשוב',
         submitLabel: 'להתחיל בצעד הראשון',
         targetOutcome: 'בריף שאפשר להעביר לעיצוב',
-        task: { id: 'task-42', title: 'להכין\u0000 בריף השקה' },
+        task: { baseRevision: 7, id: 'task-42', title: 'להכין\u0000 בריף השקה' },
         title: 'פירוק למשימת עבודה',
         type: 'task-breakdown'
       })
@@ -228,14 +231,19 @@ describe('parseHermesUiArtifact', () => {
     expect(result.ok).toBe(true)
     expect(result.ok && result.artifact.type === 'task-breakdown' && result.artifact.task.title).toBe('להכין בריף השקה')
     expect(result.ok && result.artifact.type === 'task-breakdown' && result.artifact.steps[0]?.estimateMinutes).toBe(15)
-    expect(result.ok && stableArtifactStorageKey(result.artifact)).toBe('hermes-ui:task-breakdown:launch-brief-breakdown')
+    expect(result.ok && result.artifact.type === 'task-breakdown' && result.artifact.steps[0]?.subtaskId).toBe('audience')
+    expect(result.ok && result.artifact.type === 'task-breakdown' && result.artifact.steps[1]?.clientId).toBe('draft')
+    expect(result.ok && stableArtifactStorageKey(result.artifact)).toBe('hermes-ui:task-breakdown:task-42:proposal-launch-brief:r3:b7')
   })
 
-  it('rejects unsupported task-breakdown keys and duplicate step ids', () => {
+  it('rejects unsupported task-breakdown keys and invalid or duplicate step identities', () => {
     const validBreakdown = {
+      proposalId: 'proposal-1',
+      proposalRevision: 1,
+      schemaVersion: 1,
       scope: 'next-move',
-      steps: [{ doneEnough: 'The first move is complete', id: 'first', title: 'Start' }],
-      task: { id: 'task-1', title: 'Large task' },
+      steps: [{ clientId: 'first', doneEnough: 'The first move is complete', title: 'Start' }],
+      task: { baseRevision: 4, id: 'task-1', title: 'Large task' },
       type: 'task-breakdown'
     }
 
@@ -244,44 +252,61 @@ describe('parseHermesUiArtifact', () => {
       ok: false
     })
     expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, task: { ...validBreakdown.task, href: 'javascript:alert(1)' } })).ok).toBe(false)
-    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ command: 'rm', doneEnough: 'Done', id: 'first', title: 'A' }] })).ok).toBe(false)
-    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ doneEnough: 'Done A', id: 'same', title: 'A' }, { doneEnough: 'Done B', id: 'same', title: 'B' }] }))).toEqual({
-      error: 'Duplicate step id: same',
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ clientId: 'first', command: 'rm', doneEnough: 'Done', title: 'A' }] })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ clientId: 'same', doneEnough: 'Done A', title: 'A' }, { clientId: 'same', doneEnough: 'Done B', title: 'B' }] }))).toEqual({
+      error: 'Duplicate step identity: clientId:same',
       ok: false
     })
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ clientId: 'new', doneEnough: 'Done', subtaskId: 'existing', title: 'A' }] }))).toEqual({
+      error: 'steps[0] must contain exactly one of subtaskId or clientId',
+      ok: false
+    })
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ doneEnough: 'Done', title: 'A' }] }))).toEqual({
+      error: 'steps[0] must contain exactly one of subtaskId or clientId',
+      ok: false
+    })
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ doneEnough: 'Done', subtaskId: 's'.repeat(256), title: 'A' }] })).ok).toBe(true)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ doneEnough: 'Done', subtaskId: 's'.repeat(257), title: 'A' }] })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...validBreakdown, steps: [{ clientId: 'c'.repeat(161), doneEnough: 'Done', title: 'A' }] })).ok).toBe(false)
   })
 
-  it('enforces task-breakdown scope, step count, and estimate bounds', () => {
+  it('enforces task-breakdown envelope, scope, step count, and estimate bounds', () => {
     const artifact = {
+      proposalId: 'proposal-1',
+      proposalRevision: 2,
+      schemaVersion: 1,
       scope: 'full-delivery',
-      steps: [{ doneEnough: 'The first move is complete', estimateMinutes: 480, id: 'first', title: 'Start' }],
-      task: { id: 'task-1', title: 'Large task' },
+      steps: [{ clientId: 'first', doneEnough: 'The first move is complete', estimateMinutes: 480, title: 'Start' }],
+      task: { baseRevision: 9, id: 'task-1', title: 'Large task' },
       type: 'task-breakdown'
     }
 
     expect(parseHermesUiArtifact(JSON.stringify(artifact)).ok).toBe(true)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, schemaVersion: 2 })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, proposalRevision: 0 })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, task: { ...artifact.task, baseRevision: 0 } })).ok).toBe(false)
     expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, scope: 'finish-everything' })).ok).toBe(false)
     expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [] })).ok).toBe(false)
-    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: Array.from({ length: 13 }, (_, index) => ({ doneEnough: 'Done', id: `s-${index}`, title: 'Step' })) })).ok).toBe(false)
-    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [{ doneEnough: 'Done', estimateMinutes: 481, id: 'first', title: 'Start' }] }))).toEqual({
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: Array.from({ length: 13 }, (_, index) => ({ clientId: `s-${index}`, doneEnough: 'Done', title: 'Step' })) })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [{ clientId: 'first', doneEnough: 'Done', estimateMinutes: 481, title: 'Start' }] }))).toEqual({
       error: 'steps[0].estimateMinutes must be an integer from 1 to 480',
       ok: false
     })
-    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [{ id: 'first', title: 'Start' }] }))).toEqual({
+    expect(parseHermesUiArtifact(JSON.stringify({ ...artifact, steps: [{ clientId: 'first', title: 'Start' }] }))).toEqual({
       error: 'steps[0].doneEnough is required',
       ok: false
     })
   })
 
   it('accepts bounded incomplete draft steps but rejects oversized or unsafe drafts', () => {
-    expect(parseHermesUiTaskBreakdownDraftSteps([{ doneEnough: '', id: 'draft-1', title: '' }])).toEqual([
-      { doneEnough: '', estimateMinutes: undefined, id: 'draft-1', optional: undefined, title: '' }
+    expect(parseHermesUiTaskBreakdownDraftSteps([{ clientId: 'draft-1', doneEnough: '', title: '' }])).toEqual([
+      { clientId: 'draft-1', doneEnough: '', estimateMinutes: undefined, optional: undefined, subtaskId: undefined, title: '' }
     ])
     expect(parseHermesUiTaskBreakdownDraftSteps([
-      { doneEnough: 'Done', id: 'draft-1', title: 'x'.repeat(801) }
+      { clientId: 'draft-1', doneEnough: 'Done', title: 'x'.repeat(501) }
     ])).toBeNull()
     expect(parseHermesUiTaskBreakdownDraftSteps([
-      { command: 'unsafe', doneEnough: 'Done', id: 'draft-1', title: 'Start' }
+      { clientId: 'draft-1', command: 'unsafe', doneEnough: 'Done', title: 'Start' }
     ])).toBeNull()
   })
 
@@ -831,6 +856,97 @@ describe('parseHermesUiArtifact', () => {
 
     expect(result.ok).toBe(true)
     expect(result.ok && result.artifact.type === 'mutation-preview' && result.artifact.actions).toHaveLength(3)
+  })
+
+  it('parses an exact FlowState subtask approval without model-authored actions', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        canonicalApproval: {
+          action: 'subtask_batch',
+          baseRevision: 7,
+          contractVersion: 'task-v1',
+          operationId: 'breakdown:proposal-1:r3',
+          operations: [
+            {
+              clientId: 'draft',
+              doneEnough: 'A reviewable draft exists',
+              estimateMinutes: 20,
+              kind: 'create',
+              order: 0,
+              title: 'Draft the outline'
+            },
+            { kind: 'delete', subtaskId: 'obsolete' }
+          ],
+          previewDigest: 'a'.repeat(64),
+          previewExpiresAt: '2099-07-16T10:00:00.000Z',
+          proposalId: 'proposal-1',
+          proposalRevision: 3,
+          requestHash: 'b'.repeat(64),
+          taskId: 'task-1'
+        },
+        changes: [
+          {
+            after: { steps: 1 },
+            before: { steps: 1 },
+            operation: 'update',
+            taskId: 'task-1',
+            title: 'Prepare launch'
+          }
+        ],
+        title: 'Approve exact breakdown',
+        type: 'mutation-preview'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(
+      result.ok &&
+      result.artifact.type === 'mutation-preview' &&
+      result.artifact.canonicalApproval?.operations[0]
+    ).toMatchObject({ clientId: 'draft', kind: 'create', order: 0 })
+  })
+
+  it('fails closed on malformed, changed, or ambiguously actionable canonical approvals', () => {
+    const canonicalApproval = {
+      action: 'subtask_batch',
+      baseRevision: 7,
+      contractVersion: 'task-v1',
+      operationId: 'breakdown:proposal-1:r3',
+      operations: [{ clientId: 'draft', kind: 'create', order: 0, title: 'Draft' }],
+      previewDigest: 'a'.repeat(64),
+      previewExpiresAt: '2099-07-16T10:00:00.000Z',
+      proposalId: 'proposal-1',
+      proposalRevision: 3,
+      requestHash: 'b'.repeat(64),
+      taskId: 'task-1'
+    }
+
+    const artifact = {
+      canonicalApproval,
+      changes: [{ operation: 'update', taskId: 'task-1', title: 'Prepare launch' }],
+      type: 'mutation-preview'
+    }
+
+    expect(parseHermesUiArtifact(JSON.stringify(artifact)).ok).toBe(true)
+    expect(parseHermesUiArtifact(JSON.stringify({
+      ...artifact,
+      actions: [{ id: 'approve', label: 'Approve', submitText: 'Trust me' }]
+    })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({
+      ...artifact,
+      canonicalApproval: { ...canonicalApproval, requestHash: 'not-a-digest' }
+    })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({
+      ...artifact,
+      canonicalApproval: {
+        ...canonicalApproval,
+        operations: [{ clientId: 'draft', kind: 'create', subtaskId: 'existing', title: 'Draft' }]
+      }
+    })).ok).toBe(false)
+    expect(parseHermesUiArtifact(JSON.stringify({
+      ...artifact,
+      canonicalApproval: { ...canonicalApproval, proposalRevision: 0 }
+    })).ok).toBe(false)
   })
 
   it('parses an urgency-energy-matrix artifact', () => {

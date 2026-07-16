@@ -170,6 +170,12 @@ class TestDesktopQuestionnaireGuidance:
         assert "regenerate the preview" in stable
         assert "exact preview" in stable
         assert "flowstate_subtask_batch" in stable
+        assert "approvalRequest" in stable
+        assert "canonicalApproval" in stable
+        assert "fresh `flowstate_list_subtasks`" in stable
+        assert "stale_revision" in stable
+        assert "invalid_existing_subtasks" in stable
+        assert "Editing is never approval" in stable
         assert "closest supported `hermes-ui` artifact" in stable
         assert "Use `task-table` for task lists" in stable
         assert "Do not merely offer or promise" in stable
