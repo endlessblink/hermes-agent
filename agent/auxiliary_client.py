@@ -1943,7 +1943,7 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
-        _mark_provider_unhealthy("openrouter", ttl=60)
+        _mark_provider_unhealthy("openrouter", ttl=60, reason="not configured — no API key")
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
     return _create_openai_client(api_key=or_key, base_url=OPENROUTER_BASE_URL,
@@ -1975,7 +1975,7 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
                 "Auxiliary: skipping Nous Portal (rate-limited, resets in %.0fs)",
                 _remaining,
             )
-            _mark_provider_unhealthy("nous", ttl=_remaining)
+            _mark_provider_unhealthy("nous", ttl=_remaining, reason="rate-limited")
             return None, None
     except Exception:
         pass
@@ -1987,7 +1987,7 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
             "Auxiliary Nous client unavailable: no Nous authentication found "
             "(run: hermes auth)."
         )
-        _mark_provider_unhealthy("nous", ttl=60)
+        _mark_provider_unhealthy("nous", ttl=60, reason="not configured — no authentication")
         return None, None
     if runtime is None and nous:
         logger.debug(
@@ -2035,7 +2035,7 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
                 "Auxiliary Nous client unavailable: no usable inference JWT found "
                 "(run: hermes auth add nous)."
             )
-            _mark_provider_unhealthy("nous", ttl=60)
+            _mark_provider_unhealthy("nous", ttl=60, reason="not configured — no inference JWT")
             return None, None
         base_url = str((nous or {}).get("inference_base_url") or _nous_base_url()).rstrip("/")
     return (
@@ -2138,6 +2138,17 @@ def _read_main_provider() -> str:
             provider = model_cfg.get("provider", "")
             if isinstance(provider, str) and provider.strip():
                 return provider.strip().lower()
+    except Exception:
+        pass
+    # Scalar ``model: <slug>`` configs (and dict configs without a
+    # ``provider`` key) name no provider, which used to silently skip
+    # Step 1 of the aux auto-detect chain.  The active auth provider is
+    # the main provider in every such setup, so use it.
+    try:
+        from hermes_cli.auth import get_active_provider
+        active = get_active_provider()
+        if isinstance(active, str) and active.strip():
+            return active.strip().lower()
     except Exception:
         pass
     return ""
@@ -2764,10 +2775,17 @@ def _normalize_chain_label(provider: str) -> str:
     return _AUX_UNHEALTHY_LABEL_ALIASES.get(p, p)
 
 
-def _mark_provider_unhealthy(provider: str, ttl: Optional[float] = None) -> None:
-    """Mark ``provider`` as recently-402'd, hidden from chain iteration
-    until the TTL expires. Called from the payment-fallback branches in
-    ``call_llm`` and ``acall_llm`` after a confirmed payment error.
+def _mark_provider_unhealthy(
+    provider: str,
+    ttl: Optional[float] = None,
+    reason: str = "payment / credit error",
+) -> None:
+    """Mark ``provider`` as unhealthy, hidden from chain iteration until
+    the TTL expires. Called from the payment-fallback branches in
+    ``call_llm`` and ``acall_llm`` after a confirmed payment error, and
+    from client-unavailable paths (pass an honest ``reason`` there —
+    labeling an unconfigured provider "payment / credit error" sends
+    debugging down the wrong path).
     """
     label = _normalize_chain_label(provider)
     if not label:
@@ -2775,10 +2793,11 @@ def _mark_provider_unhealthy(provider: str, ttl: Optional[float] = None) -> None
     expires_at = time.time() + (ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS)
     _aux_unhealthy_until[label] = expires_at
     logger.warning(
-        "Auxiliary: marking %s unhealthy for %ds (payment / credit error). "
+        "Auxiliary: marking %s unhealthy for %ds (%s). "
         "Subsequent auxiliary calls will skip it until %s.",
         label,
         int(ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS),
+        reason,
         time.strftime("%H:%M:%S", time.localtime(expires_at)),
     )
 
@@ -4012,6 +4031,7 @@ def _try_main_fallback_chain(
     task: Optional[str],
     failed_provider: str = "",
     reason: str = "error",
+    main_tried: bool = True,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Try the top-level main-agent fallback chain for an auxiliary call.
 
@@ -4035,7 +4055,16 @@ def _try_main_fallback_chain(
 
     failed_norm = (failed_provider or "").strip().lower()
     main_norm = (_read_main_provider() or "").strip().lower()
-    skip = {p for p in (failed_norm, main_norm, "auto") if p}
+    # Skip entries matching the main provider only when Step 1 actually
+    # attempted (and failed) a resolution against it.  When Step 1 never
+    # ran — no main model/provider configured, or the provider was in the
+    # unhealthy cache — a fallback entry naming the same provider (often
+    # with a different model) is the user's declared next step, not a
+    # doomed retry.  Unconditional skipping stranded all-codex setups
+    # whose every fallback entry shares the main provider.
+    skip = {p for p in (failed_norm, "auto") if p}
+    if main_tried and main_norm:
+        skip.add(main_norm)
     tried: List[str] = []
     min_ctx = _task_minimum_context_length(task)
 
@@ -4207,6 +4236,7 @@ def _resolve_auto(
         except Exception:
             logger.debug("MoA aux resolution to aggregator failed", exc_info=True)
 
+    main_step_tried = False
     if (main_provider and main_model
             and main_provider not in {"auto", ""}):
         resolved_provider = main_provider
@@ -4230,6 +4260,7 @@ def _resolve_auto(
         if main_chain_label and _is_provider_unhealthy(main_chain_label):
             _log_skip_unhealthy(main_chain_label)
         else:
+            main_step_tried = True
             client, resolved = resolve_provider_client(
                 resolved_provider,
                 main_model,
@@ -4253,7 +4284,8 @@ def _resolve_auto(
         if fb_client is not None:
             return fb_client, fb_model
     fb_client, fb_model, _fb_label = _try_main_fallback_chain(
-        task, main_provider or "auto", reason="main provider unavailable")
+        task, main_provider or "auto", reason="main provider unavailable",
+        main_tried=main_step_tried)
     if fb_client is not None:
         return fb_client, fb_model
 
@@ -4273,10 +4305,15 @@ def _resolve_auto(
                 logger.info("Auxiliary auto-detect: using %s (%s)", label, model or "default")
             return client, model
         tried.append(label)
+    _remedy = (
+        "Check the main provider login (hermes auth) and per-task pinning "
+        "(auxiliary.<task>.provider/model in config.yaml)."
+        if _normalize_chain_label(main_provider) == "openai-codex"
+        else "Set OPENROUTER_API_KEY or configure a local model in config.yaml."
+    )
     logger.warning("Auxiliary auto-detect: no provider available (tried: %s). "
-                   "Compression, summarization, and memory flush will not work. "
-                   "Set OPENROUTER_API_KEY or configure a local model in config.yaml.",
-                   ", ".join(tried))
+                   "Compression, summarization, and memory flush will not work. %s",
+                   ", ".join(tried), _remedy)
     return None, None
 
 
