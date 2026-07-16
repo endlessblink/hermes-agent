@@ -263,10 +263,13 @@ def test_desktop_large_context_keeps_codex_floor():
     assert openai_codex_stale_timeout_floor(est) >= timeout
 
 
-def test_desktop_small_context_keeps_snappy_cap():
+def test_desktop_small_context_gets_180s_floor():
+    # The old 60s "snappy cap" killed healthy Codex calls: real desktop
+    # payloads exceed 60s of admission/prefill even when est_tokens is
+    # small (2026-07-14/15: 8+ consecutive 60s timeouts on one turn).
     from agent.chat_completion_helpers import effective_openai_codex_stale_timeout
     timeout = effective_openai_codex_stale_timeout(_stub_agent("desktop"), 90.0, 5_000)
-    assert timeout == 60.0
+    assert timeout == 180.0
 
 
 def test_cli_large_context_floor_unchanged():

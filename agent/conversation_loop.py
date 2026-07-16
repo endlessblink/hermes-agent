@@ -1424,11 +1424,19 @@ def run_conversation(
                         next_api_kwargs = dict(next_api_kwargs)
                         for key in ("tools", "tool_choice", "parallel_tool_calls"):
                             next_api_kwargs.pop(key, None)
-                    if post_compaction_probe_pending and (
-                        agent.api_mode == "codex_responses" or not _use_streaming
-                    ):
+                    if post_compaction_probe_pending and not _use_streaming:
+                        # Bound only genuinely non-streaming probes. The old
+                        # ``api_mode == "codex_responses"`` disjunct forced a
+                        # 30s ceiling onto codex turns regardless of path —
+                        # a real post-compaction turn died at exactly 30s
+                        # (request dump 20260715_143021) because the first
+                        # response after compaction re-prefills the whole
+                        # compacted context and legitimately takes longer,
+                        # not shorter, than a normal turn. 120s keeps the
+                        # probe snappier than the 180s desktop floor while
+                        # surviving the post-compaction prefill.
                         next_api_kwargs = dict(next_api_kwargs)
-                        next_api_kwargs["__hermes_stale_timeout_seconds"] = 30.0
+                        next_api_kwargs["__hermes_stale_timeout_seconds"] = 120.0
                         post_compaction_probe_pending = False
                     if _use_streaming:
                         return agent._interruptible_streaming_api_call(

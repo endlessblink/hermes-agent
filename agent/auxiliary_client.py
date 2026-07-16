@@ -2790,7 +2790,20 @@ def _mark_provider_unhealthy(
     label = _normalize_chain_label(provider)
     if not label:
         return
-    expires_at = time.time() + (ttl if ttl is not None else _AUX_UNHEALTHY_TTL_SECONDS)
+    if ttl is None:
+        ttl = _AUX_UNHEALTHY_TTL_SECONDS
+        # Marking the user's MAIN provider unhealthy for the full TTL is a
+        # self-inflicted blackout on single-provider setups (e.g. codex-only
+        # ChatGPT OAuth): every aux consumer — compression, summarization,
+        # memory flush — skips the only backend that exists. Quota/credit
+        # blips on OAuth backends are transient bursts, not billing states,
+        # so bound the main provider's cooldown to one minute.
+        try:
+            if label == _normalize_chain_label(_read_main_provider()):
+                ttl = min(ttl, 60.0)
+        except Exception:
+            pass
+    expires_at = time.time() + ttl
     _aux_unhealthy_until[label] = expires_at
     logger.warning(
         "Auxiliary: marking %s unhealthy for %ds (%s). "

@@ -165,14 +165,17 @@ def effective_openai_codex_stale_timeout(
     floor = openai_codex_stale_timeout_floor(est_tokens)
     timeout = max(computed_timeout, floor)
     if str(getattr(agent, "platform", "") or "").strip().lower() == "desktop":
-        # The snappy 60s cap is only safe below the context floor. At
-        # gateway-scale payloads (tools + instructions alone are ~34k tokens)
-        # Codex admission/prefill legitimately exceeds 60s, so capping under
-        # the floor killed healthy calls at exactly 60s, twice, and failed the
-        # turn. Allow the floor up to one minute under the desktop UI stream
-        # watchdog (8 minutes, apps/desktop session.ts) so a retry or typed
-        # error still lands before the UI declares the session stuck.
-        return min(timeout, max(60.0, min(floor, _DESKTOP_UI_WATCHDOG_SECONDS - 60.0)))
+        # Bound desktop turns under the UI stream watchdog (8 minutes,
+        # apps/desktop session.ts) so a retry or typed error still lands
+        # before the UI declares the session stuck — but never below 180s.
+        # The previous 60s minimum killed healthy calls: Codex
+        # admission/prefill on real conversation payloads (observed
+        # 107-227KB request bodies) routinely exceeds 60s even when
+        # est_tokens lands under the 10k context-floor threshold, which
+        # produced chains of 8+ consecutive 60s timeouts on the same turn
+        # (2026-07-14/15 request dumps) instead of one slower success.
+        desktop_cap = max(180.0, min(floor, _DESKTOP_UI_WATCHDOG_SECONDS - 60.0))
+        return min(max(timeout, 180.0), desktop_cap)
     return timeout
 
 
