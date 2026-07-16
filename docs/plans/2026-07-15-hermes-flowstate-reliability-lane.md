@@ -30,7 +30,7 @@ The lane is complete only when the public artifact, installed bytes, live proces
 - Task create/delete, work-block scheduling, subtask mutation, timer control, projects/groups/lanes, and Canvas operations do not yet share one canonical receipt contract.
 - Search and filtered list are capped samples; only inventory may claim completeness.
 - Monitor production still reads a 25-row sample and lacks canonical operation/source identity for causal suppression.
-- General Notion create/property/status/archive writes are not exposed; activation is intentionally separate.
+- General Notion create/property/status/archive writes now exist in the standalone bridge with activation kept separate, but profile installation and disposable-page live proof remain open.
 - Packaged auth recovery and release/install/live truth remain open proof boundaries.
 - The live watchdog now rejects defunct FlowState processes and restores the desktop launcher/X authority, but a desktop session whose X server cannot create renderer windows must be reported as a distinct runtime failure, not as a healthy app.
 
@@ -447,17 +447,19 @@ Commit: `fix(assistant): make monitor delivery complete and causal`
 ### Task H9: Expose a writable, user-directed Notion bridge
 
 **Files:**
-- Create: Hermes `tools/notion_task_tool.py`
-- Create: Hermes `tests/tools/test_notion_task_tool.py`
-- Modify: Hermes `model_tools.py`
+- Modify: Hermes `integrations/notion_flowstate_bridge/bridge.py`
+- Modify: Hermes `integrations/notion_flowstate_bridge/__init__.py`
+- Modify: Hermes `integrations/notion_flowstate_bridge/README.md`
+- Modify: Hermes `tests/integrations/test_notion_flowstate_bridge.py`
+- Create: Hermes `tests/hermes_cli/test_notion_flowstate_bridge_plugin_runtime.py`
 - Modify: FlowState `server/local-api/notion-activation.cjs`
 - Test: FlowState `tests/unit/local-api/notion-activation.test.ts`
 
-- [ ] **Step 1: Separate Notion mutation from FlowState activation**
+- [x] **Step 1: Separate Notion mutation from FlowState activation**
 
 Notion remains source of truth for Bina project tasks. Reads, create, property/status updates, and archive are Notion commands. FlowState activation is a separate explicit preview/apply command with stable page provenance.
 
-- [ ] **Step 2: Define exact writable operations**
+- [x] **Step 2: Define exact writable operations**
 
 ```python
 NOTION_ACTIONS = {"create_task", "update_properties", "set_status", "archive_task"}
@@ -465,13 +467,13 @@ NOTION_ACTIONS = {"create_task", "update_properties", "set_status", "archive_tas
 
 Every preview binds database ID, page ID when present, exact property schema/types, normalized changes, expected `last_edited_time`, request ID, and expiry. Apply verifies Notion read-back and records a durable redacted receipt; schema drift, altered replay, response loss, and optimistic-version conflicts are typed.
 
-- [ ] **Step 3: Expose existing canonical activation to Hermes**
+- [x] **Step 3: Expose existing canonical activation to Hermes**
 
 Register preview/apply activation with strict receipt hash validation. It may create at most one active FlowState task per user/source/page and may add only the exact approved personal work block.
 
 - [ ] **Step 4: Verify with disposable pages only and commit**
 
-Run: `python -m pytest -q tests/tools/test_notion_task_tool.py && npm test -- tests/unit/local-api/notion-activation.test.ts`
+Run Hermes through the canonical wrapper: `scripts/run_tests.sh tests/integrations/test_notion_flowstate_bridge.py tests/hermes_cli/test_notion_flowstate_bridge_plugin_runtime.py -q`. Re-run the existing FlowState activation contract before live proof.
 
 Commit: `feat(notion): add verified user-directed task writes`
 

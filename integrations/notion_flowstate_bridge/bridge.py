@@ -24,6 +24,21 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_OUTPUT_BYTES = 256 * 1024
 MAX_IDENTIFIER = 256
 MAX_OPERATION_ID = 200
+SUPPORTED_NOTION_PROPERTY_TYPES = {
+    "title",
+    "rich_text",
+    "number",
+    "select",
+    "multi_select",
+    "status",
+    "date",
+    "people",
+    "checkbox",
+    "url",
+    "email",
+    "phone_number",
+    "relation",
+}
 
 
 class BridgeError(RuntimeError):
@@ -43,7 +58,7 @@ class BridgeConfig:
     state_path: Path
     flowstate_token: str = field(default="", repr=False)
     notion_base_url: str = "https://api.notion.com/v1"
-    notion_version: str = "2025-09-03"
+    notion_version: str = "2026-03-11"
     preview_ttl_seconds: int = 900
     timeout_seconds: float = 15.0
 
@@ -240,6 +255,32 @@ class ReceiptStore:
             raise BridgeError("preview_expired", "The approved preview has expired")
         return row
 
+    def resolve_preview(
+        self,
+        operation_id: str,
+        kind: str,
+        intent: dict[str, Any],
+        preview_digest: str,
+    ) -> tuple[sqlite3.Row, dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM previews WHERE operation_id=? AND kind=?",
+                (operation_id, kind),
+            ).fetchone()
+        if row is None:
+            raise BridgeError("preview_required", "A matching preview is required before apply")
+        if row["preview_digest"] != preview_digest:
+            raise BridgeError("preview_mismatch", "Apply input does not match the approved preview")
+        try:
+            request = json.loads(row["request_json"])
+        except (TypeError, json.JSONDecodeError):
+            raise BridgeError("invalid_state", "Stored preview is invalid") from None
+        if not isinstance(request, dict) or request.get("intent_digest") != _digest(intent):
+            raise BridgeError("preview_mismatch", "Apply input does not match the approved preview")
+        if row["request_digest"] != _digest(request):
+            raise BridgeError("invalid_state", "Stored preview failed its integrity check")
+        return row, request
+
     def has_stale_claim(
         self, operation_id: str, kind: str, request: dict[str, Any], now: float
     ) -> bool:
@@ -396,16 +437,63 @@ class Bridge:
     def read_page(self, args: dict[str, Any]) -> dict[str, Any]:
         page_id = _required_text(args.get("page_id"), "page_id")
         page = self._notion("GET", f"/pages/{urllib.parse.quote(page_id)}")
-        self._verify_page_source(page, self._data_source_id(args))
+        self._verify_page_identity(page, page_id, self._data_source_id(args))
         return {"page": page}
 
-    def _assert_idempotency_schema(self, data_source_id: str) -> None:
+    def _schema_binding(
+        self,
+        data_source_id: str,
+        properties: Mapping[str, Any],
+        *,
+        include_idempotency: bool = False,
+        validate_values: bool = True,
+    ) -> dict[str, Any]:
         schema = self._notion("GET", f"/data_sources/{urllib.parse.quote(data_source_id)}")
-        prop = (schema.get("properties") or {}).get(self.config.notion_idempotency_property)
-        if not isinstance(prop, dict) or prop.get("type") != "rich_text":
+        if schema.get("id") != data_source_id:
+            raise BridgeError("provenance_mismatch", "Notion returned a different data source")
+        available = schema.get("properties")
+        if not isinstance(available, dict):
+            raise BridgeError("invalid_schema", "Notion data source omitted its property schema")
+        names = set(properties)
+        if include_idempotency:
+            names.add(self.config.notion_idempotency_property)
+        binding: dict[str, Any] = {}
+        for name in sorted(names):
+            definition = available.get(name)
+            if not isinstance(definition, dict) or not isinstance(definition.get("type"), str):
+                raise BridgeError("invalid_schema", f"Notion property schema is missing for {name}")
+            binding[name] = definition
+        if include_idempotency and binding[self.config.notion_idempotency_property].get("type") != "rich_text":
             raise BridgeError(
                 "invalid_schema", "Configured Notion idempotency property must be rich_text"
             )
+        if validate_values:
+            for name, value in properties.items():
+                expected_type = binding[name]["type"]
+                if expected_type not in SUPPORTED_NOTION_PROPERTY_TYPES:
+                    raise BridgeError(
+                        "unsupported_property_type",
+                        f"Notion property {name} cannot be verified safely",
+                    )
+                if not isinstance(value, dict) or expected_type not in value:
+                    raise BridgeError(
+                        "invalid_property_type",
+                        f"Notion property {name} must use the configured {expected_type} type",
+                    )
+                if expected_type == "status":
+                    selected = value.get("status")
+                    selected_name = selected.get("name") if isinstance(selected, dict) else None
+                    status_schema = binding[name].get("status")
+                    options = status_schema.get("options") if isinstance(status_schema, dict) else None
+                    if isinstance(options, list) and selected_name not in {
+                        option.get("name") for option in options if isinstance(option, dict)
+                    }:
+                        raise BridgeError(
+                            "invalid_property_value",
+                            f"Notion status {selected_name!r} does not exist for {name}",
+                        )
+        _canonical(binding)
+        return binding
 
     def _create_matches(self, data_source_id: str, operation_id: str) -> list[dict[str, Any]]:
         result = self._notion(
@@ -450,15 +538,49 @@ class Bridge:
         if "multi_select" in value:
             selected = value.get("multi_select")
             if isinstance(selected, list):
-                return {"multi_select": [item.get("name") for item in selected if isinstance(item, dict)]}
+                return {
+                    "multi_select": sorted(
+                        item.get("name")
+                        for item in selected
+                        if isinstance(item, dict) and isinstance(item.get("name"), str)
+                    )
+                }
             return {"multi_select": selected}
         if "relation" in value:
             related = value.get("relation")
             if isinstance(related, list):
-                return {"relation": [item.get("id") for item in related if isinstance(item, dict)]}
+                return {
+                    "relation": sorted(
+                        item.get("id")
+                        for item in related
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)
+                    )
+                }
             return {"relation": related}
+        if "people" in value:
+            people = value.get("people")
+            if isinstance(people, list):
+                return {
+                    "people": sorted(
+                        item.get("id")
+                        for item in people
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)
+                    )
+                }
+            return {"people": people}
+        if "date" in value:
+            date = value.get("date")
+            if not isinstance(date, dict):
+                return {"date": date}
+            return {
+                "date": {
+                    "start": date.get("start"),
+                    "end": date.get("end"),
+                    "time_zone": date.get("time_zone"),
+                }
+            }
         for kind in (
-            "number", "date", "checkbox", "url", "email", "phone_number", "people", "files"
+            "number", "checkbox", "url", "email", "phone_number"
         ):
             if kind in value:
                 return {kind: value[kind]}
@@ -488,43 +610,138 @@ class Bridge:
         if actual != data_source_id:
             raise BridgeError("provenance_mismatch", "Notion page belongs to a different data source")
 
+    def _verify_page_identity(
+        self, page: Mapping[str, Any], page_id: str, data_source_id: str
+    ) -> None:
+        if page.get("id") != page_id:
+            raise BridgeError("provenance_mismatch", "Notion returned a different page")
+        self._verify_page_source(page, data_source_id)
+
     def _notion_request(self, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         operation_id = _required_text(args.get("operation_id"), "operation_id", MAX_OPERATION_ID)
-        action = args.get("action")
-        if action not in {"create", "property_update"}:
-            raise BridgeError("invalid_input", "action must be create or property_update")
-        properties = dict(_object(args.get("properties"), "properties"))
-        if not properties:
-            raise BridgeError("invalid_input", "properties must not be empty")
+        aliases = {"create": "create_task", "property_update": "update_properties"}
+        action = aliases.get(args.get("action"), args.get("action"))
+        if action not in {"create_task", "update_properties", "set_status", "archive_task"}:
+            raise BridgeError(
+                "invalid_input",
+                "action must be create_task, update_properties, set_status, or archive_task",
+            )
+        properties: dict[str, Any]
+        if action in {"create_task", "update_properties"}:
+            properties = dict(_object(args.get("properties"), "properties"))
+            if not properties:
+                raise BridgeError("invalid_input", "properties must not be empty")
+            if args.get("status_property") is not None or args.get("status_name") is not None:
+                raise BridgeError("invalid_input", "status fields are only valid for set_status")
+        elif action == "set_status":
+            if args.get("properties") is not None:
+                raise BridgeError("invalid_input", "properties are not valid for set_status")
+            status_property = _required_text(args.get("status_property"), "status_property")
+            status_name = _required_text(args.get("status_name"), "status_name")
+            properties = {status_property: {"status": {"name": status_name}}}
+        else:
+            if any(args.get(name) is not None for name in ("properties", "status_property", "status_name")):
+                raise BridgeError("invalid_input", "archive_task does not accept property changes")
+            properties = {}
         if set(properties) - set(self.config.notion_writable_properties):
             raise BridgeError("scope_violation", "Notion properties are outside the writable allowlist")
         data_source_id = self._data_source_id(args)
-        request: dict[str, Any] = {
+        intent: dict[str, Any] = {
             "operation_id": operation_id,
             "action": action,
             "data_source_id": data_source_id,
-            "properties": properties,
         }
-        if action == "property_update":
-            request["page_id"] = _required_text(args.get("page_id"), "page_id")
+        if properties:
+            intent["properties"] = properties
+        if action == "set_status":
+            intent["status_property"] = status_property
+            intent["status_name"] = status_name
+        if action != "create_task":
+            intent["page_id"] = _required_text(args.get("page_id"), "page_id")
         elif args.get("page_id"):
-            raise BridgeError("invalid_input", "page_id is not valid for create")
-        _canonical(request)
-        return operation_id, request
+            raise BridgeError("invalid_input", "page_id is not valid for create_task")
+        _canonical(intent)
+        return operation_id, intent
+
+    @staticmethod
+    def _last_edited_time(page: Mapping[str, Any]) -> str:
+        return _required_text(page.get("last_edited_time"), "Notion last_edited_time")
+
+    def _bind_notion_preview(self, intent: dict[str, Any]) -> dict[str, Any]:
+        action = intent["action"]
+        properties = intent.get("properties") or {}
+        binding = self._schema_binding(
+            intent["data_source_id"],
+            properties,
+            include_idempotency=action == "create_task",
+        )
+        request = {
+            **intent,
+            "intent_digest": _digest(intent),
+            "property_schema": binding,
+            "schema_digest": _digest(binding),
+            "normalized_changes": (
+                {"in_trash": True}
+                if action == "archive_task"
+                else self._property_projection(properties)
+            ),
+        }
+        if action != "create_task":
+            page = self._notion("GET", f"/pages/{urllib.parse.quote(intent['page_id'])}")
+            self._verify_page_identity(page, intent["page_id"], intent["data_source_id"])
+            request["expected_last_edited_time"] = self._last_edited_time(page)
+        return request
+
+    def _assert_schema_unchanged(self, request: Mapping[str, Any]) -> None:
+        binding = self._schema_binding(
+            request["data_source_id"],
+            request.get("properties") or {},
+            include_idempotency=request["action"] == "create_task",
+            validate_values=False,
+        )
+        if _digest(binding) != request.get("schema_digest") or binding != request.get("property_schema"):
+            raise BridgeError("schema_drift", "Notion property schema changed after approval")
+
+    def _mutation_matches(self, page: dict[str, Any], request: Mapping[str, Any]) -> bool:
+        if request["action"] == "archive_task":
+            return page.get("in_trash") is True
+        return self._properties_match(page, request.get("properties") or {})
+
+    def _verify_mutation(self, page: dict[str, Any], request: Mapping[str, Any]) -> None:
+        if not self._mutation_matches(page, request):
+            message = (
+                "Notion read-back did not confirm the page was archived"
+                if request["action"] == "archive_task"
+                else "Notion read-back did not match the requested properties"
+            )
+            raise BridgeError("verification_failed", message)
+
+    def _read_back_evidence(
+        self, page: dict[str, Any], request: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        evidence: dict[str, Any] = {
+            "page_id": page.get("id"),
+            "data_source_id": self._page_data_source(page),
+            "last_edited_time": self._last_edited_time(page),
+        }
+        if request["action"] == "archive_task":
+            evidence["in_trash"] = page.get("in_trash")
+        else:
+            actual = page.get("properties") or {}
+            evidence["properties"] = self._property_projection(
+                {name: actual.get(name) for name in request.get("properties") or {}}
+            )
+        return evidence
 
     def mutate_notion(self, args: dict[str, Any]) -> dict[str, Any]:
         mode = args.get("mode", "preview")
         if mode not in {"preview", "apply"}:
             raise BridgeError("invalid_input", "mode must be preview or apply")
-        operation_id, request = self._notion_request(args)
+        operation_id, intent = self._notion_request(args)
         kind = "notion_mutation"
         now = self.clock()
         if mode == "preview":
-            if request["action"] == "create":
-                self._assert_idempotency_schema(request["data_source_id"])
-            else:
-                target = self._notion("GET", f"/pages/{urllib.parse.quote(request['page_id'])}")
-                self._verify_page_source(target, request["data_source_id"])
+            request = self._bind_notion_preview(intent)
             expires_at = now + self.config.preview_ttl_seconds
             preview_digest = _digest(
                 {"kind": kind, "request": request, "expires_at": expires_at}
@@ -538,36 +755,49 @@ class Bridge:
                 "preview": request,
             }
         preview_digest = _required_text(args.get("preview_digest"), "preview_digest")
+        preview_row, request = self.store.resolve_preview(
+            operation_id, kind, intent, preview_digest
+        )
         duplicate = self.store.receipt(operation_id, kind, request)
         if duplicate is not None:
             return duplicate
         recovering = self.store.has_stale_claim(operation_id, kind, request, now)
-        preview_row = self.store.require_preview(
-            operation_id,
-            kind,
-            request,
-            preview_digest,
-            now,
-            allow_expired=recovering,
-        )
-        expired_recovery = float(preview_row["expires_at"]) <= now
+        preview_expired = float(preview_row["expires_at"]) <= now
+        if preview_expired and not recovering:
+            raise BridgeError("preview_expired", "The approved preview has expired")
         claimed = self.store.claim(operation_id, kind, request, now)
         if claimed is not None:
             return claimed
-        mutation_dispatched = False
+        # A stale claim means a previous network call may already have committed.
+        # Recovery is therefore read-only and must retain the claim until exact
+        # remote evidence settles it.
+        mutation_dispatched = recovering
         try:
-            if request["action"] == "create":
-                self._assert_idempotency_schema(request["data_source_id"])
+            schema_error: BridgeError | None = None
+            try:
+                self._assert_schema_unchanged(request)
+            except BridgeError as exc:
+                if not recovering or exc.code != "schema_drift":
+                    raise
+                schema_error = exc
+            already_satisfied = False
+            if request["action"] == "create_task":
                 properties = dict(request["properties"])
                 properties[self.config.notion_idempotency_property] = {
                     "rich_text": [{"type": "text", "text": {"content": operation_id}}]
                 }
                 matches = self._create_matches(request["data_source_id"], operation_id)
                 if matches:
+                    already_satisfied = True
                     page = matches[0]
                 else:
-                    if expired_recovery:
-                        raise BridgeError("preview_expired", "The approved preview has expired")
+                    if recovering:
+                        if schema_error is not None:
+                            raise schema_error
+                        raise BridgeError(
+                            "ambiguous_commit",
+                            "The earlier Notion create is still unverified; no retry was sent",
+                        )
                     try:
                         mutation_dispatched = True
                         page = self._notion(
@@ -588,24 +818,43 @@ class Bridge:
                         page = recovered[0]
                 page_id = _required_text(page.get("id"), "Notion page id")
                 readback = self._notion("GET", f"/pages/{urllib.parse.quote(page_id)}")
-                self._verify_page_source(readback, request["data_source_id"])
+                self._verify_page_identity(readback, page_id, request["data_source_id"])
                 self._verify_properties(readback, properties)
             else:
                 page_id = request["page_id"]
                 readback = self._notion("GET", f"/pages/{urllib.parse.quote(page_id)}")
-                self._verify_page_source(readback, request["data_source_id"])
-                if not self._properties_match(readback, request["properties"]):
-                    if expired_recovery:
-                        raise BridgeError("preview_expired", "The approved preview has expired")
-                    mutation_dispatched = True
-                    self._notion(
-                        "PATCH",
-                        f"/pages/{urllib.parse.quote(page_id)}",
-                        {"properties": request["properties"]},
+                self._verify_page_identity(readback, page_id, request["data_source_id"])
+                if recovering and self._mutation_matches(readback, request):
+                    already_satisfied = True
+                elif recovering:
+                    if schema_error is not None:
+                        raise schema_error
+                    raise BridgeError(
+                        "ambiguous_commit",
+                        "The earlier Notion update is still unverified; no retry was sent",
                     )
-                    readback = self._notion("GET", f"/pages/{urllib.parse.quote(page_id)}")
-                    self._verify_page_source(readback, request["data_source_id"])
-                self._verify_properties(readback, request["properties"])
+                else:
+                    if self._last_edited_time(readback) != request["expected_last_edited_time"]:
+                        raise BridgeError("version_conflict", "Notion page changed after approval")
+                    if self._mutation_matches(readback, request):
+                        already_satisfied = True
+                    else:
+                        mutation_dispatched = True
+                        payload = (
+                            {"in_trash": True}
+                            if request["action"] == "archive_task"
+                            else {"properties": request["properties"]}
+                        )
+                        self._notion(
+                            "PATCH",
+                            f"/pages/{urllib.parse.quote(page_id)}",
+                            payload,
+                        )
+                        readback = self._notion("GET", f"/pages/{urllib.parse.quote(page_id)}")
+                        self._verify_page_identity(readback, page_id, request["data_source_id"])
+                self._verify_mutation(readback, request)
+            evidence = self._read_back_evidence(readback, request)
+            verified_at = self.clock()
             receipt = {
                 "mode": "applied",
                 "operation_id": operation_id,
@@ -614,8 +863,16 @@ class Bridge:
                 "data_source_id": request["data_source_id"],
                 "verified": True,
                 "duplicate": False,
+                "already_satisfied": already_satisfied,
+                "schema_digest": request["schema_digest"],
+                "schema_verified": schema_error is None,
+                "request_hash": _digest(request),
+                "read_back_hash": _digest(evidence),
+                "expected_last_edited_time": request.get("expected_last_edited_time"),
+                "observed_last_edited_time": evidence["last_edited_time"],
+                "verified_at": datetime.fromtimestamp(verified_at, timezone.utc).isoformat(),
             }
-            return self.store.verify(operation_id, kind, request, page_id, receipt, self.clock())
+            return self.store.verify(operation_id, kind, request, page_id, receipt, verified_at)
         except Exception:
             if not mutation_dispatched:
                 self.store.abandon(operation_id, kind)
@@ -713,6 +970,7 @@ class Bridge:
             or receipt.get("operationId") != request["operationId"]
             or receipt.get("entityType") != "task"
             or receipt.get("action") != "activate"
+            or not isinstance(receipt.get("replayed"), bool)
             or not self._activation_provenance_matches(receipt.get("provenance"), notion)
             or not isinstance(canonical_revision, int)
             or isinstance(canonical_revision, bool)
