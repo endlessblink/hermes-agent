@@ -18,12 +18,14 @@ import { useI18n } from '@/i18n'
 import { $dismissedWorktreeIds, dismissWorktree } from '@/store/layout'
 import { notifyError } from '@/store/notifications'
 import { removeWorktreePath } from '@/store/projects'
+import { $workspacePresentation } from '@/store/workspace-presentation'
 
 import { SidebarRowStack } from '../chrome'
 
 import { useWorkspaceNodeOpen } from './model'
 import { SidebarWorkspaceGroup } from './workspace-group'
 import {
+  folderFirstSessions,
   mergeRepoWorktreeGroups,
   overlayRepoLanes,
   type SidebarProjectTree,
@@ -96,10 +98,14 @@ function RepoFlatSection({
   const s = t.sidebar
   const [open, toggleOpen] = useWorkspaceNodeOpen(repo.id)
   const dismissedWorktrees = useStore($dismissedWorktreeIds)
+  const folderFirst = useStore($workspacePresentation) === 'folders'
 
   // The repo's session lanes already come fully built from the backend; this
   // only injects empty VISUAL lanes from a live `git worktree list`.
-  const mergedGroups = useMemo(() => mergeRepoWorktreeGroups(repo, discoveredWorktrees), [repo, discoveredWorktrees])
+  const mergedGroups = useMemo(
+    () => (folderFirst ? repo.groups : mergeRepoWorktreeGroups(repo, discoveredWorktrees)),
+    [repo, discoveredWorktrees, folderFirst]
+  )
 
   // Optimistic placement runs against the MERGED lane set (backend + visual
   // git-worktree lanes) so out-of-tree/sibling worktrees — which exist as visual
@@ -112,8 +118,8 @@ function RepoFlatSection({
 
     const { groups } = overlayRepoLanes({ ...repo, groups: mergedGroups }, liveSessions ?? [], removedSessionIds)
 
-    return mergeRepoWorktreeGroups({ id: repo.id, path: repo.path, groups }, discoveredWorktrees)
-  }, [repo, mergedGroups, discoveredWorktrees, liveSessions, removedSessionIds])
+    return folderFirst ? groups : mergeRepoWorktreeGroups({ id: repo.id, path: repo.path, groups }, discoveredWorktrees)
+  }, [repo, mergedGroups, discoveredWorktrees, liveSessions, removedSessionIds, folderFirst])
 
   const discoveredWorktreePaths = useMemo(
     () =>
@@ -128,12 +134,17 @@ function RepoFlatSection({
   // Main lanes are always visible; linked worktrees can be user-dismissed.
   // A live `git worktree list` hit wins over an old dismissal: if git says the
   // worktree exists again (or still exists after "hide from sidebar"), surface it.
-  const ordered = overlaidGroups.filter(
-    group =>
-      group.isMain || !dismissedWorktrees.includes(group.id) || (group.path && discoveredWorktreePaths.has(group.path))
-  )
+  const ordered = folderFirst
+    ? overlaidGroups
+    : overlaidGroups.filter(
+        group =>
+          group.isMain ||
+          !dismissedWorktrees.includes(group.id) ||
+          (group.path && discoveredWorktreePaths.has(group.path))
+      )
 
-  const repoCount = ordered.reduce((sum, group) => sum + group.sessions.length, 0)
+  const flatSessions = useMemo(() => folderFirstSessions(ordered), [ordered])
+  const repoCount = folderFirst ? flatSessions.length : ordered.reduce((sum, group) => sum + group.sessions.length, 0)
 
   // Removal asks how: actually `git worktree remove` it, or just hide the lane
   // and leave the worktree on disk. A dirty worktree escalates to a force prompt
@@ -160,7 +171,9 @@ function RepoFlatSection({
     }
   }
 
-  const body = (
+  const body = folderFirst ? (
+    <>{renderRows(flatSessions)}</>
+  ) : (
     <>
       {ordered.map(group => (
         <SidebarWorkspaceGroup
@@ -247,7 +260,7 @@ function RepoFlatSection({
     return (
       <>
         {body}
-        {removeDialog}
+        {!folderFirst && removeDialog}
       </>
     )
   }
@@ -269,7 +282,7 @@ function RepoFlatSection({
         title={repo.path ?? undefined}
       />
       {open && <SidebarRowStack className="pl-2.5">{body}</SidebarRowStack>}
-      {removeDialog}
+      {!folderFirst && removeDialog}
     </SidebarRowStack>
   )
 }

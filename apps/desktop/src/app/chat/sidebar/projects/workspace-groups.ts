@@ -110,6 +110,28 @@ export function sessionsBesideProjectOverview(
 }
 
 /**
+ * Folder-first presentation keeps every chat but removes the intermediary Git
+ * lane model. A session can briefly appear in two lanes while optimistic and
+ * backend snapshots converge, so de-duplicate by id and preserve the normal
+ * newest-first chat order.
+ */
+export function folderFirstSessions(groups: SidebarSessionGroup[]): SessionInfo[] {
+  const sessionsById = new Map<string, SessionInfo>()
+
+  for (const group of groups) {
+    for (const session of group.sessions) {
+      const current = sessionsById.get(session.id)
+
+      if (!current || sessionRecency(session) > sessionRecency(current)) {
+        sessionsById.set(session.id, session)
+      }
+    }
+  }
+
+  return [...sessionsById.values()].sort((a, b) => sessionRecency(b) - sessionRecency(a))
+}
+
+/**
  * Runtime invariant for the Projects presentation. Return only a count so the
  * diagnostic boundary never needs chat titles, content, or identifiers.
  */

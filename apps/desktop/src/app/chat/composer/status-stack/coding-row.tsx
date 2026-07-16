@@ -29,6 +29,7 @@ import { gitRef } from '@/lib/sanitize'
 import { $repoStatus, $repoWorktrees } from '@/store/coding-status'
 import { notifyError } from '@/store/notifications'
 import { $newWorktreeRequest } from '@/store/projects'
+import { $workspacePresentation } from '@/store/workspace-presentation'
 
 // Tiny uppercase section header, matching the composer "+" menu's labels.
 const MENU_SECTION = 'text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-tertiary)'
@@ -86,6 +87,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
   const p = t.sidebar.projects
   const status = useStore($repoStatus)
   const worktrees = useStore($repoWorktrees)
+  const worktreeControls = useStore($workspacePresentation) === 'worktrees'
 
   const [branchOpen, setBranchOpen] = useState(false)
   const [branchName, setBranchName] = useState('')
@@ -165,7 +167,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
 
     lastWorktreeReqRef.current = worktreeReq
 
-    if (!onBranchOff) {
+    if (!onBranchOff || !worktreeControls) {
       return
     }
 
@@ -173,7 +175,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
     setBranchName('')
     setConvertMode(false)
     setBranchOpen(true)
-  }, [onBranchOff, worktreeReq])
+  }, [onBranchOff, worktreeReq, worktreeControls])
 
   const submitBranch = async () => {
     const branch = branchName.trim()
@@ -272,7 +274,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
               ALWAYS laid out; only its opacity flips on hover/focus/open, so
               revealing it never reflows the row (no layout shift). pointer-events
               follow opacity so the invisible trigger isn't clickable at rest. */}
-          {onBranchOff && (
+          {onBranchOff && worktreeControls && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -363,7 +365,10 @@ export const CodingStatusRow = memo(function CodingStatusRow({
         ) : null}
       </StatusRow>
 
-      <Dialog onOpenChange={open => !branchPending && setBranchOpen(open)} open={branchOpen}>
+      <Dialog
+        onOpenChange={open => !branchPending && setBranchOpen(open)}
+        open={worktreeControls && branchOpen}
+      >
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>{convertMode ? p.convertBranchTitle : p.newWorktreeTitle}</DialogTitle>

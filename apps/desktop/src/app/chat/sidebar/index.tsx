@@ -128,6 +128,7 @@ import {
   toggleFolderOpen,
   toggleFolderPinned
 } from '@/store/sidebar-folders'
+import { $workspacePresentation } from '@/store/workspace-presentation'
 
 import { ACTIVE_CHATS_ROUTE, type AppView, ARTIFACTS_ROUTE, MESSAGING_ROUTE, SKILLS_ROUTE } from '../../routes'
 import type { SidebarNavItem } from '../../types'
@@ -295,6 +296,7 @@ export function ChatSidebar({
   const contentVisible = sidebarOpen || overlayMounted
   const panesFlipped = useStore($panesFlipped)
   const agentsGrouped = useStore($sidebarAgentsGrouped)
+  const workspacePresentation = useStore($workspacePresentation)
   const pinnedSessionIds = useStore($pinnedSessionIds)
   const pinsOpen = useStore($sidebarPinsOpen)
   const agentsOpen = useStore($sidebarRecentsOpen)
@@ -737,8 +739,11 @@ export function ChatSidebar({
   )
 
   // git worktree list is a VISUAL-only enhancer (empty lanes); never membership.
-  const inEnteredProject = Boolean(enteredProject && !showAllProfiles)
-  const [scopedRepoWorktrees] = useRepoWorktreeMap(scopedRepoPaths, inEnteredProject)
+  const worktreePresentationActive = Boolean(
+    enteredProject && !showAllProfiles && workspacePresentation === 'worktrees'
+  )
+
+  const [scopedRepoWorktrees] = useRepoWorktreeMap(scopedRepoPaths, worktreePresentationActive)
 
   // Re-probe worktree lanes on out-of-band git changes the renderer can't see.
   // A turn can `git worktree add/remove` in the terminal (e.g. you ask Hermes to
@@ -756,13 +761,13 @@ export function ChatSidebar({
     // A session leaving the working set means its turn just completed.
     const aTurnSettled = prev.some(id => !workingSessionIds.includes(id))
 
-    if (inEnteredProject && aTurnSettled) {
+    if (worktreePresentationActive && aTurnSettled) {
       refreshWorktrees()
     }
-  }, [workingSessionIds, inEnteredProject])
+  }, [workingSessionIds, worktreePresentationActive])
 
   useEffect(() => {
-    if (!inEnteredProject) {
+    if (!worktreePresentationActive) {
       return
     }
 
@@ -770,7 +775,7 @@ export function ChatSidebar({
     window.addEventListener('focus', onFocus)
 
     return () => window.removeEventListener('focus', onFocus)
-  }, [inEnteredProject])
+  }, [worktreePresentationActive])
 
   const lastProjectCwdSyncRef = useRef<null | string>(null)
 

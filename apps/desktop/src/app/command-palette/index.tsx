@@ -59,6 +59,7 @@ import { openPetGenerate } from '@/store/pet-generate'
 import { requestStartWorkSession } from '@/store/projects'
 import { runGatewayRestart } from '@/store/system-actions'
 import { applyBackendUpdate } from '@/store/updates'
+import { $workspacePresentation } from '@/store/workspace-presentation'
 import { luminance } from '@/themes/color'
 import { type ThemeMode, useTheme } from '@/themes/context'
 import { isUserTheme, resolveTheme } from '@/themes/user-themes'
@@ -294,6 +295,7 @@ export function CommandPalette() {
   const pendingPage = useStore($commandPalettePage)
   const bindings = useStore($bindings)
   const worktrees = useStore($repoWorktrees)
+  const worktreeControls = useStore($workspacePresentation) === 'worktrees'
   const navigate = useNavigate()
   const { availableThemes, resolvedMode, setMode, setTheme, themeName } = useTheme()
   const [search, setSearch] = useState('')
@@ -377,7 +379,7 @@ export function CommandPalette() {
     // session anchored to that worktree's checkout (requestStartWorkSession),
     // so git is the source of truth and edits land in the right tree.
     const branchGroup: PaletteGroup[] =
-      worktrees.length > 0
+      worktreeControls && worktrees.length > 0
         ? [
             {
               heading: cc.branches,
@@ -561,7 +563,7 @@ export function CommandPalette() {
         ]
       }
     ]
-  }, [go, settingsSectionLabel, t, worktrees])
+  }, [go, settingsSectionLabel, t, worktreeControls, worktrees])
 
   // The long, granular lists (settings fields, API keys, MCP servers, archived
   // chats) only surface once the user types — otherwise they'd bury the

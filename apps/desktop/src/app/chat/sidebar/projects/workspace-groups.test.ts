@@ -5,6 +5,7 @@ import type { ProjectInfo, SessionInfo } from '@/types/hermes'
 
 import {
   baseName,
+  folderFirstSessions,
   hiddenLooseSessionCount,
   kanbanWorktreeDir,
   liveSessionProjectId,
@@ -55,6 +56,33 @@ describe('baseName', () => {
     expect(baseName('/www/hermes-agent/')).toBe('hermes-agent')
     expect(baseName('C:\\repos\\app')).toBe('app')
     expect(baseName('')).toBeUndefined()
+  })
+})
+
+describe('folderFirstSessions', () => {
+  it('keeps sessions from every worktree while removing the worktree lanes', () => {
+    const main = makeSession('/repo', { id: 'main', last_active: 10 })
+    const linked = makeSession('/repo-worktrees/feature', { id: 'linked', last_active: 30 })
+    const kanban = makeSession('/repo/.worktrees/t_aaaaaaaa', { id: 'kanban', last_active: 20 })
+
+    const groups = [
+      lane({ id: 'main-lane', label: 'main', isMain: true, sessions: [main] }),
+      lane({ id: 'feature-lane', label: 'feature', sessions: [linked, main] }),
+      lane({ id: 'kanban-lane', label: 'kanban', isKanban: true, sessions: [kanban] })
+    ]
+
+    expect(folderFirstSessions(groups).map(session => session.id)).toEqual(['linked', 'kanban', 'main'])
+  })
+
+  it('does not invent rows for empty worktrees', () => {
+    const session = makeSession('/repo', { id: 'only' })
+
+    expect(
+      folderFirstSessions([
+        lane({ id: 'main-lane', label: 'main', isMain: true, sessions: [session] }),
+        lane({ id: 'empty-worktree', label: 'empty' })
+      ])
+    ).toEqual([session])
   })
 })
 

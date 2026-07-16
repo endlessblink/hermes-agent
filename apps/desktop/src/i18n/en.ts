@@ -740,6 +740,12 @@ export const en: Translations = {
     },
     sessions: {
       loading: 'Loading archived sessions…',
+      workspaceOrganizationTitle: 'Workspace organization',
+      workspaceOrganizationLabel: 'Show sessions by',
+      workspaceOrganizationDesc:
+        'Folders keeps every chat under its project folder and hides Git worktree lanes and controls. Switching views never changes or deletes files.',
+      folders: 'Folders',
+      gitWorktrees: 'Git worktrees',
       archivedTitle: 'Archived sessions',
       archivedIntro:
         'Archived chats are hidden from the sidebar but keep all their messages. Ctrl/⌘-click a chat in the sidebar to archive it.',

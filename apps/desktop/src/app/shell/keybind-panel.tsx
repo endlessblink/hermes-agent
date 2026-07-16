@@ -28,12 +28,14 @@ import {
   resetAllBindings,
   resetBinding
 } from '@/store/keybinds'
+import { $workspacePresentation } from '@/store/workspace-presentation'
 
 // The full hotkey map. Quiet popover, click a row's chip to rebind.
 export function KeybindPanel() {
   const { t } = useI18n()
   const open = useStore($keybindPanelOpen)
   const bindings = useStore($bindings)
+  const worktreeControls = useStore($workspacePresentation) === 'worktrees'
   const k = t.keybinds
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
 
@@ -75,7 +77,10 @@ export function KeybindPanel() {
           <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
             {KEYBIND_CATEGORIES.map(category => {
               const actions = KEYBIND_ACTIONS.filter(
-                action => action.category === category && action.id !== KEYBIND_PANEL_ACTION
+                action =>
+                  action.category === category &&
+                  action.id !== KEYBIND_PANEL_ACTION &&
+                  (worktreeControls || action.id !== 'workspace.newWorktree')
               )
 
               const readonly = KEYBIND_READONLY.filter(shortcut => shortcut.category === category)

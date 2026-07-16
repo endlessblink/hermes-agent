@@ -42,6 +42,7 @@ import {
   switcherJustClosed
 } from '@/store/session-switcher'
 import { openNewSessionInNewWindow } from '@/store/windows'
+import { showWorktreeControls } from '@/store/workspace-presentation'
 import { useTheme } from '@/themes/context'
 
 import { requestComposerFocus, requestVoiceToggle } from '../chat/composer/focus'
@@ -146,7 +147,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     'session.togglePin': deps.toggleSelectedPin,
     // Only meaningful inside a git repo — a no-op otherwise (the key falls
     // through instead of silently doing nothing).
-    'workspace.newWorktree': () => $repoStatus.get() && requestNewWorktree(),
+    'workspace.newWorktree': () => $repoStatus.get() && showWorktreeControls() && requestNewWorktree(),
 
     'view.toggleSidebar': () => {
       if (matchesQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)) {

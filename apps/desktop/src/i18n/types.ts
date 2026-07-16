@@ -634,6 +634,11 @@ export interface Translations {
     }
     sessions: {
       loading: string
+      workspaceOrganizationTitle: string
+      workspaceOrganizationLabel: string
+      workspaceOrganizationDesc: string
+      folders: string
+      gitWorktrees: string
       archivedTitle: string
       archivedIntro: string
       emptyArchivedTitle: string

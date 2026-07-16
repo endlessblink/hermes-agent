@@ -926,6 +926,11 @@ export const zh: Translations = {
     },
     sessions: {
       loading: '正在加载已归档会话…',
+      workspaceOrganizationTitle: '工作区组织方式',
+      workspaceOrganizationLabel: '会话显示方式',
+      workspaceOrganizationDesc: '“文件夹”会保留项目文件夹下的所有对话，并隐藏 Git 工作树分组和控件。切换视图不会更改或删除文件。',
+      folders: '文件夹',
+      gitWorktrees: 'Git 工作树',
       archivedTitle: '已归档会话',
       archivedIntro: '已归档对话会从侧边栏隐藏，但会保留全部消息。在侧边栏 Ctrl/⌘ 点击对话即可归档。',
       emptyArchivedTitle: '暂无归档',

@@ -1,6 +1,8 @@
+import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Tip } from '@/components/ui/tooltip'
 import { deleteSession, listAllProfileSessions, setSessionArchived } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -10,6 +12,7 @@ import { Archive, ArchiveOff, FolderOpen, Loader2, Trash2 } from '@/lib/icons'
 import { notify, notifyError } from '@/store/notifications'
 import { untombstoneSessions } from '@/store/projects'
 import { applyConfiguredDefaultProjectDir, ensureDefaultWorkspaceCwd, setSessions } from '@/store/session'
+import { $workspacePresentation, type WorkspacePresentation } from '@/store/workspace-presentation'
 import type { SessionInfo } from '@/types/hermes'
 
 import { EmptyState, ListRow, LoadingState, SectionHeading, SettingsContent } from './primitives'
@@ -112,6 +115,7 @@ export function SessionsSettings() {
 
   return (
     <SettingsContent>
+      <WorkspaceOrganizationSetting />
       <DefaultProjectDirSetting />
 
       <SectionHeading
@@ -171,6 +175,37 @@ export function SessionsSettings() {
         </div>
       )}
     </SettingsContent>
+  )
+}
+
+function WorkspaceOrganizationSetting() {
+  const { t } = useI18n()
+  const s = t.settings.sessions
+  const presentation = useStore($workspacePresentation)
+
+  const options = [
+    { id: 'folders', label: s.folders },
+    { id: 'worktrees', label: s.gitWorktrees }
+  ] as const satisfies readonly { id: WorkspacePresentation; label: string }[]
+
+  return (
+    <div className="mb-6">
+      <SectionHeading icon={FolderOpen} title={s.workspaceOrganizationTitle} />
+      <ListRow
+        action={
+          <SegmentedControl
+            onChange={next => {
+              triggerHaptic('selection')
+              $workspacePresentation.set(next)
+            }}
+            options={options}
+            value={presentation}
+          />
+        }
+        description={s.workspaceOrganizationDesc}
+        title={s.workspaceOrganizationLabel}
+      />
+    </div>
   )
 }
 
