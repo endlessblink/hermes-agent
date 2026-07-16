@@ -399,6 +399,45 @@ def run_monitor_check(
                 )
             )
             assessment_dates = (assessment_dates + [local_date])[-14:]
+        # One-time backlog inventory: pre-existing uncategorized tasks used to
+        # be silently baselined into the first snapshot and never surfaced
+        # (the uncategorized_tasks event only fires when the count RISES).
+        # Offer exactly one review session over the standing backlog, latched
+        # in state so it can never become a recurring nag.
+        if not state.get("backlog_inventory_offered"):
+            standing_uncategorized = [
+                task for task in current.get("tasks", [])
+                if isinstance(task, dict)
+                and "projectId" in task
+                and task.get("projectId") in (None, "")
+            ]
+            if len(standing_uncategorized) >= 3:
+                sample = [
+                    {"id": task.get("id"), "title": task.get("title")}
+                    for task in standing_uncategorized[:10]
+                ]
+                occurrence = occurrences.get("backlog_inventory", 0) + 1
+                occurrences["backlog_inventory"] = occurrence
+                candidates.append(
+                    _event(
+                        "backlog_inventory",
+                        {
+                            "count": len(standing_uncategorized),
+                            "sample": sample,
+                            "action": "offer_review_session",
+                            "note": (
+                                "Standing backlog never surfaced before. Offer ONE "
+                                "grouped review session (dead / big-and-scary / quick "
+                                "wins) at a natural moment; after that session the "
+                                "backlog is quiet suggestion material only."
+                            ),
+                        },
+                        checked_at,
+                        occurrence,
+                        subject="flowstate:backlog-inventory",
+                    )
+                )
+                state["backlog_inventory_offered"] = local_date
         queue_path = root / "queue.json"
         queue, queue_changed = _load_queue(queue_path)
         events = queue["events"]
