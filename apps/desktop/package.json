@@ -3,6 +3,7 @@
   "productName": "Hermes",
   "private": true,
   "version": "0.17.0",
+  "homepage": "https://github.com/NousResearch/Hermes-Agent#readme",
   "description": "Native desktop shell for Hermes Agent.",
   "author": "Nous Research",
   "type": "module",
