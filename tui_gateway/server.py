@@ -4260,7 +4260,15 @@ def _personal_assistant_prompt(
         "Proactively assess what would be most useful to help me with now, based "
         "on my current commitments and context."
     )
+    try:
+        from agent.suggestion_gate import discipline_block_for_active_profile
+        discipline = discipline_block_for_active_profile(precise_time=True)
+    except Exception:
+        discipline = ""
+    if discipline:
+        discipline = f"{discipline}\n\n"
     return (
+        f"{discipline}"
         "Act as my personal assistant for this session. "
         f"The session was started by a {trigger} trigger.\n\n"
         f"My request or current intent:\n{intent}\n\n"

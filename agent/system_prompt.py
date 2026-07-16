@@ -541,6 +541,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         timestamp_line += f"\nProvider: {agent.provider}"
     volatile_parts.append(timestamp_line)
 
+    # Suggestion discipline (rejection rules, mood, daily cap). Date-only
+    # stamp inside, matching the byte-stable-per-day constraint above.
+    try:
+        from agent.suggestion_gate import discipline_block_for_active_profile
+        _discipline = discipline_block_for_active_profile(precise_time=False)
+        if _discipline:
+            volatile_parts.append(_discipline)
+    except Exception:
+        pass
+
     return {
         "stable":   "\n\n".join(p.strip() for p in stable_parts   if p and p.strip()),
         "context":  "\n\n".join(p.strip() for p in context_parts  if p and p.strip()),

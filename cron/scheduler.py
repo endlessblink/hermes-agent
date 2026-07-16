@@ -2272,6 +2272,17 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
+    # Suggestion discipline (rejection rules, mood, daily cap) applies to
+    # every proactive surface, including scheduled jobs — a briefing that
+    # ignores the user's mood or rejected suggestion classes is the same
+    # failure as a tone-deaf chat nudge.
+    try:
+        from agent.suggestion_gate import discipline_block_for_active_profile
+        _discipline = discipline_block_for_active_profile(precise_time=True)
+    except Exception:
+        _discipline = ""
+    if _discipline:
+        cron_hint = f"{_discipline}\n\n{cron_hint}"
     prompt = cron_hint + prompt
     if skills is None:
         legacy = job.get("skill")

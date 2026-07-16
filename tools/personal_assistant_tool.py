@@ -486,6 +486,57 @@ STATE_CHANGE_SCHEMA = {
 }
 
 
+SUGGESTION_RULE_SAVE_SCHEMA = {
+    "name": "suggestion_rule_save",
+    "description": (
+        "Record that the user brushed off a proactive suggestion so its whole class is never "
+        "re-suggested. Call this the moment the user rejects a suggestion, then append the "
+        "returned one-line acknowledgment to your reply. Use mood_flavored=true when the "
+        "rejection is about today's energy ('not tonight', 'I don't feel well') — that mutes "
+        "suggestions for today only instead of creating a rule."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "rule_class": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "description": "Short kebab-case slug for the IDEA being rejected, not the wording (e.g. evening-appliance-check).",
+            },
+            "reason": {
+                "type": "string",
+                "maxLength": 160,
+                "description": "The user's generalizable reason, if they gave one (e.g. 'laundry closes before evening'). A reasoned rule is permanent immediately.",
+            },
+            "mood_flavored": {
+                "type": "boolean",
+                "description": "True when the rejection is about today's mood/energy, not the suggestion class.",
+            },
+        },
+        "required": ["rule_class"],
+    },
+}
+
+
+def _handle_suggestion_rule_save(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        from agent.suggestion_gate import active_profile_state_dir, save_rejection
+
+        state_dir = active_profile_state_dir()
+        if state_dir is None:
+            return _error("profile state directory unavailable")
+        out = save_rejection(
+            state_dir,
+            str(args.get("rule_class") or ""),
+            reason=str(args.get("reason") or ""),
+            mood_flavored=bool(args.get("mood_flavored")),
+        )
+        return _result(out)
+    except Exception as exc:  # pragma: no cover - defensive tool boundary
+        return _error(exc)
+
+
 for _name, _schema, _handler in (
     ("personal_assistant_get_state", GET_STATE_SCHEMA, _handle_get_state),
     (
@@ -495,6 +546,7 @@ for _name, _schema, _handler in (
     ),
     ("personal_assistant_propose_capture", PROPOSE_CAPTURE_SCHEMA, _handle_propose_capture),
     ("personal_assistant_state_change", STATE_CHANGE_SCHEMA, _handle_state_change),
+    ("suggestion_rule_save", SUGGESTION_RULE_SAVE_SCHEMA, _handle_suggestion_rule_save),
 ):
     registry.register(
         name=_name,

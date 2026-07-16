@@ -167,6 +167,7 @@ def test_personal_assistant_toolset_exposes_state_parity_tools():
         "personal_assistant_reconcile_inventory",
         "personal_assistant_propose_capture",
         "personal_assistant_state_change",
+        "suggestion_rule_save",
     }
 
 

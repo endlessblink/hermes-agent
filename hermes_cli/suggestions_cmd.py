@@ -143,11 +143,44 @@ def handle_suggestions_command(
         removed = store.clear_resolved()
         return f"Cleared {removed} resolved suggestion record(s)."
 
+    if sub == "rules":
+        try:
+            from agent.suggestion_gate import active_profile_state_dir, load_rules, remove_rule
+        except Exception as e:  # pragma: no cover - import guard
+            logger.debug("suggestion gate import failed: %s", e)
+            return "Suggestion rules are unavailable in this build."
+        state_dir = active_profile_state_dir()
+        if state_dir is None:
+            return "Suggestion rules are unavailable (no profile home)."
+        rule_parts = rest.split()
+        rule_sub = rule_parts[0].lower() if rule_parts else "list"
+        if rule_sub == "remove":
+            target = " ".join(rule_parts[1:]).strip()
+            if not target:
+                return "Usage: /suggestions rules remove <class>"
+            if remove_rule(state_dir, target):
+                return f"Removed rule '{target}' — that class may be suggested again."
+            return f"No rule named '{target}'. Run /suggestions rules to list them."
+        rules = load_rules(state_dir)
+        if not rules:
+            return "No learned suggestion rules yet."
+        lines = ["Learned suggestion rules (never re-suggested):"]
+        for r in rules:
+            reason = f" — {r['reason']}" if r.get("reason") else ""
+            lines.append(
+                f"  {r.get('class')} [{r.get('strength')}] "
+                f"(hit {r.get('hits', 1)}x, last {r.get('last_hit')}){reason}"
+            )
+        lines.append("Remove one with: /suggestions rules remove <class>")
+        return "\n".join(lines)
+
     return (
         "Usage:\n"
         "  /suggestions              list pending\n"
         "  /suggestions accept N     schedule suggestion N\n"
         "  /suggestions dismiss N    dismiss suggestion N\n"
         "  /suggestions catalog      add curated starter automations\n"
+        "  /suggestions rules        list learned rejection rules\n"
+        "  /suggestions rules remove <class>  forget a rule\n"
         "  /suggestions clear        housekeeping"
     )

@@ -303,6 +303,7 @@ TOOLSETS = {
             "personal_assistant_reconcile_inventory",
             "personal_assistant_propose_capture",
             "personal_assistant_state_change",
+            "suggestion_rule_save",
         ],
         "includes": []
     },
