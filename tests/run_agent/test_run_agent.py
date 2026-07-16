@@ -4010,6 +4010,21 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_current_turn_marker_never_reaches_provider(self, agent):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Final answer", finish_reason="stop"
+        )
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            agent.run_conversation("hello")
+
+        sent = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        assert all("_turn_id" not in message for message in sent)
+
     def test_personal_assistant_silent_timeout_compacts_in_place_before_retry(self, agent):
         self._setup_agent(agent)
         agent.compression_enabled = True

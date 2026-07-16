@@ -183,6 +183,7 @@ def test_personal_assistant_runtime_policy_caps_only_its_agent():
     assert agent._force_codex_ttfb_watchdog is True
     assert agent._codex_ttfb_timeout_seconds == 60
     assert agent._single_attempt_silent_timeout is True
+    assert agent._resumable_iteration_checkpoint is True
     assert agent.compression_in_place is True
     assert agent.ephemeral_system_prompt.count(server._PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY) == 1
 

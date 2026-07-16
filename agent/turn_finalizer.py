@@ -22,6 +22,7 @@ keep the exact logger name (``"agent.conversation_loop"``).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -33,6 +34,243 @@ _SUPERSESSION_RE = re.compile(
     re.I,
 )
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\|\.{1,2}/)[^\s`'\")\]}<>]+")
+_CONTINUATION_WORDS = frozenset(
+    {
+        "continue",
+        "resume",
+        "proceed",
+        "go",
+        "on",
+        "keep",
+        "going",
+        "and",
+        "please",
+        "the",
+        "goal",
+        "this",
+        "it",
+        "working",
+        "המשך",
+        "תמשיך",
+        "קדימה",
+    }
+)
+_CONTINUATION_VERBS = frozenset(
+    {"continue", "resume", "proceed", "go", "keep", "המשך", "תמשיך", "קדימה"}
+)
+
+
+def _is_checkpoint_continuation(user_text, existing_state):
+    if str(existing_state.get("status") or "") != "checkpoint":
+        return False
+    words = re.findall(r"[\w\u0590-\u05ff]+", str(user_text or "").lower())
+    return (
+        0 < len(words) <= 6
+        and any(word in _CONTINUATION_VERBS for word in words)
+        and all(word in _CONTINUATION_WORDS for word in words)
+    )
+
+
+def _checkpoint_tool_arguments(raw_arguments):
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if isinstance(raw_arguments, str):
+        try:
+            parsed = json.loads(raw_arguments)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _checkpoint_is_preview(tool_name, arguments):
+    name = str(tool_name or "").strip().lower()
+    if name in {"notion_mutation", "notion_flowstate_activate"}:
+        return arguments.get("mode", "preview") != "apply"
+    if "flowstate" not in name:
+        return False
+    is_read = any(token in name for token in ("list", "search", "read", "get", "health"))
+    return not is_read and arguments.get("preview", True) is not False
+
+
+def _checkpoint_phase_for_tool(tool_name, arguments=None):
+    """Return a bounded user-facing phase for a completed tool result."""
+    name = str(tool_name or "").strip().lower()
+    arguments = arguments or {}
+    if not name:
+        return "Completed one tool step"
+    if _checkpoint_is_preview(name, arguments):
+        if name == "notion_mutation":
+            return "Prepared a Notion change preview"
+        return "Prepared a FlowState change preview"
+    if name == "notion_flowstate_activate":
+        return "Activated a Notion task in FlowState"
+    if "flowstate" in name and any(token in name for token in ("list", "search", "read", "get")):
+        return "Read FlowState tasks"
+    if "flowstate" in name and "preview" in name:
+        return "Prepared a FlowState change preview"
+    if "notion" in name and any(token in name for token in ("list", "search", "read", "get")):
+        return "Read Notion tasks"
+    if "notion" in name and "preview" in name:
+        return "Prepared a Notion change preview"
+    readable = re.sub(r"[_\-.]+", " ", name)
+    readable = re.sub(r"\s+", " ", readable).strip()
+    return f"Completed {readable}" if readable else "Completed one tool step"
+
+
+def _checkpoint_pending_phase(last_tool_name, arguments=None, *, failed=False):
+    name = str(last_tool_name or "").strip().lower()
+    arguments = arguments or {}
+    if failed and "flowstate" in name and "search" in name:
+        return "Correct or retry the failed FlowState task search, then continue the requested work."
+    if failed and "flowstate" in name:
+        return "Correct or retry the failed FlowState step, then continue the requested work."
+    if failed and "notion" in name:
+        return "Correct or retry the failed Notion step, then continue the requested work."
+    if failed:
+        return "Correct or retry the latest failed tool step, then continue the requested work."
+    if _checkpoint_is_preview(name, arguments):
+        system = "Notion" if name == "notion_mutation" else "FlowState"
+        verification = "remote" if system == "Notion" else "canonical"
+        return (
+            f"Review the {system} change preview; apply it only if it is already approved, "
+            f"then verify the {verification} result."
+        )
+    if "flowstate" in name and any(token in name for token in ("list", "search", "read", "get")):
+        return "Review the latest FlowState task list and continue the requested work."
+    if "notion" in name and any(token in name for token in ("list", "search", "read", "get")):
+        return "Review the latest Notion task data and continue the requested work."
+    if name:
+        phase = _checkpoint_phase_for_tool(name, arguments).removeprefix("Completed ").lower()
+        return f"Review the latest {phase} result and continue the requested work."
+    return "Continue the requested work from this checkpoint."
+
+
+def _checkpoint_tool_result_failed(message):
+    content = message.get("content") if isinstance(message, dict) else None
+    from agent.tool_guardrails import classify_tool_failure
+
+    payload = content
+    tool_name = str(message.get("name") or "") if isinstance(message, dict) else ""
+    rendered = content if isinstance(content, str) else json.dumps(content, default=str)
+    classified_failed, _ = classify_tool_failure(tool_name, rendered)
+    if classified_failed:
+        return True
+    if isinstance(content, str):
+        stripped = content.strip()
+        if re.search(r"(?im)^\s*(?:[-*]\s*)?(?:tool\s+)?error\s*:", stripped):
+            return True
+        status_match = re.search(r"(?im)^\s*(?:[-*]\s*)?status\s*:\s*(\d{3})\b", stripped)
+        if status_match and int(status_match.group(1)) >= 400:
+            return True
+        try:
+            payload = json.loads(stripped)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("error") not in (None, "", False, {}):
+        return True
+    if payload.get("ok") is False or payload.get("success") is False:
+        return True
+    status = payload.get("status")
+    return isinstance(status, int) and status >= 400
+
+
+def _build_iteration_checkpoint(messages, current_turn_user_idx=None, turn_id=None):
+    """Build a deterministic resume contract without another model call."""
+    marked_index = next(
+        (
+            index
+            for index in range(len(messages or []) - 1, -1, -1)
+            if isinstance(messages[index], dict)
+            and turn_id
+            and messages[index].get("_turn_id") == turn_id
+        ),
+        None,
+    )
+    if marked_index is not None:
+        current_turn_user_idx = marked_index
+    elif current_turn_user_idx is None:
+        current_turn_user_idx = next(
+            (
+                index
+                for index in range(len(messages or []) - 1, -1, -1)
+                if isinstance(messages[index], dict) and messages[index].get("role") == "user"
+            ),
+            -1,
+        )
+    try:
+        start_index = max(0, int(current_turn_user_idx) + 1)
+    except (TypeError, ValueError):
+        start_index = 0
+    turn_messages = list(messages or [])[start_index:]
+    completed = []
+    completed_seen = set()
+    last_tool_name = ""
+    last_tool_arguments = {}
+    unresolved_failures = {}
+    call_details = {}
+    for message in turn_messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id") or "")
+                function = call.get("function") or {}
+                name = str(function.get("name") or "") if isinstance(function, dict) else ""
+                if call_id and name:
+                    call_details[call_id] = {
+                        "name": name,
+                        "arguments": _checkpoint_tool_arguments(function.get("arguments")),
+                    }
+        if message.get("role") != "tool":
+            continue
+        detail = call_details.get(str(message.get("tool_call_id") or ""), {})
+        name = str(message.get("name") or detail.get("name") or "")
+        if not name:
+            continue
+        arguments = detail.get("arguments") or {}
+        last_tool_name = name
+        last_tool_arguments = arguments
+        if _checkpoint_tool_result_failed(message):
+            unresolved_failures.pop(name, None)
+            unresolved_failures[name] = arguments
+            continue
+        unresolved_failures.pop(name, None)
+        phase = _checkpoint_phase_for_tool(name, arguments)
+        if phase not in completed_seen:
+            completed_seen.add(phase)
+            completed.append(phase)
+
+    last_failed_tool_name = next(reversed(unresolved_failures), "")
+    last_failed_tool_arguments = unresolved_failures.get(last_failed_tool_name, {})
+    pending = _checkpoint_pending_phase(
+        last_failed_tool_name or last_tool_name,
+        last_failed_tool_arguments if last_failed_tool_name else last_tool_arguments,
+        failed=bool(last_failed_tool_name),
+    )
+    checkpoint = {
+        "version": 1,
+        "reason": "iteration_budget_exhausted",
+        "resumable": True,
+        "completed_phases": completed[:8],
+        "pending_phase": pending,
+    }
+    completed_text = (
+        ", ".join(completed[:8])
+        if completed
+        else "No durable phase was completed before the pause"
+    )
+    response = (
+        "I paused at a resumable checkpoint after reaching this turn's work limit.\n\n"
+        f"Completed: {completed_text}.\n"
+        f"Next: {pending}\n\n"
+        "Send **Continue** to resume in this conversation."
+    )
+    return checkpoint, response
 
 
 def _state_text(value, limit=1200):
@@ -134,6 +372,7 @@ def _patch_completed_turn_working_state(
     messages,
     interrupted,
     failed,
+    continuation_checkpoint=None,
 ):
     db = getattr(agent, "_session_db", None)
     session_id = getattr(agent, "session_id", "") or ""
@@ -164,6 +403,37 @@ def _patch_completed_turn_working_state(
             )
             return
         if not final_response or failed:
+            return
+        if continuation_checkpoint:
+            existing = db.get_working_state(session_id)
+            active_task = user_text
+            is_continuation = _is_checkpoint_continuation(user_text, existing)
+            if is_continuation:
+                active_task = str(existing.get("active_task") or user_text)
+            completed_actions = []
+            prior_actions = list(existing.get("completed_actions") or []) if is_continuation else []
+            for action in prior_actions + list(
+                continuation_checkpoint.get("completed_phases") or []
+            ):
+                if action and action not in completed_actions:
+                    completed_actions.append(action)
+            db.patch_working_state(
+                session_id,
+                {
+                    "active_task": active_task,
+                    "status": "checkpoint",
+                    "phase": continuation_checkpoint.get("pending_phase"),
+                    "completed_actions": completed_actions[:16],
+                    "blockers": [
+                        "This turn reached its iteration budget before the workflow finished."
+                    ],
+                    "last_verified_state": (
+                        "The resumable checkpoint and completed tool results were persisted "
+                        "to this conversation."
+                    ),
+                },
+                source="turn_iteration_checkpoint",
+            )
             return
         patch = {
             "active_task": user_text,
@@ -204,6 +474,7 @@ def finalize_turn(
     _should_review_memory,
     _turn_exit_reason,
     _pending_verification_response=None,
+    current_turn_user_idx=None,
 ):
     """Run the post-loop finalization and return the turn ``result`` dict.
 
@@ -230,6 +501,7 @@ def finalize_turn(
 
     iteration_limit_fallback = False
     preserved_verification_fallback = False
+    continuation_checkpoint = None
     if continuation_budget_exhausted:
         # A verification/continuation gate deliberately withheld a composed
         # answer, then consumed the remaining budget before producing a newer
@@ -240,6 +512,18 @@ def finalize_turn(
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
         iteration_limit_fallback = True
         preserved_verification_fallback = True
+    elif (
+        final_response is None
+        and budget_fallback_eligible
+        and bool(getattr(agent, "_resumable_iteration_checkpoint", False))
+    ):
+        _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
+        continuation_checkpoint, final_response = _build_iteration_checkpoint(
+            messages,
+            current_turn_user_idx=current_turn_user_idx,
+            turn_id=turn_id,
+        )
+        iteration_limit_fallback = True
     elif final_response is None and budget_fallback_eligible:
         # Budget exhausted — ask the model for a summary via one extra
         # API call with tools stripped.  _handle_max_iterations injects a
@@ -397,6 +681,7 @@ def finalize_turn(
             messages=messages,
             interrupted=interrupted,
             failed=failed,
+            continuation_checkpoint=continuation_checkpoint,
         )
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
@@ -622,6 +907,8 @@ def finalize_turn(
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+    if continuation_checkpoint is not None:
+        result["continuation_checkpoint"] = continuation_checkpoint
     # Surface any post-loop cleanup failures so the caller can distinguish a
     # clean turn from one whose trajectory/session/resource teardown raised
     # (the response is still returned either way — #8049).

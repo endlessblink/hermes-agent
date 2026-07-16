@@ -46,6 +46,7 @@ class _LimitAgent:
         self.persisted_messages = None
         self._handle_max_iterations_called = False
         self._completion_explainer = completion_explainer
+        self._resumable_iteration_checkpoint = False
 
     def _handle_max_iterations(self, messages, api_call_count):
         self._handle_max_iterations_called = True
@@ -163,6 +164,476 @@ def test_empty_pending_verification_response_uses_summary_fallback(monkeypatch):
     assert result["final_response"] == "summary from extra call"
     assert result["turn_exit_reason"] == "max_iterations_reached(60/60)"
     assert agent._handle_max_iterations_called is True
+
+
+def test_personal_assistant_budget_exhaustion_returns_resumable_checkpoint(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    messages = [
+        {"role": "user", "content": "organize my day and update the approved tasks"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "flowstate_list_tasks", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "flowstate_list_tasks",
+            "content": '{"tasks": []}',
+        },
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="organize my day and update the approved tasks",
+        original_user_message="organize my day and update the approved tasks",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    assert agent._handle_max_iterations_called is False
+    assert result["completed"] is False
+    assert result["turn_exit_reason"] == "max_iterations_reached(6/6)"
+    assert result["continuation_checkpoint"] == {
+        "version": 1,
+        "reason": "iteration_budget_exhausted",
+        "resumable": True,
+        "completed_phases": ["Read FlowState tasks"],
+        "pending_phase": "Review the latest FlowState task list and continue the requested work.",
+    }
+    assert "resumable checkpoint" in result["final_response"].lower()
+    assert "Continue" in result["final_response"]
+
+
+def test_resumable_checkpoint_is_persisted_as_active_working_state(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("sess-test", "cli", model="test-model")
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    agent._session_db = db
+    messages = [
+        {"role": "user", "content": "prepare and apply my approved plan"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "flowstate_update_task",
+                        "arguments": '{"id":"task-1","preview":true}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "flowstate_update_task",
+            "content": '{"preview": "p1"}',
+        },
+    ]
+
+    finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="prepare and apply my approved plan",
+        original_user_message="prepare and apply my approved plan",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    state = db.get_working_state("sess-test")
+    assert state["active_task"] == "prepare and apply my approved plan"
+    assert state["status"] == "checkpoint"
+    assert state["phase"] == (
+        "Review the FlowState change preview; apply it only if it is already approved, "
+        "then verify the canonical result."
+    )
+    assert state["completed_actions"] == ["Prepared a FlowState change preview"]
+    assert state["blockers"] == ["This turn reached its iteration budget before the workflow finished."]
+
+
+def test_failed_tool_result_is_pending_not_completed(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    messages = [
+        {"role": "user", "content": "find the task"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "flowstate_search_tasks", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "flowstate_search_tasks",
+            "content": "- Status: 400\n- Error: query is required",
+        },
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="find the task",
+        original_user_message="find the task",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    checkpoint = result["continuation_checkpoint"]
+    assert checkpoint["completed_phases"] == []
+    assert checkpoint["pending_phase"] == (
+        "Correct or retry the failed FlowState task search, then continue the requested work."
+    )
+
+
+def test_repeated_checkpoint_keeps_original_task_and_prior_progress(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("sess-test", "cli", model="test-model")
+    db.set_working_state(
+        "sess-test",
+        {
+            "active_task": "organize my day and apply the approved plan",
+            "status": "checkpoint",
+            "completed_actions": ["Read FlowState tasks"],
+        },
+        source="test",
+    )
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    agent._session_db = db
+    messages = [
+        {"role": "user", "content": "continue and resume"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "function": {
+                        "name": "flowstate_update_task",
+                        "arguments": '{"id":"task-1","preview":true}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-2",
+            "name": "flowstate_update_task",
+            "content": '{"preview": "p2"}',
+        },
+    ]
+
+    finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn-2",
+        user_message="continue and resume",
+        original_user_message="continue and resume",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    state = db.get_working_state("sess-test")
+    assert state["active_task"] == "organize my day and apply the approved plan"
+    assert state["completed_actions"] == [
+        "Read FlowState tasks",
+        "Prepared a FlowState change preview",
+    ]
+
+
+def test_checkpoint_only_reports_tools_from_current_turn(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    messages = [
+        {"role": "user", "content": "old request"},
+        {
+            "role": "tool",
+            "name": "notion_list_tasks",
+            "content": '{"tasks": ["old"]}',
+        },
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new request"},
+        {
+            "role": "tool",
+            "name": "flowstate_list_tasks",
+            "content": '{"tasks": ["new"]}',
+        },
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="new request",
+        original_user_message="new request",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+        current_turn_user_idx=3,
+    )
+
+    assert result["continuation_checkpoint"]["completed_phases"] == ["Read FlowState tasks"]
+
+
+def test_checkpoint_uses_stable_turn_marker_after_compression(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    messages = [
+        {"role": "user", "content": "[CONTEXT COMPACTION] old tools summarized"},
+        {"role": "tool", "name": "notion_list_tasks", "content": '{"tasks": ["old"]}'},
+        {"role": "user", "content": "continue", "_turn_id": "turn-current"},
+        {"role": "tool", "name": "flowstate_list_tasks", "content": '{"tasks": ["new"]}'},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn-current",
+        user_message="continue",
+        original_user_message="continue",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+        current_turn_user_idx=99,
+    )
+
+    assert result["continuation_checkpoint"]["completed_phases"] == ["Read FlowState tasks"]
+
+
+def test_successful_same_tool_retry_clears_failure(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    messages = [
+        {"role": "user", "content": "find the task"},
+        {
+            "role": "tool",
+            "name": "flowstate_search_tasks",
+            "content": "Error executing tool 'flowstate_search_tasks': query is required",
+        },
+        {
+            "role": "tool",
+            "name": "flowstate_search_tasks",
+            "content": '{"tasks": ["task-1"]}',
+        },
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="find the task",
+        original_user_message="find the task",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    checkpoint = result["continuation_checkpoint"]
+    assert checkpoint["completed_phases"] == ["Read FlowState tasks"]
+    assert checkpoint["pending_phase"] == (
+        "Review the latest FlowState task list and continue the requested work."
+    )
+
+
+def test_unrelated_success_does_not_hide_earlier_failure(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    messages = [
+        {"role": "user", "content": "find and inspect the task"},
+        {
+            "role": "tool",
+            "name": "flowstate_search_tasks",
+            "content": "- Status: 400\n- Error: query is required",
+        },
+        {"role": "tool", "name": "flowstate_list_tasks", "content": '{"tasks": []}'},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="find and inspect the task",
+        original_user_message="find and inspect the task",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    assert result["continuation_checkpoint"]["pending_phase"] == (
+        "Correct or retry the failed FlowState task search, then continue the requested work."
+    )
+
+
+def test_activation_apply_is_not_reported_as_preview(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    messages = [
+        {"role": "user", "content": "apply the approved activation"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-activate",
+                    "type": "function",
+                    "function": {
+                        "name": "notion_flowstate_activate",
+                        "arguments": '{"mode":"apply"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-activate",
+            "name": "notion_flowstate_activate",
+            "content": '{"status":"committed"}',
+        },
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="apply the approved activation",
+        original_user_message="apply the approved activation",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+    )
+
+    assert result["continuation_checkpoint"]["completed_phases"] == [
+        "Activated a Notion task in FlowState"
+    ]
+
+
+def test_new_task_checkpoint_replaces_prior_task_progress(monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("sess-test", "cli", model="test-model")
+    db.set_working_state(
+        "sess-test",
+        {
+            "active_task": "old task",
+            "status": "checkpoint",
+            "completed_actions": ["Read Notion tasks"],
+        },
+        source="test",
+    )
+    agent = _LimitAgent(max_iterations=6)
+    agent._resumable_iteration_checkpoint = True
+    agent._session_db = db
+    messages = [
+        {"role": "user", "content": "organize a different day"},
+        {"role": "tool", "name": "flowstate_list_tasks", "content": '{"tasks": []}'},
+    ]
+
+    finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=6,
+        interrupted=False,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="organize a different day",
+        original_user_message="organize a different day",
+        _should_review_memory=False,
+        _turn_exit_reason="budget_exhausted",
+        current_turn_user_idx=0,
+    )
+
+    state = db.get_working_state("sess-test")
+    assert state["active_task"] == "organize a different day"
+    assert state["completed_actions"] == ["Read FlowState tasks"]
 
 
 def test_short_generated_summary_keeps_abnormal_turn_explainer(monkeypatch):

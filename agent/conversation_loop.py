@@ -844,6 +844,9 @@ def run_conversation(
                 api_msg.pop("finish_reason")
             # Strip internal thinking-prefill marker
             api_msg.pop("_thinking_prefill", None)
+            # The durable per-turn boundary is session bookkeeping, never a
+            # provider message field. Strict APIs reject unknown top-level keys.
+            api_msg.pop("_turn_id", None)
             # Strip Codex Responses API fields (call_id, response_item_id) for
             # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
             # Uses new dicts so the internal messages list retains the fields
@@ -5477,6 +5480,7 @@ def run_conversation(
         _should_review_memory=_should_review_memory,
         _turn_exit_reason=_turn_exit_reason,
         _pending_verification_response=_pending_verification_response,
+        current_turn_user_idx=current_turn_user_idx,
     )
 
 

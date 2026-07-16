@@ -358,7 +358,10 @@ def build_turn_context(
             agent._turns_since_memory = 0
 
     # Add user message.
-    user_msg = {"role": "user", "content": user_message}
+    # Stable internal boundary for this turn. Compression preserves the recent
+    # user message but may move its list index, so downstream checkpoint logic
+    # must key on this marker rather than the pre-compression index.
+    user_msg = {"role": "user", "content": user_message, "_turn_id": turn_id}
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx

@@ -490,7 +490,7 @@ Commit: `feat(notion): add verified user-directed task writes`
 - Test: Hermes `tests/tools/test_flowstate_planning_artifacts.py`
 - Create: Hermes `tests/run_agent/test_model_iteration_limit.py`
 
-- [ ] **Step 1: Add a strict `task-breakdown` artifact**
+- [x] **Step 1: Add a strict `task-breakdown` artifact**
 
 ```ts
 type TaskBreakdownArtifact = {
@@ -514,7 +514,7 @@ type TaskBreakdownArtifact = {
 
 Incomplete streaming JSON shows a preparation state, never raw code. RTL and English inputs render correctly. Text entry uses actual text fields; radio/checkbox primitives are used only for bounded choices.
 
-- [ ] **Step 2: Ask only the first consequential unknown**
+- [x] **Step 2: Ask only the first consequential unknown**
 
 Before ordering a day, Hermes must establish finish-by time, fixed commitments, location/travel, task completion state, meaningful outcome, and duration uncertainty only when each changes the plan. It must not run a fixed morning script.
 
@@ -522,15 +522,15 @@ Before ordering a day, Hermes must establish finish-by time, fixed commitments, 
 
 Store evidence as context dimensions—task kind, location/travel, scope/depth, tool/setup, and observed/corrected duration—with confidence. One explicit correction may override the current plan; it becomes a durable default only when the user states it is general or repeated compatible evidence supports it.
 
-- [ ] **Step 4: Submit an exact H5/H6 preview, not prose**
+- [x] **Step 4: Submit an exact H5/H6 preview, not prose**
 
 Editing/reordering steps or times submits structured IDs and values to Hermes. Hermes renders the exact canonical preview and applies only after explicit approval.
 
-- [ ] **Step 5: Acknowledge every interactive submission**
+- [x] **Step 5: Acknowledge every interactive submission**
 
 Artifact submit carries artifact, session, request, and turn IDs. Gateway returns `accepted`, `queued`, or `rejected`; Desktop retains the draft on failure, prevents duplicate clicks, and can retry the same request identity after reconnect or session resume.
 
-- [ ] **Step 6: Replace silent model-iteration exhaustion with a checkpoint**
+- [x] **Step 6: Replace silent model-iteration exhaustion with a checkpoint**
 
 Read → clarify → preview → apply → read-back flows may exceed a fixed iteration cap. The assistant either receives a task-aware bounded extension or renders a visible resumable checkpoint naming completed and pending phases; it never stops on an unexplained spinner.
 

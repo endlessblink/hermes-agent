@@ -3414,6 +3414,32 @@ class TestDoubleCompactionSummaryRole:
             f"compatibility, got role={non_system[0]['role']!r}"
         )
 
+    def test_compression_preserves_current_turn_marker_in_protected_tail(self):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "summary of earlier turns"
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test", quiet_mode=True, protect_first_n=1, protect_last_n=3
+            )
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "old 1"},
+            {"role": "assistant", "content": "old 2"},
+            {"role": "user", "content": "old 3"},
+            {"role": "assistant", "content": "old 4"},
+            {"role": "user", "content": "current", "_turn_id": "turn-current"},
+            {"role": "assistant", "content": "working"},
+            {"role": "tool", "name": "flowstate_list_tasks", "content": "{}"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            compressed = c.compress(messages, force=True)
+
+        marked = [message for message in compressed if message.get("_turn_id") == "turn-current"]
+        assert len(marked) == 1
+        assert marked[0]["content"] == "current"
+
     def test_double_compaction_user_tail_merges_into_tail(self):
         """When the summary is forced to role=user (system-only head) and
         the first tail message is also user, the summary must merge into

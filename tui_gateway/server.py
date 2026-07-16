@@ -3554,6 +3554,7 @@ def _apply_personal_assistant_runtime_policy(session: dict) -> None:
     agent._force_codex_ttfb_watchdog = True
     agent._codex_ttfb_timeout_seconds = 60
     agent._single_attempt_silent_timeout = True
+    agent._resumable_iteration_checkpoint = True
     agent.compression_in_place = True
     existing = str(getattr(agent, "ephemeral_system_prompt", "") or "").strip()
     if _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY not in existing:
