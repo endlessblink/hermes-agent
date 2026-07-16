@@ -21,6 +21,12 @@ export type ChatMessage = {
   attachmentRefs?: string[]
 }
 
+const TRUSTED_FLOWSTATE_DECISION_PREFIX = 'Hermes UI trusted FlowState mutation decision:\n'
+
+function isHiddenTrustedFlowstateDecision(message: SessionMessage, displayContent: string): boolean {
+  return message.role === 'user' && displayContent.startsWith(TRUSTED_FLOWSTATE_DECISION_PREFIX)
+}
+
 export type GatewayEventPayload = {
   text?: string
   rendered?: string
@@ -839,7 +845,8 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       id: `${message.timestamp || Date.now()}-${index}-${message.role}`,
       role: message.role,
       parts,
-      timestamp: message.timestamp
+      timestamp: message.timestamp,
+      hidden: isHiddenTrustedFlowstateDecision(message, displayContent) || undefined
     })
 
     activeAssistantIndex = message.role === 'assistant' ? result.length - 1 : null
