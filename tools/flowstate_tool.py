@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +27,7 @@ _VALID_DUE_FILTERS = {"today", "overdue", "open"}
 _VALID_TASK_STATUSES = {"todo", "done"}
 _VALID_PRIORITIES = {"low", "medium", "high"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SCOPE_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
 _ERROR_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
@@ -178,6 +180,65 @@ def _tool_error(message: str) -> str:
     return tool_error(message)
 
 
+def _validated_inventory_receipt(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Fail closed before a model or monitor treats an inventory as exact."""
+
+    try:
+        captured = datetime.fromisoformat(
+            str(payload["capturedAt"]).replace("Z", "+00:00")
+        )
+        items = payload["items"]
+        page = payload["page"]
+        ids = [item["id"] for item in items]
+        valid = (
+            payload.get("source") == "flowstate"
+            and isinstance(payload.get("scope"), str)
+            and bool(payload["scope"].strip())
+            and payload.get("scopeKind") in {"personal", "workspace"}
+            and bool(
+                _SCOPE_FINGERPRINT_RE.fullmatch(
+                    str(payload.get("scopeFingerprint") or "")
+                )
+            )
+            and isinstance(payload.get("appVersion"), str)
+            and bool(payload["appVersion"])
+            and captured.utcoffset() is not None
+            and payload.get("fresh") is True
+            and payload.get("complete") is True
+            and isinstance(items, list)
+            and all(isinstance(item, dict) for item in items)
+            and all(
+                isinstance(task_id, str) and bool(_UUID_RE.fullmatch(task_id))
+                for task_id in ids
+            )
+            and all(
+                isinstance(item.get("canonicalRevision"), int)
+                and not isinstance(item.get("canonicalRevision"), bool)
+                and item["canonicalRevision"] > 0
+                for item in items
+            )
+            and len(ids) == len(set(ids))
+            and isinstance(page, dict)
+            and isinstance(payload.get("changeSequence"), int)
+            and not isinstance(payload.get("changeSequence"), bool)
+            and payload["changeSequence"] >= 0
+            and isinstance(payload.get("total"), int)
+            and not isinstance(payload.get("total"), bool)
+            and payload["total"] == len(ids)
+            and page.get("hasMore") is False
+            and page.get("nextCursor") is None
+        )
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise _FlowStateApiError(
+            "Flow State returned an invalid inventory receipt; no exact count is available.",
+            code="invalid_inventory_receipt",
+            status=502,
+        )
+    return payload
+
+
 def _typed_flowstate_error(exc: _FlowStateApiError) -> str:
     from tools.registry import tool_error
 
@@ -187,6 +248,9 @@ def _typed_flowstate_error(exc: _FlowStateApiError) -> str:
         "stale_revision": "Task changed since preview.",
         "incompatible_revision": "Task changed since preview.",
         "invalid_existing_subtasks": "Existing FlowState subtask data needs bounded repair.",
+        "invalid_inventory_receipt": (
+            "Flow State returned an invalid inventory receipt; no exact count is available."
+        ),
         "subtask_limit_exceeded": "This task already has the maximum number of subtasks.",
         "not_found": "task not found",
     }
@@ -217,33 +281,59 @@ def _handle_list_tasks(args: dict, **kw) -> str:
     due = args.get("due")
     limit = args.get("limit")
 
-    params = urllib.parse.urlencode(
-        {
-            key: value
-            for key, value in {
-                "status": status,
-                "due": due,
-                "limit": limit,
-            }.items()
-            if value not in (None, "")
-        }
-    )
-
     if status not in (None, "") and status not in _VALID_STATUS_FILTERS:
         return _tool_error("status must be todo|open|done")
     if due not in (None, "") and not _is_valid_date_or_due_filter(str(due)):
         return _tool_error("due must be today|overdue|open|YYYY-MM-DD")
+    use_inventory = status in (None, "", "todo", "open") and due in (
+        None,
+        "",
+    )
+    max_limit = 100 if use_inventory else 25
     if limit not in (None, ""):
         try:
             n = int(limit)
         except (TypeError, ValueError):
-            return _tool_error("limit must be an integer from 1 to 25")
-        if n < 1 or n > 25:
-            return _tool_error("limit must be an integer from 1 to 25")
+            return _tool_error(
+                f"limit must be an integer from 1 to {max_limit}"
+            )
+        if n < 1 or n > max_limit:
+            return _tool_error(
+                f"limit must be an integer from 1 to {max_limit}"
+            )
+        limit = n
 
     try:
+        if use_inventory:
+            params = urllib.parse.urlencode(
+                {"limit": limit} if limit not in (None, "") else {}
+            )
+            suffix = f"?{params}" if params else ""
+            payload = _request(
+                "GET",
+                f"/api/tasks/inventory{suffix}",
+            )
+            return _tool_result(_validated_inventory_receipt(payload))
+        params = urllib.parse.urlencode(
+            {
+                key: value
+                for key, value in {
+                    "status": status,
+                    "due": due,
+                    "limit": limit,
+                }.items()
+                if value not in (None, "")
+            }
+        )
         suffix = f"?{params}" if params else ""
         return _tool_result(_request("GET", f"/api/tasks{suffix}"))
+    except _FlowStateApiError as exc:
+        logger.error(
+            "flowstate_list_tasks API error: status=%s code=%s",
+            exc.status,
+            exc.code,
+        )
+        return _typed_flowstate_error(exc)
     except Exception as exc:
         logger.error("flowstate_list_tasks error: %s", exc)
         return _tool_error(str(exc))

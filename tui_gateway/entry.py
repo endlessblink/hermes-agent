@@ -292,6 +292,7 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
 
 def main():
     _install_sidecar_publisher()
+    server.start_personal_assistant_monitor_consumer()
 
     # MCP tool discovery — runs in a background daemon thread so a slow or
     # unreachable MCP server can't freeze TUI startup.  Previously this ran

@@ -315,6 +315,7 @@ async def handle_ws(ws: Any) -> None:
             logger=_log,
             thread_name="tui-ws-mcp-discovery",
         )
+        server.start_personal_assistant_monitor_consumer()
 
         ready_ok = await transport.write_async(
             {

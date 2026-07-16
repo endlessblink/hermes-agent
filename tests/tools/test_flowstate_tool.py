@@ -35,6 +35,29 @@ def _capturing_urlopen(seen, payload):
     return _urlopen
 
 
+def _complete_inventory():
+    return {
+        "source": "flowstate",
+        "scope": "all open tasks visible to the authenticated user",
+        "scopeKind": "personal",
+        "scopeFingerprint": "0123456789abcdef",
+        "capturedAt": "2026-07-16T09:00:00Z",
+        "appVersion": "1.4.263",
+        "fresh": True,
+        "complete": True,
+        "changeSequence": 12,
+        "total": 1,
+        "items": [
+            {
+                "id": "00000000-0000-4000-8000-000000000001",
+                "title": "Plan",
+                "canonicalRevision": 3,
+            }
+        ],
+        "page": {"limit": 100, "nextCursor": None, "hasMore": False},
+    }
+
+
 @pytest.fixture(autouse=True)
 def flowstate_config(monkeypatch):
     monkeypatch.setattr(fst, "_FLOW_STATE_API_URL", "http://127.0.0.1:5577")
@@ -55,6 +78,35 @@ def test_list_tasks_sends_query_and_bearer_header(monkeypatch):
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks?status=open&due=today&limit=5"
     assert seen["method"] == "GET"
     assert seen["headers"]["Authorization"] == "Bearer token-123"
+
+
+def test_unfiltered_list_uses_complete_inventory_without_stale_cache(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, _complete_inventory()),
+    )
+
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert result["result"]["complete"] is True
+    assert result["result"]["total"] == 1
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/inventory"
+
+
+def test_unfiltered_list_fails_closed_on_incomplete_inventory(monkeypatch):
+    payload = _complete_inventory()
+    payload["complete"] = False
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen({}, payload),
+    )
+
+    result = json.loads(fst._handle_list_tasks({}))
+
+    assert "invalid inventory receipt" in result["error"]
 
 
 def test_create_task_omits_empty_project_id(monkeypatch):
