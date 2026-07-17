@@ -6700,10 +6700,16 @@ def test_status_update_emits_compression_diagnostic(monkeypatch):
     assert session.get("compression_started_at")
 
 
-def test_compression_watchdog_default_is_desktop_bounded(monkeypatch):
+def test_compression_watchdog_default_outlives_aux_budget(monkeypatch):
     monkeypatch.delenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", raising=False)
 
-    assert server._compression_watchdog_timeout_seconds() == 45.0
+    from agent.auxiliary_client import _effective_aux_timeout
+
+    aux_budget = _effective_aux_timeout("compression", None)
+    value = server._compression_watchdog_timeout_seconds()
+    # Killing the turn before the auxiliary summarizer's own deadline aborts
+    # LLM compression mid-flight, so the watchdog must strictly outlive it.
+    assert value == aux_budget + 30.0
 
 
 def test_compression_watchdog_env_override(monkeypatch):
@@ -6712,10 +6718,13 @@ def test_compression_watchdog_env_override(monkeypatch):
     assert server._compression_watchdog_timeout_seconds() == 12.5
 
 
-def test_compression_watchdog_bad_env_uses_desktop_default(monkeypatch):
+def test_compression_watchdog_bad_env_falls_back_to_aux_budget(monkeypatch):
     monkeypatch.setenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", "not-a-number")
 
-    assert server._compression_watchdog_timeout_seconds() == 45.0
+    from agent.auxiliary_client import _effective_aux_timeout
+
+    aux_budget = _effective_aux_timeout("compression", None)
+    assert server._compression_watchdog_timeout_seconds() == aux_budget + 30.0
 
 
 def test_turn_idle_watchdog_default_automatically_unblocks_chat(monkeypatch):

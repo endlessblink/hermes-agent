@@ -10614,15 +10614,24 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
 
 
 def _compression_watchdog_timeout_seconds() -> float:
-    # Desktop users experience auto-compaction as a blocking "Summarizing
-    # thread" turn. If the auxiliary compression call has not completed quickly,
-    # continuity recovery is more reliable than making the user stare at a
-    # non-terminal busy state for minutes.
-    raw = os.environ.get("HERMES_COMPRESSION_WATCHDOG_SECONDS", "45")
+    # The auxiliary summarizer is allowed auxiliary.compression.timeout seconds
+    # (240s in shipped configs, capped at 300s in auxiliary_client). A watchdog
+    # shorter than that budget aborts LLM summarization mid-flight, so the
+    # context never shrinks and the thread silently forgets. The watchdog must
+    # outlive the aux budget and only catch a truly wedged summarizer; the
+    # heartbeat keeps the desktop UI showing progress in the meantime.
+    raw = os.environ.get("HERMES_COMPRESSION_WATCHDOG_SECONDS")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            pass
     try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        return 45.0
+        from agent.auxiliary_client import _effective_aux_timeout
+
+        return max(0.0, float(_effective_aux_timeout("compression", None))) + 30.0
+    except Exception:
+        return 300.0
 
 
 def _turn_idle_watchdog_timeout_seconds() -> float:
