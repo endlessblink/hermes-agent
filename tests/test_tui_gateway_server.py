@@ -6608,7 +6608,6 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
     )
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-    monkeypatch.setattr(server, "_get_db", lambda: None)
 
     server.handle_request(
         {
@@ -6656,7 +6655,6 @@ def test_prompt_submit_marks_compression_exhausted_message_complete(monkeypatch)
     )
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-    monkeypatch.setattr(server, "_get_db", lambda: None)
 
     server.handle_request(
         {
@@ -6730,10 +6728,10 @@ def test_compression_watchdog_bad_env_falls_back_to_aux_budget(monkeypatch):
 def test_turn_idle_watchdog_default_automatically_unblocks_chat(monkeypatch):
     monkeypatch.delenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", raising=False)
 
-    # The provider stream watchdog reconnects at 60s. The turn-level fail-safe
-    # must leave it time to retry instead of interrupting the entire turn at
-    # the same boundary.
-    assert server._turn_idle_watchdog_timeout_seconds() == 90.0
+    # Long-context Codex turns can spend several minutes reasoning after a
+    # tool result while the provider stream stays healthy, so this outer
+    # fail-safe is much more generous than the provider-level stale watchdog.
+    assert server._turn_idle_watchdog_timeout_seconds() == 600.0
 
 
 def test_turn_idle_watchdog_env_override(monkeypatch):
@@ -6745,7 +6743,7 @@ def test_turn_idle_watchdog_env_override(monkeypatch):
 def test_turn_idle_watchdog_bad_env_uses_default(monkeypatch):
     monkeypatch.setenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "bad")
 
-    assert server._turn_idle_watchdog_timeout_seconds() == 90.0
+    assert server._turn_idle_watchdog_timeout_seconds() == 600.0
 
 
 def test_compression_completion_restarts_turn_idle_budget(monkeypatch):
@@ -7106,7 +7104,6 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     )
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-    monkeypatch.setattr(server, "_get_db", lambda: None)
 
     server.handle_request(
         {
@@ -7119,11 +7116,14 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     complete_events = [e for e in emitted if e[0] == "message.complete"]
     assert complete_events, "expected message.complete to be emitted"
     payload = complete_events[-1][2]
-    # Status stays "complete" because no error flag was set
-    assert payload.get("status") == "complete"
-    # Text stays empty — we did NOT fabricate an "Error:" string
+    # Silent-turn recovery (2026-07-14 "recover silent turns in place"):
+    # an empty response with no backend error is no longer shipped as an
+    # empty "complete" turn — it becomes a retryable error with an honest
+    # explanation, NOT a fabricated "Error: <detail>" string.
+    assert payload.get("status") == "error"
     text = payload.get("text", "")
-    assert text in {"", None}, f"expected empty text, got {text!r}"
+    assert "without producing a visible answer" in text
+    assert not text.startswith("Error:")
 
 
 # ── active live TUI sessions ─────────────────────────────────────────
