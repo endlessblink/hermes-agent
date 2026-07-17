@@ -1566,6 +1566,25 @@ def _current_session_platform_hint() -> str:
         return ""
 
 
+# The skills index is re-sent on every turn, so verbose frontmatter
+# descriptions (some run 500-1000+ chars) multiply into tens of KB of
+# standing prompt. The index only needs enough to decide whether to load
+# the skill — skill_view(name) always returns the full text.
+_SKILL_INDEX_DESC_MAX_CHARS = 220
+
+
+def _cap_index_description(desc: str) -> str:
+    """Truncate a skill description for the per-turn index at a word boundary."""
+    text = " ".join(str(desc or "").split())
+    if len(text) <= _SKILL_INDEX_DESC_MAX_CHARS:
+        return text
+    cut = text[: _SKILL_INDEX_DESC_MAX_CHARS - 1]
+    space = cut.rfind(" ")
+    if space > _SKILL_INDEX_DESC_MAX_CHARS // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.") + "…"
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
@@ -1786,7 +1805,9 @@ def build_skills_system_prompt(
                     continue
                 seen.add(name)
                 if desc:
-                    index_lines.append(f"    - {name}: {desc}")
+                    index_lines.append(
+                        f"    - {name}: {_cap_index_description(desc)}"
+                    )
                 else:
                     index_lines.append(f"    - {name}")
 
