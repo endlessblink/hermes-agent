@@ -901,14 +901,17 @@ class GatewayConfig:
             "max_concurrent_sessions": self.max_concurrent_sessions,
             "multiplex_profiles": self.multiplex_profiles,
             "multiplex_served_profiles": self.multiplex_served_profiles,
-            "profile_routes": self.profile_routes,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
-            "profile_routes": [
-                asdict(r) if is_dataclass(r) and not isinstance(r, type) else r
-                for r in self.profile_routes
-            ],
+            "profile_routes": (
+                self.profile_routes
+                if isinstance(self.profile_routes, dict)
+                else [
+                    asdict(r) if is_dataclass(r) and not isinstance(r, type) else r
+                    for r in self.profile_routes
+                ]
+            ),
         }
     
     @classmethod
@@ -984,8 +987,6 @@ class GatewayConfig:
         profile_routes = data.get("profile_routes")
         if profile_routes is None and isinstance(nested_gateway, dict):
             profile_routes = nested_gateway.get("profile_routes")
-        if not isinstance(profile_routes, dict):
-            profile_routes = {}
         # Operator override: GATEWAY_MULTIPLEX_PROFILES wins over config.yaml when
         # set to a recognized value. Hosted deployments (Nous Portal / Fly) stamp
         # it on the container so the single multiplexed gateway — which the
@@ -1019,9 +1020,11 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
-        # Parse profile routes (validated by gateway.profile_routing)
-        from gateway.profile_routing import parse_profile_routes
-        profile_routes = parse_profile_routes(data.get("profile_routes") or [])
+        # Preserve multiplex routing tables; legacy list routes still use the
+        # validated ProfileRoute parser.
+        if not isinstance(profile_routes, dict):
+            from gateway.profile_routing import parse_profile_routes
+            profile_routes = parse_profile_routes(profile_routes or [])
 
         return cls(
             platforms=platforms,

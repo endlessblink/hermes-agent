@@ -9,6 +9,7 @@ import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
+from gateway.profile_routing import ProfileRoute
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
@@ -56,6 +57,28 @@ def test_profile_routes_round_trip_and_accept_nested_gateway_form():
 
     assert config.profile_routes == ROUTES
     assert GatewayConfig.from_dict(config.to_dict()).profile_routes == ROUTES
+
+
+def test_legacy_profile_route_lists_still_parse():
+    config = GatewayConfig.from_dict(
+        {
+            "profile_routes": [
+                {
+                    "name": "personal",
+                    "platform": "telegram",
+                    "profile": "office-work",
+                }
+            ]
+        }
+    )
+
+    assert config.profile_routes == [
+        ProfileRoute(
+            name="personal",
+            platform="telegram",
+            profile="office-work",
+        )
+    ]
 
 
 def test_topic_route_beats_chat_route_then_falls_back_to_default():

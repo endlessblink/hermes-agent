@@ -7514,6 +7514,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._running = True
         self._update_runtime_status("running")
+        self._start_personal_assistant_telegram_monitor_bridge(_hermes_home)
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -8096,6 +8097,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return get_active_profile_name() or "default"
         except Exception:
             return "default"
+
+    def _start_personal_assistant_telegram_monitor_bridge(
+        self,
+        profile_home: "Path",
+    ) -> bool:
+        """Schedule the office-work monitor bridge when Telegram is ready."""
+        from gateway.personal_assistant_monitor import (
+            create_personal_assistant_telegram_monitor_bridge,
+        )
+
+        bridge = create_personal_assistant_telegram_monitor_bridge(
+            profile_name=self._active_profile_name(),
+            profile_home=profile_home,
+            config=self.config,
+            delivery_router=self.delivery_router,
+            is_busy=lambda: bool(self._running_agents),
+        )
+        if bridge is None:
+            return False
+        self._personal_assistant_telegram_monitor_bridge = bridge
+        task = asyncio.create_task(
+            bridge.run(lambda: self._running)
+        )
+        self._personal_assistant_telegram_monitor_task = task
+        background_tasks = getattr(self, "_background_tasks", None)
+        if background_tasks is not None:
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
+        logger.info("Personal-assistant Telegram monitor bridge started")
+        return True
 
     # ── Kanban board watchers ───────────────────────────────────────────
     # The kanban notifier/dispatcher watcher loops + their helpers live in
