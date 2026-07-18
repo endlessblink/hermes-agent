@@ -91,6 +91,13 @@ function chatZonePane(groupId: string): null | string {
  * split commits through `openSessionTile`, which OPENS a new tile from a sidebar
  * row and MOVES the existing one when its tab is the drag source.
  */
+/** Dispatched on a `[data-session-folder-drop]` element when a session drag is
+ *  released over it. Sidebar folder sections listen for this and run their
+ *  move-to-folder handler — their native-DnD `onDrop` path can never fire for
+ *  pointer drags, which replaced native session drags (the local
+ *  drag-a-chat-into-a-folder feature rides the pointer session instead). */
+export const SESSION_FOLDER_DROP_EVENT = 'hermes:session-folder-drop'
+
 export function startSessionDrag(
   payload: SessionDragPayload,
   e: ReactPointerEvent<HTMLElement>,
@@ -100,12 +107,14 @@ export function startSessionDrag(
   let strips: StripSnapshot[] = []
   let surfaces: SurfaceSnapshot[] = []
   let composers: ZoneRect[] = []
+  let folderTargets: { el: HTMLElement; rect: ZoneRect }[] = []
   let zoneHost = new Map<string, null | string>()
 
   // Commit intent, updated per resolved move (the machinery flushes the final
   // move before commit, so these always match the released-at position).
   let split: { anchor: string; before?: null | string; pos: TileDock } | null = null
   let link: null | string = null
+  let folderEl: HTMLElement | null = null
 
   // The drag SOURCE (sidebar row or tile tab). Captured synchronously — React
   // clears `currentTarget` after the pointerdown handler returns, but this runs
@@ -124,6 +133,10 @@ export function startSessionDrag(
       strips = snapshotStrips()
       surfaces = snapshotSurfaces()
       composers = [...document.querySelectorAll<HTMLElement>('[data-slot="composer-root"]')].map(snapRect)
+      folderTargets = [...document.querySelectorAll<HTMLElement>('[data-session-folder-drop]')].map(el => ({
+        el,
+        rect: snapRect(el)
+      }))
       zoneHost = new Map(zones.map(zone => [zone.id, chatZonePane(zone.id)]))
       source?.style.setProperty('opacity', '0.45')
       // The same sentinel the zone overlay + chat surfaces key off — the
@@ -138,6 +151,20 @@ export function startSessionDrag(
     },
 
     resolveMove(x, y): DropHint | null {
+      // Sidebar folder sections accept the drop even though the sidebar is
+      // not a chat zone — checked first so a folder wins over the zone deny.
+      const folder = folderTargets.find(t => rectContains(t.rect, x, y))
+
+      if (folder) {
+        folderEl = folder.el
+        split = null
+        link = null
+
+        return null
+      }
+
+      folderEl = null
+
       const zone = zones.find(z => rectContains(z.rect, x, y))
       const host = zone ? zoneHost.get(zone.id) : null
 
@@ -178,6 +205,14 @@ export function startSessionDrag(
     },
 
     onCommit() {
+      if (folderEl) {
+        folderEl.dispatchEvent(
+          new CustomEvent(SESSION_FOLDER_DROP_EVENT, { detail: { sessionId: payload.id } })
+        )
+
+        return
+      }
+
       if (split) {
         openSessionTile(payload.id, split.pos, split.anchor, split.before)
         // A tile for this session may already exist (openSessionTile is

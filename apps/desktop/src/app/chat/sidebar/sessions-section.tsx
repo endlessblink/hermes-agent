@@ -1,8 +1,9 @@
 import type { useSensors } from '@dnd-kit/core'
 import type * as React from 'react'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 
 import { dragHasSession, readSessionDrag } from '@/app/chat/composer/inline-refs'
+import { SESSION_FOLDER_DROP_EVENT } from '@/app/chat/session-drag'
 import { SidebarPanelLabel } from '@/app/shell/sidebar-label'
 import { DisclosureCaret } from '@/components/ui/disclosure-caret'
 import { SidebarGroup, SidebarGroupContent } from '@/components/ui/sidebar'
@@ -347,6 +348,32 @@ export function SidebarSessionsSection({
   // to avoid a double scroll container.
   const resolvedContentClassName = cn(contentClassName, flatVirtualized && 'overflow-y-visible')
 
+  // Session drags are POINTER drags now (session-drag.ts), so the native
+  // onDrop below never fires for them. The drag session instead dispatches
+  // SESSION_FOLDER_DROP_EVENT on this group's root (found via the
+  // data-session-folder-drop marker) when released over it.
+  const groupRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const el = groupRef.current
+
+    if (!el || !onDropSession) {
+      return
+    }
+
+    const handler = (event: Event) => {
+      const sessionId = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId
+
+      if (sessionId) {
+        onDropSession(sessionId)
+      }
+    }
+
+    el.addEventListener(SESSION_FOLDER_DROP_EVENT, handler)
+
+    return () => el.removeEventListener(SESSION_FOLDER_DROP_EVENT, handler)
+  }, [onDropSession])
+
   const handleDragOver = (event: React.DragEvent) => {
     if (!onDropSession || !dragHasSession(event.dataTransfer)) {
       return
@@ -373,7 +400,13 @@ export function SidebarSessionsSection({
   }
 
   return (
-    <SidebarGroup className={rootClassName} onDragOver={handleDragOver} onDrop={handleDrop}>
+    <SidebarGroup
+      className={rootClassName}
+      data-session-folder-drop={onDropSession ? '' : undefined}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      ref={groupRef}
+    >
       <SidebarSectionHeader
         action={headerAction}
         collapsible={collapsible}
