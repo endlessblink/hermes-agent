@@ -57,7 +57,11 @@ test('createDiagnosticsRecorder writes jsonl and keeps recent events', () => {
   recorder.record({ component: 'backend', event: 'exit', message: 'two' })
   recorder.record({ component: 'renderer', event: 'heartbeat.missed', message: 'three', severity: 'warn' })
 
-  const lines = fs.readFileSync(filePath, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  const lines = fs
+    .readFileSync(filePath, 'utf8')
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
   assert.equal(lines.length, 3)
   assert.deepEqual(
     recorder.recent().map(event => event.message),

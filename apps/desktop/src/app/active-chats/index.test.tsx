@@ -127,9 +127,7 @@ describe('ActiveChatsView', () => {
     expect(screen.getByRole('button', { name: /Profile/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Workspace/i })).toBeTruthy()
 
-    await waitFor(() =>
-      expect(getSessionMessages).toHaveBeenCalledWith('waiting-chat', 'endlessblink')
-    )
+    await waitFor(() => expect(getSessionMessages).toHaveBeenCalledWith('waiting-chat', 'endlessblink'))
     expect(await screen.findByText('Need help here')).toBeTruthy()
 
     const replyBox = screen.getByPlaceholderText('Reply to this chat...')
@@ -163,9 +161,7 @@ describe('ActiveChatsView', () => {
     const onOpenSession = vi.fn()
 
     $sessions.set(
-      $sessions.get().map(session =>
-        session.id === 'waiting-chat' ? { ...session, archived: true } : session
-      )
+      $sessions.get().map(session => (session.id === 'waiting-chat' ? { ...session, archived: true } : session))
     )
 
     render(

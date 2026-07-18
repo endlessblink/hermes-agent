@@ -38,11 +38,7 @@ function resolvedStart(timerKey?: string, explicitStartedAtMs?: number | null): 
   return startedAt(timerKey)
 }
 
-export function useElapsedSeconds(
-  active = true,
-  timerKey?: string,
-  explicitStartedAtMs?: number | null
-): number {
+export function useElapsedSeconds(active = true, timerKey?: string, explicitStartedAtMs?: number | null): number {
   const start = useRef(resolvedStart(timerKey, explicitStartedAtMs))
   const lastKey = useRef(timerKey)
   const lastExplicitStart = useRef(explicitStartedAtMs)

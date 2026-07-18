@@ -157,9 +157,10 @@ describe('PersonalAssistantSituation', () => {
     let resolveAcknowledgement: (value: undefined) => void = () => undefined
 
     acknowledgePersonalAssistantRead.mockImplementationOnce(
-      () => new Promise<undefined>(resolve => {
-        resolveAcknowledgement = resolve
-      })
+      () =>
+        new Promise<undefined>(resolve => {
+          resolveAcknowledgement = resolve
+        })
     )
     mountBottomedThreadViewport()
     render(<PersonalAssistantSituation />)

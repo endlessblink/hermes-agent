@@ -62,7 +62,10 @@ function splitMarkdownHeadings(text: string): string[] {
 }
 
 function splitParagraphs(text: string): string[] {
-  const paragraphs = text.split(/\n\s*\n/g).map(normalizeChunk).filter(Boolean)
+  const paragraphs = text
+    .split(/\n\s*\n/g)
+    .map(normalizeChunk)
+    .filter(Boolean)
 
   if (paragraphs.length <= 1) {
     return [normalizeChunk(text)]

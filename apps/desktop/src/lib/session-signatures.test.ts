@@ -13,6 +13,7 @@ import {
   shouldSettleBusyFromLiveStatus,
   storedSessionIdForCompressionContinuation
 } from '../app/desktop-controller-utils'
+
 import { sameCronSignature, sessionMessagesSignature } from './session-signatures'
 
 const session = (id: string, title: string | null): SessionInfo => ({ id, title }) as SessionInfo
@@ -238,7 +239,7 @@ describe('recoverSameSessionFromCompression', () => {
   it('resumes from durable server state without requiring a volatile desktop prompt', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
 
-    const requestGateway = async <T,>(method: string, requestParams?: Record<string, unknown>): Promise<T> => {
+    const requestGateway = async <T>(method: string, requestParams?: Record<string, unknown>): Promise<T> => {
       calls.push({ method, params: requestParams })
 
       if (method === 'session.resume') {
@@ -280,7 +281,7 @@ describe('recoverSameSessionFromCompression', () => {
   })
 
   it('does not retry non-stale continuation failures', async () => {
-    const requestGateway = async <T,>(method: string): Promise<T> => {
+    const requestGateway = async <T>(method: string): Promise<T> => {
       if (method === 'session.resume') {
         throw new Error('provider failed')
       }

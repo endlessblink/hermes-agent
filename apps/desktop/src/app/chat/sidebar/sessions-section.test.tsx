@@ -1,9 +1,8 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { SessionInfo } from '@/types/hermes'
-
 import { SESSION_FOLDER_DROP_EVENT } from '@/app/chat/composer/inline-refs'
+import type { SessionInfo } from '@/types/hermes'
 
 import { SidebarSessionsSection } from './sessions-section'
 
@@ -105,9 +104,7 @@ describe('SidebarSessionsSection pointer-drag folder drop', () => {
     const target = container.querySelector('[data-session-folder-drop]')
 
     expect(target).toBeTruthy()
-    target?.dispatchEvent(
-      new CustomEvent(SESSION_FOLDER_DROP_EVENT, { detail: { sessionId: 'dragged-session' } })
-    )
+    target?.dispatchEvent(new CustomEvent(SESSION_FOLDER_DROP_EVENT, { detail: { sessionId: 'dragged-session' } }))
 
     expect(onDropSession).toHaveBeenCalledWith('dragged-session')
   })

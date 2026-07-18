@@ -191,14 +191,11 @@ export function useIncrementalExternalStoreRuntime<T extends ThreadMessage>(
   const initialStoreRef = useRef(store as ExternalStoreAdapter)
   const { resetKey } = options
 
-  const runtime = useMemo(
-    () => {
-      void resetKey
+  const runtime = useMemo(() => {
+    void resetKey
 
-      return new IncrementalExternalStoreRuntimeCore(initialStoreRef.current)
-    },
-    [resetKey]
-  )
+    return new IncrementalExternalStoreRuntimeCore(initialStoreRef.current)
+  }, [resetKey])
 
   useEffect(() => {
     runtime.setAdapter(store as ExternalStoreAdapter)

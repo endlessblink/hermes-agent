@@ -82,7 +82,9 @@ const sameQueuedPayload = (
 ): boolean =>
   entry.text === payload.text &&
   entry.attachments.length === payload.attachments.length &&
-  entry.attachments.every((attachment, index) => attachmentKey(attachment) === attachmentKey(payload.attachments[index]!))
+  entry.attachments.every(
+    (attachment, index) => attachmentKey(attachment) === attachmentKey(payload.attachments[index]!)
+  )
 
 export const getQueuedPrompts = (key: string | null | undefined): QueuedPromptEntry[] => {
   const sid = sidOf(key)
@@ -198,7 +200,10 @@ export const markQueuedPromptsAutoDrain = (key: string | null | undefined): bool
     return false
   }
 
-  writeSession(sid, queue.map(entry => (entry.autoDrain ? entry : { ...entry, autoDrain: true })))
+  writeSession(
+    sid,
+    queue.map(entry => (entry.autoDrain ? entry : { ...entry, autoDrain: true }))
+  )
 
   return true
 }
@@ -227,7 +232,10 @@ export const batchQueuedPrompts = (key: string | null | undefined): null | Queue
 
   const batched: QueuedPromptEntry = {
     id: head!.id,
-    text: queue.map(entry => entry.text.trim()).filter(Boolean).join('\n\n'),
+    text: queue
+      .map(entry => entry.text.trim())
+      .filter(Boolean)
+      .join('\n\n'),
     attachments: queue.flatMap(entry => cloneAttachments(entry.attachments)),
     queuedAt: head!.queuedAt,
     autoDrain: true
@@ -252,7 +260,10 @@ export const markQueuedPromptAutoDrain = (key: string | null | undefined, id: st
     return false
   }
 
-  writeSession(sid, queue.map(item => (item.id === id ? { ...item, autoDrain: true } : item)))
+  writeSession(
+    sid,
+    queue.map(item => (item.id === id ? { ...item, autoDrain: true } : item))
+  )
 
   return true
 }

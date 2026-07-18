@@ -246,7 +246,10 @@ export function ActiveChatsView({
   }, [selectedKey, visibleRows])
 
   const selectedSessionKey = selected ? sessionKey(selected) : ''
-  const visibleMessages = useMemo(() => (messages ?? []).filter(message => !message.hidden).slice(-PREVIEW_LIMIT), [messages])
+  const visibleMessages = useMemo(
+    () => (messages ?? []).filter(message => !message.hidden).slice(-PREVIEW_LIMIT),
+    [messages]
+  )
   const draft = selectedSessionKey ? (draftBySession[selectedSessionKey] ?? '') : ''
 
   const waitingCount = activeRows.filter(
@@ -399,9 +402,24 @@ export function ActiveChatsView({
                 <QueueMetric icon={<Zap className="size-3.5" />} label={copy.running} value={runningCount} />
               </div>
               <div className="mt-3 grid grid-cols-3 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-muted) p-0.5">
-                <GroupButton active={groupMode === 'status'} icon={<Zap className="size-3.5" />} label={copy.groupStatus} onClick={() => setGroupMode('status')} />
-                <GroupButton active={groupMode === 'profile'} icon={<Users className="size-3.5" />} label={copy.groupProfile} onClick={() => setGroupMode('profile')} />
-                <GroupButton active={groupMode === 'workspace'} icon={<FolderOpen className="size-3.5" />} label={copy.groupWorkspace} onClick={() => setGroupMode('workspace')} />
+                <GroupButton
+                  active={groupMode === 'status'}
+                  icon={<Zap className="size-3.5" />}
+                  label={copy.groupStatus}
+                  onClick={() => setGroupMode('status')}
+                />
+                <GroupButton
+                  active={groupMode === 'profile'}
+                  icon={<Users className="size-3.5" />}
+                  label={copy.groupProfile}
+                  onClick={() => setGroupMode('profile')}
+                />
+                <GroupButton
+                  active={groupMode === 'workspace'}
+                  icon={<FolderOpen className="size-3.5" />}
+                  label={copy.groupWorkspace}
+                  onClick={() => setGroupMode('workspace')}
+                />
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -415,7 +433,9 @@ export function ActiveChatsView({
                           {group.label}
                         </h3>
                       </div>
-                      <span className="text-[0.6875rem] tabular-nums text-(--ui-text-quaternary)">{group.sessions.length}</span>
+                      <span className="text-[0.6875rem] tabular-nums text-(--ui-text-quaternary)">
+                        {group.sessions.length}
+                      </span>
                     </div>
                     <ul className="space-y-1">
                       {group.sessions.map(session => {
@@ -510,7 +530,11 @@ export function ActiveChatsView({
                       <span className="text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
                         {copy.messages(selected.message_count)}
                       </span>
-                      <Button disabled={!draft.trim() || Boolean(sendingKey)} onClick={() => void submitReply()} size="sm">
+                      <Button
+                        disabled={!draft.trim() || Boolean(sendingKey)}
+                        onClick={() => void submitReply()}
+                        size="sm"
+                      >
                         {sendingKey ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
                         {copy.answer}
                       </Button>
@@ -549,7 +573,9 @@ function ChatRow({
       <span className="flex min-w-0 items-center gap-2">
         <StateDot state={state} />
         <span className="min-w-0 flex-1 truncate text-[0.8125rem] text-foreground">{sessionTitle(session)}</span>
-        <span className="shrink-0 text-[0.625rem] text-(--ui-text-tertiary)">{formatAge(sessionTimestamp(session))}</span>
+        <span className="shrink-0 text-[0.625rem] text-(--ui-text-tertiary)">
+          {formatAge(sessionTimestamp(session))}
+        </span>
       </span>
       <span className="truncate pl-4 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
         {session.preview || workspaceLabel(session) || session.source || session.id}
@@ -642,7 +668,12 @@ function TranscriptRow({ message }: { message: ChatMessage }) {
   }
 
   return (
-    <article className={cn('grid gap-1 rounded-md px-3 py-2', message.role === 'user' ? 'bg-(--ui-row-active-background)' : 'bg-(--ui-surface-muted)')}>
+    <article
+      className={cn(
+        'grid gap-1 rounded-md px-3 py-2',
+        message.role === 'user' ? 'bg-(--ui-row-active-background)' : 'bg-(--ui-surface-muted)'
+      )}
+    >
       <div className="text-[0.6875rem] uppercase tracking-[0.08em] text-(--ui-text-tertiary)">{message.role}</div>
       <p className="whitespace-pre-wrap break-words text-[0.8125rem] leading-5 text-(--ui-text-secondary)">{text}</p>
     </article>

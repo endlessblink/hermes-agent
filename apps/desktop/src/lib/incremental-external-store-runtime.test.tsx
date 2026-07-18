@@ -5,13 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { useIncrementalExternalStoreRuntime } from './incremental-external-store-runtime'
 
-function RuntimeHarness({
-  onRuntime,
-  resetKey
-}: {
-  onRuntime: (runtime: AssistantRuntime) => void
-  resetKey: string
-}) {
+function RuntimeHarness({ onRuntime, resetKey }: { onRuntime: (runtime: AssistantRuntime) => void; resetKey: string }) {
   const store = useMemo<ExternalStoreAdapter<ThreadMessage>>(
     () => ({
       messages: [],

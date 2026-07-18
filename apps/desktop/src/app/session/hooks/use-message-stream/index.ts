@@ -476,8 +476,10 @@ export function useMessageStream({
       const replyReadyProfile =
         $sessions
           .get()
-          .find(session => session.id === replyReadyId || session._lineage_root_id === replyReadyId || session.id === sessionId)
-          ?.profile ?? $activeGatewayProfile.get()
+          .find(
+            session =>
+              session.id === replyReadyId || session._lineage_root_id === replyReadyId || session.id === sessionId
+          )?.profile ?? $activeGatewayProfile.get()
 
       setSessionReplyReady(replyReadyId, true, replyReadyProfile)
     },

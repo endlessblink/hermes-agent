@@ -39,11 +39,7 @@ describe('daily assistant scheduler', () => {
   })
 
   it('computes Jerusalem nine across standard and daylight time', () => {
-    expect(nextJerusalemNine(new Date('2026-01-12T05:00:00.000Z')).toISOString()).toBe(
-      '2026-01-12T07:00:00.000Z'
-    )
-    expect(nextJerusalemNine(new Date('2026-07-12T05:00:00.000Z')).toISOString()).toBe(
-      '2026-07-12T06:00:00.000Z'
-    )
+    expect(nextJerusalemNine(new Date('2026-01-12T05:00:00.000Z')).toISOString()).toBe('2026-01-12T07:00:00.000Z')
+    expect(nextJerusalemNine(new Date('2026-07-12T05:00:00.000Z')).toISOString()).toBe('2026-07-12T06:00:00.000Z')
   })
 })

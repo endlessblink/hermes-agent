@@ -87,11 +87,14 @@ export const AssistantMessage: FC<{
   const replyTarget = useStore($messageReplyTarget)
   const activeProfile = useStore($activeGatewayProfile)
   const repliesEnabled = useStore($messageRepliesEnabled) || messageRepliesEnabledForProfile(activeProfile)
+
   const replyChunks = useMemo(
     () => (!isRunning && repliesEnabled && completedText ? splitAssistantMessageIntoReplyChunks(completedText) : []),
     [completedText, isRunning, repliesEnabled]
   )
+
   const renderReplyChunks = replyChunks.length > 1
+
   const replyingToThisMessage =
     replyTarget?.messageId === messageId || Boolean(replyTarget?.messageId.startsWith(`${messageId}:chunk:`))
 

@@ -619,11 +619,7 @@ const toggleMembership = (set: (next: Updater<string[]>) => void, id: string, on
     return present ? current.filter(x => x !== id) : current
   })
 
-export function setSessionReplyReady(
-  sessionId: string | null | undefined,
-  ready: boolean,
-  profile?: null | string
-) {
+export function setSessionReplyReady(sessionId: string | null | undefined, ready: boolean, profile?: null | string) {
   if (!sessionId) {
     return
   }

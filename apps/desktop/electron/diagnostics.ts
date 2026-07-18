@@ -15,11 +15,15 @@ function planDiagnosticsRotation(filePath, size, maxBytes = DEFAULT_MAX_BYTES, b
   if (size < maxBytes) {
     return []
   }
+
   const ops = [['rm', diagnosticsBackupPath(filePath, backupCount)]]
+
   for (let i = backupCount - 1; i >= 1; i--) {
     ops.push(['mv', diagnosticsBackupPath(filePath, i), diagnosticsBackupPath(filePath, i + 1)])
   }
+
   ops.push(['mv', filePath, diagnosticsBackupPath(filePath, 1)])
+
   return ops
 }
 
@@ -27,22 +31,29 @@ function redactDiagnosticValue(value, depth = 0) {
   if (value == null || typeof value === 'boolean' || typeof value === 'number') {
     return value
   }
+
   if (typeof value === 'string') {
     return value.length > MAX_STRING_LENGTH ? `${value.slice(0, MAX_STRING_LENGTH)}...` : value
   }
+
   if (depth >= MAX_DETAIL_DEPTH) {
     return '[Truncated]'
   }
+
   if (Array.isArray(value)) {
     return value.slice(0, 20).map(item => redactDiagnosticValue(item, depth + 1))
   }
+
   if (typeof value === 'object') {
     const next = {}
+
     for (const [key, inner] of Object.entries(value)) {
       next[key] = SENSITIVE_KEY_RE.test(key) ? '[Redacted]' : redactDiagnosticValue(inner, depth + 1)
     }
+
     return next
   }
+
   return String(value)
 }
 
@@ -73,6 +84,7 @@ function createDiagnosticsRecorder(options: any) {
 
   function rotateIfNeeded() {
     let size
+
     try {
       size = fs.statSync(filePath).size
     } catch {
@@ -95,6 +107,7 @@ function createDiagnosticsRecorder(options: any) {
   function record(input) {
     const entry = normalizeDiagnosticEvent(input)
     recent.push(entry)
+
     if (recent.length > recentLimit) {
       recent.splice(0, recent.length - recentLimit)
     }
@@ -117,9 +130,4 @@ function createDiagnosticsRecorder(options: any) {
   }
 }
 
-export {
-  createDiagnosticsRecorder,
-  normalizeDiagnosticEvent,
-  planDiagnosticsRotation,
-  redactDiagnosticValue
-}
+export { createDiagnosticsRecorder, normalizeDiagnosticEvent, planDiagnosticsRotation, redactDiagnosticValue }

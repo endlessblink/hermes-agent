@@ -14,9 +14,7 @@ const entry = (id: string, text: string): QueuedPromptEntry => ({
   text
 })
 
-function renderQueuePanel(
-  props: Partial<ComponentProps<typeof QueuePanel>> = {}
-) {
+function renderQueuePanel(props: Partial<ComponentProps<typeof QueuePanel>> = {}) {
   const onDelete = vi.fn()
   const onEdit = vi.fn()
   const onSendAll = vi.fn()

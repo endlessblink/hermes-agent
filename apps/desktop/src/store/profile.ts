@@ -267,7 +267,8 @@ export const $activeGatewayProfile = atom<string>('default')
 export const $selectedProfileScope = atom<string>(storedSelectedProfileScope())
 
 if (typeof window !== 'undefined') {
-  void window.hermesDesktop?.profile?.getScope?.()
+  void window.hermesDesktop?.profile
+    ?.getScope?.()
     .then(({ profile }) => {
       if (profile && isPersistableProfileScope(profile)) {
         const key = normalizeProfileKey(profile)

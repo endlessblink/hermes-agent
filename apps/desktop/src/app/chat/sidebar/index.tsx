@@ -10,12 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from '@/components/ui/context-menu'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { KbdGroup } from '@/components/ui/kbd'
 import { SearchField } from '@/components/ui/search-field'
@@ -72,13 +67,7 @@ import {
 } from '@/store/layout'
 import { notify } from '@/store/notifications'
 import { $personalAssistantState } from '@/store/personal-assistant'
-import {
-  $newChatProfile,
-  $profiles,
-  $profileScope,
-  ALL_PROFILES,
-  normalizeProfileKey
-} from '@/store/profile'
+import { $newChatProfile, $profiles, $profileScope, ALL_PROFILES, normalizeProfileKey } from '@/store/profile'
 import {
   $activeProjectId,
   $projects,
@@ -114,6 +103,7 @@ import {
   sessionPinId,
   setCurrentCwd
 } from '@/store/session'
+import { $focusedStoredSessionId, type SplitDir } from '@/store/session-states'
 import {
   $sidebarFolders,
   createFolder,
@@ -129,7 +119,6 @@ import {
   toggleFolderOpen,
   toggleFolderPinned
 } from '@/store/sidebar-folders'
-import { $focusedStoredSessionId, type SplitDir } from '@/store/session-states'
 
 import {
   ACTIVE_CHATS_ROUTE,
@@ -147,13 +136,7 @@ import { SidebarCronJobsSection } from './cron-jobs-section'
 import { FolderNameDialog } from './folder-dialogs'
 import { filterUnfiledSessions, resolveFolderSessions, visibleFoldersForScope } from './folders'
 import { SidebarLoadMoreRow } from './load-more-row'
-import {
-  orderByIds,
-  reconcileOrderIds,
-  resolveManualSessionOrderIds,
-  sameIds,
-  sessionsForSidebarScope
-} from './order'
+import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds, sessionsForSidebarScope } from './order'
 import { ProfileRail } from './profile-switcher'
 import { ProjectDialog } from './project-dialog'
 import {
@@ -357,12 +340,11 @@ export function ChatSidebar({
 
   const personalAssistantSelected = Boolean(
     currentView === 'chat' &&
-      assistantState?.sessionId &&
-      (selectedSessionId === assistantState.sessionId ||
-        sessions.some(
-          session =>
-            session.id === selectedSessionId && session._lineage_root_id === assistantState.sessionId
-        ))
+    assistantState?.sessionId &&
+    (selectedSessionId === assistantState.sessionId ||
+      sessions.some(
+        session => session.id === selectedSessionId && session._lineage_root_id === assistantState.sessionId
+      ))
   )
 
   // Only surface the profile switcher when more than one profile exists, so
@@ -1518,15 +1500,15 @@ export function ChatSidebar({
                   <div className="flex shrink-0 items-center gap-0.5">
                     {inProject && enteredProject ? (
                       <>
-                      {enteredProject.path && (
-                        <StartWorkButton onStarted={onNewSessionInWorkspace} repoPath={enteredProject.path} />
-                      )}
-                      <ProjectMenu
-                        isActive={enteredProject.id === activeProjectId}
-                        onExitScope={exitProjectScope}
-                        project={enteredProject}
-                        scoped
-                      />
+                        {enteredProject.path && (
+                          <StartWorkButton onStarted={onNewSessionInWorkspace} repoPath={enteredProject.path} />
+                        )}
+                        <ProjectMenu
+                          isActive={enteredProject.id === activeProjectId}
+                          onExitScope={exitProjectScope}
+                          project={enteredProject}
+                          scoped
+                        />
                       </>
                     ) : null}
                     <Tip label={s.nav['active-chats'] ?? ACTIVE_CHATS_NAV_ITEM.label}>
@@ -1534,7 +1516,8 @@ export function ChatSidebar({
                         aria-label={s.nav['active-chats'] ?? ACTIVE_CHATS_NAV_ITEM.label}
                         className={cn(
                           'text-(--ui-text-tertiary) opacity-70 hover:bg-(--ui-control-hover-background) hover:text-foreground hover:opacity-100 focus-visible:opacity-100',
-                          currentView === 'active-chats' && 'bg-(--ui-control-active-background) text-foreground opacity-100'
+                          currentView === 'active-chats' &&
+                            'bg-(--ui-control-active-background) text-foreground opacity-100'
                         )}
                         onClick={event => {
                           event.stopPropagation()

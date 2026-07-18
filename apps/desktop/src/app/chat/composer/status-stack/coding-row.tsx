@@ -240,9 +240,10 @@ export const CodingStatusRow = memo(function CodingStatusRow({
 
   // Other worktrees to jump into — everything except the one we're already in
   // (matched by its checked-out branch) and the bare/main placeholder entry.
-  const otherWorktrees = worktreeUiEnabled && onOpenWorktree
-    ? worktrees.filter(w => w.path && !w.detached && w.branch && w.branch !== current)
-    : []
+  const otherWorktrees =
+    worktreeUiEnabled && onOpenWorktree
+      ? worktrees.filter(w => w.path && !w.detached && w.branch && w.branch !== current)
+      : []
 
   const hasLineDelta = status.added > 0 || status.removed > 0
   // Untracked files carry no line delta vs HEAD, so surface them as a count when

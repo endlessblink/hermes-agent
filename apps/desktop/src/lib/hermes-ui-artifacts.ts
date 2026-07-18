@@ -110,9 +110,16 @@ export interface HermesUiFlowStateBatchArtifact {
   tasks: HermesUiFlowStateBatchTask[]
 }
 
-
 export type HermesUiFlowStatePlanningMode = 'day-start' | 'overload-relief' | 'end-of-day' | 'quick-triage'
-export type HermesUiFlowStatePlanningTone = 'risk' | 'health' | 'pet' | 'work' | 'money' | 'life' | 'creative' | 'maintenance'
+export type HermesUiFlowStatePlanningTone =
+  | 'risk'
+  | 'health'
+  | 'pet'
+  | 'work'
+  | 'money'
+  | 'life'
+  | 'creative'
+  | 'maintenance'
 
 export interface HermesUiFlowStatePlanningCategoryExample {
   id: string
@@ -411,7 +418,15 @@ export interface HermesUiWorkloadBarsArtifact {
   bars: HermesUiWorkloadBar[]
 }
 
-export type HermesUiTaskGraphNodeKind = 'task' | 'project' | 'person' | 'money' | 'health' | 'creative' | 'home' | 'unknown'
+export type HermesUiTaskGraphNodeKind =
+  | 'task'
+  | 'project'
+  | 'person'
+  | 'money'
+  | 'health'
+  | 'creative'
+  | 'home'
+  | 'unknown'
 
 export interface HermesUiTaskGraphNode {
   id: string
@@ -503,10 +518,29 @@ const MAX_GRAPH_EDGES = 16
 const MAX_FORM_FIELDS = 12
 const MAX_FORM_OPTIONS = 12
 const SAFE_FORM_KEYS = new Set(['description', 'direction', 'fields', 'id', 'submitLabel', 'title', 'type'])
-const SAFE_FORM_FIELD_KEYS = new Set(['default', 'description', 'id', 'label', 'options', 'placeholder', 'required', 'type'])
+const SAFE_FORM_FIELD_KEYS = new Set([
+  'default',
+  'description',
+  'id',
+  'label',
+  'options',
+  'placeholder',
+  'required',
+  'type'
+])
 const SAFE_FORM_OPTION_KEYS = new Set(['label', 'value'])
 
-const SAFE_PLANNING_SESSION_KEYS = new Set(['categories', 'description', 'direction', 'id', 'mode', 'nextBlock', 'tasks', 'title', 'type'])
+const SAFE_PLANNING_SESSION_KEYS = new Set([
+  'categories',
+  'description',
+  'direction',
+  'id',
+  'mode',
+  'nextBlock',
+  'tasks',
+  'title',
+  'type'
+])
 const SAFE_PLANNING_CATEGORY_KEYS = new Set(['count', 'examples', 'id', 'label', 'recommendation', 'tone'])
 const SAFE_PLANNING_CATEGORY_EXAMPLE_KEYS = new Set(['dueDate', 'id', 'priority', 'title'])
 const SAFE_PLANNING_NEXT_BLOCK_KEYS = new Set(['doneEnough', 'durationMinutes', 'id', 'rationale', 'taskIds', 'title'])
@@ -548,7 +582,16 @@ const SAFE_TASK_TABLE_ROW_KEYS = new Set([
 const SAFE_MINI_KANBAN_KEYS = new Set(['description', 'direction', 'id', 'lanes', 'title', 'type'])
 const SAFE_MINI_KANBAN_LANE_KEYS = new Set(['description', 'id', 'tasks', 'title'])
 const SAFE_MINI_KANBAN_TASK_KEYS = new Set(['actions', 'confidence', 'dueDate', 'id', 'note', 'priority', 'title'])
-const SAFE_DAY_TIMELINE_KEYS = new Set(['blocks', 'currentTime', 'date', 'description', 'direction', 'id', 'title', 'type'])
+const SAFE_DAY_TIMELINE_KEYS = new Set([
+  'blocks',
+  'currentTime',
+  'date',
+  'description',
+  'direction',
+  'id',
+  'title',
+  'type'
+])
 
 const SAFE_DAY_TIMELINE_BLOCK_KEYS = new Set([
   'actions',
@@ -669,7 +712,10 @@ function isParseFailure(value: HermesUiArtifactParseFailure | unknown): value is
   return isRecord(value) && value.ok === false && typeof value.error === 'string'
 }
 
-function parseChecklistAction(rawAction: unknown, field: string): HermesUiArtifactParseFailure | HermesUiChecklistAction {
+function parseChecklistAction(
+  rawAction: unknown,
+  field: string
+): HermesUiArtifactParseFailure | HermesUiChecklistAction {
   if (!isRecord(rawAction)) {
     return { error: `${field} must be an object`, ok: false }
   }
@@ -713,7 +759,10 @@ function parseChecklistAction(rawAction: unknown, field: string): HermesUiArtifa
   return { copyText, id: actionId, label: actionLabel, submitText }
 }
 
-function parseChecklistLikeArtifact(parsed: Record<string, unknown>, type: 'checklist' | 'questionnaire'): HermesUiArtifactParseResult {
+function parseChecklistLikeArtifact(
+  parsed: Record<string, unknown>,
+  type: 'checklist' | 'questionnaire'
+): HermesUiArtifactParseResult {
   const rawItems = parsed.items ?? parsed.questions
 
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
@@ -825,6 +874,7 @@ function parseQuestionnaireArtifact(parsed: Record<string, unknown>): HermesUiAr
 
 function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
   const unsupportedFormKeys = Object.keys(parsed).filter(key => !SAFE_FORM_KEYS.has(key))
+
   if (unsupportedFormKeys.length > 0) {
     return { error: `form contains unsupported properties: ${unsupportedFormKeys.join(', ')}`, ok: false }
   }
@@ -844,7 +894,14 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
   }
 
   const allowedTypes = new Set<HermesUiFormFieldType>([
-    'short-text', 'long-text', 'single-choice', 'multi-choice', 'boolean', 'number', 'date', 'time'
+    'short-text',
+    'long-text',
+    'single-choice',
+    'multi-choice',
+    'boolean',
+    'number',
+    'date',
+    'time'
   ])
 
   const seenIds = new Set<string>()
@@ -856,8 +913,12 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
     }
 
     const unsupportedFieldKeys = Object.keys(raw).filter(key => !SAFE_FORM_FIELD_KEYS.has(key))
+
     if (unsupportedFieldKeys.length > 0) {
-      return { error: `fields[${index}] contains unsupported properties: ${unsupportedFieldKeys.join(', ')}`, ok: false }
+      return {
+        error: `fields[${index}] contains unsupported properties: ${unsupportedFieldKeys.join(', ')}`,
+        ok: false
+      }
     }
 
     const id = normalizeText(raw.id, MAX_ITEM_ID_LENGTH, `fields[${index}].id`)
@@ -917,11 +978,7 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
 
       for (const [optionIndex, rawOption] of raw.options.entries()) {
         if (typeof rawOption === 'string') {
-          const optionText = normalizeText(
-            rawOption,
-            MAX_ITEM_ID_LENGTH,
-            `fields[${index}].options[${optionIndex}]`
-          )
+          const optionText = normalizeText(rawOption, MAX_ITEM_ID_LENGTH, `fields[${index}].options[${optionIndex}]`)
 
           if (typeof optionText !== 'string') {
             return optionText
@@ -945,8 +1002,16 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
           return { error: `fields[${index}].options[${optionIndex}] contains unsupported properties`, ok: false }
         }
 
-        const value = normalizeText(rawOption.value, MAX_ITEM_ID_LENGTH, `fields[${index}].options[${optionIndex}].value`)
-        const optionLabel = normalizeText(rawOption.label, MAX_ACTION_COPY_TEXT_LENGTH, `fields[${index}].options[${optionIndex}].label`)
+        const value = normalizeText(
+          rawOption.value,
+          MAX_ITEM_ID_LENGTH,
+          `fields[${index}].options[${optionIndex}].value`
+        )
+        const optionLabel = normalizeText(
+          rawOption.label,
+          MAX_ACTION_COPY_TEXT_LENGTH,
+          `fields[${index}].options[${optionIndex}].label`
+        )
 
         if (typeof value !== 'string') {
           return value
@@ -1077,7 +1142,6 @@ function parseTaskPriority(value: unknown): HermesUiArtifactParseFailure | Herme
   return { error: 'task.priority must be high, medium, low, or null', ok: false }
 }
 
-
 function parseTriageDecision(value: unknown): HermesUiArtifactParseFailure | HermesUiTriageDecision | undefined {
   if (value === undefined) {
     return undefined
@@ -1090,7 +1154,10 @@ function parseTriageDecision(value: unknown): HermesUiArtifactParseFailure | Her
   return { error: 'recommendation must be today, not_today, later, or discuss', ok: false }
 }
 
-function parseTaskLike(rawTask: Record<string, unknown>, field: string): HermesUiArtifactParseFailure | HermesUiTaskTriageTask {
+function parseTaskLike(
+  rawTask: Record<string, unknown>,
+  field: string
+): HermesUiArtifactParseFailure | HermesUiTaskTriageTask {
   const taskId = normalizeText(rawTask.id, MAX_ITEM_ID_LENGTH, `${field}.id`)
 
   if (typeof taskId !== 'string') {
@@ -1138,7 +1205,6 @@ function parseTaskLike(rawTask: Record<string, unknown>, field: string): HermesU
   return { dueDate, id: taskId, priority: priority ?? null, projectId, status, title: taskTitle }
 }
 
-
 function parsePlanningMode(value: unknown): HermesUiArtifactParseFailure | HermesUiFlowStatePlanningMode {
   if (value === 'day-start' || value === 'overload-relief' || value === 'end-of-day' || value === 'quick-triage') {
     return value
@@ -1147,7 +1213,10 @@ function parsePlanningMode(value: unknown): HermesUiArtifactParseFailure | Herme
   return { error: 'mode must be day-start, overload-relief, end-of-day, or quick-triage', ok: false }
 }
 
-function parsePlanningTone(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiFlowStatePlanningTone {
+function parsePlanningTone(
+  value: unknown,
+  field: string
+): HermesUiArtifactParseFailure | HermesUiFlowStatePlanningTone {
   if (
     value === 'risk' ||
     value === 'health' ||
@@ -1237,11 +1306,20 @@ function parseFlowStatePlanningSessionArtifact(parsed: Record<string, unknown>):
       return tone
     }
 
-    if (typeof rawCategory.count !== 'number' || !Number.isInteger(rawCategory.count) || rawCategory.count < 0 || rawCategory.count > 999) {
+    if (
+      typeof rawCategory.count !== 'number' ||
+      !Number.isInteger(rawCategory.count) ||
+      rawCategory.count < 0 ||
+      rawCategory.count > 999
+    ) {
       return { error: `categories[${index}].count must be an integer from 0 to 999`, ok: false }
     }
 
-    const recommendation = normalizeText(rawCategory.recommendation, MAX_ITEM_DESCRIPTION_LENGTH, `categories[${index}].recommendation`)
+    const recommendation = normalizeText(
+      rawCategory.recommendation,
+      MAX_ITEM_DESCRIPTION_LENGTH,
+      `categories[${index}].recommendation`
+    )
 
     if (typeof recommendation !== 'string') {
       return recommendation
@@ -1406,7 +1484,11 @@ function parseFlowStatePlanningSessionArtifact(parsed: Record<string, unknown>):
       return recommendedPriority
     }
 
-    const recommendedDueDate = optionalNullableText(rawTask.recommendedDueDate, MAX_ITEM_ID_LENGTH, `tasks[${index}].recommendedDueDate`)
+    const recommendedDueDate = optionalNullableText(
+      rawTask.recommendedDueDate,
+      MAX_ITEM_ID_LENGTH,
+      `tasks[${index}].recommendedDueDate`
+    )
 
     if (recommendedDueDate && typeof recommendedDueDate !== 'string') {
       return recommendedDueDate
@@ -1427,7 +1509,10 @@ function parseFlowStatePlanningSessionArtifact(parsed: Record<string, unknown>):
     })
   }
 
-  return { artifact: { ...base.fields, categories, mode, nextBlock, tasks, type: 'flowstate-planning-session' }, ok: true }
+  return {
+    artifact: { ...base.fields, categories, mode, nextBlock, tasks, type: 'flowstate-planning-session' },
+    ok: true
+  }
 }
 
 function parseFlowStateBatchArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
@@ -1477,7 +1562,11 @@ function parseFlowStateBatchArtifact(parsed: Record<string, unknown>): HermesUiA
       return recommendedPriority
     }
 
-    const recommendedDueDate = optionalNullableText(rawTask.recommendedDueDate, MAX_ITEM_ID_LENGTH, `tasks[${index}].recommendedDueDate`)
+    const recommendedDueDate = optionalNullableText(
+      rawTask.recommendedDueDate,
+      MAX_ITEM_ID_LENGTH,
+      `tasks[${index}].recommendedDueDate`
+    )
 
     if (recommendedDueDate && typeof recommendedDueDate !== 'string') {
       return recommendedDueDate
@@ -1528,7 +1617,11 @@ function parseTaskTriageArtifact(parsed: Record<string, unknown>): HermesUiArtif
   }
 }
 
-function hasUnsupportedKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, field: string): HermesUiArtifactParseFailure | undefined {
+function hasUnsupportedKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  field: string
+): HermesUiArtifactParseFailure | undefined {
   const unsupported = Object.keys(value).filter(key => !allowed.has(key))
 
   if (unsupported.length > 0) {
@@ -1590,28 +1683,36 @@ function parseTaskBreakdownSteps(
   const steps: HermesUiTaskBreakdownStep[] = []
 
   for (const [index, rawStep] of value.entries()) {
-    if (!isRecord(rawStep)) {return { error: `steps[${index}] must be an object`, ok: false }}
+    if (!isRecord(rawStep)) {
+      return { error: `steps[${index}] must be an object`, ok: false }
+    }
 
     const unsupportedStep = hasUnsupportedKeys(rawStep, SAFE_TASK_BREAKDOWN_STEP_KEYS, `steps[${index}]`)
 
-    if (unsupportedStep) {return unsupportedStep}
+    if (unsupportedStep) {
+      return unsupportedStep
+    }
 
     const id = normalizeText(rawStep.id, MAX_ITEM_ID_LENGTH, `steps[${index}].id`)
 
-    if (typeof id !== 'string') {return id}
+    if (typeof id !== 'string') {
+      return id
+    }
 
-    if (!id) {return { error: `steps[${index}].id is required`, ok: false }}
+    if (!id) {
+      return { error: `steps[${index}].id is required`, ok: false }
+    }
 
-    if (seenIds.has(id)) {return { error: `Duplicate step id: ${id}`, ok: false }}
+    if (seenIds.has(id)) {
+      return { error: `Duplicate step id: ${id}`, ok: false }
+    }
     seenIds.add(id)
 
-    const title = normalizeText(
-      rawStep.title,
-      HERMES_UI_TASK_BREAKDOWN_LIMITS.titleLength,
-      `steps[${index}].title`
-    )
+    const title = normalizeText(rawStep.title, HERMES_UI_TASK_BREAKDOWN_LIMITS.titleLength, `steps[${index}].title`)
 
-    if (typeof title !== 'string') {return title}
+    if (typeof title !== 'string') {
+      return title
+    }
 
     if (!title && !allowEmptyEditableFields) {
       return { error: `steps[${index}].title is required`, ok: false }
@@ -1627,7 +1728,9 @@ function parseTaskBreakdownSteps(
       `steps[${index}].doneEnough`
     )
 
-    if (typeof doneEnough !== 'string') {return doneEnough}
+    if (typeof doneEnough !== 'string') {
+      return doneEnough
+    }
 
     if (!doneEnough && !allowEmptyEditableFields) {
       return { error: `steps[${index}].doneEnough is required`, ok: false }
@@ -1636,7 +1739,12 @@ function parseTaskBreakdownSteps(
     let estimateMinutes: number | undefined
 
     if (rawStep.estimateMinutes !== undefined) {
-      if (typeof rawStep.estimateMinutes !== 'number' || !Number.isInteger(rawStep.estimateMinutes) || rawStep.estimateMinutes < 1 || rawStep.estimateMinutes > 480) {
+      if (
+        typeof rawStep.estimateMinutes !== 'number' ||
+        !Number.isInteger(rawStep.estimateMinutes) ||
+        rawStep.estimateMinutes < 1 ||
+        rawStep.estimateMinutes > 480
+      ) {
         return { error: `steps[${index}].estimateMinutes must be an integer from 1 to 480`, ok: false }
       }
 
@@ -1684,15 +1792,23 @@ function parseTaskBreakdownArtifact(parsed: Record<string, unknown>): HermesUiAr
 
   const taskId = normalizeText(parsed.task.id, MAX_ITEM_ID_LENGTH, 'task.id')
 
-  if (typeof taskId !== 'string') {return taskId}
+  if (typeof taskId !== 'string') {
+    return taskId
+  }
 
-  if (!taskId) {return { error: 'task.id is required', ok: false }}
+  if (!taskId) {
+    return { error: 'task.id is required', ok: false }
+  }
 
   const taskTitle = normalizeText(parsed.task.title, MAX_LABEL_LENGTH, 'task.title')
 
-  if (typeof taskTitle !== 'string') {return taskTitle}
+  if (typeof taskTitle !== 'string') {
+    return taskTitle
+  }
 
-  if (!taskTitle) {return { error: 'task.title is required', ok: false }}
+  if (!taskTitle) {
+    return { error: 'task.title is required', ok: false }
+  }
 
   if (parsed.scope !== 'next-move' && parsed.scope !== 'working-session' && parsed.scope !== 'full-delivery') {
     return { error: 'scope must be next-move, working-session, or full-delivery', ok: false }
@@ -1706,13 +1822,19 @@ function parseTaskBreakdownArtifact(parsed: Record<string, unknown>): HermesUiAr
 
   const targetOutcome = optionalText(parsed.targetOutcome, MAX_ITEM_DESCRIPTION_LENGTH, 'targetOutcome')
 
-  if (targetOutcome && typeof targetOutcome !== 'string') {return targetOutcome}
+  if (targetOutcome && typeof targetOutcome !== 'string') {
+    return targetOutcome
+  }
   const stoppingRule = optionalText(parsed.stoppingRule, MAX_ITEM_DESCRIPTION_LENGTH, 'stoppingRule')
 
-  if (stoppingRule && typeof stoppingRule !== 'string') {return stoppingRule}
+  if (stoppingRule && typeof stoppingRule !== 'string') {
+    return stoppingRule
+  }
   const submitLabel = optionalText(parsed.submitLabel, MAX_ACTION_LABEL_LENGTH, 'submitLabel')
 
-  if (submitLabel && typeof submitLabel !== 'string') {return submitLabel}
+  if (submitLabel && typeof submitLabel !== 'string') {
+    return submitLabel
+  }
 
   return {
     artifact: {
@@ -1729,7 +1851,9 @@ function parseTaskBreakdownArtifact(parsed: Record<string, unknown>): HermesUiAr
   }
 }
 
-function parsePlanningFunnelStepStatus(value: unknown): HermesUiArtifactParseFailure | HermesUiPlanningFunnelStepStatus | undefined {
+function parsePlanningFunnelStepStatus(
+  value: unknown
+): HermesUiArtifactParseFailure | HermesUiPlanningFunnelStepStatus | undefined {
   if (value === undefined) {
     return undefined
   }
@@ -1897,7 +2021,10 @@ function parseTaskSize(value: unknown, field: string): HermesUiArtifactParseFail
   return { error: `${field} must be tiny, small, medium, large, or unknown`, ok: false }
 }
 
-function parsePlanningLevel(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiPlanningLevel | undefined {
+function parsePlanningLevel(
+  value: unknown,
+  field: string
+): HermesUiArtifactParseFailure | HermesUiPlanningLevel | undefined {
   if (value === undefined) {
     return undefined
   }
@@ -1921,7 +2048,10 @@ function parseConfidence(value: unknown, field: string): HermesUiArtifactParseFa
   return { error: `${field} must be low, medium, or high`, ok: false }
 }
 
-function parseExternality(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiTaskExternality | undefined {
+function parseExternality(
+  value: unknown,
+  field: string
+): HermesUiArtifactParseFailure | HermesUiTaskExternality | undefined {
   if (value === undefined) {
     return undefined
   }
@@ -2006,7 +2136,10 @@ function parseTaskChip(
   }
 }
 
-function parseVisibleRecord(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiVisibleRecord | undefined {
+function parseVisibleRecord(
+  value: unknown,
+  field: string
+): HermesUiArtifactParseFailure | HermesUiVisibleRecord | undefined {
   if (value === undefined) {
     return undefined
   }
@@ -2353,7 +2486,11 @@ function parseMiniKanbanArtifact(parsed: Record<string, unknown>): HermesUiArtif
 
     seenLaneIds.add(laneId)
 
-    const laneDescription = optionalText(rawLane.description, MAX_ITEM_DESCRIPTION_LENGTH, `lanes[${laneIndex}].description`)
+    const laneDescription = optionalText(
+      rawLane.description,
+      MAX_ITEM_DESCRIPTION_LENGTH,
+      `lanes[${laneIndex}].description`
+    )
 
     if (laneDescription && typeof laneDescription !== 'string') {
       return laneDescription
@@ -2374,7 +2511,11 @@ function parseMiniKanbanArtifact(parsed: Record<string, unknown>): HermesUiArtif
         return { error: `lanes[${laneIndex}].tasks[${taskIndex}] must be an object`, ok: false }
       }
 
-      const unsupportedTask = hasUnsupportedKeys(rawTask, SAFE_MINI_KANBAN_TASK_KEYS, `lanes[${laneIndex}].tasks[${taskIndex}]`)
+      const unsupportedTask = hasUnsupportedKeys(
+        rawTask,
+        SAFE_MINI_KANBAN_TASK_KEYS,
+        `lanes[${laneIndex}].tasks[${taskIndex}]`
+      )
 
       if (unsupportedTask) {
         return unsupportedTask

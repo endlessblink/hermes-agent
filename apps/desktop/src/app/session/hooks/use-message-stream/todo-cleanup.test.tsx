@@ -318,7 +318,10 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.busy).toBe(false)
     expect(state?.awaitingResponse).toBe(false)
     expect(state?.messages.at(-1)?.error).toBeUndefined()
-    expect(state?.messages.at(-1)?.parts.at(-1)).toMatchObject({ type: 'text', text: 'Recovered after refreshing auth.' })
+    expect(state?.messages.at(-1)?.parts.at(-1)).toMatchObject({
+      type: 'text',
+      text: 'Recovered after refreshing auth.'
+    })
   })
 
   it('requests automatic same-session recovery when compression times out', async () => {

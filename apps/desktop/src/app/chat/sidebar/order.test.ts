@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  orderByIds,
-  reconcileOrderIds,
-  resolveManualSessionOrderIds,
-  sameIds,
-  sessionsForSidebarScope
-} from './order'
+import { orderByIds, reconcileOrderIds, resolveManualSessionOrderIds, sameIds, sessionsForSidebarScope } from './order'
 
 describe('sessionsForSidebarScope', () => {
   const sessions = [

@@ -57,6 +57,9 @@ concurrency:
 jobs:
   generate-patch:
     name: Generate eslint --fix patch
+    # Upstream-only: the apply job pushes with AUTOFIX_BOT_PAT, which forks
+    # don't have — on a fork this workflow can only fail and spam email.
+    if: github.repository == 'NousResearch/hermes-agent'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

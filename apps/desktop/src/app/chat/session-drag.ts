@@ -214,9 +214,7 @@ export function startSessionDrag(
 
     onCommit() {
       if (folderEl) {
-        folderEl.dispatchEvent(
-          new CustomEvent(SESSION_FOLDER_DROP_EVENT, { detail: { sessionId: payload.id } })
-        )
+        folderEl.dispatchEvent(new CustomEvent(SESSION_FOLDER_DROP_EVENT, { detail: { sessionId: payload.id } }))
 
         return
       }

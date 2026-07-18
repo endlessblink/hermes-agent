@@ -13,6 +13,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import { type CSSProperties, lazy, type ReactNode, Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
+import {
+  activeRuntimeSessionRow,
+  activeRuntimeSessionStatus,
+  resolveProfileRestoreSessionId,
+  shouldSettleBusyFromLiveStatus
+} from '@/app/desktop-controller-utils'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
 import { DesktopInstallOverlay } from '@/components/desktop-install-overlay'
@@ -22,12 +28,6 @@ import { DesktopOnboardingOverlay } from '@/components/onboarding'
 import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
-import {
-  activeRuntimeSessionRow,
-  activeRuntimeSessionStatus,
-  resolveProfileRestoreSessionId,
-  shouldSettleBusyFromLiveStatus
-} from '@/app/desktop-controller-utils'
 import { getSession, getSessionMessages, triggerCronJob } from '@/hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
@@ -36,11 +36,8 @@ import { latestSessionTodos } from '@/lib/todos'
 import { setClarifyRequest } from '@/store/clarify'
 import { setCronFocusJobId } from '@/store/cron'
 import { startDailyAssistantScheduler } from '@/store/daily-assistant-scheduler'
+import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { notify } from '@/store/notifications'
-import {
-  handlePersonalAssistantAttention,
-  type PersonalAssistantAttentionPayload
-} from '@/store/personal-assistant-attention'
 import {
   $personalAssistantState,
   hydratePersonalAssistantStateWhenReady,
@@ -48,7 +45,10 @@ import {
   refreshPersonalAssistantState,
   startPersonalAssistant
 } from '@/store/personal-assistant'
-import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
+import {
+  handlePersonalAssistantAttention,
+  type PersonalAssistantAttentionPayload
+} from '@/store/personal-assistant-attention'
 import { $filePreviewTarget, $previewTarget } from '@/store/preview'
 import {
   $activeGatewayProfile,

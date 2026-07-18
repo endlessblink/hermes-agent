@@ -132,11 +132,13 @@ export function ProfileRail() {
   const [pendingRename, setPendingRename] = useState<null | ProfileInfo>(null)
   const [pendingDelete, setPendingDelete] = useState<null | ProfileInfo>(null)
   const [pendingSoul, setPendingSoul] = useState<null | string>(null)
+
   const [scrollState, setScrollState] = useState<ProfileRailScrollState>({
     canScrollLeft: false,
     canScrollRight: false,
     hasOverflow: false
   })
+
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Too many profiles for the square strip → collapse to the select. Declared
@@ -835,71 +837,71 @@ function ProfileSquare({
             </Tooltip>
           </TooltipProvider>
 
-        {/* The rail sits at the very bottom, so pad off the chrome (esp. the
+          {/* The rail sits at the very bottom, so pad off the chrome (esp. the
             statusbar) — Radix then flips the menu up instead of squishing it. */}
-        <ContextMenuContent
-          aria-label={p.actionsFor(label)}
-          className="w-40"
-          collisionPadding={{ bottom: 44, left: 8, right: 8, top: 8 }}
-          // Menu close refocuses the trigger — which doubles as the popover
-          // anchor — so the picker reads it as focus-outside and dies on open.
-          // Suppress the refocus and the picker survives.
-          onCloseAutoFocus={event => event.preventDefault()}
-        >
-          <ContextMenuItem onSelect={() => setPickerOpen(true)}>
-            <Codicon name="symbol-color" size="0.875rem" />
-            <span>{p.color}</span>
-          </ContextMenuItem>
-          <ContextMenuItem onSelect={() => setIconOpen(true)}>
-            <Codicon name="symbol-misc" size="0.875rem" />
-            <span>{p.icon}</span>
-          </ContextMenuItem>
-          <ContextMenuItem onSelect={onRename}>
-            <Codicon name="text-size" size="0.875rem" />
-            <span>{p.renameMenu}</span>
-          </ContextMenuItem>
-          <ContextMenuItem onSelect={onEditSoul}>
-            <Codicon name="edit" size="0.875rem" />
-            <span>{p.editSoul}</span>
-          </ContextMenuItem>
-          <ContextMenuItem
-            className="text-destructive focus:text-destructive"
-            onSelect={onDelete}
-            variant="destructive"
+          <ContextMenuContent
+            aria-label={p.actionsFor(label)}
+            className="w-40"
+            collisionPadding={{ bottom: 44, left: 8, right: 8, top: 8 }}
+            // Menu close refocuses the trigger — which doubles as the popover
+            // anchor — so the picker reads it as focus-outside and dies on open.
+            // Suppress the refocus and the picker survives.
+            onCloseAutoFocus={event => event.preventDefault()}
           >
-            <Codicon name="trash" size="0.875rem" />
-            <span>{t.common.delete}</span>
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
+            <ContextMenuItem onSelect={() => setPickerOpen(true)}>
+              <Codicon name="symbol-color" size="0.875rem" />
+              <span>{p.color}</span>
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => setIconOpen(true)}>
+              <Codicon name="symbol-misc" size="0.875rem" />
+              <span>{p.icon}</span>
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={onRename}>
+              <Codicon name="text-size" size="0.875rem" />
+              <span>{p.renameMenu}</span>
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={onEditSoul}>
+              <Codicon name="edit" size="0.875rem" />
+              <span>{p.editSoul}</span>
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="text-destructive focus:text-destructive"
+              onSelect={onDelete}
+              variant="destructive"
+            >
+              <Codicon name="trash" size="0.875rem" />
+              <span>{t.common.delete}</span>
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
 
-      <PopoverContent
-        aria-label={p.colorFor(label)}
-        className="w-auto p-2"
-        collisionPadding={{ bottom: 44, left: 8, right: 8, top: 8 }}
-        side="top"
-      >
-        <ColorSwatches
-          clearIcon="sync"
-          clearLabel={p.autoColor}
-          onChange={pickColor}
-          swatches={PROFILE_SWATCHES}
-          swatchLabel={p.setColor}
-          value={color}
-        />
-      </PopoverContent>
-    </Popover>
-    <ProfileIconDialog
-      hasIcon={Boolean(icon)}
-      label={label}
-      onClear={() => {
-        onSetIcon(null)
-        setIconOpen(false)
-      }}
-      onOpenChange={setIconOpen}
-      onSelect={emoji => onSetIcon(emoji)}
-      open={iconOpen}
-    />
+        <PopoverContent
+          aria-label={p.colorFor(label)}
+          className="w-auto p-2"
+          collisionPadding={{ bottom: 44, left: 8, right: 8, top: 8 }}
+          side="top"
+        >
+          <ColorSwatches
+            clearIcon="sync"
+            clearLabel={p.autoColor}
+            onChange={pickColor}
+            swatches={PROFILE_SWATCHES}
+            swatchLabel={p.setColor}
+            value={color}
+          />
+        </PopoverContent>
+      </Popover>
+      <ProfileIconDialog
+        hasIcon={Boolean(icon)}
+        label={label}
+        onClear={() => {
+          onSetIcon(null)
+          setIconOpen(false)
+        }}
+        onOpenChange={setIconOpen}
+        onSelect={emoji => onSetIcon(emoji)}
+        open={iconOpen}
+      />
     </>
   )
 }
@@ -918,11 +920,7 @@ function ProfileAttentionBadge({ count }: { count: number }) {
   }
 
   return (
-    <span
-      aria-hidden="true"
-      className={PROFILE_RAIL_COUNT_CLASS}
-      data-profile-count=""
-    >
+    <span aria-hidden="true" className={PROFILE_RAIL_COUNT_CLASS} data-profile-count="">
       {count > 99 ? '99+' : count}
     </span>
   )

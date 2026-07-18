@@ -68,8 +68,8 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
     cachedProfiles.length > 0 ? cachedProfiles : null
   )
 
-  const [selectedName, setSelectedName] = useState<null | string>(() =>
-    cachedProfiles.find(p => p.is_default)?.name ?? cachedProfiles[0]?.name ?? null
+  const [selectedName, setSelectedName] = useState<null | string>(
+    () => cachedProfiles.find(p => p.is_default)?.name ?? cachedProfiles[0]?.name ?? null
   )
 
   const [query, setQuery] = useState('')
