@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from agent.personal_assistant_monitor import (
     defer_candidate_event,
+    record_monitor_consumer_owner,
     lease_candidate_event,
     record_monitor_health,
     retry_candidate_event,
@@ -88,6 +89,11 @@ class PersonalAssistantTelegramMonitorBridge:
         target = self._target()
         if target is None:
             return False
+        record_monitor_consumer_owner(
+            self.profile_home,
+            "telegram-gateway",
+            now=now,
+        )
 
         event = lease_candidate_event(
             self.profile_home,

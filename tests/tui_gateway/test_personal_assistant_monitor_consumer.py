@@ -22,6 +22,24 @@ def _canonical(event):
     }
 
 
+def test_monitor_defers_to_live_telegram_owner(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+
+    lease = monkeypatch.setattr(
+        "agent.personal_assistant_monitor.lease_candidate_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Desktop must not race the Telegram owner")
+        ),
+    )
+    monkeypatch.setattr(
+        "agent.personal_assistant_monitor.active_monitor_consumer",
+        lambda *_args, **_kwargs: "telegram-gateway",
+    )
+
+    assert server._consume_personal_assistant_monitor_once(tmp_path) is False
+    assert lease is None
+
+
 def test_monitor_retries_failed_batch_with_safe_lifecycle(monkeypatch, tmp_path):
     import tui_gateway.server as server
 

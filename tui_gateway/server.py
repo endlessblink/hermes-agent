@@ -4292,6 +4292,7 @@ def _finish_personal_assistant_monitor_delivery(
 def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
     """Coalesce deterministic monitor work without interrupting an active turn."""
     from agent.personal_assistant_monitor import (
+        active_monitor_consumer,
         defer_candidate_event,
         lease_candidate_event,
         record_monitor_health,
@@ -4302,6 +4303,9 @@ def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
         PersonalAssistantStateStore,
         validate_monitor_events,
     )
+
+    if active_monitor_consumer(profile_home) == "telegram-gateway":
+        return False
 
     leased: list[dict[str, Any]] = []
     for _ in range(_PERSONAL_ASSISTANT_MONITOR_BATCH_LIMIT):

@@ -32,6 +32,7 @@ LEASE_TTL = timedelta(minutes=10)
 ACKED_HISTORY_LIMIT = 128
 MAX_DELIVERY_ATTEMPTS = 3
 RETRY_BACKOFF = timedelta(seconds=30)
+CONSUMER_OWNER_TTL = timedelta(seconds=20)
 SETTLED_DISPOSITIONS = frozenset({"handled", "merged", "suppressed"})
 TERMINAL_STATUSES = SETTLED_DISPOSITIONS | {"dead_letter"}
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
@@ -72,6 +73,53 @@ def record_monitor_health(
     except OSError:
         # Monitoring must never make the task queue less reliable.
         return
+
+
+def record_monitor_consumer_owner(
+    profile_home: Path,
+    consumer: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Publish a short-lived preferred consumer without creating a hard lock."""
+    observed_at = now or datetime.now(timezone.utc)
+    safe_consumer = "".join(
+        char
+        for char in str(consumer).lower()
+        if char.isalnum() or char in "-_"
+    )[:64]
+    if not safe_consumer:
+        return
+    with _locked(profile_home) as root:
+        atomic_json_write(
+            root / "consumer-owner.json",
+            {
+                "consumer": safe_consumer,
+                "observed_at": observed_at.isoformat(),
+            },
+            mode=0o600,
+            sort_keys=True,
+        )
+
+
+def active_monitor_consumer(
+    profile_home: Path,
+    *,
+    now: datetime | None = None,
+    ttl: timedelta = CONSUMER_OWNER_TTL,
+) -> str | None:
+    """Return the preferred consumer while its heartbeat remains fresh."""
+    checked_at = now or datetime.now(timezone.utc)
+    with _locked(profile_home) as root:
+        owner = _read_json(root / "consumer-owner.json", {})
+    try:
+        observed_at = datetime.fromisoformat(str(owner.get("observed_at") or ""))
+    except ValueError:
+        return None
+    if observed_at.tzinfo is None or checked_at - observed_at > ttl:
+        return None
+    consumer = str(owner.get("consumer") or "").strip()
+    return consumer or None
 
 
 @contextmanager

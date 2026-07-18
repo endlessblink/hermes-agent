@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agent.personal_assistant_monitor import run_monitor_check
+from agent.personal_assistant_monitor import active_monitor_consumer, run_monitor_check
 from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.delivery import DeliveryRouter
 from gateway.personal_assistant_monitor import (
@@ -102,6 +102,10 @@ async def test_bridge_delivers_monitor_event_to_telegram_home(tmp_path):
     assert chat_id == "424242"
     assert "1 overdue task" in content
     assert metadata["personal_assistant_monitor"] is True
+    assert active_monitor_consumer(
+        tmp_path,
+        now=NOW + timedelta(minutes=16),
+    ) == "telegram-gateway"
 
 
 @pytest.mark.asyncio
