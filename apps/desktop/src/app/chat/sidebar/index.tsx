@@ -1319,13 +1319,24 @@ export function ChatSidebar({
                         $newChatProfile.set(null)
                       }
 
-                      onNavigate(item)
+                      // The Personal assistant row opens the assistant's home
+                      // session via its dedicated handler — the generic
+                      // navigate path has no route for it (dropped in the
+                      // upstream merge; restored to pre-merge behavior).
+                      if (item.id === 'personal-assistant' && onStartPersonalAssistant) {
+                        onStartPersonalAssistant()
+                      } else {
+                        onNavigate(item)
+                      }
                     }}
                     tooltip={s.nav[item.id] ?? item.label}
                     type="button"
                   >
                     <item.icon className="size-4 shrink-0 text-[color-mix(in_srgb,currentColor_72%,transparent)]" />
                     <span className="min-w-0 flex-1 truncate">{s.nav[item.id] ?? item.label}</span>
+                    {item.id === 'personal-assistant' && assistantState && assistantState.unreadCount > 0 && (
+                      <SidebarMenuBadge>{assistantState.unreadCount}</SidebarMenuBadge>
+                    )}
                     {isNewSession && (
                       <KbdGroup
                         className={cn('ml-auto opacity-55', newSessionKbdFlash && 'opacity-100!')}
