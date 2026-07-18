@@ -172,6 +172,12 @@ function useSessionActions({
   const [renameOpen, setRenameOpen] = useState(false)
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
+  const folders = useStore($sidebarFolders)
+  // Folder membership is keyed by the durable id (sessionPinId), mirroring pins.
+  const membershipKey = folderKey || sessionId
+  const profileKey = normalizeProfileKey(profile)
+  const visibleFolders = visibleFoldersForScope(folders, profileKey)
+  const currentFolder = folderForKey(visibleFolders, membershipKey, profileKey)
 
   // Already showing as a tab somewhere (a tile, or loaded in main — main IS
   // a tab): offering "Open in new tab" again is noise.
@@ -352,11 +358,66 @@ function useSessionActions({
     </Item>
   )
 
+  // Folder actions ("Move to folder" submenu + "Remove from folder") render with
+  // the Item-matched Radix Sub components so the dropdown and context menus stay
+  // at parity. Only shown when folders exist / the session is already foldered.
+  const renderFolderItems = (Item: MenuItem) => {
+    if (visibleFolders.length === 0 && !currentFolder) {
+      return null
+    }
+
+    const isDropdown = Item === DropdownMenuItem
+    const Sub = isDropdown ? DropdownMenuSub : ContextMenuSub
+    const SubTrigger = isDropdown ? DropdownMenuSubTrigger : ContextMenuSubTrigger
+    const SubContent = isDropdown ? DropdownMenuSubContent : ContextMenuSubContent
+
+    return (
+      <>
+        {visibleFolders.length > 0 && (
+          <Sub>
+            <SubTrigger disabled={!sessionId}>
+              <Codicon name="folder" size="0.875rem" />
+              <span>{r.moveToFolder}</span>
+            </SubTrigger>
+            <SubContent>
+              {visibleFolders.map(folder => (
+                <Item
+                  disabled={!sessionId || folder.id === currentFolder?.id}
+                  key={folder.id}
+                  onSelect={() => {
+                    triggerHaptic('selection')
+                    moveSessionToFolderInScope(membershipKey, folder.id, profileKey)
+                  }}
+                >
+                  <Codicon name={folder.id === currentFolder?.id ? 'check' : 'folder'} size="0.875rem" />
+                  <span>{folder.name}</span>
+                </Item>
+              ))}
+            </SubContent>
+          </Sub>
+        )}
+        {currentFolder && (
+          <Item
+            disabled={!sessionId}
+            onSelect={() => {
+              triggerHaptic('selection')
+              removeSessionFromFolderInScope(membershipKey, profileKey)
+            }}
+          >
+            <Codicon name="remove" size="0.875rem" />
+            <span>{r.removeFromFolder}</span>
+          </Item>
+        )}
+      </>
+    )
+  }
+
   const renderItems = (kit: MenuKit) => (
     <>
       {openItems.map(item => renderMenuItem(kit.Item, item))}
       {openItems.length > 0 && <kit.Separator />}
       {identityItems.map(item => renderMenuItem(kit.Item, item))}
+      {renderFolderItems(kit.Item)}
       <CopyButton
         appearance={kit.Item === DropdownMenuItem ? 'menu-item' : 'context-menu-item'}
         disabled={!sessionId}
