@@ -211,3 +211,46 @@ async def test_runner_schedules_office_work_monitor_bridge(monkeypatch, tmp_path
     assert runner._start_personal_assistant_telegram_monitor_bridge(tmp_path) is True
     await asyncio.wait_for(started.wait(), timeout=1)
     assert runner._personal_assistant_telegram_monitor_task in runner._background_tasks
+
+
+@pytest.mark.asyncio
+async def test_default_multiplexer_schedules_office_work_monitor_bridge(
+    monkeypatch, tmp_path
+):
+    office_home = tmp_path / "profiles" / "office-work"
+    office_home.mkdir(parents=True)
+    started = asyncio.Event()
+    seen = {}
+
+    class FakeBridge:
+        async def run(self, keep_running):
+            started.set()
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config, runner.delivery_router = configured_gateway(
+        RecordingTelegramAdapter()
+    )
+    runner.config.multiplex_profiles = True
+    runner.config.multiplex_served_profiles = ["life-advisor", "office-work"]
+    runner._running = True
+    runner._running_agents = {}
+    runner._background_tasks = set()
+    monkeypatch.setattr(runner, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profiles_to_serve",
+        lambda **_kwargs: [("default", tmp_path), ("office-work", office_home)],
+    )
+
+    def create_bridge(**kwargs):
+        seen.update(kwargs)
+        return FakeBridge()
+
+    monkeypatch.setattr(
+        "gateway.personal_assistant_monitor.create_personal_assistant_telegram_monitor_bridge",
+        create_bridge,
+    )
+
+    assert runner._start_personal_assistant_telegram_monitor_bridge(tmp_path) is True
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert seen["profile_name"] == "office-work"
+    assert seen["profile_home"] == office_home

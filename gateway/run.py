@@ -1509,6 +1509,65 @@ def _profile_runtime_scope(profile_home: "Path"):
         reset_hermes_home_override(home_token)
 
 
+def _start_secondary_profile_cron_schedulers(
+    runner,
+    stop_event: threading.Event,
+    loop,
+    *,
+    resolve_provider=None,
+):
+    """Start one profile-scoped cron ticker for each served secondary profile."""
+    if not getattr(getattr(runner, "config", None), "multiplex_profiles", False):
+        return []
+
+    from cron.scheduler_provider import InProcessCronScheduler
+    from hermes_cli.profiles import get_active_profile_name, profiles_to_serve
+
+    if resolve_provider is None:
+        from cron.scheduler_provider import resolve_cron_scheduler
+
+        resolve_provider = resolve_cron_scheduler
+
+    active = get_active_profile_name() or "default"
+    profiles = profiles_to_serve(
+        multiplex=True,
+        served_profiles=getattr(
+            runner.config,
+            "multiplex_served_profiles",
+            None,
+        ),
+    )
+    schedulers = []
+    for profile_name, profile_home in profiles:
+        if profile_name == active or profile_name != "office-work":
+            continue
+        with _profile_runtime_scope(profile_home):
+            provider = resolve_provider()
+        adapters = getattr(runner, "_profile_adapters", {}).get(profile_name) or {}
+        kwargs = {"adapters": adapters, "loop": loop}
+        if isinstance(provider, InProcessCronScheduler):
+            kwargs["can_dispatch"] = lambda: not (
+                runner._draining or runner._external_drain_active
+            )
+
+        def run_scoped(
+            provider=provider,
+            profile_home=profile_home,
+            kwargs=kwargs,
+        ):
+            with _profile_runtime_scope(profile_home):
+                provider.start(stop_event, **kwargs)
+
+        thread = threading.Thread(
+            target=run_scoped,
+            daemon=True,
+            name=f"cron-scheduler-{profile_name}",
+        )
+        thread.start()
+        schedulers.append((provider, thread))
+    return schedulers
+
+
 def load_gateway_config_for_runner() -> "GatewayConfig":
     """Load gateway config for the process-level GatewayRunner.
 
@@ -8107,9 +8166,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             create_personal_assistant_telegram_monitor_bridge,
         )
 
+        owner_profile = self._active_profile_name()
+        owner_home = profile_home
+        if owner_profile != "office-work":
+            if not getattr(self.config, "multiplex_profiles", False):
+                return False
+            from hermes_cli.profiles import profiles_to_serve
+
+            served = profiles_to_serve(
+                multiplex=True,
+                served_profiles=getattr(
+                    self.config,
+                    "multiplex_served_profiles",
+                    None,
+                ),
+            )
+            owner_home = next(
+                (home for name, home in served if name == "office-work"),
+                None,
+            )
+            if owner_home is None:
+                return False
+            owner_profile = "office-work"
+
         bridge = create_personal_assistant_telegram_monitor_bridge(
-            profile_name=self._active_profile_name(),
-            profile_home=profile_home,
+            profile_name=owner_profile,
+            profile_home=owner_home,
             config=self.config,
             delivery_router=self.delivery_router,
             is_busy=lambda: bool(self._running_agents),
@@ -21887,6 +21969,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         name="cron-scheduler",
     )
     cron_thread.start()
+    secondary_cron_schedulers = _start_secondary_profile_cron_schedulers(
+        runner,
+        cron_stop,
+        asyncio.get_running_loop(),
+    )
 
     # Gateway-only periodic housekeeping (channel dir, cache cleanup, paste
     # sweep, curator) — runs independently of which cron provider is active.
@@ -21934,6 +22021,20 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             "Cron ticker did not exit within %.0fs of shutdown — an in-flight "
             "delivery may have been dropped.", _CRON_SHUTDOWN_DRAIN_TIMEOUT,
         )
+    for secondary_provider, secondary_thread in secondary_cron_schedulers:
+        try:
+            secondary_provider.stop()
+        except Exception as e:
+            logger.debug("Secondary cron provider stop() error: %s", e)
+        if not await _await_thread_exit(
+            secondary_thread,
+            timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT,
+        ):
+            logger.warning(
+                "Secondary cron ticker %s did not exit within %.0fs of shutdown",
+                secondary_thread.name,
+                _CRON_SHUTDOWN_DRAIN_TIMEOUT,
+            )
     await _await_thread_exit(
         housekeeping_thread, timeout=_HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT
     )
