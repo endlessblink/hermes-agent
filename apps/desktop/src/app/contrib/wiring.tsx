@@ -22,7 +22,8 @@ import { DesktopOnboardingOverlay } from '@/components/onboarding'
 import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
-import { getSessionMessages, triggerCronJob } from '@/hermes'
+import { resolveProfileRestoreSessionId } from '@/app/desktop-controller-utils'
+import { getSession, getSessionMessages, triggerCronJob } from '@/hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { isMessagingSource } from '@/lib/session-source'
@@ -30,7 +31,13 @@ import { latestSessionTodos } from '@/lib/todos'
 import { setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { $filePreviewTarget, $previewTarget } from '@/store/preview'
-import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  $freshSessionRequest,
+  $profileScope,
+  $profileSessionRestoreRequest,
+  refreshActiveProfile
+} from '@/store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '@/store/projects'
 import {
   $activeSessionId,
@@ -44,6 +51,9 @@ import {
   $resumeFailedSessionId,
   $selectedStoredSessionId,
   $sessions,
+  clearRememberedProfileSessionId,
+  getRememberedProfileSessionId,
+  normalizeSessionProfileKey,
   sessionMatchesStoredId,
   sessionPinId,
   setAwaitingResponse,
@@ -410,6 +420,51 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     lastFreshRef.current = freshSessionRequest
     startFreshSessionDraft()
   }, [freshSessionRequest, startFreshSessionDraft])
+
+  // Clicking a profile restores that profile's last-open chat (or lands on a
+  // fresh draft) — ported verbatim from the retired DesktopController, which
+  // was the only consumer of $profileSessionRestoreRequest; without this the
+  // profile rail selects the scope but the view never moves.
+  const profileSessionRestoreRequest = useStore($profileSessionRestoreRequest)
+  const lastProfileRestoreNonceRef = useRef(profileSessionRestoreRequest?.nonce ?? 0)
+
+  useEffect(() => {
+    if (!profileSessionRestoreRequest || profileSessionRestoreRequest.nonce === lastProfileRestoreNonceRef.current) {
+      return
+    }
+
+    lastProfileRestoreNonceRef.current = profileSessionRestoreRequest.nonce
+
+    const profile = normalizeSessionProfileKey(profileSessionRestoreRequest.profile)
+    const rememberedSessionId = getRememberedProfileSessionId(profile)
+
+    startFreshSessionDraft()
+
+    let cancelled = false
+
+    void resolveProfileRestoreSessionId(
+      profile,
+      rememberedSessionId,
+      [...$sessions.get(), ...$messagingSessions.get()],
+      getSession
+    ).then(targetSessionId => {
+      if (cancelled) {
+        return
+      }
+
+      if (rememberedSessionId && targetSessionId !== rememberedSessionId) {
+        clearRememberedProfileSessionId(rememberedSessionId)
+      }
+
+      if (targetSessionId) {
+        navigate(sessionRoute(targetSessionId), { replace: true })
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [navigate, profileSessionRestoreRequest, startFreshSessionDraft])
 
   // Swapping the live gateway to another profile must re-pull that profile's
   // global model + active-profile pill (both are nanostores — the blanket
