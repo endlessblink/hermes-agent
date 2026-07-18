@@ -35,6 +35,19 @@ import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
 import { setClarifyRequest } from '@/store/clarify'
 import { setCronFocusJobId } from '@/store/cron'
+import { startDailyAssistantScheduler } from '@/store/daily-assistant-scheduler'
+import { notify } from '@/store/notifications'
+import {
+  handlePersonalAssistantAttention,
+  type PersonalAssistantAttentionPayload
+} from '@/store/personal-assistant-attention'
+import {
+  $personalAssistantState,
+  hydratePersonalAssistantStateWhenReady,
+  openPersonalAssistantHome,
+  refreshPersonalAssistantState,
+  startPersonalAssistant
+} from '@/store/personal-assistant'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { $filePreviewTarget, $previewTarget } from '@/store/preview'
 import {
@@ -163,6 +176,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const messagingSessions = useStore($messagingSessions)
   const profileScope = useStore($profileScope)
+  const personalAssistantState = useStore($personalAssistantState)
 
   const routedSessionId = routeSessionId(location.pathname)
   const routedSessionIdRef = useRef(routedSessionId)
@@ -779,14 +793,88 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     startFreshSessionDraft
   })
 
+  // Personal assistant (office-work profile): start/refresh its dedicated
+  // session and route to it. `scheduled` failures stay silent — the daily
+  // scheduler fires unattended, so only a manual open surfaces an error.
+  const openPersonalAssistant = useCallback(
+    async (trigger: 'manual' | 'scheduled') => {
+      try {
+        const result = await startPersonalAssistant(trigger)
+
+        if (result.sessionId) {
+          await refreshPersonalAssistantState()
+          navigate(sessionRoute(result.sessionId))
+        }
+      } catch (error) {
+        if (trigger === 'manual') {
+          notify({
+            kind: 'error',
+            title: 'Could not start personal assistant',
+            message: error instanceof Error ? error.message : 'Please try again.'
+          })
+        }
+      }
+    },
+    [navigate]
+  )
+
+  const openPersonalAssistantDestination = useCallback(async () => {
+    try {
+      navigate(sessionRoute(await openPersonalAssistantHome()))
+    } catch (error) {
+      notify({
+        kind: 'error',
+        title: 'Could not open personal assistant',
+        message: error instanceof Error ? error.message : 'Please try again.'
+      })
+    }
+  }, [navigate])
+
+  // Native-notification "View" action for a personal-assistant attention nudge.
+  useEffect(() => {
+    const unsubscribe = window.hermesDesktop?.onNotificationAction?.(({ actionId }) => {
+      if (actionId === 'view-personal-assistant') {
+        void openPersonalAssistantDestination()
+      }
+    })
+
+    return () => unsubscribe?.()
+  }, [openPersonalAssistantDestination])
+
+  // Daily assistant scheduler (9am Jerusalem) opens the assistant unattended for
+  // the office-work profile. Returns its own teardown.
+  useEffect(
+    () =>
+      startDailyAssistantScheduler($activeGatewayProfile, async (_profile, trigger) => {
+        await openPersonalAssistant(trigger)
+      }),
+    [openPersonalAssistant]
+  )
+
+  // Hydrate the assistant's pending/attention state once the gateway is ready,
+  // so the sidebar situation card and pending count are populated on boot.
+  useEffect(() => {
+    if (!personalAssistantState) {
+      void hydratePersonalAssistantStateWhenReady(gatewayState).catch(() => undefined)
+    }
+  }, [gatewayState, personalAssistantState])
+
   // Plugins hear the stream FIRST (isolated fan-out in contrib/events), then
   // the app dispatches as before — a plugin listener can't affect app flow.
+  // Layered on top: personal_assistant.attention events (backend nudges) route
+  // into the attention store, which can open the assistant destination.
   const handleGatewayEventWithPlugins = useCallback(
     (event: Parameters<typeof handleDesktopGatewayEvent>[0]) => {
       emitGatewayEvent(event)
       handleDesktopGatewayEvent(event)
+
+      if (event.type === 'personal_assistant.attention') {
+        void handlePersonalAssistantAttention(event.payload as PersonalAssistantAttentionPayload, () => {
+          void openPersonalAssistantDestination()
+        })
+      }
     },
-    [handleDesktopGatewayEvent]
+    [handleDesktopGatewayEvent, openPersonalAssistantDestination]
   )
 
   useGatewayBoot({
