@@ -107,13 +107,9 @@ export function UpdatesOverlay() {
           <ManualView command={apply.command ?? null} message={apply.message} onDone={() => handleClose(false)} />
         )}
 
-        {phase === 'dirty' && (
-          <DirtyView message={apply.message} onDone={() => handleClose(false)} />
-        )}
+        {phase === 'dirty' && <DirtyView message={apply.message} onDone={() => handleClose(false)} />}
 
-        {phase === 'guiSkew' && (
-          <GuiSkewView message={apply.message} onDone={() => handleClose(false)} />
-        )}
+        {phase === 'guiSkew' && <GuiSkewView message={apply.message} onDone={() => handleClose(false)} />}
 
         {phase === 'error' && (
           <ErrorView message={apply.message} onDismiss={() => handleClose(false)} onRetry={handleInstall} />

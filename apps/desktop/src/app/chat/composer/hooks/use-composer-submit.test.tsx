@@ -146,9 +146,7 @@ describe('useComposerSubmit clarify routing', () => {
     const onQueue = vi.fn(() => true)
     const onSubmit = vi.fn(() => true)
 
-    const { getByTestId } = render(
-      <Harness busy onQueue={onQueue} onSubmit={onSubmit} recoverLostClarifyWhileBusy />
-    )
+    const { getByTestId } = render(<Harness busy onQueue={onQueue} onSubmit={onSubmit} recoverLostClarifyWhileBusy />)
 
     const editor = getByTestId('editor')
 

@@ -62,10 +62,7 @@ function readChecklistState(key: string, itemIds: ReadonlySet<string>): Record<s
 }
 
 function persistChecklistState(key: string, itemIds: readonly string[], state: Record<string, boolean>) {
-  writeKey(
-    key,
-    JSON.stringify(Object.fromEntries(itemIds.map(id => [id, Boolean(state[id])] as const)))
-  )
+  writeKey(key, JSON.stringify(Object.fromEntries(itemIds.map(id => [id, Boolean(state[id])] as const))))
 }
 
 function hasRtlText(value: string | undefined): boolean {
@@ -97,7 +94,10 @@ function artifactDirection(
   }
 
   const taskText = artifact.type === 'task-triage' ? [artifact.task.title, artifact.task.status] : []
-  const batchText = artifact.type === 'flowstate-task-batch' ? artifact.tasks.flatMap(task => [task.title, task.status, task.rationale]) : []
+  const batchText =
+    artifact.type === 'flowstate-task-batch'
+      ? artifact.tasks.flatMap(task => [task.title, task.status, task.rationale])
+      : []
 
   const nextBlockText =
     artifact.type === 'flowstate-next-block' ? [artifact.task.title, artifact.doneEnough, artifact.rationale] : []
@@ -111,7 +111,9 @@ function artifactDirection(
             category.recommendation,
             ...category.examples.map(example => example.title)
           ]),
-          ...(artifact.nextBlock ? [artifact.nextBlock.title, artifact.nextBlock.doneEnough, artifact.nextBlock.rationale] : []),
+          ...(artifact.nextBlock
+            ? [artifact.nextBlock.title, artifact.nextBlock.doneEnough, artifact.nextBlock.rationale]
+            : []),
           ...artifact.tasks.flatMap(task => [task.title, task.status, task.rationale])
         ]
       : []
@@ -142,19 +144,19 @@ function artifactDirection(
       : []
 
   const taskTableText =
-    artifact.type === 'task-table'
-      ? artifact.rows.flatMap(row => [row.title, row.context, row.nextStep])
-      : []
+    artifact.type === 'task-table' ? artifact.rows.flatMap(row => [row.title, row.context, row.nextStep]) : []
 
   const kanbanText =
     artifact.type === 'mini-kanban'
-      ? artifact.lanes.flatMap(lane => [lane.title, lane.description, ...lane.tasks.flatMap(task => [task.title, task.note])])
+      ? artifact.lanes.flatMap(lane => [
+          lane.title,
+          lane.description,
+          ...lane.tasks.flatMap(task => [task.title, task.note])
+        ])
       : []
 
   const timelineText =
-    artifact.type === 'day-timeline'
-      ? artifact.blocks.flatMap(block => [block.label, block.doneEnough])
-      : []
+    artifact.type === 'day-timeline' ? artifact.blocks.flatMap(block => [block.label, block.doneEnough]) : []
 
   const mutationText =
     artifact.type === 'mutation-preview'
@@ -166,8 +168,7 @@ function artifactDirection(
       ? artifact.cells.flatMap(cell => [cell.label, ...cell.tasks.map(task => task.title)])
       : []
 
-  const workloadText =
-    artifact.type === 'workload-bars' ? artifact.bars.flatMap(bar => [bar.label, bar.note]) : []
+  const workloadText = artifact.type === 'workload-bars' ? artifact.bars.flatMap(bar => [bar.label, bar.note]) : []
 
   const graphText =
     artifact.type === 'task-graph'
@@ -198,8 +199,8 @@ function artifactDirection(
     ...matrixText,
     ...workloadText,
     ...graphText,
-    ...itemText
-    , ...formText
+    ...itemText,
+    ...formText
   ]
     .filter(Boolean)
     .join('\n')
@@ -279,7 +280,9 @@ function formValueInvalid(field: HermesUiFormField, value: HermesUiFormValue | u
 export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact }) {
   const direction = artifactDirection(artifact)
   const storageKey = useMemo(() => `${stableArtifactStorageKey(artifact)}:draft`, [artifact])
-  const [values, setValues] = useState<Record<string, HermesUiFormValue>>(() => readFormDraft(storageKey, artifact.fields))
+  const [values, setValues] = useState<Record<string, HermesUiFormValue>>(() =>
+    readFormDraft(storageKey, artifact.fields)
+  )
   const [showErrors, setShowErrors] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
@@ -311,7 +314,12 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
   }
 
   return (
-    <section aria-label={artifact.title || 'Interactive form'} className="my-3 rounded-xl border border-border/80 bg-muted/25 p-3" data-hermes-ui-artifact="form" dir={direction}>
+    <section
+      aria-label={artifact.title || 'Interactive form'}
+      className="my-3 rounded-xl border border-border/80 bg-muted/25 p-3"
+      data-hermes-ui-artifact="form"
+      dir={direction}
+    >
       {artifact.title && <h3 className="text-sm font-semibold text-foreground">{artifact.title}</h3>}
       {artifact.description && <p className="mt-1 text-xs text-muted-foreground">{artifact.description}</p>}
       <div className="mt-3 space-y-3">
@@ -322,31 +330,113 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
 
           return (
             <div key={field.id}>
-              <label className="block text-xs font-medium text-foreground" htmlFor={common.id}>{field.label}{field.required ? ' *' : ''}</label>
+              <label className="block text-xs font-medium text-foreground" htmlFor={common.id}>
+                {field.label}
+                {field.required ? ' *' : ''}
+              </label>
               {field.description && <p className="mb-1 text-[0.7rem] text-muted-foreground">{field.description}</p>}
               {field.type === 'long-text' ? (
-                <textarea {...common} className="mt-1 min-h-20 w-full rounded-md border bg-background px-2 py-1.5 text-sm" onChange={event => updateValue(field.id, event.target.value)} placeholder={field.placeholder} value={typeof value === 'string' ? value : ''} />
+                <textarea
+                  {...common}
+                  className="mt-1 min-h-20 w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+                  onChange={event => updateValue(field.id, event.target.value)}
+                  placeholder={field.placeholder}
+                  value={typeof value === 'string' ? value : ''}
+                />
               ) : field.type === 'single-choice' ? (
-                <div className="mt-1 space-y-1">{field.options?.map(option => <label className="flex items-center gap-2 text-sm" key={option.value}><input aria-label={option.label} checked={value === option.value} name={common.id} onChange={() => updateValue(field.id, option.value)} type="radio" />{option.label}</label>)}</div>
+                <div className="mt-1 space-y-1">
+                  {field.options?.map(option => (
+                    <label className="flex items-center gap-2 text-sm" key={option.value}>
+                      <input
+                        aria-label={option.label}
+                        checked={value === option.value}
+                        name={common.id}
+                        onChange={() => updateValue(field.id, option.value)}
+                        type="radio"
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
               ) : field.type === 'multi-choice' ? (
-                <div className="mt-1 space-y-1">{field.options?.map(option => {
-                  const selected = Array.isArray(value) ? value : []
+                <div className="mt-1 space-y-1">
+                  {field.options?.map(option => {
+                    const selected = Array.isArray(value) ? value : []
 
-                  return <label className="flex items-center gap-2 text-sm" key={option.value}><input aria-label={option.label} checked={selected.includes(option.value)} onChange={event => updateValue(field.id, event.target.checked ? [...selected, option.value] : selected.filter(item => item !== option.value))} type="checkbox" />{option.label}</label>
-                })}</div>
+                    return (
+                      <label className="flex items-center gap-2 text-sm" key={option.value}>
+                        <input
+                          aria-label={option.label}
+                          checked={selected.includes(option.value)}
+                          onChange={event =>
+                            updateValue(
+                              field.id,
+                              event.target.checked
+                                ? [...selected, option.value]
+                                : selected.filter(item => item !== option.value)
+                            )
+                          }
+                          type="checkbox"
+                        />
+                        {option.label}
+                      </label>
+                    )
+                  })}
+                </div>
               ) : field.type === 'boolean' ? (
-                <input {...common} aria-label={field.label} checked={value === true} className="mt-1" onChange={event => updateValue(field.id, event.target.checked)} type="checkbox" />
+                <input
+                  {...common}
+                  aria-label={field.label}
+                  checked={value === true}
+                  className="mt-1"
+                  onChange={event => updateValue(field.id, event.target.checked)}
+                  type="checkbox"
+                />
               ) : field.type === 'time' ? (
-                <input {...common} aria-label={field.label} className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-sm tabular-nums" dir="ltr" inputMode="numeric" maxLength={5} onChange={event => updateValue(field.id, event.target.value)} placeholder={field.placeholder || 'HH:mm'} type="text" value={typeof value === 'string' ? value : ''} />
+                <input
+                  {...common}
+                  aria-label={field.label}
+                  className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-sm tabular-nums"
+                  dir="ltr"
+                  inputMode="numeric"
+                  maxLength={5}
+                  onChange={event => updateValue(field.id, event.target.value)}
+                  placeholder={field.placeholder || 'HH:mm'}
+                  type="text"
+                  value={typeof value === 'string' ? value : ''}
+                />
               ) : (
-                <input {...common} aria-label={field.label} className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm" onChange={event => updateValue(field.id, event.target.value)} placeholder={field.placeholder} type={field.type === 'short-text' ? 'text' : field.type} value={typeof value === 'string' ? value : ''} />
+                <input
+                  {...common}
+                  aria-label={field.label}
+                  className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+                  onChange={event => updateValue(field.id, event.target.value)}
+                  placeholder={field.placeholder}
+                  type={field.type === 'short-text' ? 'text' : field.type}
+                  value={typeof value === 'string' ? value : ''}
+                />
               )}
-              {invalid && <p className="mt-1 text-xs text-destructive">{field.type === 'time' && typeof value === 'string' && value.length > 0 ? (direction === 'rtl' ? 'יש להזין שעה בפורמט 24 שעות (HH:mm)' : 'Use 24-hour time (HH:mm)') : 'שדה חובה'}</p>}
+              {invalid && (
+                <p className="mt-1 text-xs text-destructive">
+                  {field.type === 'time' && typeof value === 'string' && value.length > 0
+                    ? direction === 'rtl'
+                      ? 'יש להזין שעה בפורמט 24 שעות (HH:mm)'
+                      : 'Use 24-hour time (HH:mm)'
+                    : 'שדה חובה'}
+                </p>
+              )}
             </div>
           )
         })}
       </div>
-      <button className="mt-3 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-60" disabled={submitting} onClick={submit} type="button">{artifact.submitLabel || 'Submit'}</button>
+      <button
+        className="mt-3 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-60"
+        disabled={submitting}
+        onClick={submit}
+        type="button"
+      >
+        {artifact.submitLabel || 'Submit'}
+      </button>
     </section>
   )
 }
@@ -380,7 +470,11 @@ function PlainTextBlocks({ className, text }: { className?: string; text: string
   )
 }
 
-export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklistArtifact | HermesUiQuestionnaireArtifact }) {
+export function ChecklistArtifactCard({
+  artifact
+}: {
+  artifact: HermesUiChecklistArtifact | HermesUiQuestionnaireArtifact
+}) {
   const reactId = useId()
   const itemIds = useMemo(() => artifact.items.map(item => item.id), [artifact.items])
   const itemIdSet = useMemo(() => new Set(itemIds), [itemIds])
@@ -398,7 +492,10 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
     persistChecklistState(storageKey, itemIds, next)
   }
 
-  const runAction = async (actionKey: string, action: NonNullable<HermesUiChecklistArtifact['items'][number]['actions']>[number]) => {
+  const runAction = async (
+    actionKey: string,
+    action: NonNullable<HermesUiChecklistArtifact['items'][number]['actions']>[number]
+  ) => {
     if (action.submitText) {
       requestComposerSubmit(action.submitText, { target: 'main' })
       setHandledActionId(actionKey)
@@ -432,12 +529,20 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
         <div className={cn('flex min-w-0 items-start justify-between gap-3', isRtl && 'flex-row-reverse')}>
           <div className="min-w-0">
             {artifact.title && (
-              <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
+              <h3
+                className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground"
+                dir={direction}
+                style={directionalStyle}
+              >
                 {artifact.title}
               </h3>
             )}
             {artifact.description && (
-              <p className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+              <p
+                className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+                dir={direction}
+                style={directionalStyle}
+              >
                 <PlainTextBlocks text={artifact.description} />
               </p>
             )}
@@ -506,10 +611,28 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
                           className="rounded-md border border-border/70 bg-background/45 px-2 py-1 text-[0.6875rem] font-medium text-muted-foreground hover:bg-muted/70 hover:text-foreground"
                           key={action.id}
                           onClick={() => void runAction(actionKey, action)}
-                          title={handledActionId === actionKey ? (action.submitText ? (isRtl ? 'נשלח' : 'Sent') : isRtl ? 'הועתק' : 'Copied') : undefined}
+                          title={
+                            handledActionId === actionKey
+                              ? action.submitText
+                                ? isRtl
+                                  ? 'נשלח'
+                                  : 'Sent'
+                                : isRtl
+                                  ? 'הועתק'
+                                  : 'Copied'
+                              : undefined
+                          }
                           type="button"
                         >
-                          {handledActionId === actionKey ? (action.submitText ? (isRtl ? 'נשלח' : 'Sent') : isRtl ? 'הועתק' : 'Copied') : action.label}
+                          {handledActionId === actionKey
+                            ? action.submitText
+                              ? isRtl
+                                ? 'נשלח'
+                                : 'Sent'
+                              : isRtl
+                                ? 'הועתק'
+                                : 'Copied'
+                            : action.label}
                         </button>
                       )
                     })}
@@ -539,7 +662,6 @@ export function ChecklistArtifactCard({ artifact }: { artifact: HermesUiChecklis
     </section>
   )
 }
-
 
 const PRIORITY_LABELS: Record<Exclude<HermesUiTaskPriority, null>, { ltr: string; rtl: string }> = {
   high: { ltr: 'High', rtl: 'גבוהה' },
@@ -585,7 +707,9 @@ function taskTriageCopyText(
     `${isRtl ? 'תאריך נוכחי' : 'Current due date'}: ${currentDue}`,
     `${isRtl ? 'תאריך חדש' : 'New due date'}: ${nextDue}`,
     `${isRtl ? 'דחיפות חדשה' : 'New priority'}: ${formatPriority(priority, isRtl)}`,
-    isRtl ? 'נא להציג לי preview לפני שינוי אמיתי ב־FlowState.' : 'Show me a preview before applying a real FlowState change.'
+    isRtl
+      ? 'נא להציג לי preview לפני שינוי אמיתי ב־FlowState.'
+      : 'Show me a preview before applying a real FlowState change.'
   ].join('\n')
 }
 
@@ -616,12 +740,20 @@ export function TaskTriageArtifactCard({ artifact }: { artifact: HermesUiTaskTri
     >
       <div className="border-b border-border/65 px-3 py-2.5">
         {artifact.title && (
-          <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
+          <h3
+            className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
             {artifact.title}
           </h3>
         )}
         {artifact.description && (
-          <p className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+          <p
+            className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
             <PlainTextBlocks text={artifact.description} />
           </p>
         )}
@@ -629,12 +761,20 @@ export function TaskTriageArtifactCard({ artifact }: { artifact: HermesUiTaskTri
 
       <div className="space-y-3 px-3 py-3" dir={direction} style={directionalStyle}>
         <div>
-          <div className="text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere" dir={direction} style={directionalStyle}>
+          <div
+            className="text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere"
+            dir={direction}
+            style={directionalStyle}
+          >
             {artifact.task.title}
           </div>
-          <div className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
-            {isRtl ? 'תאריך יעד' : 'Due'}: {artifact.task.dueDate || (isRtl ? 'אין' : 'none')} · {isRtl ? 'דחיפות' : 'Priority'}:{' '}
-            {formatPriority(artifact.task.priority, isRtl)}
+          <div
+            className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
+            {isRtl ? 'תאריך יעד' : 'Due'}: {artifact.task.dueDate || (isRtl ? 'אין' : 'none')} ·{' '}
+            {isRtl ? 'דחיפות' : 'Priority'}: {formatPriority(artifact.task.priority, isRtl)}
           </div>
         </div>
 
@@ -661,7 +801,11 @@ export function TaskTriageArtifactCard({ artifact }: { artifact: HermesUiTaskTri
         </div>
 
         <div className="grid gap-2 sm:grid-cols-2">
-          <label className="block text-[0.75rem] font-medium text-muted-foreground" dir={direction} style={directionalStyle}>
+          <label
+            className="block text-[0.75rem] font-medium text-muted-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
             {isRtl ? 'שנה תאריך' : 'Change date'}
             <input
               className="mt-1 w-full rounded-md border border-border/80 bg-background/60 px-2 py-1.5 text-[0.8125rem] text-foreground"
@@ -670,7 +814,11 @@ export function TaskTriageArtifactCard({ artifact }: { artifact: HermesUiTaskTri
               value={dueDate}
             />
           </label>
-          <label className="block text-[0.75rem] font-medium text-muted-foreground" dir={direction} style={directionalStyle}>
+          <label
+            className="block text-[0.75rem] font-medium text-muted-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
             {isRtl ? 'שנה דחיפות' : 'Change priority'}
             <select
               className="mt-1 w-full rounded-md border border-border/80 bg-background/60 px-2 py-1.5 text-[0.8125rem] text-foreground"
@@ -686,16 +834,32 @@ export function TaskTriageArtifactCard({ artifact }: { artifact: HermesUiTaskTri
         </div>
 
         <div className={cn('flex flex-wrap gap-1.5', isRtl && 'justify-end')}>
-          <button className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/70 hover:text-foreground" onClick={() => setDueDate(todayIso())} type="button">
+          <button
+            className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+            onClick={() => setDueDate(todayIso())}
+            type="button"
+          >
             {isRtl ? 'היום' : 'Today'}
           </button>
-          <button className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/70 hover:text-foreground" onClick={() => setDueDate(plusDaysIso(1))} type="button">
+          <button
+            className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+            onClick={() => setDueDate(plusDaysIso(1))}
+            type="button"
+          >
             {isRtl ? 'מחר' : 'Tomorrow'}
           </button>
-          <button className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/70 hover:text-foreground" onClick={() => setDueDate(plusDaysIso(7))} type="button">
+          <button
+            className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+            onClick={() => setDueDate(plusDaysIso(7))}
+            type="button"
+          >
             {isRtl ? 'שבוע הבא' : 'Next week'}
           </button>
-          <button className="rounded-md border border-border/80 bg-transparent px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground" onClick={() => setDueDate('')} type="button">
+          <button
+            className="rounded-md border border-border/80 bg-transparent px-2 py-1 text-[0.75rem] font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+            onClick={() => setDueDate('')}
+            type="button"
+          >
             {isRtl ? 'ללא תאריך' : 'No date'}
           </button>
         </div>
@@ -713,7 +877,6 @@ export function TaskTriageArtifactCard({ artifact }: { artifact: HermesUiTaskTri
     </section>
   )
 }
-
 
 function formatDecision(decision: HermesUiTriageDecision | '', isRtl: boolean): string {
   if (decision === 'today') {
@@ -768,13 +931,22 @@ function batchSubmitText(
   ]
 
   artifact.tasks.forEach((task, index) => {
-    const decision = state[task.id] || { completed: task.status === 'done', decision: '', dueDate: task.dueDate || '', priority: task.priority ?? null }
+    const decision = state[task.id] || {
+      completed: task.status === 'done',
+      decision: '',
+      dueDate: task.dueDate || '',
+      priority: task.priority ?? null
+    }
     lines.push(`${index + 1}. ${task.title}`)
     lines.push(`ID: ${task.id}`)
     lines.push(`${isRtl ? 'החלטה' : 'Decision'}: ${formatDecision(decision.decision, isRtl)}`)
-    lines.push(`${isRtl ? 'סימון ביצוע' : 'Completion'}: ${decision.completed ? (isRtl ? 'בוצע' : 'done') : (isRtl ? 'לא בוצע' : 'not done')}`)
+    lines.push(
+      `${isRtl ? 'סימון ביצוע' : 'Completion'}: ${decision.completed ? (isRtl ? 'בוצע' : 'done') : isRtl ? 'לא בוצע' : 'not done'}`
+    )
     lines.push(`${isRtl ? 'תאריך נוכחי' : 'Current due date'}: ${task.dueDate || (isRtl ? 'אין' : 'none')}`)
-    lines.push(`${isRtl ? 'תאריך מוצע' : 'Proposed due date'}: ${decision.dueDate || (isRtl ? 'ללא תאריך' : 'no date')}`)
+    lines.push(
+      `${isRtl ? 'תאריך מוצע' : 'Proposed due date'}: ${decision.dueDate || (isRtl ? 'ללא תאריך' : 'no date')}`
+    )
     lines.push(`${isRtl ? 'דחיפות נוכחית' : 'Current priority'}: ${formatPriority(task.priority, isRtl)}`)
     lines.push(`${isRtl ? 'דחיפות מוצעת' : 'Proposed priority'}: ${formatPriority(decision.priority, isRtl)}`)
 
@@ -787,7 +959,6 @@ function batchSubmitText(
 
   return lines.join('\n').trim()
 }
-
 
 function planningModeLabel(mode: HermesUiFlowStatePlanningSessionArtifact['mode'], isRtl: boolean): string {
   const labels: Record<HermesUiFlowStatePlanningSessionArtifact['mode'], { ltr: string; rtl: string }> = {
@@ -860,9 +1031,12 @@ export function FlowStatePlanningSessionCard({ artifact }: { artifact: HermesUiF
           <section className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-3 py-2.5">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0">
-                <div className="text-[0.8rem] font-semibold text-foreground wrap-anywhere">{artifact.nextBlock.title}</div>
+                <div className="text-[0.8rem] font-semibold text-foreground wrap-anywhere">
+                  {artifact.nextBlock.title}
+                </div>
                 <div className="mt-0.5 text-[0.68rem] text-muted-foreground">
-                  {formatDurationMinutes(artifact.nextBlock.durationMinutes, isRtl)} · {artifact.nextBlock.taskIds.join(', ')}
+                  {formatDurationMinutes(artifact.nextBlock.durationMinutes, isRtl)} ·{' '}
+                  {artifact.nextBlock.taskIds.join(', ')}
                 </div>
               </div>
               <span className="rounded-md border border-emerald-500/40 bg-background/35 px-2 py-1 text-[0.65rem] font-medium text-muted-foreground">
@@ -918,12 +1092,20 @@ export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowSta
         <div className={cn('flex min-w-0 items-start justify-between gap-3', isRtl && 'flex-row-reverse')}>
           <div className="min-w-0">
             {artifact.title && (
-              <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
+              <h3
+                className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground"
+                dir={direction}
+                style={directionalStyle}
+              >
                 {artifact.title}
               </h3>
             )}
             {artifact.description && (
-              <p className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+              <p
+                className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+                dir={direction}
+                style={directionalStyle}
+              >
                 <PlainTextBlocks text={artifact.description} />
               </p>
             )}
@@ -936,7 +1118,12 @@ export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowSta
 
       <div className="divide-y divide-border/45">
         {artifact.tasks.map(task => {
-          const taskState = state[task.id] || { completed: task.status === 'done', decision: '', dueDate: task.dueDate || '', priority: task.priority ?? null }
+          const taskState = state[task.id] || {
+            completed: task.status === 'done',
+            decision: '',
+            dueDate: task.dueDate || '',
+            priority: task.priority ?? null
+          }
 
           return (
             <div className="space-y-2 px-3 py-3" dir={direction} key={task.id} style={directionalStyle}>
@@ -960,13 +1147,24 @@ export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowSta
                     {task.title}
                   </div>
                 </div>
-                <div className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
-                  {isRtl ? 'נוכחי' : 'Current'}: {task.dueDate || (isRtl ? 'אין תאריך' : 'no date')} · {formatPriority(task.priority, isRtl)}
+                <div
+                  className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+                  dir={direction}
+                  style={directionalStyle}
+                >
+                  {isRtl ? 'נוכחי' : 'Current'}: {task.dueDate || (isRtl ? 'אין תאריך' : 'no date')} ·{' '}
+                  {formatPriority(task.priority, isRtl)}
                   <br />
-                  {isRtl ? 'המלצה שלי' : 'My recommendation'}: {formatDecision(task.recommendation || '', isRtl)} · {formatPriority(task.recommendedPriority ?? task.priority, isRtl)} · {task.recommendedDueDate || task.dueDate || (isRtl ? 'ללא תאריך' : 'no date')}
+                  {isRtl ? 'המלצה שלי' : 'My recommendation'}: {formatDecision(task.recommendation || '', isRtl)} ·{' '}
+                  {formatPriority(task.recommendedPriority ?? task.priority, isRtl)} ·{' '}
+                  {task.recommendedDueDate || task.dueDate || (isRtl ? 'ללא תאריך' : 'no date')}
                 </div>
                 {task.rationale && (
-                  <div className="mt-1 text-[0.72rem] leading-relaxed text-muted-foreground/90" dir={direction} style={directionalStyle}>
+                  <div
+                    className="mt-1 text-[0.72rem] leading-relaxed text-muted-foreground/90"
+                    dir={direction}
+                    style={directionalStyle}
+                  >
                     {task.rationale}
                   </div>
                 )}
@@ -996,7 +1194,11 @@ export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowSta
               </div>
 
               <div className="grid gap-2 sm:grid-cols-2">
-                <label className="block text-[0.72rem] font-medium text-muted-foreground" dir={direction} style={directionalStyle}>
+                <label
+                  className="block text-[0.72rem] font-medium text-muted-foreground"
+                  dir={direction}
+                  style={directionalStyle}
+                >
                   {isRtl ? 'תאריך מוצע' : 'Proposed date'}
                   <input
                     className="mt-1 w-full rounded-md border border-border/80 bg-background/60 px-2 py-1.5 text-[0.8125rem] text-foreground"
@@ -1005,11 +1207,17 @@ export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowSta
                     value={taskState.dueDate}
                   />
                 </label>
-                <label className="block text-[0.72rem] font-medium text-muted-foreground" dir={direction} style={directionalStyle}>
+                <label
+                  className="block text-[0.72rem] font-medium text-muted-foreground"
+                  dir={direction}
+                  style={directionalStyle}
+                >
                   {isRtl ? 'דחיפות מוצעת' : 'Proposed priority'}
                   <select
                     className="mt-1 w-full rounded-md border border-border/80 bg-background/60 px-2 py-1.5 text-[0.8125rem] text-foreground"
-                    onChange={event => updateTask(task.id, { priority: (event.currentTarget.value || null) as HermesUiTaskPriority })}
+                    onChange={event =>
+                      updateTask(task.id, { priority: (event.currentTarget.value || null) as HermesUiTaskPriority })
+                    }
                     value={taskState.priority || ''}
                   >
                     <option value="">{isRtl ? 'ללא' : 'None'}</option>
@@ -1030,7 +1238,13 @@ export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowSta
           onClick={submitBatch}
           type="button"
         >
-          {submitted ? (isRtl ? 'נשלח ל־Hermes' : 'Sent to Hermes') : isRtl ? 'שלח החלטות ל־Hermes' : 'Send decisions to Hermes'}
+          {submitted
+            ? isRtl
+              ? 'נשלח ל־Hermes'
+              : 'Sent to Hermes'
+            : isRtl
+              ? 'שלח החלטות ל־Hermes'
+              : 'Send decisions to Hermes'}
         </button>
       </div>
     </section>
@@ -1077,11 +1291,19 @@ export function FlowStateNextBlockCard({ artifact }: { artifact: HermesUiFlowSta
         <div className={cn('flex min-w-0 items-start justify-between gap-3', isRtl && 'flex-row-reverse')}>
           <div className="min-w-0">
             {artifact.title && (
-              <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
+              <h3
+                className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground"
+                dir={direction}
+                style={directionalStyle}
+              >
                 {artifact.title}
               </h3>
             )}
-            <p className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+            <p
+              className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+              dir={direction}
+              style={directionalStyle}
+            >
               {preview.scheduledDate} · {startTime}
             </p>
           </div>
@@ -1093,12 +1315,20 @@ export function FlowStateNextBlockCard({ artifact }: { artifact: HermesUiFlowSta
 
       <div className="space-y-2.5 px-3 py-3" dir={direction} style={directionalStyle}>
         <div>
-          <div className="text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere" dir={direction} style={directionalStyle}>
+          <div
+            className="text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere"
+            dir={direction}
+            style={directionalStyle}
+          >
             {artifact.task.title}
           </div>
-          <div className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
-            {isRtl ? 'תאריך יעד' : 'Due'}: {artifact.task.dueDate || (isRtl ? 'אין' : 'none')} · {isRtl ? 'דחיפות' : 'Priority'}:{' '}
-            {formatPriority(artifact.task.priority, isRtl)}
+          <div
+            className="mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
+            {isRtl ? 'תאריך יעד' : 'Due'}: {artifact.task.dueDate || (isRtl ? 'אין' : 'none')} ·{' '}
+            {isRtl ? 'דחיפות' : 'Priority'}: {formatPriority(artifact.task.priority, isRtl)}
           </div>
         </div>
 
@@ -1106,16 +1336,28 @@ export function FlowStateNextBlockCard({ artifact }: { artifact: HermesUiFlowSta
           <div className="text-[0.7rem] font-medium text-muted-foreground" dir={direction} style={directionalStyle}>
             {isRtl ? 'מספיק כדי לסיים את הבלוק' : 'Done enough for this block'}
           </div>
-          <div className="mt-1 text-[0.78rem] leading-relaxed text-foreground wrap-anywhere" dir={direction} style={directionalStyle}>
+          <div
+            className="mt-1 text-[0.78rem] leading-relaxed text-foreground wrap-anywhere"
+            dir={direction}
+            style={directionalStyle}
+          >
             <PlainTextBlocks text={artifact.doneEnough} />
           </div>
         </div>
 
-        <div className="text-[0.75rem] leading-relaxed text-muted-foreground wrap-anywhere" dir={direction} style={directionalStyle}>
+        <div
+          className="text-[0.75rem] leading-relaxed text-muted-foreground wrap-anywhere"
+          dir={direction}
+          style={directionalStyle}
+        >
           <PlainTextBlocks text={artifact.rationale} />
         </div>
 
-        <div className="text-[0.72rem] leading-relaxed text-muted-foreground/90" dir={direction} style={directionalStyle}>
+        <div
+          className="text-[0.72rem] leading-relaxed text-muted-foreground/90"
+          dir={direction}
+          style={directionalStyle}
+        >
           {isRtl ? 'Preview מוצע' : 'Proposed preview'}: {preview.scheduledDate} · {preview.scheduledTime} ·{' '}
           {formatDurationMinutes(preview.duration, isRtl)}
         </div>
@@ -1178,12 +1420,20 @@ export function PlanningFunnelCard({ artifact }: { artifact: HermesUiPlanningFun
     >
       <div className="border-b border-border/65 px-3 py-2.5">
         {artifact.title && (
-          <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
+          <h3
+            className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
             {artifact.title}
           </h3>
         )}
         {artifact.description && (
-          <p className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+          <p
+            className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+            dir={direction}
+            style={directionalStyle}
+          >
             <PlainTextBlocks text={artifact.description} />
           </p>
         )}
@@ -1195,7 +1445,11 @@ export function PlanningFunnelCard({ artifact }: { artifact: HermesUiPlanningFun
 
           return (
             <div key={step.id}>
-              <div className={cn('flex items-start gap-2', isRtl && 'flex-row-reverse')} dir={direction} style={directionalStyle}>
+              <div
+                className={cn('flex items-start gap-2', isRtl && 'flex-row-reverse')}
+                dir={direction}
+                style={directionalStyle}
+              >
                 <span
                   className={cn(
                     'mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full border text-[0.68rem] font-semibold tabular-nums',
@@ -1206,20 +1460,28 @@ export function PlanningFunnelCard({ artifact }: { artifact: HermesUiPlanningFun
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5" dir={direction}>
-                    <span className="text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere">{step.label}</span>
+                    <span className="text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere">
+                      {step.label}
+                    </span>
                     <span className="rounded-md border border-border/60 bg-background/35 px-1.5 py-0.5 text-[0.65rem] leading-none text-muted-foreground">
                       {funnelStatusLabel(step.status, isRtl)}
                     </span>
                   </div>
                   {step.description && (
-                    <div className="mt-0.5 text-[0.72rem] leading-relaxed text-muted-foreground wrap-anywhere" dir={direction} style={directionalStyle}>
+                    <div
+                      className="mt-0.5 text-[0.72rem] leading-relaxed text-muted-foreground wrap-anywhere"
+                      dir={direction}
+                      style={directionalStyle}
+                    >
                       <PlainTextBlocks text={step.description} />
                     </div>
                   )}
                 </div>
               </div>
               {index < artifact.steps.length - 1 && (
-                <div className={cn('py-1 text-center text-[0.7rem] text-muted-foreground/70', isRtl && 'text-center')}>↓</div>
+                <div className={cn('py-1 text-center text-[0.7rem] text-muted-foreground/70', isRtl && 'text-center')}>
+                  ↓
+                </div>
               )}
             </div>
           )
@@ -1277,11 +1539,19 @@ export function TaskContextCard({ artifact }: { artifact: HermesUiTaskContextArt
         <div className={cn('flex min-w-0 items-start justify-between gap-3', isRtl && 'flex-row-reverse')}>
           <div className="min-w-0">
             {artifact.title && (
-              <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
+              <h3
+                className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground"
+                dir={direction}
+                style={directionalStyle}
+              >
                 {artifact.title}
               </h3>
             )}
-            <div className="mt-1 text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere" dir={direction} style={directionalStyle}>
+            <div
+              className="mt-1 text-[0.8125rem] leading-relaxed font-semibold text-foreground wrap-anywhere"
+              dir={direction}
+              style={directionalStyle}
+            >
               {artifact.task.title}
             </div>
           </div>
@@ -1310,7 +1580,9 @@ export function TaskContextCard({ artifact }: { artifact: HermesUiTaskContextArt
           </div>
         </div>
         <div className="rounded-md border border-border/55 bg-background/35 px-2.5 py-2">
-          <div className="text-[0.68rem] font-medium text-muted-foreground">{isRtl ? 'חסר כדי להחליט' : 'Unknown before deciding'}</div>
+          <div className="text-[0.68rem] font-medium text-muted-foreground">
+            {isRtl ? 'חסר כדי להחליט' : 'Unknown before deciding'}
+          </div>
           <div className="mt-1 text-[0.76rem] leading-relaxed text-foreground wrap-anywhere">
             <ContextLineList emptyLabel={empty} items={artifact.unknowns} />
           </div>
@@ -1318,7 +1590,11 @@ export function TaskContextCard({ artifact }: { artifact: HermesUiTaskContextArt
       </div>
 
       {artifact.waitingOn?.length ? (
-        <div className="border-t border-border/45 px-3 py-2 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+        <div
+          className="border-t border-border/45 px-3 py-2 text-[0.75rem] leading-relaxed text-muted-foreground"
+          dir={direction}
+          style={directionalStyle}
+        >
           <span className="font-medium text-foreground">{isRtl ? 'מחכה ל' : 'Waiting on'}: </span>
           <ContextLineList emptyLabel={empty} items={artifact.waitingOn} />
         </div>
@@ -1355,7 +1631,9 @@ function readTaskBreakdownDraft(
   const fallback = () => artifact.steps.map(step => ({ ...step }))
   const raw = readKey(storageKey)
 
-  if (!raw) {return fallback()}
+  if (!raw) {
+    return fallback()
+  }
 
   try {
     const steps = JSON.parse(raw)
@@ -1394,7 +1672,9 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
   const moveStep = (index: number, offset: -1 | 1) => {
     const target = index + offset
 
-    if (target < 0 || target >= steps.length) {return}
+    if (target < 0 || target >= steps.length) {
+      return
+    }
     setSubmitted(false)
     replaceSteps(current => {
       const next = [...current]
@@ -1406,17 +1686,23 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
   }
 
   const removeStep = (id: string) => {
-    if (steps.length <= 1) {return}
+    if (steps.length <= 1) {
+      return
+    }
     setSubmitted(false)
     replaceSteps(current => current.filter(step => step.id !== id))
   }
 
   const addStep = () => {
-    if (steps.length >= 12) {return}
+    if (steps.length >= 12) {
+      return
+    }
     const used = new Set(steps.map(step => step.id))
     let index = steps.length + 1
 
-    while (used.has(`draft-${index}`)) {index += 1}
+    while (used.has(`draft-${index}`)) {
+      index += 1
+    }
     setSubmitted(false)
     replaceSteps(current => [
       ...current,
@@ -1431,7 +1717,9 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
   const valid = steps.every(step => step.title.trim() && step.doneEnough.trim())
 
   const submit = () => {
-    if (!valid) {return}
+    if (!valid) {
+      return
+    }
 
     const response = [
       `I revised the task breakdown for taskId=${artifact.task.id}.`,
@@ -1456,18 +1744,35 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
 
   const labels = isRtl
     ? {
-        add: 'הוסף צעד', doneEnough: 'מה נחשב מספיק', down: 'העבר את', optional: 'אופציונלי',
-        remove: 'הסר את', step: 'צעד', stopping: 'כלל עצירה', target: 'תוצאה רצויה', up: 'העבר את'
+        add: 'הוסף צעד',
+        doneEnough: 'מה נחשב מספיק',
+        down: 'העבר את',
+        optional: 'אופציונלי',
+        remove: 'הסר את',
+        step: 'צעד',
+        stopping: 'כלל עצירה',
+        target: 'תוצאה רצויה',
+        up: 'העבר את'
       }
     : {
-        add: 'Add step', doneEnough: 'Done enough', down: 'Move', optional: 'Optional',
-        remove: 'Remove', step: 'Step', stopping: 'Stopping rule', target: 'Target outcome', up: 'Move'
+        add: 'Add step',
+        doneEnough: 'Done enough',
+        down: 'Move',
+        optional: 'Optional',
+        remove: 'Remove',
+        step: 'Step',
+        stopping: 'Stopping rule',
+        target: 'Target outcome',
+        up: 'Move'
       }
 
   return (
     <section
       aria-label={artifact.title || artifact.task.title}
-      className={cn('my-3 overflow-hidden rounded-xl border border-border/80 bg-muted/25', isRtl ? 'text-right' : 'text-left')}
+      className={cn(
+        'my-3 overflow-hidden rounded-xl border border-border/80 bg-muted/25',
+        isRtl ? 'text-right' : 'text-left'
+      )}
       data-hermes-ui-artifact="task-breakdown"
       dir={direction}
       style={directionalStyle}
@@ -1484,7 +1789,9 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
             {BREAKDOWN_SCOPE_LABELS[artifact.scope][isRtl ? 'rtl' : 'ltr']}
           </span>
         </div>
-        {artifact.description && <p className="m-0 mt-1 text-[0.72rem] text-muted-foreground">{artifact.description}</p>}
+        {artifact.description && (
+          <p className="m-0 mt-1 text-[0.72rem] text-muted-foreground">{artifact.description}</p>
+        )}
       </div>
 
       {(artifact.targetOutcome || artifact.stoppingRule) && (
@@ -1514,13 +1821,36 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
                 </span>
                 <span className="text-[0.68rem] font-medium text-muted-foreground">{labels.step}</span>
                 {step.optional && (
-                  <span className="rounded border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">{labels.optional}</span>
+                  <span className="rounded border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
+                    {labels.optional}
+                  </span>
                 )}
               </div>
               <div className={cn('flex items-center gap-1', isRtl && 'flex-row-reverse')}>
-                <button aria-label={`${labels.up} ${step.title} ${isRtl ? 'למעלה' : 'up'}`} disabled={index === 0} onClick={() => moveStep(index, -1)} type="button">↑</button>
-                <button aria-label={`${labels.down} ${step.title} ${isRtl ? 'למטה' : 'down'}`} disabled={index === steps.length - 1} onClick={() => moveStep(index, 1)} type="button">↓</button>
-                <button aria-label={`${labels.remove} ${step.title}`} disabled={steps.length === 1} onClick={() => removeStep(step.id)} type="button">×</button>
+                <button
+                  aria-label={`${labels.up} ${step.title} ${isRtl ? 'למעלה' : 'up'}`}
+                  disabled={index === 0}
+                  onClick={() => moveStep(index, -1)}
+                  type="button"
+                >
+                  ↑
+                </button>
+                <button
+                  aria-label={`${labels.down} ${step.title} ${isRtl ? 'למטה' : 'down'}`}
+                  disabled={index === steps.length - 1}
+                  onClick={() => moveStep(index, 1)}
+                  type="button"
+                >
+                  ↓
+                </button>
+                <button
+                  aria-label={`${labels.remove} ${step.title}`}
+                  disabled={steps.length === 1}
+                  onClick={() => removeStep(step.id)}
+                  type="button"
+                >
+                  ×
+                </button>
               </div>
             </div>
             <input
@@ -1542,12 +1872,31 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
         ))}
       </div>
 
-      <div className={cn('flex flex-wrap items-center gap-2 border-t border-border/65 px-3 py-2.5', isRtl && 'justify-end')}>
-        <button className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.72rem]" disabled={steps.length >= 12} onClick={addStep} type="button">
+      <div
+        className={cn(
+          'flex flex-wrap items-center gap-2 border-t border-border/65 px-3 py-2.5',
+          isRtl && 'justify-end'
+        )}
+      >
+        <button
+          className="rounded-md border border-border/80 bg-background/45 px-2 py-1 text-[0.72rem]"
+          disabled={steps.length >= 12}
+          onClick={addStep}
+          type="button"
+        >
           {labels.add}
         </button>
-        <button className="rounded-md bg-foreground px-2.5 py-1 text-[0.72rem] font-medium text-background disabled:opacity-45" disabled={!valid} onClick={submit} type="button">
-          {submitted ? (isRtl ? 'נשלח ל־Hermes' : 'Sent to Hermes') : artifact.submitLabel || (isRtl ? 'עדכן את הפירוק' : 'Update breakdown')}
+        <button
+          className="rounded-md bg-foreground px-2.5 py-1 text-[0.72rem] font-medium text-background disabled:opacity-45"
+          disabled={!valid}
+          onClick={submit}
+          type="button"
+        >
+          {submitted
+            ? isRtl
+              ? 'נשלח ל־Hermes'
+              : 'Sent to Hermes'
+            : artifact.submitLabel || (isRtl ? 'עדכן את הפירוק' : 'Update breakdown')}
         </button>
       </div>
     </section>
@@ -1589,12 +1938,20 @@ function ArtifactShell({
       {(artifact.title || artifact.description) && (
         <div className="border-b border-border/65 px-3 py-2.5">
           {artifact.title && (
-            <h3 className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground" dir={direction} style={directionalStyle}>
+            <h3
+              className="m-0 text-[0.8125rem] leading-snug font-semibold text-foreground"
+              dir={direction}
+              style={directionalStyle}
+            >
               {artifact.title}
             </h3>
           )}
           {artifact.description && (
-            <p className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground" dir={direction} style={directionalStyle}>
+            <p
+              className="m-0 mt-1 text-[0.75rem] leading-relaxed text-muted-foreground"
+              dir={direction}
+              style={directionalStyle}
+            >
               <PlainTextBlocks text={artifact.description} />
             </p>
           )}
@@ -1657,7 +2014,7 @@ function valueLabel(value: string | number | boolean | null | undefined, isRtl: 
   }
 
   if (typeof value === 'boolean') {
-    return value ? (isRtl ? 'כן' : 'Yes') : (isRtl ? 'לא' : 'No')
+    return value ? (isRtl ? 'כן' : 'Yes') : isRtl ? 'לא' : 'No'
   }
 
   return String(value)
@@ -1685,7 +2042,10 @@ function columnLabel(column: HermesUiTaskTableArtifact['columns'][number], isRtl
 export function TaskTableCard({ artifact }: { artifact: HermesUiTaskTableArtifact }) {
   const { directionalStyle, isRtl } = useArtifactDirection(artifact)
 
-  const cellValue = (row: HermesUiTaskTableArtifact['rows'][number], column: HermesUiTaskTableArtifact['columns'][number]) => {
+  const cellValue = (
+    row: HermesUiTaskTableArtifact['rows'][number],
+    column: HermesUiTaskTableArtifact['columns'][number]
+  ) => {
     if (column === 'task') {
       return (
         <span>
@@ -1744,22 +2104,33 @@ export function MiniKanbanCard({ artifact }: { artifact: HermesUiMiniKanbanArtif
           <section className="min-w-0 rounded-md border border-border/60 bg-background/30" key={lane.id}>
             <div className="border-b border-border/50 px-2.5 py-2">
               <div className="text-[0.78rem] font-semibold text-foreground">{lane.title}</div>
-              {lane.description && <div className="mt-0.5 text-[0.68rem] text-muted-foreground">{lane.description}</div>}
+              {lane.description && (
+                <div className="mt-0.5 text-[0.68rem] text-muted-foreground">{lane.description}</div>
+              )}
             </div>
             <div className="divide-y divide-border/40">
               {lane.tasks.length ? (
                 lane.tasks.map(task => (
                   <div className="px-2.5 py-2" key={task.id}>
-                    <div className="text-[0.76rem] font-medium leading-relaxed text-foreground wrap-anywhere">{task.title}</div>
-                    <div className="mt-0.5 text-[0.68rem] text-muted-foreground">
-                      {task.dueDate || unknownLabel(isRtl)} · {priorityText(task.priority, isRtl)} · {valueLabel(task.confidence, isRtl)}
+                    <div className="text-[0.76rem] font-medium leading-relaxed text-foreground wrap-anywhere">
+                      {task.title}
                     </div>
-                    {task.note && <div className="mt-1 text-[0.7rem] leading-relaxed text-muted-foreground wrap-anywhere">{task.note}</div>}
+                    <div className="mt-0.5 text-[0.68rem] text-muted-foreground">
+                      {task.dueDate || unknownLabel(isRtl)} · {priorityText(task.priority, isRtl)} ·{' '}
+                      {valueLabel(task.confidence, isRtl)}
+                    </div>
+                    {task.note && (
+                      <div className="mt-1 text-[0.7rem] leading-relaxed text-muted-foreground wrap-anywhere">
+                        {task.note}
+                      </div>
+                    )}
                     <PlanningActionButtons actions={task.actions} isRtl={isRtl} />
                   </div>
                 ))
               ) : (
-                <div className="px-2.5 py-2 text-[0.7rem] text-muted-foreground">{isRtl ? 'אין משימות' : 'No tasks'}</div>
+                <div className="px-2.5 py-2 text-[0.7rem] text-muted-foreground">
+                  {isRtl ? 'אין משימות' : 'No tasks'}
+                </div>
               )}
             </div>
           </section>
@@ -1803,7 +2174,9 @@ export function DayTimelineCard({ artifact }: { artifact: HermesUiDayTimelineArt
                     {valueLabel(block.status, isRtl)}
                   </span>
                 </div>
-                {block.doneEnough && <div className="mt-1 text-[0.7rem] text-muted-foreground wrap-anywhere">{block.doneEnough}</div>}
+                {block.doneEnough && (
+                  <div className="mt-1 text-[0.7rem] text-muted-foreground wrap-anywhere">{block.doneEnough}</div>
+                )}
                 <PlanningActionButtons actions={block.actions} isRtl={isRtl} />
               </div>
             </div>
@@ -1821,13 +2194,20 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
     <ArtifactShell artifact={artifact} label={isRtl ? 'תצוגת שינוי לפני אישור' : 'Mutation preview'}>
       <div className="space-y-2 px-3 py-3" dir={direction} style={directionalStyle}>
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[0.72rem] font-medium text-amber-800 dark:text-amber-200">
-          {isRtl ? 'Preview בלבד. לא מתבצע שינוי ב־FlowState מהרכיב הזה.' : 'Preview only. This component does not write to FlowState.'}
+          {isRtl
+            ? 'Preview בלבד. לא מתבצע שינוי ב־FlowState מהרכיב הזה.'
+            : 'Preview only. This component does not write to FlowState.'}
         </div>
         {artifact.changes.map(change => (
-          <div className="rounded-md border border-border/60 bg-background/30 px-2.5 py-2" key={`${change.taskId}:${change.operation}`}>
+          <div
+            className="rounded-md border border-border/60 bg-background/30 px-2.5 py-2"
+            key={`${change.taskId}:${change.operation}`}
+          >
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-[0.78rem] font-semibold text-foreground wrap-anywhere">{change.title}</span>
-              <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">{change.operation}</span>
+              <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
+                {change.operation}
+              </span>
               <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
                 {isRtl ? 'סיכון' : 'Risk'}: {valueLabel(change.risk, isRtl)}
               </span>
@@ -1934,7 +2314,10 @@ export function WorkloadBarsCard({ artifact }: { artifact: HermesUiWorkloadBarsA
                 </span>
               </div>
               <div className="mt-1 h-2 overflow-hidden rounded-full bg-background/70">
-                <div className={cn('h-full rounded-full', BAR_TONES[bar.tone || 'neutral'])} style={{ width: `${percent}%` }} />
+                <div
+                  className={cn('h-full rounded-full', BAR_TONES[bar.tone || 'neutral'])}
+                  style={{ width: `${percent}%` }}
+                />
               </div>
               {bar.note && <div className="mt-0.5 text-[0.68rem] text-muted-foreground">{bar.note}</div>}
             </div>

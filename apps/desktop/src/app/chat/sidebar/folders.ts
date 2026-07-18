@@ -12,10 +12,7 @@ export function visibleFoldersForScope(folders: SidebarFolder[], scope: string):
 // current profile scope (since `sessionByAnyId` is built from the visible set).
 // This is what keeps a folder with non-loaded members from crashing the render.
 // Order follows the folder's own `sessionIds`.
-export function resolveFolderSessions(
-  folder: SidebarFolder,
-  sessionByAnyId: Map<string, SessionInfo>
-): SessionInfo[] {
+export function resolveFolderSessions(folder: SidebarFolder, sessionByAnyId: Map<string, SessionInfo>): SessionInfo[] {
   const seen = new Set<string>()
   const out: SessionInfo[] = []
 

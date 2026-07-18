@@ -22,9 +22,7 @@ describe('isLikelyProseCodeBlock', () => {
   })
 
   it('treats short RTL text fences as prose, not LTR code cards', () => {
-    expect(isLikelyProseCodeBlock('text', 'אני פונה אליכם כי אתם עוסקים ב OPEN AI ובעבודה עם מודלים.')).toBe(
-      true
-    )
+    expect(isLikelyProseCodeBlock('text', 'אני פונה אליכם כי אתם עוסקים ב OPEN AI ובעבודה עם מודלים.')).toBe(true)
   })
 
   it('treats RTL text fences with URLs/emails/punctuation as prose', () => {

@@ -108,10 +108,7 @@ function groupedPendingMessage(): ThreadMessage {
   } as ThreadMessage
 }
 
-function groupedPendingClarifyMessage(
-  question = 'Pick one',
-  choices: string[] = ['One', 'Two']
-): ThreadMessage {
+function groupedPendingClarifyMessage(question = 'Pick one', choices: string[] = ['One', 'Two']): ThreadMessage {
   return {
     id: 'assistant-group-clarify',
     role: 'assistant',

@@ -80,9 +80,7 @@ function storePersonalAssistantState(state: AssistantState): AssistantState {
   }
 
   $personalAssistantState.set(state)
-  $personalAssistantPendingCount.set(
-    (state.pendingApprovals?.length ?? 0) + (state.captureProposals?.length ?? 0)
-  )
+  $personalAssistantPendingCount.set((state.pendingApprovals?.length ?? 0) + (state.captureProposals?.length ?? 0))
 
   return state
 }
@@ -97,9 +95,7 @@ async function ownerGateway() {
   return gateway
 }
 
-export async function startPersonalAssistant(
-  trigger: PersonalAssistantTrigger
-): Promise<PersonalAssistantStartResult> {
+export async function startPersonalAssistant(trigger: PersonalAssistantTrigger): Promise<PersonalAssistantStartResult> {
   const gateway = await ownerGateway()
 
   const response = (await gateway.request('personal_assistant.start', {
@@ -128,7 +124,9 @@ export async function startPersonalAssistant(
 }
 
 export async function openPersonalAssistantHome(): Promise<string> {
-  const response = await (await ownerGateway()).request<{
+  const response = await (
+    await ownerGateway()
+  ).request<{
     canonical_session_id: string
     session_id: string
     state: AssistantState
@@ -147,16 +145,16 @@ export async function openPersonalAssistantHome(): Promise<string> {
 }
 
 export async function refreshPersonalAssistantState(): Promise<AssistantState> {
-  const response = await (await ownerGateway()).request<{ state: AssistantState }>('personal_assistant.state.get', {
+  const response = await (
+    await ownerGateway()
+  ).request<{ state: AssistantState }>('personal_assistant.state.get', {
     profile: PERSONAL_ASSISTANT_OWNER_PROFILE
   })
 
   return storePersonalAssistantState(response.state)
 }
 
-export async function hydratePersonalAssistantStateWhenReady(
-  gatewayState: string
-): Promise<AssistantState | null> {
+export async function hydratePersonalAssistantStateWhenReady(gatewayState: string): Promise<AssistantState | null> {
   const current = $personalAssistantState.get()
 
   if (gatewayState !== 'open' || current) {
@@ -173,7 +171,9 @@ export async function hydratePersonalAssistantStateWhenReady(
 }
 
 export async function acknowledgePersonalAssistantRead(): Promise<AssistantState> {
-  const response = await (await ownerGateway()).request<{ state: AssistantState }>('personal_assistant.read', {
+  const response = await (
+    await ownerGateway()
+  ).request<{ state: AssistantState }>('personal_assistant.read', {
     profile: PERSONAL_ASSISTANT_OWNER_PROFILE
   })
 
@@ -186,16 +186,16 @@ export async function acknowledgePersonalAssistantRead(): Promise<AssistantState
   return storePersonalAssistantState(response.state)
 }
 
-export async function patchPersonalAssistantState(
-  operations: AssistantStateOperation[]
-): Promise<AssistantState> {
+export async function patchPersonalAssistantState(operations: AssistantStateOperation[]): Promise<AssistantState> {
   const current = $personalAssistantState.get()
 
   if (!current) {
     throw new Error('Personal assistant state is not loaded')
   }
 
-  const response = await (await ownerGateway()).request<{ state: AssistantState }>('personal_assistant.state.patch', {
+  const response = await (
+    await ownerGateway()
+  ).request<{ state: AssistantState }>('personal_assistant.state.patch', {
     expectedVersion: current.version,
     operations,
     profile: PERSONAL_ASSISTANT_OWNER_PROFILE

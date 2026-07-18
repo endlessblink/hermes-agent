@@ -20,10 +20,9 @@ import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { useI18n } from '@/i18n'
 import { respondToClarifyRequest } from '@/lib/clarify-response'
-import { triggerHaptic } from '@/lib/haptics'
 import { CircleLetterA, Loader2, MessageQuestion } from '@/lib/icons'
 import { cn } from '@/lib/utils'
-import { $clarifyRequest, clearClarifyRequest, sessionClarifyRequest } from '@/store/clarify'
+import { $clarifyRequest, sessionClarifyRequest } from '@/store/clarify'
 import { $gateway } from '@/store/gateway'
 
 import { selectMessageRunning } from './tool/fallback-model'
@@ -177,18 +176,19 @@ function ClarifyToolLive(props: ToolCallMessagePartProps) {
   // interactive panel visible until that request is answered or cleared.
   const hasLiveMatchingRequest = Boolean(
     request &&
-      messageId === latestMatchingClarifyMessageId &&
-      (!fromArgs.question || !request.question || fromArgs.question === request.question)
+    messageId === latestMatchingClarifyMessageId &&
+    (!fromArgs.question || !request.question || fromArgs.question === request.question)
   )
 
   const isSupersededMatchingRequest = Boolean(
     request?.question &&
-      fromArgs.question === request.question &&
-      latestMatchingClarifyMessageId &&
-      messageId !== latestMatchingClarifyMessageId
+    fromArgs.question === request.question &&
+    latestMatchingClarifyMessageId &&
+    messageId !== latestMatchingClarifyMessageId
   )
 
-  const isPending = !isSupersededMatchingRequest && ((messageRunning && props.result === undefined) || hasLiveMatchingRequest)
+  const isPending =
+    !isSupersededMatchingRequest && ((messageRunning && props.result === undefined) || hasLiveMatchingRequest)
 
   if (!isPending) {
     return <ToolFallback {...props} />
@@ -417,7 +417,11 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   return (
     <ClarifyShell className="grid gap-2 px-2.5 py-2" dir={direction}>
       <div className="flex items-start gap-2">
-        <span className="flex-1 whitespace-pre-wrap font-medium leading-(--conversation-line-height)" data-bidi-plaintext="" dir="auto">
+        <span
+          className="flex-1 whitespace-pre-wrap font-medium leading-(--conversation-line-height)"
+          data-bidi-plaintext=""
+          dir="auto"
+        >
           {question}
         </span>
         <MessageQuestion aria-hidden className="mt-px size-4 shrink-0 text-(--ui-text-tertiary)" />

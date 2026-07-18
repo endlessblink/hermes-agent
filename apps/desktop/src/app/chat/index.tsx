@@ -114,7 +114,7 @@ function ChatHeader({
 
   const isPersonalAssistant = Boolean(
     assistantState?.sessionId &&
-      (assistantState.sessionId === selectedSessionId || assistantState.sessionId === activeSessionId)
+    (assistantState.sessionId === selectedSessionId || assistantState.sessionId === activeSessionId)
   )
 
   const title = isPersonalAssistant
@@ -203,18 +203,21 @@ function ChatRuntimeBoundary({
   const messages = suppressMessages ? NO_MESSAGES : storeMessages
   const runtimeMessageRepository = useRuntimeMessageRepository(messages)
 
-  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
-    messageRepository: runtimeMessageRepository,
-    isRunning: busy,
-    setMessages: onThreadMessagesChange,
-    onNew: async () => {
-      // Submission is handled explicitly by ChatBar.
-      // Keeping this no-op avoids duplicate prompt.submit calls.
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>(
+    {
+      messageRepository: runtimeMessageRepository,
+      isRunning: busy,
+      setMessages: onThreadMessagesChange,
+      onNew: async () => {
+        // Submission is handled explicitly by ChatBar.
+        // Keeping this no-op avoids duplicate prompt.submit calls.
+      },
+      onEdit,
+      onCancel: async () => onCancel(),
+      onReload
     },
-    onEdit,
-    onCancel: async () => onCancel(),
-    onReload
-  }, { resetKey: runtimeKey })
+    { resetKey: runtimeKey }
+  )
 
   return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
 }
@@ -335,7 +338,7 @@ export function ChatView({
 
   const isPersonalAssistant = Boolean(
     assistantState?.sessionId &&
-      (assistantState.sessionId === selectedSessionId || assistantState.sessionId === activeSessionId)
+    (assistantState.sessionId === selectedSessionId || assistantState.sessionId === activeSessionId)
   )
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({

@@ -123,10 +123,7 @@ export const sessionRecency = (session: SessionInfo): number => session.last_act
  * membership, preview limits, stale metadata, or a restored presentation mode
  * cannot make a conversation disappear from the sidebar.
  */
-export function sessionsBesideProjectOverview(
-  sessions: SessionInfo[],
-  _projectOverviewActive: boolean
-): SessionInfo[] {
+export function sessionsBesideProjectOverview(sessions: SessionInfo[], _projectOverviewActive: boolean): SessionInfo[] {
   return sessions
 }
 

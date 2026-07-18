@@ -1061,9 +1061,11 @@ function rememberLog(chunk) {
 
 function recordDiagnosticEvent(event) {
   const entry = desktopDiagnostics.record(event)
+
   if (entry.severity === 'warn' || entry.severity === 'error' || entry.severity === 'fatal') {
     rememberLog(`[diagnostics] ${entry.component}.${entry.event}: ${entry.message}`)
   }
+
   return entry
 }
 
@@ -1097,9 +1099,9 @@ app.on('child-process-gone', (_event, details) => {
   })
 })
 
-
 function markRendererHeartbeat(details = {}) {
   lastRendererHeartbeatAt = Date.now()
+
   if (rendererHeartbeatMissing) {
     rendererHeartbeatMissing = false
     recordDiagnosticEvent({
@@ -1116,12 +1118,14 @@ function startRendererHeartbeatMonitor() {
   if (rendererHeartbeatTimer) {
     return
   }
+
   rendererHeartbeatTimer = setInterval(() => {
     if (!mainWindow || mainWindow.isDestroyed() || lastRendererHeartbeatAt === null) {
       return
     }
 
     const silenceMs = Date.now() - lastRendererHeartbeatAt
+
     if (silenceMs < DESKTOP_DIAGNOSTICS_HEARTBEAT_WARN_MS || rendererHeartbeatMissing) {
       return
     }
@@ -1135,6 +1139,7 @@ function startRendererHeartbeatMonitor() {
       details: { silenceMs }
     })
   }, 10_000)
+
   if (typeof rendererHeartbeatTimer.unref === 'function') {
     rendererHeartbeatTimer.unref()
   }
@@ -1921,11 +1926,13 @@ function getVenvPython(venvRoot) {
 
 function inferVenvRootForPython(root, python) {
   const normalizedPython = normalizeExecutablePathForCompare(python)
+
   for (const candidate of [path.join(root, '.venv'), path.join(root, 'venv')]) {
     if (normalizedPython === normalizeExecutablePathForCompare(getVenvPython(candidate))) {
       return candidate
     }
   }
+
   return path.join(root, 'venv')
 }
 
@@ -2329,9 +2336,11 @@ async function dirtyUpdateGuard(updateRoot) {
   }
 
   const dirty = await runGit(['status', '--porcelain'], { cwd: updateRoot })
+
   if (dirty.code !== 0) {
     return null
   }
+
   if (!isDirtyStatus(dirty.stdout)) {
     return null
   }
@@ -2577,8 +2586,10 @@ async function applyUpdates(opts = {}) {
   try {
     const updateRoot = resolveUpdateRoot()
     const dirtyResult = await dirtyUpdateGuard(updateRoot)
+
     if (dirtyResult) {
       rememberLog(`[updates] blocked update from dirty checkout at ${updateRoot}`)
+
       return dirtyResult
     }
 
@@ -2860,8 +2871,10 @@ function shellQuote(value) {
 async function applyUpdatesPosixInApp(opts: any) {
   const updateRoot = resolveUpdateRoot()
   const dirtyResult = await dirtyUpdateGuard(updateRoot)
+
   if (dirtyResult) {
     rememberLog(`[updates] blocked POSIX in-app update from dirty checkout at ${updateRoot}`)
+
     return dirtyResult
   }
 
@@ -3888,12 +3901,15 @@ function isHermesBackendTimeout(error: any) {
 
 function shouldRetryLocalPooledBackend(profile: any, connection: any, error: any) {
   const key = profile && String(profile).trim() ? String(profile).trim() : null
+
   if (!key || key === primaryProfileKey()) {
     return false
   }
+
   if (!isHermesBackendTimeout(error)) {
     return false
   }
+
   return connection?.mode === 'local' && connection?.source === 'local'
 }
 
@@ -4355,9 +4371,11 @@ async function resourceBufferFromUrl(rawUrl) {
   }
 
   const expandedPath = expandUserPath(rawUrl)
+
   if (path.isAbsolute(expandedPath)) {
     const { resolvedPath } = await resolveReadableFileForIpc(expandedPath, { purpose: 'Image file' })
     const buffer = await fs.promises.readFile(resolvedPath)
+
     return { buffer, mimeType: mimeTypeForPath(resolvedPath) }
   }
 
@@ -8278,12 +8296,14 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   }
 
   const connection = await ensureBackend(routeProfile)
+
   try {
     return await send(connection)
   } catch (error: any) {
     if (!shouldRetryLocalPooledBackend(routeProfile, connection, error)) {
       throw error
     }
+
     const key = String(routeProfile).trim()
     rememberLog(`Pooled backend for profile "${key}" timed out on ${requestPath}; restarting once`)
     recordDiagnosticEvent({
@@ -8295,6 +8315,7 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     })
     stopPoolBackend(key)
     const restarted = await ensureBackend(key)
+
     return send(restarted)
   }
 })
@@ -8423,6 +8444,7 @@ ipcMain.handle('hermes:writeClipboard', (_event, text) => {
 
 ipcMain.handle('hermes:copyImageFromUrl', async (_event, url) => {
   await copyImageFromUrl(String(url || ''))
+
   return true
 })
 
@@ -8591,11 +8613,13 @@ ipcMain.handle('hermes:diagnostics:recent', async (_event, limit) => ({
 
 ipcMain.handle('hermes:diagnostics:event', async (_event, payload) => {
   const entry = recordDiagnosticEvent(payload && typeof payload === 'object' ? payload : {})
+
   return { ok: true, event: entry }
 })
 
 ipcMain.handle('hermes:diagnostics:heartbeat', async (_event, payload) => {
   markRendererHeartbeat(payload && typeof payload === 'object' ? payload : {})
+
   return { ok: true, at: lastRendererHeartbeatAt }
 })
 

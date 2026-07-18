@@ -1,9 +1,6 @@
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { notify } from '@/store/notifications'
-import {
-  $personalAssistantPendingCount,
-  $personalAssistantState
-} from '@/store/personal-assistant'
+import { $personalAssistantPendingCount, $personalAssistantState } from '@/store/personal-assistant'
 
 export interface PersonalAssistantAttentionPayload {
   episode_id: string

@@ -191,9 +191,7 @@ export function moveSessionToFolderInScope(sessionKey: string, folderId: string,
         return f
       }
 
-      return f.sessionIds.includes(sessionKey)
-        ? { ...f, sessionIds: f.sessionIds.filter(id => id !== sessionKey) }
-        : f
+      return f.sessionIds.includes(sessionKey) ? { ...f, sessionIds: f.sessionIds.filter(id => id !== sessionKey) } : f
     })
   )
 }
@@ -209,7 +207,9 @@ export function ensureSessionsInNamedFolder(name: string, sessionKeys: string[],
   const targetName = name.trim()
 
   const existing = current.find(
-    f => f.name.localeCompare(targetName, undefined, { sensitivity: 'accent' }) === 0 && (f.pinned || f.profileKey === profileKey)
+    f =>
+      f.name.localeCompare(targetName, undefined, { sensitivity: 'accent' }) === 0 &&
+      (f.pinned || f.profileKey === profileKey)
   )
 
   const folderId = existing?.id ?? createFolderId()
@@ -231,7 +231,13 @@ export function ensureSessionsInNamedFolder(name: string, sessionKeys: string[],
 
   const next = current.map(folder => {
     if (folder.id === folderId) {
-      return { ...folder, name: targetName, open: true, profileKey: folder.profileKey ?? profileKey, sessionIds: nextTargetSessionIds }
+      return {
+        ...folder,
+        name: targetName,
+        open: true,
+        profileKey: folder.profileKey ?? profileKey,
+        sessionIds: nextTargetSessionIds
+      }
     }
 
     const filtered = folder.sessionIds.filter(id => !wanted.has(id))

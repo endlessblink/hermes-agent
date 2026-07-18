@@ -263,9 +263,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
                 ...state,
                 awaitingResponse: false,
                 busy,
-                messages: state.messages.map(message =>
-                  message.pending ? { ...message, pending: false } : message
-                ),
+                messages: state.messages.map(message => (message.pending ? { ...message, pending: false } : message)),
                 pendingBranchGroup: null,
                 streamId: null,
                 turnStartedAt: null
@@ -726,7 +724,11 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           event: typeof payload?.event === 'string' ? payload.event : 'event',
           message: typeof payload?.message === 'string' ? payload.message : 'Gateway diagnostic event',
           severity:
-            severity === 'debug' || severity === 'info' || severity === 'warn' || severity === 'error' || severity === 'fatal'
+            severity === 'debug' ||
+            severity === 'info' ||
+            severity === 'warn' ||
+            severity === 'error' ||
+            severity === 'fatal'
               ? severity
               : 'info',
           details: {

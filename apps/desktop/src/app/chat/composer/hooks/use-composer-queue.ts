@@ -194,7 +194,16 @@ export function useComposerQueue({
     triggerHaptic('selection')
 
     return true
-  }, [activeQueueSessionKey, attachments, clearDraft, draftRef, onDraftQueued, scope.attachments, sendBlocked, transformDraftText])
+  }, [
+    activeQueueSessionKey,
+    attachments,
+    clearDraft,
+    draftRef,
+    onDraftQueued,
+    scope.attachments,
+    sendBlocked,
+    transformDraftText
+  ])
 
   // All queue drain paths share one lock + send-then-remove sequence.
   // `pickEntry` lets each caller choose head, by-id, or skip-edited.

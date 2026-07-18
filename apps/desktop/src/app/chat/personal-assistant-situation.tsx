@@ -66,27 +66,60 @@ function SituationItem({ item, section }: { item: AssistantStateItem; section: A
           </Button>
         ) : (
           <>
-            <Button aria-label={`Inspect ${itemLabel(item)}`} onClick={() => setExpanded(value => !value)} size="icon-xs" type="button" variant="ghost">
+            <Button
+              aria-label={`Inspect ${itemLabel(item)}`}
+              onClick={() => setExpanded(value => !value)}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
               <Codicon name="info" />
             </Button>
-            <Button aria-label={`Edit ${itemLabel(item)}`} onClick={() => setEditing(true)} size="icon-xs" type="button" variant="ghost">
+            <Button
+              aria-label={`Edit ${itemLabel(item)}`}
+              onClick={() => setEditing(true)}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
               <Codicon name="edit" />
             </Button>
-            <Button aria-label={`Archive ${itemLabel(item)}`} disabled={busy} onClick={() => void mutate('archive')} size="icon-xs" type="button" variant="ghost">
+            <Button
+              aria-label={`Archive ${itemLabel(item)}`}
+              disabled={busy}
+              onClick={() => void mutate('archive')}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
               <Codicon name="archive" />
             </Button>
-            <Button aria-label={`Forget ${itemLabel(item)}`} disabled={busy} onClick={() => void mutate('forget')} size="icon-xs" type="button" variant="ghost">
+            <Button
+              aria-label={`Forget ${itemLabel(item)}`}
+              disabled={busy}
+              onClick={() => void mutate('forget')}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
               <Codicon name="trash" />
             </Button>
           </>
         )}
       </div>
       {expanded && (
-        <pre className="mt-1.5 max-h-28 overflow-auto whitespace-pre-wrap break-words text-[0.6875rem] text-(--ui-text-tertiary)" dir="ltr">
+        <pre
+          className="mt-1.5 max-h-28 overflow-auto whitespace-pre-wrap break-words text-[0.6875rem] text-(--ui-text-tertiary)"
+          dir="ltr"
+        >
           {JSON.stringify(item, null, 2)}
         </pre>
       )}
-      {error && <p className="mt-1 text-start text-[0.6875rem] text-destructive" dir="auto" role="alert">{error}</p>}
+      {error && (
+        <p className="mt-1 text-start text-[0.6875rem] text-destructive" dir="auto" role="alert">
+          {error}
+        </p>
+      )}
     </li>
   )
 }
@@ -105,7 +138,9 @@ function SituationSection({
       <h3 className="mb-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">{title}</h3>
       {items.length ? (
         <ul className="space-y-1">
-          {items.map(item => <SituationItem item={item} key={item.id} section={section} />)}
+          {items.map(item => (
+            <SituationItem item={item} key={item.id} section={section} />
+          ))}
         </ul>
       ) : (
         <p className="text-xs text-(--ui-text-tertiary)">None</p>
@@ -163,7 +198,10 @@ export function PersonalAssistantSituation() {
   }
 
   return (
-    <aside className="relative z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background)" dir="ltr">
+    <aside
+      className="relative z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background)"
+      dir="ltr"
+    >
       <button
         aria-expanded={open}
         className="flex w-full items-center gap-2 px-3 py-2 text-start hover:bg-(--ui-control-hover-background)"
@@ -190,12 +228,18 @@ export function PersonalAssistantSituation() {
           <SituationSection items={state.outcomes} section="outcomes" title="Outcomes" />
           <SituationSection items={state.commitments} section="commitments" title="Commitments" />
           <section aria-label="Capacity and focus">
-            <h3 className="mb-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Capacity & focus</h3>
-            <p className="text-start text-xs" dir="auto">{state.capacity.summary || 'Not set'}</p>
+            <h3 className="mb-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">
+              Capacity & focus
+            </h3>
+            <p className="text-start text-xs" dir="auto">
+              {state.capacity.summary || 'Not set'}
+            </p>
             {state.focus && (
               <p className="mt-1 flex min-w-0 gap-1 text-xs font-medium">
                 <span>Focus:</span>
-                <span className="min-w-0 flex-1 text-start" dir="auto">{itemLabel(state.focus)}</span>
+                <span className="min-w-0 flex-1 text-start" dir="auto">
+                  {itemLabel(state.focus)}
+                </span>
               </p>
             )}
           </section>
@@ -203,18 +247,28 @@ export function PersonalAssistantSituation() {
           <SituationSection items={state.deferred} section="deferred" title="Deferred important work" />
           <SituationSection items={state.preferences ?? []} section="preferences" title="Preferences" />
           <section aria-label="Pending approvals and proposals">
-            <h3 className="mb-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">Pending</h3>
-            <p className="text-xs">{state.pendingApprovals.length} approvals · {state.captureProposals.length} proposals</p>
+            <h3 className="mb-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">
+              Pending
+            </h3>
+            <p className="text-xs">
+              {state.pendingApprovals.length} approvals · {state.captureProposals.length} proposals
+            </p>
             {[...state.pendingApprovals, ...state.captureProposals].length > 0 && (
               <ul className="mt-1 space-y-1 text-xs">
                 {[...state.pendingApprovals, ...state.captureProposals].map(item => (
-                  <li className="rounded border border-(--ui-stroke-tertiary) px-1.5 py-1 text-start" dir="auto" key={item.id}>
+                  <li
+                    className="rounded border border-(--ui-stroke-tertiary) px-1.5 py-1 text-start"
+                    dir="auto"
+                    key={item.id}
+                  >
                     {itemLabel(item)}
                   </li>
                 ))}
               </ul>
             )}
-            <p className="mt-1 text-[0.6875rem] text-(--ui-text-tertiary)">Last verified: {state.sync.lastVerifiedAt || 'never'}</p>
+            <p className="mt-1 text-[0.6875rem] text-(--ui-text-tertiary)">
+              Last verified: {state.sync.lastVerifiedAt || 'never'}
+            </p>
           </section>
         </div>
       )}

@@ -56,12 +56,7 @@ export function nextJerusalemNine(now = new Date()): Date {
   const beforeNine = local.hour < 9
   const calendar = new Date(Date.UTC(local.year, local.month - 1, local.day + (beforeNine ? 0 : 1)))
 
-  return jerusalemLocalToDate(
-    calendar.getUTCFullYear(),
-    calendar.getUTCMonth() + 1,
-    calendar.getUTCDate(),
-    9
-  )
+  return jerusalemLocalToDate(calendar.getUTCFullYear(), calendar.getUTCMonth() + 1, calendar.getUTCDate(), 9)
 }
 
 export function startDailyAssistantScheduler(
@@ -93,16 +88,19 @@ export function startDailyAssistantScheduler(
 
     const target = nextJerusalemNine(now)
 
-    timer = setTimeout(() => {
-      timer = null
-      const active = profile.get()
+    timer = setTimeout(
+      () => {
+        timer = null
+        const active = profile.get()
 
-      if (active === 'office-work') {
-        void launch(active, 'scheduled')
-      }
+        if (active === 'office-work') {
+          void launch(active, 'scheduled')
+        }
 
-      schedule(active, false)
-    }, Math.max(0, target.getTime() - now.getTime()))
+        schedule(active, false)
+      },
+      Math.max(0, target.getTime() - now.getTime())
+    )
   }
 
   const unsubscribe = profile.subscribe(schedule)

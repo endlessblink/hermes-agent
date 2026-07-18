@@ -32,15 +32,13 @@ interface RichCodeBlockProps extends RichFenceProps {
 // deterministic schema mistake).
 function hermesUiRetryPrompt(reason?: string): string {
   const why = reason ? ` Validator error: ${reason}.` : ''
+
   return `The interactive form could not be rendered.${why} Resend it as one complete valid hermes-ui artifact — the fence body must be pure JSON using only supported keys, with no surrounding explanation — and wait for my response.`
 }
 
 function InvalidHermesUiNotice({ reason }: { reason?: string }) {
   return (
-    <div
-      className="my-3 rounded-xl border border-amber-500/35 bg-amber-500/8 px-3 py-3 text-sm"
-      role="alert"
-    >
+    <div className="my-3 rounded-xl border border-amber-500/35 bg-amber-500/8 px-3 py-3 text-sm" role="alert">
       <div className="font-medium text-foreground">Interactive form could not be shown</div>
       <div className="mt-1 text-muted-foreground">
         {reason ? `Invalid UI artifact: ${reason}.` : 'Hermes returned an incomplete or invalid UI artifact.'}
@@ -70,6 +68,7 @@ export function RichCodeBlock({ code, fallback, language, streaming }: RichCodeB
 
   if (normalizedLanguage === 'hermes-ui') {
     const parsed = parseHermesUiArtifact(code)
+
     if (!parsed.ok) {
       if (streaming) {
         return (

@@ -105,14 +105,11 @@ const nextBlockArtifact: HermesUiFlowStateNextBlockArtifact = {
   type: 'flowstate-next-block'
 }
 
-
 const planningSessionArtifact: HermesUiFlowStatePlanningSessionArtifact = {
   categories: [
     {
       count: 2,
-      examples: [
-        { dueDate: '2026-07-09', id: 'task-1', priority: 'high', title: 'להחליט מה הבלוק הבא' }
-      ],
+      examples: [{ dueDate: '2026-07-09', id: 'task-1', priority: 'high', title: 'להחליט מה הבלוק הבא' }],
       id: 'work-pressure',
       label: 'עומס עבודה',
       recommendation: 'להוציא רק בלוק אחד לביצוע ולא לפתוח את כל הבקלוג.',
@@ -155,7 +152,6 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('ChecklistArtifactCard', () => {
-
   it('validates, persists, and submits a deterministic RTL form response', () => {
     const { unmount } = render(<FormArtifactCard artifact={formArtifact} />)
 
@@ -527,7 +523,6 @@ describe('ChecklistArtifactCard', () => {
     expect(screen.getByLabelText('שנה דחיפות')).toHaveProperty('value', 'medium')
   })
 
-
   it('collects FlowState batch decisions and submits them to Hermes behind the scenes', () => {
     render(
       <FlowStateTaskBatchCard
@@ -603,21 +598,30 @@ describe('ChecklistArtifactCard', () => {
 
   it('hides incomplete hermes-ui JSON while the form is still streaming', () => {
     const { rerender } = render(
-      <RichCodeBlock code={'{"type":"form","fields":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming />
+      <RichCodeBlock
+        code={'{"type":"form","fields":['}
+        fallback={<pre>raw partial JSON</pre>}
+        language="hermes-ui"
+        streaming
+      />
     )
 
     expect(screen.getByRole('status').textContent).toBe('Preparing interactive form…')
     expect(screen.queryByText('raw partial JSON')).toBeNull()
 
     rerender(
-      <RichCodeBlock code={'{"type":"form","fields":['} fallback={<pre>raw partial JSON</pre>} language="hermes-ui" streaming={false} />
+      <RichCodeBlock
+        code={'{"type":"form","fields":['}
+        fallback={<pre>raw partial JSON</pre>}
+        language="hermes-ui"
+        streaming={false}
+      />
     )
 
     expect(screen.queryByText('raw partial JSON')).toBeNull()
     expect(screen.getByRole('alert').textContent).toContain('Interactive form could not be shown')
   })
 })
-
 
 describe('Planning interview primitives', () => {
   const taskBreakdown: HermesUiTaskBreakdownArtifact = {
@@ -763,10 +767,7 @@ describe('Planning interview primitives', () => {
 
   it('renders a task breakdown fence as interactive UI instead of code', async () => {
     render(
-      <MarkdownTextContent
-        isRunning={false}
-        text={['```hermes-ui', JSON.stringify(taskBreakdown), '```'].join('\n')}
-      />
+      <MarkdownTextContent isRunning={false} text={['```hermes-ui', JSON.stringify(taskBreakdown), '```'].join('\n')} />
     )
 
     await waitFor(() => expect(document.querySelector('[data-hermes-ui-artifact="task-breakdown"]')).toBeTruthy())
@@ -777,11 +778,7 @@ describe('Planning interview primitives', () => {
     render(
       <MarkdownTextContent
         isRunning={false}
-        text={[
-          '```hermes-ui',
-          JSON.stringify(planningFunnel, null, 2),
-          '```'
-        ].join('\n')}
+        text={['```hermes-ui', JSON.stringify(planningFunnel, null, 2), '```'].join('\n')}
       />
     )
 
@@ -805,8 +802,24 @@ describe('Planning toolkit primitives', () => {
         title: 'לבדוק בדיקות',
         urgency: 'high'
       },
-      { confidence: 'medium', context: 'לקוח', energy: 'medium', id: 't2', nextStep: 'טיוטה', title: 'מייל ללקוח', urgency: 'medium' },
-      { confidence: 'high', context: 'בית', energy: 'low', id: 't3', nextStep: '10 דקות', title: 'לסדר שולחן', urgency: 'low' }
+      {
+        confidence: 'medium',
+        context: 'לקוח',
+        energy: 'medium',
+        id: 't2',
+        nextStep: 'טיוטה',
+        title: 'מייל ללקוח',
+        urgency: 'medium'
+      },
+      {
+        confidence: 'high',
+        context: 'בית',
+        energy: 'low',
+        id: 't3',
+        nextStep: '10 דקות',
+        title: 'לסדר שולחן',
+        urgency: 'low'
+      }
     ],
     title: 'השוואת משימות',
     type: 'task-table'
@@ -817,7 +830,13 @@ describe('Planning toolkit primitives', () => {
     lanes: [
       {
         id: 'today',
-        tasks: [{ actions: [{ id: 'route', label: 'בחר להיום', submitText: 'שים את t1 ב־today preview.' }], id: 't1', title: 'טיוטה ללקוח' }],
+        tasks: [
+          {
+            actions: [{ id: 'route', label: 'בחר להיום', submitText: 'שים את t1 ב־today preview.' }],
+            id: 't1',
+            title: 'טיוטה ללקוח'
+          }
+        ],
         title: 'היום'
       },
       { id: 'need-context', tasks: [{ id: 't2', note: 'צריך להבין משמעות', title: 'בדיקות' }], title: 'צריך הקשר' }
@@ -828,7 +847,15 @@ describe('Planning toolkit primitives', () => {
 
   const dayTimeline: HermesUiDayTimelineArtifact = {
     blocks: [
-      { actions: [{ id: 'accept-block', label: 'השתמש בבלוק', submitText: 'תציג preview לבלוק הזה.' }], endTime: '10:25', id: 'b1', kind: 'focus', label: 'טיוטה ללקוח', startTime: '10:00', status: 'candidate' },
+      {
+        actions: [{ id: 'accept-block', label: 'השתמש בבלוק', submitText: 'תציג preview לבלוק הזה.' }],
+        endTime: '10:25',
+        id: 'b1',
+        kind: 'focus',
+        label: 'טיוטה ללקוח',
+        startTime: '10:00',
+        status: 'candidate'
+      },
       { durationMinutes: 15, id: 'float-1', kind: 'floating', label: 'בדיקה קצרה', status: 'planned' }
     ],
     currentTime: '09:45',
@@ -917,7 +944,14 @@ describe('Planning toolkit primitives', () => {
       <>
         <UrgencyEnergyMatrixCard
           artifact={{
-            cells: [{ label: 'דחוף באנרגיה נמוכה', tasks: [{ id: 't1', priority: 'high', title: 'שיחה קצרה' }], x: 'low', y: 'high' }],
+            cells: [
+              {
+                label: 'דחוף באנרגיה נמוכה',
+                tasks: [{ id: 't1', priority: 'high', title: 'שיחה קצרה' }],
+                x: 'low',
+                y: 'high'
+              }
+            ],
             direction: 'rtl',
             title: 'בחירה לפי אנרגיה',
             type: 'urgency-energy-matrix',
@@ -963,11 +997,7 @@ describe('Planning toolkit primitives', () => {
     render(
       <MarkdownTextContent
         isRunning={false}
-        text={[
-          '```hermes-ui',
-          JSON.stringify(mutationPreview, null, 2),
-          '```'
-        ].join('\n')}
+        text={['```hermes-ui', JSON.stringify(mutationPreview, null, 2), '```'].join('\n')}
       />
     )
 

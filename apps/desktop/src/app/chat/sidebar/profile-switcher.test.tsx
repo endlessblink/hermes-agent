@@ -62,11 +62,18 @@ function profileInfo(name: string, isDefault = false) {
   }
 }
 
-function mockRailMetrics(el: HTMLElement, { clientWidth, scrollLeft, scrollWidth }: {
-  clientWidth: number
-  scrollLeft: number
-  scrollWidth: number
-}) {
+function mockRailMetrics(
+  el: HTMLElement,
+  {
+    clientWidth,
+    scrollLeft,
+    scrollWidth
+  }: {
+    clientWidth: number
+    scrollLeft: number
+    scrollWidth: number
+  }
+) {
   let currentScrollLeft = scrollLeft
 
   Object.defineProperties(el, {

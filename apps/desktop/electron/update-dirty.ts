@@ -6,6 +6,7 @@ function isDirtyStatus(status) {
 
 function dirtyUpdateMessage(hermesRoot) {
   const suffix = hermesRoot ? `\n\nCheckout: ${hermesRoot}` : ''
+
   return `Hermes paused the update because this source checkout has local changes. Commit or stash them first so working features are not hidden or replaced by the rebuild.${suffix}`
 }
 
@@ -19,9 +20,4 @@ function dirtyUpdateResult(hermesRoot) {
   }
 }
 
-export {
-  DIRTY_UPDATE_ERROR,
-  dirtyUpdateMessage,
-  dirtyUpdateResult,
-  isDirtyStatus
-}
+export { DIRTY_UPDATE_ERROR, dirtyUpdateMessage, dirtyUpdateResult, isDirtyStatus }

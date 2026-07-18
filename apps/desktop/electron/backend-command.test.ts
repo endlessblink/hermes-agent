@@ -2,12 +2,7 @@ import assert from 'node:assert/strict'
 
 import { test } from 'vitest'
 
-import {
-  dashboardFallbackArgs,
-  serveBackendArgs,
-  shouldUseActiveRuntime,
-  sourceDeclaresServe
-} from './backend-command'
+import { dashboardFallbackArgs, serveBackendArgs, shouldUseActiveRuntime, sourceDeclaresServe } from './backend-command'
 
 test('a healthy active runtime wins even when its completion marker is missing', () => {
   assert.equal(shouldUseActiveRuntime({ activeRuntimeUsable: true }), true)

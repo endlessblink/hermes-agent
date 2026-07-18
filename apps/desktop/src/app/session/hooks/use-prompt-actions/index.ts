@@ -73,9 +73,7 @@ import {
 } from './utils'
 
 const isStaleRewindTargetError = (error: unknown): boolean =>
-  /no longer in session history|not in session history/i.test(
-    error instanceof Error ? error.message : String(error)
-  )
+  /no longer in session history|not in session history/i.test(error instanceof Error ? error.message : String(error))
 
 interface HandoffResult {
   ok: boolean

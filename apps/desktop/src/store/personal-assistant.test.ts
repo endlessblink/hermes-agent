@@ -39,10 +39,7 @@ describe('startPersonalAssistant', () => {
 
     request.mockResolvedValue({ state })
 
-    await Promise.all([
-      hydratePersonalAssistantStateWhenReady('open'),
-      hydratePersonalAssistantStateWhenReady('open')
-    ])
+    await Promise.all([hydratePersonalAssistantStateWhenReady('open'), hydratePersonalAssistantStateWhenReady('open')])
 
     expect(request).toHaveBeenCalledTimes(1)
     expect($personalAssistantState.get()?.unreadCount).toBe(4)

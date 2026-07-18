@@ -608,7 +608,9 @@ describe('overlayLiveLanes', () => {
           label: 'app',
           path: '/www/app',
           sessionCount: 1,
-          groups: [lane({ id: '/www/app::branch::main', label: 'main', isMain: true, path: '/www/app', sessions: [tip] })]
+          groups: [
+            lane({ id: '/www/app::branch::main', label: 'main', isMain: true, path: '/www/app', sessions: [tip] })
+          ]
         }
       ]
     })
@@ -764,7 +766,9 @@ describe('overlayLivePreviews', () => {
   it('does not merge stale compression-ended live rows into project previews', () => {
     const project = projectNode({
       id: '/www/app',
-      previewSessions: [makeSession('/www/app', { id: 'tip-5', _lineage_root_id: 'root', started_at: 6, last_active: 6 })]
+      previewSessions: [
+        makeSession('/www/app', { id: 'tip-5', _lineage_root_id: 'root', started_at: 6, last_active: 6 })
+      ]
     })
 
     const live = [makeSession('/www/app', { end_reason: 'compression', id: 'tip-4', started_at: 5, last_active: 5 })]

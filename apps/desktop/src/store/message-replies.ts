@@ -13,7 +13,8 @@ export const $messageReplyTarget = atom<MessageReplyTarget | null>(null)
 
 export function messageRepliesEnabledFromConfig(config: unknown): boolean {
   const desktop = config && typeof config === 'object' ? (config as { desktop?: unknown }).desktop : null
-  const replies = desktop && typeof desktop === 'object' ? (desktop as { message_replies?: unknown }).message_replies : null
+  const replies =
+    desktop && typeof desktop === 'object' ? (desktop as { message_replies?: unknown }).message_replies : null
 
   return Boolean(replies && typeof replies === 'object' && (replies as { enabled?: unknown }).enabled === true)
 }
@@ -78,7 +79,10 @@ export function parseMessageReply(text: string): ParsedMessageReply {
   }
 
   const quote = afterStart.slice(0, endIndex).trim()
-  const body = afterStart.slice(endIndex + REPLY_END.length).replace(/^\s*\n/, '').trimStart()
+  const body = afterStart
+    .slice(endIndex + REPLY_END.length)
+    .replace(/^\s*\n/, '')
+    .trimStart()
 
   return { body, quote: quote || null }
 }
