@@ -2511,14 +2511,18 @@ class TestSummaryTargetRatio:
         assert c.tail_token_budget == 200_000
 
     def test_summary_cap_scales_with_context(self):
-        """Max summary tokens should be 5% of context, capped at 10K."""
-        with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+        """Max summary tokens should be 5% of context, capped at 4K.
+
+        The ceiling is deliberately low: the aux summarizer call is
+        non-streaming, so every summary token is wall-clock compaction time.
+        """
+        with patch("agent.context_compressor.get_model_context_length", return_value=60_000):
             c = ContextCompressor(model="test", quiet_mode=True)
-        assert c.max_summary_tokens == 10_000  # 200K * 0.05
+        assert c.max_summary_tokens == 3_000  # 60K * 0.05
 
         with patch("agent.context_compressor.get_model_context_length", return_value=1_000_000):
             c = ContextCompressor(model="test", quiet_mode=True)
-        assert c.max_summary_tokens == 10_000  # capped at 10K ceiling
+        assert c.max_summary_tokens == 4_000  # capped at 4K ceiling
 
     def test_ratio_clamped(self):
         """Ratio should be clamped to [0.10, 0.80]."""

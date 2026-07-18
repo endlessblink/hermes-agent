@@ -2050,7 +2050,11 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
-        _mark_provider_unhealthy("openrouter", ttl=60, reason="not configured — no API key")
+        _mark_provider_unhealthy(
+            "openrouter",
+            ttl=_AUX_NOT_CONFIGURED_TTL_SECONDS,
+            reason="not configured — no API key",
+        )
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
     return _create_openai_client(api_key=or_key, base_url=OPENROUTER_BASE_URL,
@@ -2094,7 +2098,11 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
             "Auxiliary Nous client unavailable: no Nous authentication found "
             "(run: hermes auth)."
         )
-        _mark_provider_unhealthy("nous", ttl=60, reason="not configured — no authentication")
+        _mark_provider_unhealthy(
+            "nous",
+            ttl=_AUX_NOT_CONFIGURED_TTL_SECONDS,
+            reason="not configured — no authentication",
+        )
         return None, None
     if runtime is None and nous:
         logger.debug(
@@ -2142,7 +2150,11 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
                 "Auxiliary Nous client unavailable: no usable inference JWT found "
                 "(run: hermes auth add nous)."
             )
-            _mark_provider_unhealthy("nous", ttl=60, reason="not configured — no inference JWT")
+            _mark_provider_unhealthy(
+                "nous",
+                ttl=_AUX_NOT_CONFIGURED_TTL_SECONDS,
+                reason="not configured — no inference JWT",
+            )
             return None, None
         base_url = str((nous or {}).get("inference_base_url") or _nous_base_url()).rstrip("/")
     return (
@@ -2854,6 +2866,14 @@ def _get_provider_chain() -> List[tuple]:
 # the user might be running two profiles with different OpenRouter keys.
 
 _AUX_UNHEALTHY_TTL_SECONDS = 600  # 10 minutes
+
+# "Not configured" is a stable state, not a transient error: with no API key
+# or auth on disk, re-probing every minute just re-logs the same warning on
+# every aux call for the life of the process. Skip unconfigured providers for
+# an hour; adding credentials mid-session recovers on the next expiry (or a
+# restart picks them up immediately).
+_AUX_NOT_CONFIGURED_TTL_SECONDS = 3600.0
+
 _aux_unhealthy_until: Dict[str, float] = {}
 _aux_unhealthy_logged_at: Dict[str, float] = {}
 

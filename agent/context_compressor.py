@@ -236,9 +236,12 @@ _MIN_SUMMARY_TOKENS = 2000
 # Proportion of compressed content to allocate for summary
 _SUMMARY_RATIO = 0.20
 # Absolute ceiling for summary tokens (even on very large context windows).
-# Summaries must stay within a 1K-10K token envelope — anything larger is
-# itself a context-pressure source and slows every compaction.
-_SUMMARY_TOKENS_CEILING = 10_000
+# Summaries must stay within a 1K-4K token envelope — anything larger is
+# itself a context-pressure source, and because the aux summarizer call is
+# non-streaming, every summary token is wall-clock time the user spends
+# staring at "Summarizing thread": a 10K-token summary took minutes to
+# generate and was the main reason compaction outlived its watchdogs.
+_SUMMARY_TOKENS_CEILING = 4_000
 
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"

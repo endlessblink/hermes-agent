@@ -1128,7 +1128,13 @@ class TestExplicitProviderRouting:
         assert client is None
         assert model is None
         mock_openai.assert_not_called()
-        mock_mark.assert_called_once_with("openrouter", ttl=60, reason="not configured — no API key")
+        from agent.auxiliary_client import _AUX_NOT_CONFIGURED_TTL_SECONDS
+
+        mock_mark.assert_called_once_with(
+            "openrouter",
+            ttl=_AUX_NOT_CONFIGURED_TTL_SECONDS,
+            reason="not configured — no API key",
+        )
 
 class TestGetTextAuxiliaryClient:
     """Test the full resolution chain for get_text_auxiliary_client."""

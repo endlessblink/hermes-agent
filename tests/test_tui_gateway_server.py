@@ -7908,7 +7908,6 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
     )
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-    monkeypatch.setattr(server, "_get_db", lambda: None)
 
     server.handle_request(
         {
@@ -7956,7 +7955,6 @@ def test_prompt_submit_marks_compression_exhausted_message_complete(monkeypatch)
     )
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-    monkeypatch.setattr(server, "_get_db", lambda: None)
 
     server.handle_request(
         {
@@ -8000,10 +7998,16 @@ def test_status_update_emits_compression_diagnostic(monkeypatch):
     assert session.get("compression_started_at")
 
 
-def test_compression_watchdog_default_is_desktop_bounded(monkeypatch):
+def test_compression_watchdog_default_outlives_aux_budget(monkeypatch):
     monkeypatch.delenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", raising=False)
 
-    assert server._compression_watchdog_timeout_seconds() == 45.0
+    from agent.auxiliary_client import _effective_aux_timeout
+
+    aux_budget = _effective_aux_timeout("compression", None)
+    value = server._compression_watchdog_timeout_seconds()
+    # Killing the turn before the auxiliary summarizer's own deadline aborts
+    # LLM compression mid-flight, so the watchdog must strictly outlive it.
+    assert value == aux_budget + 30.0
 
 
 def test_compression_watchdog_env_override(monkeypatch):
@@ -8012,19 +8016,22 @@ def test_compression_watchdog_env_override(monkeypatch):
     assert server._compression_watchdog_timeout_seconds() == 12.5
 
 
-def test_compression_watchdog_bad_env_uses_desktop_default(monkeypatch):
+def test_compression_watchdog_bad_env_falls_back_to_aux_budget(monkeypatch):
     monkeypatch.setenv("HERMES_COMPRESSION_WATCHDOG_SECONDS", "not-a-number")
 
-    assert server._compression_watchdog_timeout_seconds() == 45.0
+    from agent.auxiliary_client import _effective_aux_timeout
+
+    aux_budget = _effective_aux_timeout("compression", None)
+    assert server._compression_watchdog_timeout_seconds() == aux_budget + 30.0
 
 
 def test_turn_idle_watchdog_default_automatically_unblocks_chat(monkeypatch):
     monkeypatch.delenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", raising=False)
 
-    # The provider stream watchdog reconnects at 60s. The turn-level fail-safe
-    # must leave it time to retry instead of interrupting the entire turn at
-    # the same boundary.
-    assert server._turn_idle_watchdog_timeout_seconds() == 90.0
+    # Long-context Codex turns can spend several minutes reasoning after a
+    # tool result while the provider stream stays healthy, so this outer
+    # fail-safe is much more generous than the provider-level stale watchdog.
+    assert server._turn_idle_watchdog_timeout_seconds() == 600.0
 
 
 def test_turn_idle_watchdog_env_override(monkeypatch):
@@ -8036,7 +8043,7 @@ def test_turn_idle_watchdog_env_override(monkeypatch):
 def test_turn_idle_watchdog_bad_env_uses_default(monkeypatch):
     monkeypatch.setenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "bad")
 
-    assert server._turn_idle_watchdog_timeout_seconds() == 90.0
+    assert server._turn_idle_watchdog_timeout_seconds() == 600.0
 
 
 def test_compression_completion_restarts_turn_idle_budget(monkeypatch):
@@ -8397,7 +8404,6 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     )
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
-    monkeypatch.setattr(server, "_get_db", lambda: None)
 
     server.handle_request(
         {
@@ -8410,11 +8416,14 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
     complete_events = [e for e in emitted if e[0] == "message.complete"]
     assert complete_events, "expected message.complete to be emitted"
     payload = complete_events[-1][2]
-    # Status stays "complete" because no error flag was set
-    assert payload.get("status") == "complete"
-    # Text stays empty — we did NOT fabricate an "Error:" string
+    # Silent-turn recovery (2026-07-14 "recover silent turns in place"):
+    # an empty response with no backend error is no longer shipped as an
+    # empty "complete" turn — it becomes a retryable error with an honest
+    # explanation, NOT a fabricated "Error: <detail>" string.
+    assert payload.get("status") == "error"
     text = payload.get("text", "")
-    assert text in {"", None}, f"expected empty text, got {text!r}"
+    assert "without producing a visible answer" in text
+    assert not text.startswith("Error:")
 
 
 # ── active live TUI sessions ─────────────────────────────────────────

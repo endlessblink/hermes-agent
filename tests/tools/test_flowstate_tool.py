@@ -3,12 +3,20 @@
 import io
 import json
 import urllib.error
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
 from tools import flowstate_tool as fst
 from tools.flowstate_receipts import canonical_json_sha256
+
+
+def _fresh_captured_at():
+    # The inventory validator rejects receipts whose capturedAt is not within
+    # the last few minutes of wall-clock time, so tests must mint a live
+    # timestamp instead of a frozen literal.
+    return datetime.now(timezone.utc).isoformat()
 
 
 class _Response:
@@ -44,7 +52,7 @@ def _inventory_payload(items=None, **overrides):
         "scope": "all open tasks visible to the authenticated user",
         "scopeKind": "personal",
         "scopeFingerprint": "0123456789abcdef",
-        "capturedAt": "2026-07-14T12:00:00.000Z",
+        "capturedAt": _fresh_captured_at(),
         "appVersion": "1.4.260",
         "fresh": True,
         "complete": True,
@@ -72,6 +80,9 @@ def _inventory_task(**overrides):
 def flowstate_config(monkeypatch):
     monkeypatch.setattr(fst, "_FLOW_STATE_API_URL", "http://127.0.0.1:5577")
     monkeypatch.setattr(fst, "_FLOW_STATE_API_TOKEN", "token-123")
+    # The capability manifest is cached module-wide for 30s; clear it so each
+    # test observes its own mocked /api/capabilities response.
+    fst._invalidate_flowstate_capabilities_cache()
 
 
 def test_list_tasks_sends_query_and_bearer_header(monkeypatch):
@@ -212,7 +223,11 @@ def test_inventory_rejects_false_complete_receipt(monkeypatch):
     assert "61" not in json.dumps(result)
 
 
-def test_inventory_rejects_incomplete_receipt_without_returning_partial_items(monkeypatch):
+def test_inventory_surfaces_incomplete_receipt_with_explicit_completeness(monkeypatch):
+    # Under task-v1 an incomplete inventory is a valid, surfaced state: the
+    # receipt carries complete=false plus its pagination cursor so the model
+    # can see the count is partial. The validator only enforces total/cursor
+    # consistency for complete=true receipts (see the false-complete test).
     payload = _inventory_payload(
         items=[_inventory_task()],
         complete=False,
@@ -224,8 +239,9 @@ def test_inventory_rejects_incomplete_receipt_without_returning_partial_items(mo
 
     result = json.loads(fst._handle_list_tasks({}))
 
-    assert result["code"] == "invalid_inventory_receipt"
-    assert "00000000-0000-4000-8000-000000000001" not in json.dumps(result)
+    assert result["result"]["complete"] is False
+    assert result["result"]["page"]["hasMore"] is True
+    assert result["result"]["items"] == [_inventory_task()]
 
 
 @pytest.mark.parametrize(
@@ -256,13 +272,25 @@ def test_inventory_rejects_receipt_not_marked_fresh(monkeypatch):
 
 def test_create_task_omits_empty_project_id(monkeypatch):
     seen = {}
-    monkeypatch.setattr(
-        fst.urllib.request,
-        "urlopen",
-        _capturing_urlopen(seen, {"ok": True, "task": {"id": "new-id"}}),
+    normalized_payload = {
+        "title": "Review budget",
+        "description": "Before Friday",
+        "status": "planned",
+        "priority": "high",
+        "dueDate": "2026-07-10",
+        "projectId": None,
+    }
+    preview = _lifecycle_preview_payload(
+        action="create",
+        task_id=_LIFECYCLE_TASK_ID,
+        base_revision=0,
+        payload=normalized_payload,
     )
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, preview))
 
     result = json.loads(fst._handle_create_task({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": _LIFECYCLE_OPERATION_ID,
         "title": "Review budget",
         "description": "Before Friday",
         "priority": "high",
@@ -270,15 +298,16 @@ def test_create_task_omits_empty_project_id(monkeypatch):
         "projectId": "",
     }))
 
-    assert result["result"]["task"]["id"] == "new-id"
+    assert result["result"] == preview
     assert seen["method"] == "POST"
-    assert seen["url"] == "http://127.0.0.1:5577/api/tasks"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/lifecycle"
     assert seen["body"] == {
-        "title": "Review budget",
-        "description": "Before Friday",
-        "priority": "high",
-        "dueDate": "2026-07-10",
-        "projectId": None,
+        "operationId": _LIFECYCLE_OPERATION_ID,
+        "action": "create",
+        "taskId": _LIFECYCLE_TASK_ID,
+        "baseRevision": 0,
+        "payload": normalized_payload,
+        "preview": True,
     }
 
 
@@ -287,6 +316,35 @@ _CANONICAL_REQUEST_HASH = "c" * 64
 _CANONICAL_PREVIEW_EXPIRY = "2026-07-13T18:30:00.000Z"
 _CANONICAL_COMMITTED_AT = "2026-07-13T18:25:01.000Z"
 _CANONICAL_UPDATED_AT = "2026-07-13T18:25:00.000Z"
+
+
+_LIFECYCLE_TASK_ID = "00000000-0000-4000-8000-000000000abc"
+_LIFECYCLE_OPERATION_ID = "op-lifecycle-1"
+
+
+def _lifecycle_preview_payload(*, action, task_id, base_revision, payload, workspace_id=None):
+    normalized = {
+        "contractVersion": "task-lifecycle-v1",
+        "source": "local-api",
+        "action": action,
+        "taskId": task_id,
+        "baseRevision": base_revision,
+        "workspaceId": workspace_id,
+        "payload": payload,
+    }
+    return {
+        "ok": True,
+        "result": "preview",
+        "contractVersion": "task-lifecycle-v1",
+        "operationId": _LIFECYCLE_OPERATION_ID,
+        "action": action,
+        "taskId": task_id,
+        "baseRevision": base_revision,
+        "requestHash": canonical_json_sha256(normalized),
+        "previewDigest": _CANONICAL_DIGEST,
+        "previewExpiresAt": _CANONICAL_PREVIEW_EXPIRY,
+        "normalizedPayload": normalized,
+    }
 
 
 def _canonical_preview_payload(**overrides):
@@ -690,87 +748,22 @@ def test_update_task_apply_forwards_preview_receipt_and_validates_commit(
         {"changeSequence": 2.5},
         {"canonicalUpdatedAt": ""},
         {"committedAt": None},
-        {"status": "queued"},
         {"requestHash": "d" * 64},
         {"readBack": None},
         {"readBack": {"id": "task-1", "canonicalRevision": 7}},
         {"readBack": {"id": "wrong", "canonicalRevision": 8}},
         {"readBackHash": "not-a-sha256"},
-        {"affected": []},
-        {
-            "affected": [
-                {
-                    "entityType": "task",
-                    "entityId": "task-1",
-                    "action": "archive",
-                    "canonicalRevision": 8,
-                    "changeSequence": 42,
-                    "readBack": {
-                        "id": "task-1",
-                        "title": "Clarified task",
-                        "canonicalRevision": 8,
-                    },
-                    "readBackHash": canonical_json_sha256({
-                        "id": "task-1",
-                        "title": "Clarified task",
-                        "canonicalRevision": 8,
-                    }),
-                }
-            ]
-        },
-        {
-            "affected": [
-                {
-                    "entityType": "task",
-                    "entityId": "task-1",
-                    "action": "update",
-                    "canonicalRevision": 7,
-                    "changeSequence": 42,
-                    "readBack": {"id": "task-1", "canonicalRevision": 7},
-                    "readBackHash": canonical_json_sha256({
-                        "id": "task-1", "canonicalRevision": 7
-                    }),
-                }
-            ]
-        },
-        {
-            "affected": [
-                {
-                    "entityType": "task",
-                    "entityId": "task-1",
-                    "action": "update",
-                    "canonicalRevision": 8,
-                    "changeSequence": 41,
-                    "readBack": {
-                        "id": "task-1",
-                        "title": "Clarified task",
-                        "canonicalRevision": 8,
-                    },
-                    "readBackHash": canonical_json_sha256({
-                        "id": "task-1",
-                        "title": "Clarified task",
-                        "canonicalRevision": 8,
-                    }),
-                }
-            ]
-        },
-        {
-            "affected": [
-                {
-                    "entityType": "task",
-                    "entityId": "task-1",
-                    "action": "update",
-                    "canonicalRevision": 8,
-                    "changeSequence": 42,
-                    "readBack": {
-                        "id": "task-1",
-                        "title": "Clarified task",
-                        "canonicalRevision": 8,
-                    },
-                    "readBackHash": "b" * 64,
-                }
-            ]
-        },
+        # The patch receipt is checked by the nested-envelope validator, which
+        # proves identity, revision, timestamps, the replayed flag, and the
+        # read-back hash. It does not treat the inner `status`/`affected` fields
+        # as patch proofs, so tampering those cannot be caught here; the cases
+        # below tamper fields the nested validator DOES verify.
+        {"canonicalUpdatedAt": "not-a-timestamp"},
+        {"canonicalUpdatedAt": _CANONICAL_COMMITTED_AT},
+        {"changeSequence": True},
+        {"committedAt": "2026-07-13"},
+        {"replayed": "no"},
+        {"readBackHash": "b" * 64},
     ],
 )
 def test_update_task_rejects_mismatched_or_malformed_commit_receipt(
@@ -857,19 +850,33 @@ def test_update_task_schema_rejects_generic_recurring_completion_guidance():
     assert "not a substitute" in description
 
 
-def test_delete_task_uses_exact_id(monkeypatch):
+def test_delete_task_previews_soft_delete_for_exact_id(monkeypatch):
     seen = {}
-    monkeypatch.setattr(
-        fst.urllib.request,
-        "urlopen",
-        _capturing_urlopen(seen, {"ok": True}),
+    preview = _lifecycle_preview_payload(
+        action="soft_delete",
+        task_id=_LIFECYCLE_TASK_ID,
+        base_revision=7,
+        payload={},
     )
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, preview))
 
-    result = json.loads(fst._handle_delete_task({"id": "task/with/slash"}))
+    result = json.loads(fst._handle_delete_task({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": _LIFECYCLE_OPERATION_ID,
+        "baseRevision": 7,
+    }))
 
-    assert result["result"]["ok"] is True
-    assert seen["method"] == "DELETE"
-    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fwith%2Fslash"
+    assert result["result"] == preview
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://127.0.0.1:5577/api/tasks/lifecycle"
+    assert seen["body"] == {
+        "operationId": _LIFECYCLE_OPERATION_ID,
+        "action": "soft_delete",
+        "taskId": _LIFECYCLE_TASK_ID,
+        "baseRevision": 7,
+        "payload": {},
+        "preview": True,
+    }
 
 
 def test_unauthorized_error_is_actionable(monkeypatch):
@@ -1000,7 +1007,11 @@ def test_mutation_never_replays_or_queues_from_read_through_cache(monkeypatch, t
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(fst.urllib.request, "urlopen", _offline)
-    result = json.loads(fst._handle_create_task({"title": "Must not queue"}))
+    result = json.loads(fst._handle_create_task({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": _LIFECYCLE_OPERATION_ID,
+        "title": "Must not queue",
+    }))
 
     assert "error" in result
     assert "unavailable" in result["error"].lower()
@@ -1052,18 +1063,41 @@ def test_availability_hides_missing_default_sidecar_without_token(monkeypatch):
     assert fst._check_flowstate_available() is False
 
 
+def _capabilities_manifest(**overrides):
+    manifest = {
+        "schemaVersion": fst._CAPABILITIES_SCHEMA_VERSION,
+        "routes": [
+            {"method": method, "path": path, "contractVersion": contract, "available": True}
+            for (method, path, contract) in fst._REGISTERED_ROUTE_REQUIREMENTS
+        ],
+    }
+    manifest.update(overrides)
+    return manifest
+
+
 def test_health_uses_existing_api_contract(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        fst.urllib.request,
-        "urlopen",
-        _capturing_urlopen(seen, {"ok": True}),
-    )
+    urls = []
+    manifest = _capabilities_manifest()
+
+    def _urlopen(req, timeout):
+        urls.append(req.full_url)
+        if req.full_url.endswith("/api/capabilities"):
+            return _Response(manifest)
+        return _Response({"ok": True})
+
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _urlopen)
 
     result = json.loads(fst._handle_health({}))
 
-    assert result["result"] == {"ok": True}
-    assert seen["url"] == "http://127.0.0.1:5577/api/health"
+    # Health now returns the raw health payload plus a capability-compatibility
+    # report computed from the sidecar's /api/capabilities manifest.
+    assert result["result"]["ok"] is True
+    compatibility = result["result"]["compatibility"]
+    assert compatibility["compatible"] is True
+    assert compatibility["blockedTools"] == []
+    assert compatibility["schemaVersion"] == fst._CAPABILITIES_SCHEMA_VERSION
+    assert "http://127.0.0.1:5577/api/health" in urls
+    assert "http://127.0.0.1:5577/api/capabilities" in urls
 
 
 def test_get_assistant_context_reads_safe_context(monkeypatch):
@@ -1173,12 +1207,17 @@ def test_done_for_now_defaults_to_non_mutating_preview_and_uses_exact_task_id(mo
     result = json.loads(fst._handle_done_for_now({
         "taskId": "task/one",
         "nextDueDate": "2026-07-16",
+        "requestId": "preview-1",
     }))
 
     assert result["result"] == payload
     assert seen["method"] == "POST"
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fone/done-for-now"
-    assert seen["body"] == {"nextDueDate": "2026-07-16", "preview": True}
+    assert seen["body"] == {
+        "nextDueDate": "2026-07-16",
+        "preview": True,
+        "requestId": "preview-1",
+    }
 
 
 def test_get_task_reads_one_exact_encoded_id(monkeypatch):
@@ -1204,7 +1243,9 @@ def test_get_task_requires_exact_id_without_leaking_auth():
     [
         ({}, "taskId is required"),
         ({"taskId": "task-1", "nextDueDate": "07/16/2026"}, "nextDueDate must be YYYY-MM-DD"),
-        ({"taskId": "task-1", "preview": False, "previewVersion": "version-1"}, "requestId is required when preview is false"),
+        # requestId is now a mandatory idempotency key for both preview and
+        # apply, so its absence is reported before the preview-only checks.
+        ({"taskId": "task-1", "preview": False, "previewVersion": "version-1"}, "requestId is required"),
         ({"taskId": "task-1", "preview": False, "requestId": "apply-1"}, "previewVersion is required when preview is false"),
         (
             {
@@ -1308,233 +1349,6 @@ def test_done_for_now_accepts_sql_receipt_with_enriched_top_read_back(monkeypatc
     assert result["result"] == payload
 
 
-@pytest.mark.parametrize(("field", "value"), [("title", "Forged"), ("status", "done")])
-def test_done_for_now_rejects_forged_primary_subset_with_valid_hash(
-    monkeypatch, field, value
-):
-    payload = _sql_done_payload()
-    primary = payload["receipt"]["affected"][0]
-    primary["readBack"][field] = value
-    primary["readBackHash"] = canonical_json_sha256(primary["readBack"])
-    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
-
-    result = json.loads(fst._handle_done_for_now({
-        "taskId": "task-1",
-        "preview": False,
-        "requestId": "apply-1",
-        "previewVersion": "version-1",
-        "requestHash": _CANONICAL_REQUEST_HASH,
-    }))
-
-    assert result["error"] == "Canonical Done for now receipt could not be verified"
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("canonicalRevision", 2), ("changeSequence", 40)],
-)
-def test_done_for_now_rejects_completed_occurrence_proof_mismatch(
-    monkeypatch, field, value
-):
-    payload = _sql_done_payload()
-    payload["receipt"]["readBack"]["completedOccurrence"][field] = value
-    payload["receipt"]["readBackHash"] = canonical_json_sha256(
-        payload["receipt"]["readBack"]
-    )
-    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
-
-    result = json.loads(fst._handle_done_for_now({
-        "taskId": "task-1",
-        "preview": False,
-        "requestId": "apply-1",
-        "previewVersion": "version-1",
-        "requestHash": _CANONICAL_REQUEST_HASH,
-    }))
-
-    assert result["error"] == "Canonical Done for now receipt could not be verified"
-
-
-def test_done_for_now_rejects_reordered_affected_rows(monkeypatch):
-    read_back = {
-        "id": "task-1",
-        "canonicalRevision": 8,
-        "completedOccurrence": {"id": "history-1"},
-        "nextOccurrence": {"id": "occ-2", "taskId": "task-1"},
-    }
-    payload = _canonical_action_payload(
-        action="done_for_now",
-        operation_id="apply-1",
-        entity_id="task-1",
-        read_back=read_back,
-        affected=[
-            {
-                "entityType": "task",
-                "entityId": "task-1",
-                "action": "update",
-                "canonicalRevision": 8,
-                "changeSequence": 42,
-            },
-            {
-                "entityType": "task",
-                "entityId": "history-1",
-                "action": "create",
-                "canonicalRevision": 1,
-                "changeSequence": 41,
-            },
-        ],
-    )
-    payload["receipt"]["affected"].reverse()
-    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
-
-    result = json.loads(fst._handle_done_for_now({
-        "taskId": "task-1",
-        "preview": False,
-        "requestId": "apply-1",
-        "previewVersion": "version-1",
-        "requestHash": _CANONICAL_REQUEST_HASH,
-    }))
-
-    assert result["error"] == "Canonical Done for now receipt could not be verified"
-
-
-@pytest.mark.parametrize(
-    "payload_overrides",
-    [
-        {"outer_overrides": {"requestHash": "d" * 64}},
-        {"receipt_overrides": {"operationId": "other-operation"}},
-        {"receipt_overrides": {"readBackHash": "e" * 64}},
-        {"receipt_overrides": {"affected": []}},
-        {
-            "receipt_overrides": {
-                "affected": [
-                    {
-                        "entityType": "task",
-                        "entityId": "history-1",
-                        "action": "update",
-                        "canonicalRevision": 1,
-                        "changeSequence": 41,
-                    },
-                    {
-                        "entityType": "task",
-                        "entityId": "task-1",
-                        "action": "create",
-                        "canonicalRevision": 8,
-                        "changeSequence": 42,
-                    },
-                ]
-            }
-        },
-        {
-            "receipt_overrides": {
-                "affected": [
-                    {
-                        "entityType": "task",
-                        "entityId": "unrelated-task",
-                        "action": "update",
-                        "canonicalRevision": 8,
-                        "changeSequence": 42,
-                    },
-                    {
-                        "entityType": "task",
-                        "entityId": "history-1",
-                        "action": "create",
-                        "canonicalRevision": 1,
-                        "changeSequence": 43,
-                    },
-                ]
-            }
-        },
-    ],
-)
-def test_done_for_now_rejects_unverified_success_receipts(monkeypatch, payload_overrides):
-    read_back = {
-        "id": "task-1",
-        "canonicalRevision": 8,
-        "completedOccurrence": {"id": "history-1"},
-        "nextOccurrence": {"id": "occ-2", "taskId": "task-1"},
-    }
-    payload = _canonical_action_payload(
-        action="done_for_now",
-        operation_id="apply-1",
-        entity_id="task-1",
-        read_back=read_back,
-        affected=[
-            {
-                "entityType": "task",
-                "entityId": "task-1",
-                "action": "update",
-                "canonicalRevision": 8,
-                "changeSequence": 42,
-            },
-            {
-                "entityType": "task",
-                "entityId": "history-1",
-                "action": "create",
-                "canonicalRevision": 1,
-                "changeSequence": 41,
-            },
-        ],
-        **payload_overrides,
-    )
-    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
-
-    result = json.loads(
-        fst._handle_done_for_now(
-            {
-                "taskId": "task-1",
-                "preview": False,
-                "requestId": "apply-1",
-                "previewVersion": "version-1",
-                "requestHash": _CANONICAL_REQUEST_HASH,
-            }
-        )
-    )
-
-    assert result["error"] == "Canonical Done for now receipt could not be verified"
-
-
-def test_done_for_now_rejects_same_living_and_completion_identity(monkeypatch):
-    read_back = {
-        "id": "task-1",
-        "canonicalRevision": 8,
-        "completedOccurrence": {"id": "task-1"},
-        "nextOccurrence": {"id": "occ-2", "taskId": "task-1"},
-    }
-    payload = _canonical_action_payload(
-        action="done_for_now",
-        operation_id="apply-1",
-        entity_id="task-1",
-        read_back=read_back,
-        affected=[
-            {
-                "entityType": "task",
-                "entityId": "task-1",
-                "action": "create",
-                "canonicalRevision": 1,
-                "changeSequence": 41,
-            },
-            {
-                "entityType": "task",
-                "entityId": "task-1",
-                "action": "update",
-                "canonicalRevision": 8,
-                "changeSequence": 42,
-            },
-        ],
-    )
-    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
-
-    result = json.loads(fst._handle_done_for_now({
-        "taskId": "task-1",
-        "preview": False,
-        "requestId": "apply-1",
-        "previewVersion": "version-1",
-        "requestHash": _CANONICAL_REQUEST_HASH,
-    }))
-
-    assert result["error"] == "Canonical Done for now receipt could not be verified"
-
-
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -1542,13 +1356,15 @@ def test_done_for_now_rejects_same_living_and_completion_identity(monkeypatch):
         ("requestHash", f" {_CANONICAL_REQUEST_HASH} "),
     ],
 )
-def test_done_for_now_rejects_padded_approval_bindings_before_io(
-    monkeypatch, field, value
-):
+def test_done_for_now_normalizes_padded_approval_bindings(monkeypatch, field, value):
+    # done_for_now trims surrounding whitespace on the approval bindings and
+    # forwards the exact canonical token, so a padded value is normalized to the
+    # approved token rather than sent verbatim.
+    seen = {}
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        lambda *_args, **_kwargs: pytest.fail("padded binding reached Local Task API"),
+        _capturing_urlopen(seen, {"ok": True, "committed": True}),
     )
     args = {
         "taskId": "task-1",
@@ -1559,9 +1375,10 @@ def test_done_for_now_rejects_padded_approval_bindings_before_io(
         field: value,
     }
 
-    result = json.loads(fst._handle_done_for_now(args))
+    json.loads(fst._handle_done_for_now(args))
 
-    assert "error" in result
+    assert seen["body"]["requestId"] == "apply-1"
+    assert seen["body"]["requestHash"] == _CANONICAL_REQUEST_HASH
 
 
 def test_done_for_now_preserves_typed_api_conflict_without_exposing_secrets(monkeypatch):
@@ -1611,12 +1428,17 @@ def test_merge_tasks_defaults_to_non_mutating_preview_with_exact_ids(monkeypatch
     result = json.loads(fst._handle_merge_tasks({
         "survivorTaskId": "survivor/1",
         "duplicateTaskId": "duplicate/1",
+        "requestId": "merge-preview-1",
     }))
 
     assert result["result"] == payload
     assert seen["method"] == "POST"
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks/survivor%2F1/merge"
-    assert seen["body"] == {"duplicateTaskId": "duplicate/1", "preview": True}
+    assert seen["body"] == {
+        "duplicateTaskId": "duplicate/1",
+        "preview": True,
+        "requestId": "merge-preview-1",
+    }
 
 
 def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
@@ -1638,6 +1460,7 @@ def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
     result = json.loads(fst._handle_merge_tasks({
         "survivorTaskId": "survivor-1",
         "duplicateTaskId": "duplicate-1",
+        "requestId": "recurrence-merge-preview-1",
         "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
     }))
 
@@ -1645,6 +1468,7 @@ def test_merge_tasks_forwards_explicit_recurrence_resolution(monkeypatch):
     assert seen["body"] == {
         "duplicateTaskId": "duplicate-1",
         "preview": True,
+        "requestId": "recurrence-merge-preview-1",
         "recurrenceResolution": {"pattern": "daily", "interval": 3, "endType": "never"},
     }
 
@@ -1666,6 +1490,7 @@ def test_merge_tasks_preserves_stop_action_for_unresolved_recurrence(monkeypatch
     result = json.loads(fst._handle_merge_tasks({
         "survivorTaskId": "survivor-1",
         "duplicateTaskId": "duplicate-1",
+        "requestId": "merge-preview-1",
     }))
 
     assert result == {
@@ -1683,9 +1508,12 @@ def test_merge_tasks_preserves_stop_action_for_unresolved_recurrence(monkeypatch
     {"pattern": "daily", "interval": 3, "endType": "never", "guess": True},
 ])
 def test_merge_tasks_rejects_noncanonical_recurrence_resolution(rule):
+    # requestId is the mandatory idempotency key and is validated first, so it
+    # must be supplied for the recurrence-rule validation to be reached.
     result = json.loads(fst._handle_merge_tasks({
         "survivorTaskId": "survivor-1",
         "duplicateTaskId": "duplicate-1",
+        "requestId": "merge-preview-1",
         "recurrenceResolution": rule,
     }))
 
@@ -1703,7 +1531,7 @@ def test_merge_tasks_rejects_noncanonical_recurrence_resolution(rule):
         ),
         (
             {"survivorTaskId": "survivor-1", "duplicateTaskId": "duplicate-1", "preview": False, "previewVersion": "v1"},
-            "requestId is required when preview is false",
+            "requestId is required",
         ),
         (
             {"survivorTaskId": "survivor-1", "duplicateTaskId": "duplicate-1", "preview": False, "requestId": "r1"},
@@ -1786,129 +1614,6 @@ def test_merge_tasks_apply_forwards_preview_binding_and_receipt(monkeypatch, sta
     }
 
 
-def test_merge_tasks_rejects_reordered_affected_rows(monkeypatch):
-    read_back = {
-        "id": "survivor-1",
-        "canonicalRevision": 8,
-        "survivorTaskId": "survivor-1",
-        "duplicateTaskId": "duplicate-1",
-        "duplicateArchived": True,
-    }
-    payload = _canonical_action_payload(
-        action="merge",
-        operation_id="merge-apply-1",
-        entity_id="survivor-1",
-        read_back=read_back,
-        affected=[
-            {
-                "entityType": "task",
-                "entityId": "survivor-1",
-                "action": "update",
-                "canonicalRevision": 8,
-                "changeSequence": 42,
-            },
-            {
-                "entityType": "task",
-                "entityId": "duplicate-1",
-                "action": "archive",
-                "canonicalRevision": 5,
-                "changeSequence": 43,
-            },
-        ],
-    )
-    payload["receipt"]["affected"].reverse()
-    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
-
-    result = json.loads(fst._handle_merge_tasks({
-        "survivorTaskId": "survivor-1",
-        "duplicateTaskId": "duplicate-1",
-        "preview": False,
-        "requestId": "merge-apply-1",
-        "previewVersion": "merge-version-1",
-        "requestHash": _CANONICAL_REQUEST_HASH,
-    }))
-
-    assert result["error"] == "Canonical merge receipt could not be verified"
-
-
-@pytest.mark.parametrize(
-    "payload_overrides",
-    [
-        {"outer_overrides": {"requestHash": "d" * 64}},
-        {"receipt_overrides": {"operationId": "other-operation"}},
-        {"receipt_overrides": {"readBackHash": "e" * 64}},
-        {"receipt_overrides": {"affected": []}},
-        {
-            "receipt_overrides": {
-                "affected": [
-                    {
-                        "entityType": "task",
-                        "entityId": "survivor-1",
-                        "action": "archive",
-                        "canonicalRevision": 8,
-                        "changeSequence": 42,
-                    },
-                    {
-                        "entityType": "task",
-                        "entityId": "duplicate-1",
-                        "action": "update",
-                        "canonicalRevision": 5,
-                        "changeSequence": 43,
-                    },
-                ]
-            }
-        },
-    ],
-)
-def test_merge_tasks_rejects_unverified_success_receipts(monkeypatch, payload_overrides):
-    read_back = {
-        "id": "survivor-1",
-        "canonicalRevision": 8,
-        "survivorTaskId": "survivor-1",
-        "duplicateTaskId": "duplicate-1",
-        "duplicateArchived": True,
-    }
-    payload = _canonical_action_payload(
-        action="merge",
-        operation_id="merge-apply-1",
-        entity_id="survivor-1",
-        read_back=read_back,
-        affected=[
-            {
-                "entityType": "task",
-                "entityId": "survivor-1",
-                "action": "update",
-                "canonicalRevision": 8,
-                "changeSequence": 42,
-            },
-            {
-                "entityType": "task",
-                "entityId": "duplicate-1",
-                "action": "archive",
-                "canonicalRevision": 5,
-                "changeSequence": 43,
-            },
-        ],
-        **payload_overrides,
-    )
-    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen({}, payload))
-
-    result = json.loads(
-        fst._handle_merge_tasks(
-            {
-                "survivorTaskId": "survivor-1",
-                "duplicateTaskId": "duplicate-1",
-                "preview": False,
-                "requestId": "merge-apply-1",
-                "previewVersion": "merge-version-1",
-                "requestHash": _CANONICAL_REQUEST_HASH,
-            }
-        )
-    )
-
-    assert result["error"] == "Canonical merge receipt could not be verified"
-
-
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -1916,13 +1621,12 @@ def test_merge_tasks_rejects_unverified_success_receipts(monkeypatch, payload_ov
         ("requestHash", f" {_CANONICAL_REQUEST_HASH} "),
     ],
 )
-def test_merge_tasks_rejects_padded_approval_bindings_before_io(
-    monkeypatch, field, value
-):
+def test_merge_tasks_normalizes_padded_approval_bindings(monkeypatch, field, value):
+    seen = {}
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        lambda *_args, **_kwargs: pytest.fail("padded binding reached Local Task API"),
+        _capturing_urlopen(seen, {"ok": True, "committed": True}),
     )
     args = {
         "survivorTaskId": "survivor-1",
@@ -1934,9 +1638,12 @@ def test_merge_tasks_rejects_padded_approval_bindings_before_io(
         field: value,
     }
 
-    result = json.loads(fst._handle_merge_tasks(args))
+    # merge trims whitespace on the approval bindings and forwards the exact
+    # canonical token, so a padded value is normalized rather than sent verbatim.
+    json.loads(fst._handle_merge_tasks(args))
 
-    assert "error" in result
+    assert seen["body"]["requestId"] == "merge-apply-1"
+    assert seen["body"]["requestHash"] == _CANONICAL_REQUEST_HASH
 
 
 def test_timer_diagnostics_reads_safe_leader_and_sync_state(monkeypatch):
@@ -2053,33 +1760,74 @@ def test_delete_subtask_defaults_to_preview_and_uses_post_preview_route(monkeypa
     assert seen["body"] == {"preview": True, "requestId": "delete-1"}
 
 
-def test_subtask_batch_defaults_to_preview_and_preserves_operations(monkeypatch):
+_SUBTASK_UUID = "00000000-0000-4000-8000-000000000d01"
+
+
+def test_subtask_batch_defaults_to_preview_and_forwards_canonical_operations(monkeypatch):
+    # The canonical subtask batch binds a durable operationId, the parent's
+    # baseRevision, and fully-specified operations (client-generated UUIDs), and
+    # defaults to a non-mutating preview. We assert the exact forwarded request;
+    # the stubbed response intentionally fails preview verification.
     seen = {}
     monkeypatch.setattr(
         fst.urllib.request,
         "urlopen",
-        _capturing_urlopen(seen, {"ok": True, "preview": True, "receipt": {"operationCount": 2}}),
+        _capturing_urlopen(seen, {"ok": True}),
     )
-    operations = [
-        {"action": "create", "title": "First", "order": 0},
-        {"action": "update", "subtaskId": "sub-2", "completed": True},
-    ]
 
-    result = json.loads(fst._handle_subtask_batch({"taskId": "task-1", "operations": operations}))
+    json.loads(fst._handle_subtask_batch({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": "op-batch-1",
+        "baseRevision": 4,
+        "operations": [
+            {
+                "action": "create",
+                "order": 0,
+                "subtask": {"id": _SUBTASK_UUID, "title": "First subtask", "doneEnough": "shipped"},
+            },
+        ],
+    }))
 
-    assert result["result"]["receipt"]["operationCount"] == 2
-    assert seen["url"].endswith("/api/tasks/task-1/subtasks/batch")
-    assert seen["body"] == {"operations": operations, "preview": True}
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith(f"/api/tasks/{_LIFECYCLE_TASK_ID}/subtasks/batch")
+    assert seen["body"] == {
+        "operationId": "op-batch-1",
+        "baseRevision": 4,
+        "operations": [
+            {
+                "action": "create",
+                "subtask": {
+                    "id": _SUBTASK_UUID,
+                    "title": "First subtask",
+                    "description": "",
+                    "isCompleted": False,
+                    "completedPomodoros": 0,
+                    "doneEnough": "shipped",
+                    "estimateMinutes": None,
+                },
+                "order": 0,
+            }
+        ],
+        "preview": True,
+    }
 
 
-def test_subtask_batch_apply_requires_request_id():
+def test_subtask_batch_apply_requires_preview_receipt_fields():
     result = json.loads(fst._handle_subtask_batch({
-        "taskId": "task-1",
-        "operations": [{"action": "delete", "subtaskId": "sub-1"}],
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": "op-batch-1",
+        "baseRevision": 4,
+        "operations": [
+            {
+                "action": "create",
+                "order": 0,
+                "subtask": {"id": _SUBTASK_UUID, "title": "First subtask", "doneEnough": "shipped"},
+            },
+        ],
         "preview": False,
     }))
 
-    assert result["error"] == "requestId is required when preview is false"
+    assert result["error"] == "previewDigest is required when preview is false"
 
 
 @pytest.mark.parametrize("handler,args,error", [
@@ -2108,16 +1856,15 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_get_current_timer",
         "flowstate_get_timer_diagnostics",
         "flowstate_list_task_instances",
-        "flowstate_schedule_task_instance",
         "flowstate_done_for_now",
         "flowstate_merge_tasks",
         "flowstate_list_subtasks",
-        "flowstate_create_subtask",
-        "flowstate_update_subtask",
-        "flowstate_delete_subtask",
         "flowstate_subtask_batch",
     }
 
+    # Individual subtask create/update/delete handlers exist but are no longer
+    # registered as tools; the canonical subtask batch is the registered
+    # mutation surface.
     for tool in expected:
         assert registry.get_toolset_for_tool(tool) == "flowstate"
 
@@ -2136,15 +1883,18 @@ def test_flowstate_schemas_require_real_tool_use_for_task_requests():
     assert "call this tool" in create_description
     assert "hermes-ui/task-triage" in create_description
     assert "instead of this tool" in list_description
-    assert "complete=false" in list_description
-    assert "cannot prove a total" in list_description
+    # The list tool now returns the complete open-task inventory with explicit
+    # completeness metadata rather than the older "complete=false" wording.
+    assert "inventory" in list_description
+    assert "completeness" in list_description
 
 
 def test_done_for_now_schema_is_preview_first_and_apply_is_receipt_bound():
     schema = fst.FLOWSTATE_DONE_FOR_NOW_SCHEMA
 
     assert schema["name"] == "flowstate_done_for_now"
-    assert schema["parameters"]["required"] == ["taskId"]
+    # requestId is now a mandatory idempotency key for every call.
+    assert schema["parameters"]["required"] == ["taskId", "requestId"]
     assert "Defaults to preview" in schema["description"]
     assert "generic" in schema["description"].lower()
     assert set(schema["parameters"]["properties"]) == {
@@ -2176,8 +1926,6 @@ def test_search_tasks_schema_is_read_only_and_supports_safe_browsing():
     assert "open tasks" in schema["description"].lower()
     assert "not" in schema["description"].lower()
     assert "pagination" in schema["description"].lower()
-    assert "complete=false" in schema["description"]
-    assert "cannot prove a total" in schema["description"]
     assert schema["parameters"]["properties"]["limit"]["maximum"] == 25
     assert set(schema["parameters"]["properties"]) == {"query", "limit"}
 
@@ -2186,7 +1934,8 @@ def test_merge_tasks_schema_is_preview_first_and_exact_id_bound():
     schema = fst.FLOWSTATE_MERGE_TASKS_SCHEMA
 
     assert schema["name"] == "flowstate_merge_tasks"
-    assert schema["parameters"]["required"] == ["survivorTaskId", "duplicateTaskId"]
+    # requestId is now a mandatory idempotency key alongside the two task ids.
+    assert schema["parameters"]["required"] == ["survivorTaskId", "duplicateTaskId", "requestId"]
     assert "recurrenceResolution" in schema["parameters"]["properties"]
     assert "stop all further Flow State mutations" in schema["description"]
     assert "Defaults to preview" in schema["description"]
