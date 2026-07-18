@@ -7137,8 +7137,6 @@ async function startHermes() {
         severity: backendReady ? 'warn' : 'error',
         details: { code, signal, ready: backendReady, mode: 'primary' }
       })
-      hermesProcess = null
-      connectionPromise = null
       sendBackendExit({ code, signal })
 
       if (!backendReady) {
