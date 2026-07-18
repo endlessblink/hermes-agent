@@ -22,12 +22,18 @@ import { DesktopOnboardingOverlay } from '@/components/onboarding'
 import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
-import { resolveProfileRestoreSessionId } from '@/app/desktop-controller-utils'
+import {
+  activeRuntimeSessionRow,
+  activeRuntimeSessionStatus,
+  resolveProfileRestoreSessionId,
+  shouldSettleBusyFromLiveStatus
+} from '@/app/desktop-controller-utils'
 import { getSession, getSessionMessages, triggerCronJob } from '@/hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
+import { setClarifyRequest } from '@/store/clarify'
 import { setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { $filePreviewTarget, $previewTarget } from '@/store/preview'
@@ -39,8 +45,10 @@ import {
   refreshActiveProfile
 } from '@/store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '@/store/projects'
+import { clearAllPrompts } from '@/store/prompts'
 import {
   $activeSessionId,
+  $busy,
   $connection,
   $currentCwd,
   $freshDraftReady,
@@ -127,6 +135,12 @@ const StarmapView = lazy(async () => ({ default: (await import('../starmap')).St
 // the controller that assembles them.
 export { WiredPane } from './context'
 
+// While a turn is busy, poll authoritative live status to self-heal a stuck
+// `busy` flag (and re-sync a pending clarify request_id) when the stream event
+// that would have settled it was missed — e.g. after a reconnect or restart.
+const LIVE_BUSY_RECONCILE_INTERVAL_MS = 5_000
+const LIVE_BUSY_RECONCILE_TIMEOUT_MS = 5_000
+
 export function ContribWiring({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const location = useLocation()
@@ -141,6 +155,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const gatewayState = useStore($gatewayState)
   const activeSessionId = useStore($activeSessionId)
+  const busy = useStore($busy)
   const currentCwd = useStore($currentCwd)
   const freshDraftReady = useStore($freshDraftReady)
   const resumeFailedSessionId = useStore($resumeFailedSessionId)
@@ -208,6 +223,115 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   })
 
   const { connectionRef, gatewayRef, requestGateway } = useGatewayRequest()
+
+  // Authoritative self-heal for a stuck turn. Normal stream/session.info events
+  // are the primary lifecycle path, but a missed settle event (reconnect,
+  // restart, background session) can leave `busy` pinned forever. While busy,
+  // poll session.active_list and: re-surface/refresh a pending clarify request
+  // from live status (keeps the stored request_id fresh so `clarify.respond`
+  // matches the gateway's pending entry instead of failing with "no pending
+  // answer request"); otherwise settle the busy flag when the turn is done.
+  const reconcileActiveBusyFromLiveStatus = useCallback(async () => {
+    const runtimeSessionId = activeSessionIdRef.current
+
+    if (!runtimeSessionId || !busyRef.current || gatewayRef.current?.connectionState !== 'open') {
+      return
+    }
+
+    try {
+      const result = await requestGateway<{ sessions?: Array<{ id?: string; session_key?: string; status?: string }> }>(
+        'session.active_list',
+        { current_session_id: runtimeSessionId },
+        LIVE_BUSY_RECONCILE_TIMEOUT_MS
+      )
+
+      const row = activeRuntimeSessionRow(result?.sessions, runtimeSessionId, selectedStoredSessionId)
+      const status = activeRuntimeSessionStatus(result?.sessions, runtimeSessionId, selectedStoredSessionId)
+
+      if (status === 'waiting' && row?.pending_prompt?.kind === 'clarify') {
+        const pending = row.pending_prompt
+
+        if (pending.request_id && pending.question) {
+          setClarifyRequest({
+            choices: Array.isArray(pending.choices) ? pending.choices : null,
+            question: pending.question,
+            requestId: pending.request_id,
+            sessionId: runtimeSessionId
+          })
+          updateSessionState(runtimeSessionId, state => ({
+            ...state,
+            awaitingResponse: false,
+            busy: true,
+            needsInput: true
+          }))
+        }
+
+        return
+      }
+
+      if (!shouldSettleBusyFromLiveStatus(status)) {
+        if (status === 'working') {
+          clearAllPrompts(runtimeSessionId)
+          updateSessionState(runtimeSessionId, state => (state.needsInput ? { ...state, needsInput: false } : state))
+        }
+
+        return
+      }
+
+      clearAllPrompts(runtimeSessionId)
+
+      updateSessionState(runtimeSessionId, state =>
+        state.busy
+          ? {
+              ...state,
+              awaitingResponse: false,
+              busy: false,
+              needsInput: false,
+              pendingBranchGroup: null,
+              streamId: null,
+              turnStartedAt: null
+            }
+          : state
+      )
+    } catch {
+      // Best-effort recovery. Normal stream/session.info events remain the
+      // primary lifecycle path; failures here must never create user-facing
+      // noise or interfere with an in-flight turn.
+    }
+  }, [activeSessionIdRef, busyRef, gatewayRef, requestGateway, selectedStoredSessionId, updateSessionState])
+
+  useEffect(() => {
+    if (!busy) {
+      return
+    }
+
+    let cancelled = false
+
+    const tick = () => {
+      if (!cancelled) {
+        void reconcileActiveBusyFromLiveStatus()
+      }
+    }
+
+    tick()
+    const interval = window.setInterval(tick, LIVE_BUSY_RECONCILE_INTERVAL_MS)
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        tick()
+      }
+    }
+
+    window.addEventListener('focus', tick)
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      window.removeEventListener('focus', tick)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [busy, reconcileActiveBusyFromLiveStatus])
 
   const {
     loadMoreMessagingForPlatform,
