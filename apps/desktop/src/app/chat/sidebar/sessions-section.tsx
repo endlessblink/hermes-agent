@@ -2,8 +2,7 @@ import type { useSensors } from '@dnd-kit/core'
 import type * as React from 'react'
 import { useEffect, useMemo, useRef } from 'react'
 
-import { dragHasSession, readSessionDrag } from '@/app/chat/composer/inline-refs'
-import { SESSION_FOLDER_DROP_EVENT } from '@/app/chat/session-drag'
+import { dragHasSession, readSessionDrag, SESSION_FOLDER_DROP_EVENT } from '@/app/chat/composer/inline-refs'
 import { SidebarPanelLabel } from '@/app/shell/sidebar-label'
 import { DisclosureCaret } from '@/components/ui/disclosure-caret'
 import { SidebarGroup, SidebarGroupContent } from '@/components/ui/sidebar'
@@ -401,7 +400,11 @@ export function SidebarSessionsSection({
 
   return (
     <SidebarGroup
-      className={rootClassName}
+      className={cn(
+        rootClassName,
+        onDropSession &&
+          'rounded-md data-[session-drop-active]:bg-(--ui-control-hover-background) data-[session-drop-active]:ring-1 data-[session-drop-active]:ring-(--ui-border-focus)'
+      )}
       data-session-folder-drop={onDropSession ? '' : undefined}
       onDragOver={handleDragOver}
       onDrop={handleDrop}

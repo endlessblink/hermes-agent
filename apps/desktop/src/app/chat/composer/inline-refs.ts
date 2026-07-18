@@ -21,6 +21,13 @@ export interface SessionDragPayload {
  *  still read HTML5 DnD, e.g. the sidebar sessions section). */
 export const HERMES_SESSION_MIME = 'application/x-hermes-session'
 
+/** Dispatched on a `[data-session-folder-drop]` element when a POINTER session
+ *  drag (session-drag.ts) is released over it — sidebar folder sections listen
+ *  and run their move-to-folder handler, since their native onDrop can never
+ *  fire for pointer drags. Lives here (not session-drag.ts) so tests and the
+ *  sidebar can import it without pulling in the pane-shell drag machinery. */
+export const SESSION_FOLDER_DROP_EVENT = 'hermes:session-folder-drop'
+
 export function writeSessionDrag(transfer: DataTransfer, payload: SessionDragPayload) {
   transfer.setData(HERMES_SESSION_MIME, JSON.stringify(payload))
   transfer.setData('text/plain', payload.title || payload.id)

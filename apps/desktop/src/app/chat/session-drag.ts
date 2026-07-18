@@ -49,7 +49,12 @@ import type { EngineZone, ZoneRect } from '@/components/pane-shell/tree/zones-en
 import { openSessionTile, type TileDock } from '@/store/session-states'
 
 import { requestComposerInsertRefs } from './composer/focus'
-import { type SessionDragPayload, sessionInlineRef, sessionLabel } from './composer/inline-refs'
+import {
+  SESSION_FOLDER_DROP_EVENT,
+  type SessionDragPayload,
+  sessionInlineRef,
+  sessionLabel
+} from './composer/inline-refs'
 
 /** A chat surface's drag-start geometry: the anchor pane id it advertises
  *  (`data-session-anchor`) and the composer a link drop routes to
@@ -91,13 +96,6 @@ function chatZonePane(groupId: string): null | string {
  * split commits through `openSessionTile`, which OPENS a new tile from a sidebar
  * row and MOVES the existing one when its tab is the drag source.
  */
-/** Dispatched on a `[data-session-folder-drop]` element when a session drag is
- *  released over it. Sidebar folder sections listen for this and run their
- *  move-to-folder handler — their native-DnD `onDrop` path can never fire for
- *  pointer drags, which replaced native session drags (the local
- *  drag-a-chat-into-a-folder feature rides the pointer session instead). */
-export const SESSION_FOLDER_DROP_EVENT = 'hermes:session-folder-drop'
-
 export function startSessionDrag(
   payload: SessionDragPayload,
   e: ReactPointerEvent<HTMLElement>,
@@ -145,6 +143,8 @@ export function startSessionDrag(
     },
 
     onEnd() {
+      folderEl?.removeAttribute('data-session-drop-active')
+
       if (source) {
         source.style.opacity = restoreOpacity
       }
@@ -153,9 +153,16 @@ export function startSessionDrag(
     resolveMove(x, y): DropHint | null {
       // Sidebar folder sections accept the drop even though the sidebar is
       // not a chat zone — checked first so a folder wins over the zone deny.
+      // The hovered section carries data-session-drop-active so it can light
+      // up (the sidebar gets no zone-overlay hint).
       const folder = folderTargets.find(t => rectContains(t.rect, x, y))
 
       if (folder) {
+        if (folderEl !== folder.el) {
+          folderEl?.removeAttribute('data-session-drop-active')
+          folder.el.setAttribute('data-session-drop-active', '')
+        }
+
         folderEl = folder.el
         split = null
         link = null
@@ -163,6 +170,7 @@ export function startSessionDrag(
         return null
       }
 
+      folderEl?.removeAttribute('data-session-drop-active')
       folderEl = null
 
       const zone = zones.find(z => rectContains(z.rect, x, y))
