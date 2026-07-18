@@ -23,6 +23,8 @@ def _make_compressor():
     compressor.compression_count = 0
     compressor.last_prompt_tokens = 0
     compressor._previous_summary = None
+    compressor._ineffective_compression_count = 0
+    compressor._verify_compaction_cleared_threshold = False
     compressor._summary_failure_cooldown_until = 0.0
     compressor._last_compression_savings_pct = 100.0
     compressor._ineffective_compression_count = 0

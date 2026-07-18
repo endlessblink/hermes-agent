@@ -3,7 +3,7 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { useSessionSlice } from '@/lib/use-session-slice'
-import { clearComposerAttachments, type ComposerAttachment } from '@/store/composer'
+import { type ComposerAttachment } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import {
   $queuedPromptsBySession,
@@ -21,6 +21,7 @@ import {
 import { notify } from '@/store/notifications'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
+import { useComposerScope } from '../scope'
 import type { ChatBarProps } from '../types'
 
 interface UseComposerQueueArgs {
@@ -68,6 +69,7 @@ export function useComposerQueue({
   transformDraftText
 }: UseComposerQueueArgs) {
   const { t } = useI18n()
+  const scope = useComposerScope()
 
   // Per-session slice (edge): re-renders only when THIS session's queue changes,
   // not on cross-session queue churn (the plain atom's map ref changes on every
@@ -187,12 +189,12 @@ export function useComposerQueue({
     }
 
     clearDraft()
-    clearComposerAttachments()
+    scope.attachments.clear()
     onDraftQueued?.()
     triggerHaptic('selection')
 
     return true
-  }, [activeQueueSessionKey, attachments, clearDraft, draftRef, onDraftQueued, sendBlocked, transformDraftText])
+  }, [activeQueueSessionKey, attachments, clearDraft, draftRef, onDraftQueued, scope.attachments, sendBlocked, transformDraftText])
 
   // All queue drain paths share one lock + send-then-remove sequence.
   // `pickEntry` lets each caller choose head, by-id, or skip-edited.

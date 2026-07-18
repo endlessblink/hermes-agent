@@ -6,7 +6,21 @@ import { Tip } from '@/components/ui/tooltip'
 import { getHermesConfigDefaults, getHermesConfigRecord, saveHermesConfig } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { Archive, Bell, Download, Globe, Info, KeyRound, Link2, RefreshCw, Settings2, Upload, Wrench, Zap } from '@/lib/icons'
+import {
+  Archive,
+  Bell,
+  Download,
+  Globe,
+  Info,
+  KeyRound,
+  Link2,
+  Package,
+  RefreshCw,
+  Settings2,
+  Upload,
+  Wrench,
+  Zap
+} from '@/lib/icons'
 import { notifyError } from '@/store/notifications'
 
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
@@ -23,6 +37,7 @@ import { ContinuitySettings } from './continuity-settings'
 import { GatewaySettings } from './gateway-settings'
 import { KEYS_VIEWS, KeysSettings, type KeysView } from './keys-settings'
 import { NotificationsSettings } from './notifications-settings'
+import { PluginsSettings } from './plugins-settings'
 import { PROVIDER_VIEWS, ProvidersSettings, type ProviderView } from './providers-settings'
 import { SessionsSettings } from './sessions-settings'
 import type { SettingsPageProps, SettingsView as SettingsViewId } from './types'
@@ -34,6 +49,7 @@ const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   'keys',
   'notifications',
   'continuity',
+  'plugins',
   'sessions',
   'about'
 ]
@@ -189,6 +205,13 @@ export function SettingsView({ gateway, onClose, onConfigSaved, onMainModelChang
       onSelect: () => setActiveView('keys')
     },
     {
+      active: activeView === 'plugins',
+      icon: Package,
+      id: 'plugins',
+      label: t.settings.nav.plugins,
+      onSelect: () => setActiveView('plugins')
+    },
+    {
       active: activeView === 'sessions',
       icon: Archive,
       id: 'sessions',
@@ -270,6 +293,8 @@ export function SettingsView({ gateway, onClose, onConfigSaved, onMainModelChang
             <NotificationsSettings />
           ) : activeView === 'continuity' ? (
             <ContinuitySettings gateway={gateway} />
+          ) : activeView === 'plugins' ? (
+            <PluginsSettings />
           ) : (
             <SessionsSettings />
           )}

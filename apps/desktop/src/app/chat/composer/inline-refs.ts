@@ -1,4 +1,5 @@
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
+import { translateNow } from '@/i18n'
 import { contextPath } from '@/lib/chat-runtime'
 
 import type { DroppedFile } from '../hooks/use-composer-actions'
@@ -8,14 +9,17 @@ import { composerPlainText, normalizeComposerEditorDom, placeCaretEnd, refChipEl
 /** A chip to insert: a raw `@kind:value` string, or a typed value + display label. */
 export type InlineRefInput = string | { kind: string; label?: string; value: string }
 
-/** MIME for an in-app session drag (sidebar row → composer). */
-export const HERMES_SESSION_MIME = 'application/x-hermes-session'
-
+/** A dragged sidebar session — carried in-memory by the pointer drag session
+ *  (session-drag.ts); sessions never ride native DnD. */
 export interface SessionDragPayload {
   id: string
   profile: string
   title: string
 }
+
+/** MIME key for a session carried on a native DataTransfer (drop targets that
+ *  still read HTML5 DnD, e.g. the sidebar sessions section). */
+export const HERMES_SESSION_MIME = 'application/x-hermes-session'
 
 export function writeSessionDrag(transfer: DataTransfer, payload: SessionDragPayload) {
   transfer.setData(HERMES_SESSION_MIME, JSON.stringify(payload))
@@ -43,10 +47,14 @@ export function readSessionDrag(transfer: DataTransfer | null): null | SessionDr
   }
 }
 
+/** A session's friendly display label — its title, or a localized fallback. */
+export const sessionLabel = ({ id, title }: SessionDragPayload) =>
+  title || translateNow('sidebar.row.untitledChat', id.slice(0, 8))
+
 /** Build a `@session:<profile>/<id>` chip. Value carries the metadata the agent
  * needs to resolve the link (session_search); label shows the friendly title. */
-export function sessionInlineRef({ id, profile, title }: SessionDragPayload): InlineRefInput {
-  return { kind: 'session', label: title || `chat ${id.slice(0, 8)}`, value: `${profile || 'default'}/${id}` }
+export function sessionInlineRef(payload: SessionDragPayload): InlineRefInput {
+  return { kind: 'session', label: sessionLabel(payload), value: `${payload.profile || 'default'}/${payload.id}` }
 }
 
 export function dragHasAttachments(transfer: DataTransfer | null, pathsMime: string) {

@@ -28,6 +28,21 @@ from gateway.whatsapp_identity import (
 )
 
 
+def _auth_env(name: str, default: str = "") -> str:
+    """Read allowlist/auth env; prefer profile secret_scope under multiplex."""
+    if not name:
+        return default
+    try:
+        from agent.secret_scope import get_secret
+
+        val = get_secret(name)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    except Exception:
+        pass
+    return (os.getenv(name) or default).strip()
+
+
 class GatewayAuthorizationMixin:
     """User/chat authorization methods for ``GatewayRunner``."""
 

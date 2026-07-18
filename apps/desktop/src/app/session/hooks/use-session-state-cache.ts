@@ -22,6 +22,7 @@ import {
   setTurnStartedAt,
   setYoloActive
 } from '@/store/session'
+import { publishSessionState } from '@/store/session-states'
 
 import type { ClientSessionState } from '../../types'
 
@@ -129,6 +130,18 @@ export function useSessionStateCache({
     }
 
     return created
+  }, [])
+
+  const resetViewSync = useCallback(() => {
+    // Drop any RAF-pending transcript stage so a backgrounded turn cannot
+    // repaint over the chat the user just switched to (#47709 / #47743).
+    pendingViewStateRef.current = null
+    viewSessionIdRef.current = null
+
+    if (viewSyncRafRef.current !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(viewSyncRafRef.current)
+      viewSyncRafRef.current = null
+    }
   }, [])
 
   const flushPendingViewState = useCallback(() => {
@@ -252,6 +265,10 @@ export function useSessionStateCache({
       const previous = ensureSessionState(sessionId, storedSessionId)
       const next = updater({ ...previous, messages: previous.messages })
       sessionStateByRuntimeIdRef.current.set(sessionId, next)
+      // Mirror into the reactive multi-session store — session tiles (and any
+      // other non-primary surface) subscribe per runtime id there instead of
+      // through the single active $messages view.
+      publishSessionState(sessionId, next)
 
       if (previous.storedSessionId !== next.storedSessionId) {
         setSessionWorking(previous.storedSessionId, false, null, { markReplyReady: false })
@@ -281,6 +298,18 @@ export function useSessionStateCache({
     [ensureSessionState, syncSessionStateToView]
   )
 
+  const getRuntimeIdForStoredSession = useCallback((storedSessionId: string): string | null => {
+    const runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
+
+    if (!runtimeId) {
+      return null
+    }
+
+    const runtimeState = sessionStateByRuntimeIdRef.current.get(runtimeId)
+
+    return runtimeState?.storedSessionId === storedSessionId ? runtimeId : null
+  }, [])
+
   // When the store watchdog force-clears a stuck session (8 min of stream
   // silence — a hung or looping turn that never delivered its terminal event),
   // also drop that session's busy/awaiting flags here. Clearing the sidebar dot
@@ -309,6 +338,8 @@ export function useSessionStateCache({
   return {
     activeSessionIdRef,
     ensureSessionState,
+    getRuntimeIdForStoredSession,
+    resetViewSync,
     runtimeIdByStoredSessionIdRef,
     selectedStoredSessionIdRef,
     sessionStateByRuntimeIdRef,
