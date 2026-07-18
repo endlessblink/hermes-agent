@@ -990,6 +990,9 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onNavigate: selectSidebarItem,
     onNewSessionInWorkspace: startSessionInWorkspace,
     onNewSessionSplit: dir => void openNewSessionTile(dir),
+    // The sidebar's Personal assistant button — the retired DesktopController
+    // passed this and the contrib port dropped it, leaving the button dead.
+    onStartPersonalAssistant: () => void openPersonalAssistantDestination(),
     onPasteClipboardImage: opts => composer.pasteClipboardImage(opts),
     onPickFiles: () => void composer.pickContextPaths('file'),
     onPickFolders: () => void composer.pickContextPaths('folder'),
