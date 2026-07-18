@@ -8189,11 +8189,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return False
             owner_profile = "office-work"
 
+        monitor_delivery_router = self.delivery_router
+        if Platform.TELEGRAM not in monitor_delivery_router.adapters:
+            shared_adapter = getattr(self, "_profile_adapters", {}).get(
+                "office-work",
+                {},
+            ).get(Platform.TELEGRAM)
+            if shared_adapter is not None:
+                monitor_delivery_router = DeliveryRouter(
+                    self.config,
+                    adapters={Platform.TELEGRAM: shared_adapter},
+                )
+
         bridge = create_personal_assistant_telegram_monitor_bridge(
             profile_name=owner_profile,
             profile_home=owner_home,
             config=self.config,
-            delivery_router=self.delivery_router,
+            delivery_router=monitor_delivery_router,
             is_busy=lambda: bool(self._running_agents),
         )
         if bridge is None:

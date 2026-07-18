@@ -258,3 +258,36 @@ async def test_default_multiplexer_schedules_office_work_monitor_bridge(
     await asyncio.wait_for(started.wait(), timeout=1)
     assert seen["profile_name"] == "office-work"
     assert seen["profile_home"] == office_home
+
+
+@pytest.mark.asyncio
+async def test_multiplexer_uses_office_work_shared_telegram_adapter(
+    monkeypatch, tmp_path
+):
+    office_home = tmp_path / "profiles" / "office-work"
+    office_home.mkdir(parents=True)
+    adapter = RecordingTelegramAdapter()
+    config, _router = configured_gateway(adapter)
+    config.multiplex_profiles = True
+    config.multiplex_served_profiles = ["office-work"]
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = config
+    runner.delivery_router = DeliveryRouter(config, adapters={})
+    runner._profile_adapters = {"office-work": {Platform.TELEGRAM: adapter}}
+    runner._running = True
+    runner._running_agents = {}
+    runner._background_tasks = set()
+    monkeypatch.setattr(runner, "_active_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profiles_to_serve",
+        lambda **_kwargs: [("default", tmp_path), ("office-work", office_home)],
+    )
+
+    assert runner._start_personal_assistant_telegram_monitor_bridge(tmp_path) is True
+    assert (
+        runner._personal_assistant_telegram_monitor_bridge.delivery_router.adapters[
+            Platform.TELEGRAM
+        ]
+        is adapter
+    )
+    runner._personal_assistant_telegram_monitor_task.cancel()
