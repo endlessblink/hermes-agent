@@ -132,6 +132,23 @@ def _current_xauthority(env: dict[str, str]) -> str | None:
 
 
 def launch_flowstate_app() -> bool:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    background_unit = config_home / "systemd" / "user" / "flowstate-background.service"
+    if background_unit.is_file():
+        try:
+            result = subprocess.run(
+                ["systemctl", "--user", "start", "flowstate-background.service"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except Exception:
+            return False
+        # An installed supervisor is the sole process authority. Falling back to
+        # Popen here could race it and create a second renderer/sidecar owner.
+        return result.returncode == 0
+
     bin_dir = Path.home() / ".local" / "bin"
     wrapper = bin_dir / "FlowState-launch.sh"
     executable = bin_dir / "FlowState.AppImage"

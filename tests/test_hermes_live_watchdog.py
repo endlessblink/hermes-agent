@@ -334,6 +334,7 @@ def test_flowstate_launch_uses_desktop_wrapper_and_current_xauthority(tmp_path, 
     xauthority.write_text("cookie", encoding="utf-8")
     launched = []
     monkeypatch.setattr(watchdog.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
     monkeypatch.delenv("XAUTHORITY", raising=False)
     monkeypatch.setattr(
@@ -348,6 +349,54 @@ def test_flowstate_launch_uses_desktop_wrapper_and_current_xauthority(tmp_path, 
     assert kwargs["env"]["DISPLAY"] == ":0"
     assert kwargs["env"]["XAUTHORITY"] == str(xauthority)
     assert kwargs["start_new_session"] is True
+
+
+def test_flowstate_launch_prefers_installed_background_service(tmp_path, monkeypatch):
+    unit = tmp_path / ".config" / "systemd" / "user" / "flowstate-background.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Service]\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(watchdog.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not launch a second app")),
+    )
+
+    assert watchdog.launch_flowstate_app() is True
+    assert calls == [
+        (
+            ["systemctl", "--user", "start", "flowstate-background.service"],
+            {"capture_output": True, "text": True, "timeout": 15, "check": False},
+        )
+    ]
+
+
+def test_flowstate_launch_does_not_fallback_when_installed_service_fails(tmp_path, monkeypatch):
+    unit = tmp_path / ".config" / "systemd" / "user" / "flowstate-background.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text("[Service]\n", encoding="utf-8")
+    monkeypatch.setattr(watchdog.Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="failed"),
+    )
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe fallback")),
+    )
+
+    assert watchdog.launch_flowstate_app() is False
 
 
 def test_flowstate_recovery_fails_closed_for_running_but_unhealthy_app():
