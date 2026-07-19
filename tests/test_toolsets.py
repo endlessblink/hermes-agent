@@ -82,24 +82,33 @@ class TestResolveToolset:
         assert tools == {
             "flowstate_get_assistant_context",
             "flowstate_health",
+            "flowstate_audit_coverage",
             "flowstate_list_tasks",
             "flowstate_search_tasks",
             "flowstate_get_task",
             "flowstate_create_task",
             "flowstate_update_task",
             "flowstate_delete_task",
+            "flowstate_restore_task",
+            "flowstate_set_task_status",
             "flowstate_get_current_timer",
             "flowstate_get_timer_diagnostics",
             "flowstate_list_task_instances",
-            "flowstate_schedule_task_instance",
+            "flowstate_create_work_block",
+            "flowstate_move_work_block",
+            "flowstate_resize_work_block",
+            "flowstate_remove_work_block",
             "flowstate_done_for_now",
             "flowstate_merge_tasks",
             "flowstate_list_subtasks",
+            "flowstate_subtask_batch",
+        }
+        assert not {
+            "flowstate_schedule_task_instance",
             "flowstate_create_subtask",
             "flowstate_update_subtask",
             "flowstate_delete_subtask",
-            "flowstate_subtask_batch",
-        }
+        } & tools
 
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):
         reg = ToolRegistry()

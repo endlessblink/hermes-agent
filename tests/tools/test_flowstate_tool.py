@@ -311,6 +311,27 @@ def test_create_task_omits_empty_project_id(monkeypatch):
     }
 
 
+def test_create_task_apply_forwards_server_issued_request_hash(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True}),
+    )
+
+    json.loads(fst._handle_create_task({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": _LIFECYCLE_OPERATION_ID,
+        "title": "Review budget",
+        "preview": False,
+        "previewDigest": _CANONICAL_DIGEST,
+        "previewExpiresAt": _CANONICAL_PREVIEW_EXPIRY,
+        "requestHash": _CANONICAL_REQUEST_HASH,
+    }))
+
+    assert seen["body"]["requestHash"] == _CANONICAL_REQUEST_HASH
+
+
 _CANONICAL_DIGEST = "a" * 64
 _CANONICAL_REQUEST_HASH = "c" * 64
 _CANONICAL_PREVIEW_EXPIRY = "2026-07-13T18:30:00.000Z"
@@ -1795,21 +1816,341 @@ def test_subtask_batch_defaults_to_preview_and_forwards_canonical_operations(mon
         "baseRevision": 4,
         "operations": [
             {
-                "action": "create",
-                "subtask": {
-                    "id": _SUBTASK_UUID,
-                    "title": "First subtask",
-                    "description": "",
-                    "isCompleted": False,
-                    "completedPomodoros": 0,
-                    "doneEnough": "shipped",
-                    "estimateMinutes": None,
-                },
+                "kind": "create",
+                "clientId": _SUBTASK_UUID,
+                "title": "First subtask",
+                "description": "",
+                "isCompleted": False,
+                "completedPomodoros": 0,
+                "doneEnough": "shipped",
+                "estimateMinutes": None,
                 "order": 0,
             }
         ],
         "preview": True,
     }
+
+
+def test_subtask_batch_apply_forwards_server_issued_request_hash(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True}),
+    )
+
+    json.loads(fst._handle_subtask_batch({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": "op-batch-1",
+        "baseRevision": 4,
+        "operations": [{
+            "action": "create",
+            "subtask": {"id": _SUBTASK_UUID, "title": "First subtask", "doneEnough": "shipped"},
+        }],
+        "preview": False,
+        "previewDigest": "a" * 64,
+        "previewExpiresAt": "2026-07-19T23:59:00.000Z",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "approvedSubtaskIds": [_SUBTASK_UUID],
+    }))
+
+    assert seen["body"]["requestHash"] == _CANONICAL_REQUEST_HASH
+
+
+def test_work_block_apply_forwards_server_issued_request_hash(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True}),
+    )
+
+    json.loads(fst._handle_create_work_block({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "workBlockId": _SUBTASK_UUID,
+        "operationId": "work-block-apply-1",
+        "baseRevision": 4,
+        "workBlockRevision": 0,
+        "scheduledDate": "2026-07-20",
+        "scheduledTime": "10:00",
+        "duration": 25,
+        "timezone": "Asia/Jerusalem",
+        "preview": False,
+        "previewDigest": "a" * 64,
+        "previewExpiresAt": "2026-07-19T23:59:00.000Z",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+    }))
+
+    assert seen["body"]["requestHash"] == _CANONICAL_REQUEST_HASH
+
+
+def test_move_work_block_accepts_shipped_legacy_identity_at_revision_zero(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True}),
+    )
+    legacy_id = f"instance-{_LIFECYCLE_TASK_ID}-1720000000000"
+
+    json.loads(fst._handle_move_work_block({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "workBlockId": legacy_id,
+        "operationId": "legacy-move-1",
+        "baseRevision": 4,
+        "workBlockRevision": 0,
+        "scheduledDate": "2026-07-20",
+        "scheduledTime": "10:00",
+        "timezone": "Asia/Jerusalem",
+    }))
+
+    assert seen["body"]["workBlockRevision"] == 0
+    assert seen["body"]["command"]["workBlockId"] == legacy_id
+
+
+def test_work_block_accepts_exact_replayed_receipt():
+    legacy_id = f"instance-{_LIFECYCLE_TASK_ID}-1720000000000"
+    command = {
+        "action": "move",
+        "workBlockId": legacy_id,
+        "scheduledDate": "2026-07-20",
+        "scheduledTime": "10:00",
+        "timezone": "Asia/Jerusalem",
+    }
+    block = {
+        "id": legacy_id,
+        "taskId": _LIFECYCLE_TASK_ID,
+        "scheduledDate": "2026-07-20",
+        "scheduledTime": "10:00",
+        "duration": 25,
+        "timezone": "Asia/Jerusalem",
+        "canonicalRevision": 1,
+    }
+    read_back = {
+        "id": _LIFECYCLE_TASK_ID,
+        "workspaceId": None,
+        "canonicalRevision": 5,
+        "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+        "workBlock": block,
+        "removedWorkBlockId": None,
+        "instances": [block],
+    }
+    receipt = {
+        "ok": True,
+        "status": "replayed",
+        "replayed": True,
+        "contractVersion": "work-block-v1",
+        "operationId": "legacy-move-1",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "source": "local-api",
+        "entityType": "task",
+        "action": "work_block_move",
+        "entityId": _LIFECYCLE_TASK_ID,
+        "workBlockId": legacy_id,
+        "canonicalRevision": 5,
+        "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+        "changeSequence": 42,
+        "committedAt": _CANONICAL_COMMITTED_AT,
+        "readBack": read_back,
+        "readBackHash": canonical_json_sha256(read_back),
+    }
+    response = {
+        "ok": True,
+        "status": "replayed",
+        "result": "committed",
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "receipt": receipt,
+    }
+
+    assert fst._valid_work_block_commit(
+        response,
+        action="move",
+        task_id=_LIFECYCLE_TASK_ID,
+        operation_id="legacy-move-1",
+        base_revision=4,
+        work_block_revision=0,
+        command=command,
+        request_hash=_CANONICAL_REQUEST_HASH,
+    ) is True
+
+
+def test_subtask_batch_preflight_requires_flowstate_task_v1_contract():
+    assert fst._FLOWSTATE_TOOL_REQUIREMENTS["flowstate_subtask_batch"] == (
+        ("POST", "/api/tasks/:id/subtasks/batch", "task-v1"),
+    )
+
+
+def test_subtask_batch_accepts_exact_flowstate_task_v1_preview():
+    operations = [{
+        "kind": "create",
+        "clientId": _SUBTASK_UUID,
+        "title": "First subtask",
+        "doneEnough": "shipped",
+        "order": 0,
+    }]
+    normalized = {"taskId": _LIFECYCLE_TASK_ID, "operations": operations}
+    response = {
+        "ok": True,
+        "result": "preview",
+        "contractVersion": "task-v1",
+        "action": "subtask_batch",
+        "operationId": "op-batch-1",
+        "taskId": _LIFECYCLE_TASK_ID,
+        "baseRevision": 4,
+        # The database binds actor, scope, contract, action, and base revision
+        # into this hash; normalizedPayload intentionally exposes only taskId
+        # and operations, so clients must not recompute it from that subset.
+        "requestHash": _CANONICAL_REQUEST_HASH,
+        "previewDigest": "a" * 64,
+        "previewExpiresAt": "2026-07-19T23:59:00.000Z",
+        "normalizedPayload": normalized,
+        "readBack": {
+            "id": _LIFECYCLE_TASK_ID,
+            "workspaceId": None,
+            "canonicalRevision": 4,
+            "subtasks": [{
+                "id": "created-subtask-1",
+                "clientId": _SUBTASK_UUID,
+                "title": "First subtask",
+                "doneEnough": "shipped",
+            }],
+        },
+    }
+
+    assert fst._valid_subtask_batch_preview(
+        response,
+        task_id=_LIFECYCLE_TASK_ID,
+        operation_id="op-batch-1",
+        base_revision=4,
+        operations=operations,
+    ) is True
+
+    response["taskId"] = "another-task"
+    assert fst._valid_subtask_batch_preview(
+        response,
+        task_id=_LIFECYCLE_TASK_ID,
+        operation_id="op-batch-1",
+        base_revision=4,
+        operations=operations,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {
+            "action": "create",
+            "subtask": {
+                "id": _SUBTASK_UUID,
+                "title": "Too long",
+                "doneEnough": "shipped",
+                "estimateMinutes": 1441,
+            },
+        },
+        {
+            "action": "create",
+            "subtask": {
+                "id": _SUBTASK_UUID,
+                "title": "Too far",
+                "doneEnough": "shipped",
+            },
+            "order": 10001,
+        },
+    ],
+)
+def test_subtask_batch_rejects_values_above_flowstate_task_v1_limits(operation):
+    assert fst._normalize_subtask_batch_operations([operation]) is None
+
+
+def test_subtask_batch_accepts_exact_flowstate_task_v1_commit():
+    operations = [{
+        "kind": "create",
+        "clientId": _SUBTASK_UUID,
+        "title": "First subtask",
+    }]
+    read_back = {
+        "id": _LIFECYCLE_TASK_ID,
+        "workspaceId": None,
+        "canonicalRevision": 5,
+        "subtasks": [{
+            "id": _SUBTASK_UUID,
+            "clientId": _SUBTASK_UUID,
+            "title": "First subtask",
+        }],
+    }
+    response = _canonical_action_payload(
+        action="subtask_batch",
+        operation_id="op-batch-1",
+        entity_id=_LIFECYCLE_TASK_ID,
+        read_back=read_back,
+        affected=[{
+            "entityType": "task",
+            "entityId": _LIFECYCLE_TASK_ID,
+            "action": "update",
+            "canonicalRevision": 5,
+            "changeSequence": 42,
+        }],
+        receipt_overrides={
+            "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+            "replayed": False,
+        },
+    )
+
+    assert fst._valid_subtask_batch_commit(
+        response,
+        task_id=_LIFECYCLE_TASK_ID,
+        operation_id="op-batch-1",
+        base_revision=4,
+        operations=operations,
+        approved_subtask_ids=[_SUBTASK_UUID],
+        request_hash=_CANONICAL_REQUEST_HASH,
+    ) is True
+
+
+def test_subtask_batch_accepts_exact_flowstate_task_v1_replay():
+    operations = [{
+        "kind": "create",
+        "clientId": _SUBTASK_UUID,
+        "title": "First subtask",
+    }]
+    read_back = {
+        "id": _LIFECYCLE_TASK_ID,
+        "workspaceId": None,
+        "canonicalRevision": 5,
+        "subtasks": [{
+            "id": _SUBTASK_UUID,
+            "clientId": _SUBTASK_UUID,
+            "title": "First subtask",
+        }],
+    }
+    response = _canonical_action_payload(
+        action="subtask_batch",
+        operation_id="op-batch-1",
+        entity_id=_LIFECYCLE_TASK_ID,
+        read_back=read_back,
+        affected=[{
+            "entityType": "task",
+            "entityId": _LIFECYCLE_TASK_ID,
+            "action": "update",
+            "canonicalRevision": 5,
+            "changeSequence": 42,
+        }],
+        receipt_overrides={
+            "canonicalUpdatedAt": _CANONICAL_UPDATED_AT,
+            "status": "replayed",
+            "replayed": True,
+        },
+    )
+
+    assert fst._valid_subtask_batch_commit(
+        response,
+        task_id=_LIFECYCLE_TASK_ID,
+        operation_id="op-batch-1",
+        base_revision=4,
+        operations=operations,
+        approved_subtask_ids=[_SUBTASK_UUID],
+        request_hash=_CANONICAL_REQUEST_HASH,
+    ) is True
 
 
 def test_subtask_batch_apply_requires_preview_receipt_fields():

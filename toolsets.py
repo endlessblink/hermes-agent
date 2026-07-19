@@ -274,6 +274,7 @@ TOOLSETS = {
         "tools": [
             "flowstate_get_assistant_context",
             "flowstate_health",
+            "flowstate_audit_coverage",
             "flowstate_list_tasks",
             "flowstate_search_tasks",
             "flowstate_get_task",

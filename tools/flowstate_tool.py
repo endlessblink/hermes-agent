@@ -40,7 +40,7 @@ _VALID_PRIORITIES = {"low", "medium", "high"}
 _CANONICAL_TASK_CONTRACT = "task-v1"
 _CANONICAL_TASK_SOURCE = "local-api"
 _TASK_LIFECYCLE_CONTRACT = "task-lifecycle-v1"
-_SUBTASK_BATCH_CONTRACT = "subtask-batch-v1"
+_SUBTASK_BATCH_CONTRACT = _CANONICAL_TASK_CONTRACT
 _WORK_BLOCK_CONTRACT = "work-block-v1"
 _LIFECYCLE_CREATE_STATUSES = {"planned", "in_progress", "backlog", "on_hold"}
 _LIFECYCLE_STATUSES = _LIFECYCLE_CREATE_STATUSES | {"done"}
@@ -91,7 +91,7 @@ _REGISTERED_ROUTE_REQUIREMENTS = (
     ("POST", "/api/tasks/:id/done-for-now", "task-v1"),
     ("POST", "/api/tasks/:id/merge", "task-v1"),
     ("GET", "/api/tasks/:id/subtasks", "subtask-list-v1"),
-    ("POST", "/api/tasks/:id/subtasks/batch", "subtask-batch-v1"),
+    ("POST", "/api/tasks/:id/subtasks/batch", "task-v1"),
 )
 
 _FLOWSTATE_TOOL_REQUIREMENTS = {
@@ -121,7 +121,7 @@ _FLOWSTATE_TOOL_REQUIREMENTS = {
     "flowstate_done_for_now": (("POST", "/api/tasks/:id/done-for-now", "task-v1"),),
     "flowstate_merge_tasks": (("POST", "/api/tasks/:id/merge", "task-v1"),),
     "flowstate_list_subtasks": (("GET", "/api/tasks/:id/subtasks", "subtask-list-v1"),),
-    "flowstate_subtask_batch": (("POST", "/api/tasks/:id/subtasks/batch", "subtask-batch-v1"),),
+    "flowstate_subtask_batch": (("POST", "/api/tasks/:id/subtasks/batch", "task-v1"),),
 }
 
 _capabilities_cache: Optional[tuple[str, float, Dict[str, Any]]] = None
@@ -1015,6 +1015,7 @@ def _handle_lifecycle(
             return _tool_error("requestHash is required when preview is false")
         body["previewDigest"] = digest
         body["previewExpiresAt"] = expiry
+        body["requestHash"] = request_hash
 
     try:
         response = _request("POST", "/api/tasks/lifecycle", body)
@@ -1395,9 +1396,17 @@ def _valid_timezone_name(value: Any) -> bool:
 
 def _normalize_work_block_command(args: dict, action: str) -> Optional[dict]:
     work_block_id = args.get("workBlockId")
-    if not _valid_lifecycle_task_id(work_block_id):
+    if action == "create" and not _valid_lifecycle_task_id(work_block_id):
         return None
-    work_block_id = work_block_id.lower()
+    if action != "create" and (
+        not isinstance(work_block_id, str)
+        or not work_block_id
+        or work_block_id != work_block_id.strip()
+        or len(work_block_id) > 200
+    ):
+        return None
+    if _UUID_RE.fullmatch(work_block_id):
+        work_block_id = work_block_id.lower()
     finish_by = args.get("finishBy")
     if finish_by is not None and not _valid_local_minute(finish_by):
         return None
@@ -1412,6 +1421,8 @@ def _normalize_work_block_command(args: dict, action: str) -> Optional[dict]:
             or not _valid_timezone_name(timezone_name)
         ):
             return None
+    elif not _valid_timezone_name(args.get("timezone")):
+        return None
     if action in {"create", "resize"}:
         duration = args.get("duration")
         if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= 1440:
@@ -1436,9 +1447,12 @@ def _normalize_work_block_command(args: dict, action: str) -> Optional[dict]:
             "timezone": args["timezone"],
         }
     elif action == "resize":
-        command = {"action": "resize", "workBlockId": work_block_id, "duration": args["duration"]}
+        command = {
+            "action": "resize", "workBlockId": work_block_id,
+            "duration": args["duration"], "timezone": args["timezone"],
+        }
     else:
-        command = {"action": "remove", "workBlockId": work_block_id}
+        command = {"action": "remove", "workBlockId": work_block_id, "timezone": args["timezone"]}
     if finish_by is not None:
         command["finishBy"] = finish_by
     return command
@@ -1738,11 +1752,14 @@ def _valid_work_block_commit(
     if not (
         isinstance(response, dict)
         and response.get("ok") is True
-        and response.get("status") == "committed"
+        and response.get("status") in {"committed", "replayed"}
         and response.get("result") == "committed"
         and response.get("requestHash") == request_hash
         and isinstance(response.get("receipt"), dict)
-        and response["receipt"].get("status") == "committed"
+        and response["receipt"].get("status") == response.get("status")
+        and isinstance(response["receipt"].get("replayed"), bool)
+        and response["receipt"].get("replayed")
+            is (response.get("status") == "replayed")
         and response["receipt"].get("requestHash") == request_hash
         and response["receipt"].get("workBlockId") == work_block_id
         and response["receipt"].get("canonicalRevision") == base_revision + 1
@@ -1778,8 +1795,8 @@ def _handle_work_block(args: dict, *, action: str) -> str:
     action_fields = {
         "create": {"scheduledDate", "scheduledTime", "duration", "timezone", "finishBy"},
         "move": {"scheduledDate", "scheduledTime", "timezone", "finishBy"},
-        "resize": {"duration", "finishBy"},
-        "remove": set(),
+        "resize": {"duration", "timezone", "finishBy"},
+        "remove": {"timezone"},
     }[action]
     common = {
         "taskId", "workBlockId", "operationId", "baseRevision", "workBlockRevision",
@@ -1803,9 +1820,9 @@ def _handle_work_block(args: dict, *, action: str) -> str:
         not isinstance(work_block_revision, int)
         or isinstance(work_block_revision, bool)
         or (action == "create" and work_block_revision != 0)
-        or (action != "create" and work_block_revision < 1)
+        or (action != "create" and work_block_revision < 0)
     ):
-        return _tool_error("workBlockRevision must be 0 for create and positive for existing blocks")
+        return _tool_error("workBlockRevision must be 0 for create or legacy blocks, otherwise positive")
     command = _normalize_work_block_command(args, action)
     if command is None:
         return _tool_error("work-block command does not match the canonical interval contract")
@@ -1831,6 +1848,7 @@ def _handle_work_block(args: dict, *, action: str) -> str:
             return _tool_error("requestHash is required when preview is false")
         body["previewDigest"] = digest
         body["previewExpiresAt"] = expiry
+        body["requestHash"] = request_hash
     try:
         response = _request(
             "POST", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/work-blocks", body
@@ -2191,7 +2209,7 @@ def _normalize_subtask_batch_operations(value: Any) -> Optional[list[dict]]:
         order = operation.get("order")
         if order is not None and (
             not isinstance(order, int) or isinstance(order, bool) or order < 0
-            or order > 100000
+            or order > 10000
         ):
             return None
         if action == "create":
@@ -2254,23 +2272,21 @@ def _normalize_subtask_batch_operations(value: Any) -> Optional[list[dict]]:
                 and (
                     not isinstance(candidate["estimateMinutes"], int)
                     or isinstance(candidate["estimateMinutes"], bool)
-                    or not 1 <= candidate["estimateMinutes"] <= 10080
+                    or not 1 <= candidate["estimateMinutes"] <= 1440
                 )
             ):
                 return None
         if action == "create":
             subtask = operation["subtask"]
             normalized: Dict[str, Any] = {
-                "action": "create",
-                "subtask": {
-                    "id": subtask["id"].lower(),
-                    "title": subtask["title"].strip(),
-                    "description": subtask.get("description", ""),
-                    "isCompleted": subtask.get("isCompleted", False),
-                    "completedPomodoros": subtask.get("completedPomodoros", 0),
-                    "doneEnough": subtask.get("doneEnough"),
-                    "estimateMinutes": subtask.get("estimateMinutes"),
-                },
+                "kind": "create",
+                "clientId": subtask["id"].lower(),
+                "title": subtask["title"].strip(),
+                "description": subtask.get("description", ""),
+                "isCompleted": subtask.get("isCompleted", False),
+                "completedPomodoros": subtask.get("completedPomodoros", 0),
+                "doneEnough": subtask.get("doneEnough"),
+                "estimateMinutes": subtask.get("estimateMinutes"),
             }
         elif action == "update":
             normalized_patch = dict(operation["patch"])
@@ -2280,15 +2296,15 @@ def _normalize_subtask_batch_operations(value: Any) -> Optional[list[dict]]:
             if _UUID_RE.fullmatch(target_id):
                 target_id = target_id.lower()
             normalized = {
-                "action": "update",
+                "kind": "update",
                 "subtaskId": target_id,
-                "patch": normalized_patch,
+                **normalized_patch,
             }
         else:
             target_id = operation["subtaskId"].strip()
             if _UUID_RE.fullmatch(target_id):
                 target_id = target_id.lower()
-            normalized = {"action": "delete", "subtaskId": target_id}
+            normalized = {"kind": "delete", "subtaskId": target_id}
         if order is not None:
             normalized["order"] = order
         normalized_operations.append(normalized)
@@ -2308,6 +2324,7 @@ def _valid_subtask_batch_preview(
         and response.get("ok") is True
         and response.get("result") == "preview"
         and response.get("contractVersion") == _SUBTASK_BATCH_CONTRACT
+        and response.get("action") == "subtask_batch"
         and response.get("operationId") == operation_id
         and response.get("taskId") == task_id
         and response.get("baseRevision") == base_revision
@@ -2322,20 +2339,10 @@ def _valid_subtask_batch_preview(
     normalized = response.get("normalizedPayload")
     return (
         isinstance(normalized, dict)
-        and set(normalized) == {
-            "contractVersion", "source", "action", "taskId", "baseRevision", "workspaceId",
-            "operations",
-        }
-        and normalized.get("contractVersion") == _SUBTASK_BATCH_CONTRACT
-        and normalized.get("source") == _CANONICAL_TASK_SOURCE
-        and normalized.get("action") == "subtask_batch"
+        and set(normalized) == {"taskId", "operations"}
         and normalized.get("taskId") == task_id
-        and normalized.get("baseRevision") == base_revision
         and normalized.get("operations") == operations
-        and (normalized.get("workspaceId") is None or isinstance(normalized.get("workspaceId"), str))
-        and canonical_json_sha256(normalized) == response["requestHash"]
         and response["readBack"].get("id") == task_id
-        and response["readBack"].get("workspaceId") == normalized.get("workspaceId")
         and response["readBack"].get("canonicalRevision") == base_revision
         and isinstance(response["readBack"].get("subtasks"), list)
         and _subtask_read_back_matches_operations(
@@ -2356,23 +2363,34 @@ def _subtask_read_back_matches_operations(
         and isinstance(read_back.get("subtasks"), list)
     ):
         return False
-    by_id = {
-        subtask.get("id"): (index, subtask)
-        for index, subtask in enumerate(read_back["subtasks"])
-        if isinstance(subtask, dict) and isinstance(subtask.get("id"), str)
-    }
+    by_id: Dict[str, tuple[int, dict]] = {}
+    for index, subtask in enumerate(read_back["subtasks"]):
+        if not isinstance(subtask, dict):
+            continue
+        for identity in (subtask.get("id"), subtask.get("clientId")):
+            if isinstance(identity, str):
+                by_id[identity] = (index, subtask)
     effects: Dict[str, Optional[dict]] = {}
     for operation in operations:
-        action = operation["action"]
+        action = operation["kind"]
         target_id = (
-            operation["subtask"]["id"] if action == "create" else operation.get("subtaskId")
+            operation["clientId"] if action == "create" else operation.get("subtaskId")
         )
         if action == "delete":
             effects[target_id] = None
         elif action == "create":
-            effects[target_id] = dict(operation["subtask"])
+            effects[target_id] = {
+                key: value for key, value in operation.items()
+                if key not in {"kind", "clientId", "order"}
+            }
         else:
-            effects[target_id] = {**(effects.get(target_id) or {}), **operation["patch"]}
+            effects[target_id] = {
+                **(effects.get(target_id) or {}),
+                **{
+                    key: value for key, value in operation.items()
+                    if key not in {"kind", "subtaskId", "order"}
+                },
+            }
     for target_id, expected in effects.items():
         target_entry = by_id.get(target_id)
         if expected is None:
@@ -2387,8 +2405,8 @@ def _subtask_read_back_matches_operations(
     last_operation = operations[-1]
     if "order" in last_operation:
         target_id = (
-            last_operation["subtask"]["id"]
-            if last_operation["action"] == "create"
+            last_operation["clientId"]
+            if last_operation["kind"] == "create"
             else last_operation["subtaskId"]
         )
         expected_index = min(last_operation["order"], max(0, len(read_back["subtasks"]) - 1))
@@ -2421,13 +2439,14 @@ def _valid_subtask_batch_commit(
     if not (
         isinstance(response, dict)
         and response.get("ok") is True
-        and response.get("status") == "committed"
         and response.get("result") == "committed"
         and response.get("requestHash") == request_hash
         and isinstance(response.get("receipt"), dict)
-        and response["receipt"].get("status") == "committed"
+        and response["receipt"].get("status") in {"committed", "replayed"}
         and response["receipt"].get("requestHash") == request_hash
         and isinstance(response["receipt"].get("replayed"), bool)
+        and response["receipt"].get("replayed")
+            is (response["receipt"].get("status") == "replayed")
         and response["receipt"].get("canonicalRevision") == base_revision + 1
         and isinstance(response["receipt"].get("readBack"), dict)
         and isinstance(response["receipt"]["readBack"].get("subtasks"), list)
@@ -2505,6 +2524,7 @@ def _handle_subtask_batch(args: dict, **kw) -> str:
             return _tool_error("approvedSubtaskIds is required when preview is false")
         body["previewDigest"] = digest
         body["previewExpiresAt"] = expiry
+        body["requestHash"] = request_hash
         body["approvedSubtaskIds"] = approved_subtask_ids
     try:
         response = _request("POST", f"{_subtask_path(task_id)}/batch", body)
@@ -2910,7 +2930,7 @@ FLOWSTATE_SCHEDULE_TASK_INSTANCE_SCHEMA = {
 
 _WORK_BLOCK_COMMON_PROPERTIES = {
     "taskId": {"type": "string", "description": "Exact stable parent task UUID."},
-    "workBlockId": {"type": "string", "description": "Stable work-block UUID."},
+    "workBlockId": {"type": "string", "description": "Exact work-block ID; new blocks use UUIDs and shipped legacy IDs are preserved."},
     "operationId": {
         "type": "string",
         "description": "Stable idempotency key reused for preview, apply, and retry.",
@@ -3001,9 +3021,10 @@ FLOWSTATE_RESIZE_WORK_BLOCK_SCHEMA = {
         "properties": {
             **_WORK_BLOCK_COMMON_PROPERTIES,
             "duration": {"type": "integer", "minimum": 1, "maximum": 1440},
+            "timezone": _WORK_BLOCK_INTERVAL_PROPERTIES["timezone"],
             **_WORK_BLOCK_FINISH_BY_PROPERTY,
         },
-        "required": _WORK_BLOCK_REQUIRED + ["duration"],
+        "required": _WORK_BLOCK_REQUIRED + ["duration", "timezone"],
         "additionalProperties": False,
     },
 }
@@ -3016,8 +3037,11 @@ FLOWSTATE_REMOVE_WORK_BLOCK_SCHEMA = {
     ),
     "parameters": {
         "type": "object",
-        "properties": {**_WORK_BLOCK_COMMON_PROPERTIES},
-        "required": _WORK_BLOCK_REQUIRED,
+        "properties": {
+            **_WORK_BLOCK_COMMON_PROPERTIES,
+            "timezone": _WORK_BLOCK_INTERVAL_PROPERTIES["timezone"],
+        },
+        "required": _WORK_BLOCK_REQUIRED + ["timezone"],
         "additionalProperties": False,
     },
 }
@@ -3254,7 +3278,7 @@ FLOWSTATE_SUBTASK_BATCH_SCHEMA = {
                                 },
                                 "estimateMinutes": {
                                     "anyOf": [
-                                        {"type": "integer", "minimum": 1, "maximum": 10080},
+                                        {"type": "integer", "minimum": 1, "maximum": 1440},
                                         {"type": "null"},
                                     ],
                                 },
@@ -3278,14 +3302,14 @@ FLOWSTATE_SUBTASK_BATCH_SCHEMA = {
                                 },
                                 "estimateMinutes": {
                                     "anyOf": [
-                                        {"type": "integer", "minimum": 1, "maximum": 10080},
+                                        {"type": "integer", "minimum": 1, "maximum": 1440},
                                         {"type": "null"},
                                     ],
                                 },
                             },
                             "additionalProperties": False,
                         },
-                        "order": {"type": "integer", "minimum": 0, "maximum": 100000},
+                        "order": {"type": "integer", "minimum": 0, "maximum": 10000},
                     },
                     "required": ["action"],
                     "additionalProperties": False,
