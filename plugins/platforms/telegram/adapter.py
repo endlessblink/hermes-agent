@@ -19,9 +19,112 @@ import re
 import threading
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Any
+from typing import Any, Callable, Dict, List, Optional, Set, cast
 
 logger = logging.getLogger(__name__)
+
+
+_HERMES_UI_FENCE_RE = re.compile(
+    r"```hermes-ui[ \t]*\r?\n(?P<payload>[\s\S]*?)\r?\n?```",
+    re.IGNORECASE,
+)
+_HEBREW_TEXT_RE = re.compile(r"[\u0590-\u05ff]")
+
+
+def _telegram_display_line(value: object) -> str:
+    """Return a clean display line, with RTL direction pinned for Hebrew."""
+    text = str(value or "").strip()
+    if text and _HEBREW_TEXT_RE.search(text):
+        return f"\u200f{text}"
+    return text
+
+
+def _render_hermes_ui_payload_for_telegram(content: str) -> tuple[str, list[str]]:
+    """Render desktop-only ``hermes-ui`` artifacts as Telegram Markdown.
+
+    Telegram cannot interpret Hermes' interactive JSON fences.  Keeping this
+    conversion at the adapter boundary protects ordinary replies, cron
+    delivery through the live gateway, and callers using ``adapter.send``.
+    Malformed artifacts are dropped instead of exposing implementation JSON.
+    """
+    text = str(content or "")
+    if "hermes-ui" not in text.lower():
+        return text, []
+
+    interactive_choices: list[str] = []
+
+    def _render(match: re.Match[str]) -> str:
+        try:
+            artifact = json.loads(match.group("payload"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ""
+        if not isinstance(artifact, dict):
+            return ""
+
+        lines: list[str] = []
+        title = _telegram_display_line(artifact.get("title"))
+        if title:
+            lines.append(f"**{title}**")
+
+        description = _telegram_display_line(
+            artifact.get("description") or artifact.get("prompt")
+        )
+        if description:
+            lines.append(description)
+
+        fields = artifact.get("fields")
+        if isinstance(fields, list):
+            for field in fields:
+                if not isinstance(field, dict):
+                    continue
+                label = _telegram_display_line(
+                    field.get("label") or field.get("title")
+                )
+                if label:
+                    if lines:
+                        lines.append("")
+                    lines.append(f"**{label}**")
+                options = field.get("options")
+                if not isinstance(options, list):
+                    continue
+                for option in options:
+                    if isinstance(option, dict):
+                        option = option.get("label") or option.get("value")
+                    option_text = _telegram_display_line(option)
+                    if option_text:
+                        lines.append(f"• {option_text}")
+                        plain_option = str(option or "").strip()
+                        if (
+                            field.get("type") == "single-choice"
+                            and plain_option
+                            and len(plain_option) <= 64
+                        ):
+                            interactive_choices.append(plain_option)
+
+        return "\n".join(lines).strip()
+
+    rendered = _HERMES_UI_FENCE_RE.sub(_render, text)
+    rendered = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", rendered)
+    return rendered.strip(), interactive_choices[:8]
+
+
+def _render_hermes_ui_for_telegram(content: str) -> str:
+    """Compatibility wrapper returning only Telegram-renderable text."""
+    rendered, _ = _render_hermes_ui_payload_for_telegram(content)
+    return rendered
+
+
+def _telegram_form_reply_markup(choices: list[str]):
+    """Build a one-use native keyboard whose taps become ordinary messages."""
+    normalized = [str(choice).strip() for choice in choices if str(choice).strip()]
+    if not normalized:
+        return None
+    keyboard_factory = cast(Callable[..., Any], ReplyKeyboardMarkup)
+    return keyboard_factory(
+        [[choice] for choice in normalized],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
 
 def _redact_telegram_error_text(error: object) -> str:
@@ -206,7 +309,14 @@ async def _shutdown_abandoned_app(app) -> None:
             logger.debug("Abandoned Telegram request shutdown failed", exc_info=True)
 
 try:
-    from telegram import Update, Bot, Message, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram import (
+        Update,
+        Bot,
+        Message,
+        InlineKeyboardButton,
+        InlineKeyboardMarkup,
+        ReplyKeyboardMarkup,
+    )
     try:
         from telegram import LinkPreviewOptions
     except ImportError:
@@ -229,6 +339,7 @@ except ImportError:
     Message = Any
     InlineKeyboardButton = Any
     InlineKeyboardMarkup = Any
+    ReplyKeyboardMarkup = Any
     LinkPreviewOptions = None
     Application = Any
     CommandHandler = Any
@@ -372,7 +483,7 @@ def check_telegram_requirements() -> bool:
     so the adapter's class-level type aliases get rebound.
     """
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
-    global InlineKeyboardMarkup, LinkPreviewOptions, Application
+    global InlineKeyboardMarkup, ReplyKeyboardMarkup, LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
     if TELEGRAM_AVAILABLE:
@@ -384,7 +495,11 @@ def check_telegram_requirements() -> bool:
         return False
     try:
         from telegram import Update as _Update, Bot as _Bot, Message as _Message
-        from telegram import InlineKeyboardButton as _IKB, InlineKeyboardMarkup as _IKM
+        from telegram import (
+            InlineKeyboardButton as _IKB,
+            InlineKeyboardMarkup as _IKM,
+            ReplyKeyboardMarkup as _RKM,
+        )
         try:
             from telegram import LinkPreviewOptions as _LPO
         except ImportError:
@@ -404,6 +519,7 @@ def check_telegram_requirements() -> bool:
     Message = _Message
     InlineKeyboardButton = _IKB
     InlineKeyboardMarkup = _IKM
+    ReplyKeyboardMarkup = _RKM
     LinkPreviewOptions = _LPO
     Application = _App
     CommandHandler = _CH
@@ -4000,6 +4116,9 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
+        content, form_choices = _render_hermes_ui_payload_for_telegram(content)
+        form_reply_markup = _telegram_form_reply_markup(form_choices)
+
         # getattr() — tests build adapters via object.__new__() (no __init__).
         if getattr(self, "_send_path_degraded", False):
             return SendResult(success=False, error="send_path_degraded", retryable=True)
@@ -4014,7 +4133,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # through to the legacy MarkdownV2 path on permanent/capability
             # errors or DM-topic routing skips; returns directly on success or
             # on a transient failure (which must NOT be legacy-resent).
-            if self._should_attempt_rich(content, metadata=metadata):
+            if form_reply_markup is None and self._should_attempt_rich(content, metadata=metadata):
                 rich_result = await self._try_send_rich(chat_id, content, reply_to, metadata)
                 if rich_result is not None:
                     if rich_result.success:
@@ -4127,6 +4246,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 effective_thread_id = thread_kwargs.get("message_thread_id")
 
                 msg = None
+                chunk_reply_markup = (
+                    form_reply_markup if i == len(chunks) - 1 else None
+                )
                 for _send_attempt in range(3):
                     try:
                         # Try Markdown first, fall back to plain text if it fails
@@ -4135,6 +4257,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 chat_id=normalize_telegram_chat_id(chat_id),
                                 text=chunk,
                                 parse_mode=ParseMode.MARKDOWN_V2,
+                                reply_markup=chunk_reply_markup,
                                 reply_to_message_id=reply_to_id,
                                 **thread_kwargs,
                                 **self._link_preview_kwargs(),
@@ -4149,6 +4272,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     chat_id=normalize_telegram_chat_id(chat_id),
                                     text=plain_chunk,
                                     parse_mode=None,
+                                    reply_markup=chunk_reply_markup,
                                     reply_to_message_id=reply_to_id,
                                     **thread_kwargs,
                                     **self._link_preview_kwargs(),

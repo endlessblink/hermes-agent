@@ -1235,6 +1235,32 @@ class TestSendTelegramHtmlDetection:
         kwargs = bot.send_message.await_args.kwargs
         assert kwargs["parse_mode"] == "MarkdownV2"
 
+    def test_standalone_cron_send_renders_hermes_ui_form(self, monkeypatch):
+        bot = self._make_bot()
+        _install_telegram_mock(monkeypatch, bot)
+        content = """Today's briefing.
+```hermes-ui
+{"type":"form","title":"Capacity?","fields":[{"label":"Choose","type":"single-choice","options":["High","Low"]}]}
+```"""
+
+        with patch(
+            "plugins.platforms.telegram.adapter.ReplyKeyboardMarkup",
+            side_effect=lambda keyboard, **kwargs: {"keyboard": keyboard, **kwargs},
+        ):
+            asyncio.run(_send_telegram("tok", "123", content))
+
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["parse_mode"] == "MarkdownV2"
+        assert "Today's briefing" in kwargs["text"]
+        assert "Capacity?" in kwargs["text"]
+        assert "High" in kwargs["text"]
+        assert "Low" in kwargs["text"]
+        assert "hermes-ui" not in kwargs["text"]
+        assert '"type"' not in kwargs["text"]
+        keyboard = kwargs["reply_markup"]
+        assert keyboard["keyboard"] == [["High"], ["Low"]]
+        assert keyboard["one_time_keyboard"] is True
+
     def test_disable_link_previews_sets_disable_web_page_preview(self, monkeypatch):
         bot = self._make_bot()
         _install_telegram_mock(monkeypatch, bot)

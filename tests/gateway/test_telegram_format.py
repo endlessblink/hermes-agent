@@ -8,7 +8,7 @@ or corrupt user-visible content.
 import re
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -38,6 +38,7 @@ _ensure_telegram_mock()
 from plugins.platforms.telegram.adapter import (  # noqa: E402
     TelegramAdapter,
     _escape_mdv2,
+    _render_hermes_ui_for_telegram,
     _strip_mdv2,
     _wrap_markdown_tables,
 )
@@ -109,6 +110,62 @@ class TestFormatMessageBasic:
     def test_plain_text_no_markdown(self, adapter):
         result = adapter.format_message("Hello world")
         assert result == "Hello world"
+
+
+class TestHermesUiTelegramRendering:
+    def test_form_becomes_readable_telegram_markdown(self):
+        content = """בוקר טוב — תמונת היום בקצרה.
+
+```hermes-ui
+{"type":"form","direction":"rtl","id":"morning-capacity","title":"מה הקיבולת שלך היום?","fields":[{"id":"capacity","label":"בחר אפשרות","type":"single-choice","required":true,"options":["גבוהה","בינונית","נמוכה"]}],"submitLabel":"שלח"}
+```"""
+
+        rendered = _render_hermes_ui_for_telegram(content)
+
+        assert "בוקר טוב — תמונת היום בקצרה." in rendered
+        assert "**\u200fמה הקיבולת שלך היום?**" in rendered
+        assert "**\u200fבחר אפשרות**" in rendered
+        assert "• \u200fגבוהה" in rendered
+        assert "• \u200fבינונית" in rendered
+        assert "• \u200fנמוכה" in rendered
+        assert "hermes-ui" not in rendered
+        assert '"type":"form"' not in rendered
+        assert "```" not in rendered
+
+    def test_invalid_artifact_is_removed_instead_of_leaking_json(self):
+        content = "Before\n```hermes-ui\n{broken json}\n```\nAfter"
+
+        rendered = _render_hermes_ui_for_telegram(content)
+
+        assert rendered == "Before\n\nAfter"
+        assert "broken json" not in rendered
+
+    @pytest.mark.asyncio
+    async def test_send_never_exposes_raw_form_artifact(self, adapter):
+        adapter._bot = MagicMock()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
+        adapter._bot.send_chat_action = AsyncMock()
+        adapter._rich_messages_enabled = False
+        content = """```hermes-ui
+{"type":"form","title":"Capacity?","fields":[{"label":"Choose","type":"single-choice","options":["High","Low"]}]}
+```"""
+
+        with patch(
+            "plugins.platforms.telegram.adapter.ReplyKeyboardMarkup",
+            side_effect=lambda keyboard, **kwargs: {"keyboard": keyboard, **kwargs},
+        ):
+            result = await adapter.send("12345", content, metadata={"notify": True})
+
+        assert result.success is True
+        sent_text = adapter._bot.send_message.await_args.kwargs["text"]
+        assert "Capacity?" in sent_text
+        assert "High" in sent_text
+        assert "Low" in sent_text
+        assert "hermes-ui" not in sent_text
+        assert '"type"' not in sent_text
+        keyboard = adapter._bot.send_message.await_args.kwargs["reply_markup"]
+        assert keyboard["keyboard"] == [["High"], ["Low"]]
+        assert keyboard["one_time_keyboard"] is True
 
 
 # =========================================================================
