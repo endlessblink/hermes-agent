@@ -32,6 +32,12 @@ _MONITOR_DISPOSITIONS = {
 _TERMINAL_MONITOR_DISPOSITIONS = {"suppressed", "handled"}
 _SENSITIVE_KEY_PARTS = ("authorization", "cookie", "password", "secret", "token")
 _TASK_EVENT_KINDS = {"blocker", "changed_high_priority"}
+_PROTECTED_ITEM_KINDS = {"project", "commitment"}
+_PROTECTED_DISPOSITIONS = {
+    "actionable", "waiting", "deferred", "needs_context", "completed", "cancelled",
+}
+_SOURCE_COVERAGE_STATUSES = {"fresh", "partial", "stale", "unavailable"}
+COVERAGE_RECEIPT_LIMIT = 32
 
 
 def _bounded_identifier(value: Any, label: str, *, limit: int = 160) -> str:
@@ -240,6 +246,172 @@ def _safe_context_ledger(raw: Any) -> list[dict[str, Any]]:
     return safe
 
 
+def _optional_bounded_text(value: Any, label: str, *, limit: int = 2_000) -> str | None:
+    if value is None:
+        return None
+    return _bounded_identifier(value, label, limit=limit)
+
+
+def _bounded_string_list(value: Any, label: str, *, limit: int = 64) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > limit:
+        raise ValueError(f"{label} must be a list of at most {limit} identifiers")
+    return list(dict.fromkeys(_bounded_identifier(item, label) for item in value))
+
+
+def _validate_protected_item(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("protected item must be an object")
+    item = {
+        "id": _bounded_identifier(raw.get("id"), "protected item id", limit=300),
+        "source": _bounded_identifier(raw.get("source"), "protected item source", limit=100),
+        "sourceId": _bounded_identifier(raw.get("sourceId"), "protected item source id", limit=300),
+        "kind": _bounded_identifier(raw.get("kind"), "protected item kind", limit=40),
+        "title": _bounded_identifier(raw.get("title"), "protected item title", limit=1_000),
+        "consequence": _bounded_identifier(
+            raw.get("consequence"), "protected item consequence", limit=2_000
+        ),
+        "disposition": _bounded_identifier(
+            raw.get("disposition"), "protected item disposition", limit=40
+        ),
+        "nextAction": _optional_bounded_text(raw.get("nextAction"), "protected item next action"),
+        "dependencyIds": _bounded_string_list(
+            raw.get("dependencyIds"), "protected item dependency id"
+        ),
+        "missingFields": _bounded_string_list(
+            raw.get("missingFields"), "protected item missing field"
+        ),
+        "deferralReason": _optional_bounded_text(
+            raw.get("deferralReason"), "protected item deferral reason"
+        ),
+        "deadline": raw.get("deadline"),
+        "nextReviewAt": raw.get("nextReviewAt"),
+        "sourceRevision": _optional_bounded_text(
+            raw.get("sourceRevision"), "protected item source revision", limit=300
+        ),
+        "verifiedAt": raw.get("verifiedAt"),
+    }
+    if item["kind"] not in _PROTECTED_ITEM_KINDS:
+        raise ValueError("protected item kind must be project or commitment")
+    disposition = item["disposition"]
+    if disposition not in _PROTECTED_DISPOSITIONS:
+        raise ValueError("protected item disposition is invalid")
+    for field in ("deadline", "nextReviewAt", "verifiedAt"):
+        if item[field] is not None:
+            item[field] = _iso_timestamp(item[field], f"protected item {field}")
+    if disposition == "actionable" and not item["nextAction"]:
+        raise ValueError("actionable protected item requires a next action")
+    if disposition == "waiting" and (
+        not item["dependencyIds"] or not item["nextReviewAt"]
+    ):
+        raise ValueError("waiting protected item requires dependencies and a next review")
+    if disposition == "deferred" and (
+        not item["deferralReason"] or not item["nextReviewAt"]
+    ):
+        raise ValueError("deferred protected item requires a reason and a next review")
+    if disposition == "needs_context" and (
+        not item["missingFields"] or not item["nextReviewAt"]
+    ):
+        raise ValueError("protected item needing context requires missing fields and a next review")
+    if disposition in {"completed", "cancelled"} and not item["verifiedAt"]:
+        raise ValueError("completed or cancelled protected item requires verification")
+    return item
+
+
+def _safe_protected_items(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    safe: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in raw:
+        try:
+            item = _validate_protected_item(value)
+        except ValueError:
+            continue
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        safe.append(item)
+    return safe
+
+
+def _build_coverage_receipt(
+    *,
+    cadence: str,
+    scope_fingerprint: str,
+    sources: list[dict[str, Any]],
+    expected_item_ids: list[str],
+    reviewed_item_ids: list[str],
+    risk_item_ids: list[str],
+    unresolved_item_ids: list[str],
+) -> tuple[dict[str, Any], set[str]]:
+    if cadence not in {"daily", "weekly"}:
+        raise ValueError("coverage cadence must be daily or weekly")
+    fingerprint = _bounded_identifier(
+        scope_fingerprint, "coverage scope fingerprint", limit=500
+    )
+    if not isinstance(sources, list) or not sources or len(sources) > 20:
+        raise ValueError("coverage sources must be a non-empty list of at most 20 items")
+    safe_sources: list[dict[str, Any]] = []
+    source_ids: set[str] = set()
+    blocking_reasons: list[str] = []
+    for raw in sources:
+        if not isinstance(raw, dict):
+            raise ValueError("coverage source must be an object")
+        source_id = _bounded_identifier(raw.get("id"), "coverage source id", limit=200)
+        if source_id in source_ids:
+            raise ValueError(f"duplicate coverage source: {source_id}")
+        source_ids.add(source_id)
+        status = _bounded_identifier(raw.get("status"), "coverage source status", limit=40)
+        if status not in _SOURCE_COVERAGE_STATUSES:
+            raise ValueError("coverage source status is invalid")
+        revision = _optional_bounded_text(
+            raw.get("revision"), "coverage source revision", limit=300
+        )
+        safe_sources.append({"id": source_id, "status": status, "revision": revision})
+        if status != "fresh":
+            blocking_reasons.append(f"source {source_id} is {status}")
+
+    expected = _bounded_string_list(expected_item_ids, "expected protected item id", limit=500)
+    reviewed = _bounded_string_list(reviewed_item_ids, "reviewed protected item id", limit=500)
+    risks = _bounded_string_list(risk_item_ids, "risk protected item id", limit=500)
+    unresolved = _bounded_string_list(
+        unresolved_item_ids, "unresolved protected item id", limit=500
+    )
+    expected_set = set(expected)
+    for label, values in (
+        ("reviewed", reviewed), ("risk", risks), ("unresolved", unresolved)
+    ):
+        outside = sorted(set(values) - expected_set)
+        if outside:
+            raise ValueError(f"{label} item is outside the protected review scope: {outside[0]}")
+    missing = sorted(expected_set - set(reviewed))
+    if missing:
+        noun = "item was" if len(missing) == 1 else "items were"
+        blocking_reasons.append(f"{len(missing)} protected {noun} not reviewed")
+    if unresolved:
+        noun = "item has" if len(unresolved) == 1 else "items have"
+        blocking_reasons.append(f"{len(unresolved)} protected {noun} unresolved context")
+
+    receipt = {
+        "id": uuid4().hex,
+        "cadence": cadence,
+        "scopeFingerprint": fingerprint,
+        "sources": safe_sources,
+        "expectedItemIds": expected,
+        "reviewedItemIds": reviewed,
+        "missingItemIds": missing,
+        "riskItemIds": risks,
+        "unresolvedItemIds": unresolved,
+        "blockingReasons": blocking_reasons,
+        "complete": not blocking_reasons,
+        "allClear": not blocking_reasons and not risks,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    return receipt, expected_set
+
+
 def _default() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -255,6 +427,8 @@ def _default() -> dict[str, Any]:
         },
         "episode_summaries": [],
         "context_ledger": [],
+        "protected_items": [],
+        "coverage_receipts": [],
         "pending_approvals": [],
         "pending_proposals": [],
         "sync_status": {"status": "unknown", "updated_at": None, "detail": None},
@@ -291,6 +465,10 @@ class PersonalAssistantStateStore:
             state.update(raw)
         state["schema_version"] = SCHEMA_VERSION
         state["context_ledger"] = _safe_context_ledger(state.get("context_ledger"))
+        state["protected_items"] = _safe_protected_items(state.get("protected_items"))
+        if not isinstance(state.get("coverage_receipts"), list):
+            state["coverage_receipts"] = []
+        state["coverage_receipts"] = state["coverage_receipts"][-COVERAGE_RECEIPT_LIMIT:]
         return state
 
     def read(self) -> dict[str, Any]:
@@ -310,6 +488,109 @@ class PersonalAssistantStateStore:
 
     def set_canonical_session(self, session_id: str | None) -> dict[str, Any]:
         return self.update(lambda state: state.__setitem__("canonical_session_id", session_id))
+
+    def upsert_protected_item(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Persist a protected project or commitment only with a safe disposition."""
+
+        item = _validate_protected_item(raw)
+
+        def mutate(state: dict[str, Any]) -> None:
+            items = _safe_protected_items(state.get("protected_items"))
+            index = next(
+                (i for i, existing in enumerate(items) if existing["id"] == item["id"]),
+                None,
+            )
+            if index is None:
+                items.append(copy.deepcopy(item))
+            else:
+                items[index] = copy.deepcopy(item)
+            state["protected_items"] = items
+
+        return self.update(mutate)
+
+    def record_coverage_receipt(
+        self,
+        *,
+        cadence: str,
+        scope_fingerprint: str,
+        sources: list[dict[str, Any]],
+        expected_item_ids: list[str],
+        reviewed_item_ids: list[str],
+        risk_item_ids: list[str],
+        unresolved_item_ids: list[str],
+    ) -> dict[str, Any]:
+        """Record deterministic proof of what a daily or weekly safety sweep covered."""
+        receipt, expected_set = _build_coverage_receipt(
+            cadence=cadence,
+            scope_fingerprint=scope_fingerprint,
+            sources=sources,
+            expected_item_ids=expected_item_ids,
+            reviewed_item_ids=reviewed_item_ids,
+            risk_item_ids=risk_item_ids,
+            unresolved_item_ids=unresolved_item_ids,
+        )
+
+        def mutate(state: dict[str, Any]) -> None:
+            registered = {item["id"] for item in _safe_protected_items(state.get("protected_items"))}
+            unknown = sorted(expected_set - registered)
+            if unknown:
+                raise ValueError(f"protected item is not registered: {unknown[0]}")
+            receipts = state.setdefault("coverage_receipts", [])
+            receipts.append(copy.deepcopy(receipt))
+            del receipts[:-COVERAGE_RECEIPT_LIMIT]
+
+        self.update(mutate)
+        return copy.deepcopy(receipt)
+
+    def record_safety_review(
+        self,
+        *,
+        protected_items: list[dict[str, Any]],
+        cadence: str,
+        scope_fingerprint: str,
+        sources: list[dict[str, Any]],
+        reviewed_item_ids: list[str],
+        risk_item_ids: list[str],
+        unresolved_item_ids: list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically merge protected scope and persist its deterministic receipt."""
+
+        if not isinstance(protected_items, list) or len(protected_items) > 500:
+            raise ValueError("protectedItems must be a list of at most 500 items")
+        validated = [_validate_protected_item(item) for item in protected_items]
+        submitted_ids = [item["id"] for item in validated]
+        if len(submitted_ids) != len(set(submitted_ids)):
+            raise ValueError("protectedItems contains duplicate ids")
+        result: dict[str, Any] = {}
+
+        def mutate(state: dict[str, Any]) -> None:
+            existing = _safe_protected_items(state.get("protected_items"))
+            by_id = {item["id"]: item for item in existing}
+            for item in validated:
+                by_id[item["id"]] = copy.deepcopy(item)
+            merged = list(by_id.values())
+            active_ids = [
+                item["id"]
+                for item in merged
+                if item["disposition"] not in {"completed", "cancelled"}
+            ]
+            receipt, _ = _build_coverage_receipt(
+                cadence=cadence,
+                scope_fingerprint=scope_fingerprint,
+                sources=sources,
+                expected_item_ids=active_ids,
+                reviewed_item_ids=reviewed_item_ids,
+                risk_item_ids=risk_item_ids,
+                unresolved_item_ids=unresolved_item_ids,
+            )
+            state["protected_items"] = merged
+            receipts = state.setdefault("coverage_receipts", [])
+            receipts.append(copy.deepcopy(receipt))
+            del receipts[:-COVERAGE_RECEIPT_LIMIT]
+            result.update(receipt)
+
+        state = self.update(mutate)
+        return state, copy.deepcopy(result)
 
     def append_episode(
         self, *, trigger: str, user_intent: str, idempotency_key: str | None = None
@@ -623,5 +904,9 @@ def public_state(state: dict[str, Any]) -> dict[str, Any]:
         "unreadCount": int(state.get("unreadCount") or 0),
         "episodes": copy.deepcopy(state.get("episode_summaries") or []),
         "contextLedger": copy.deepcopy(_safe_context_ledger(state.get("context_ledger"))),
+        "protectedItems": copy.deepcopy(_safe_protected_items(state.get("protected_items"))),
+        "latestCoverageReceipt": copy.deepcopy(
+            (state.get("coverage_receipts") or [None])[-1]
+        ),
         "source": copy.deepcopy(state.get("durableSource") or {"kind": "obsidian", "version": 0, "hash": None}),
     }

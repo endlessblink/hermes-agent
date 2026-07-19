@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     DESKTOP_QUESTIONNAIRE_GUIDANCE,
+    TELEGRAM_INTERACTIVE_GUIDANCE,
     FLOWSTATE_TOOL_USE_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
@@ -289,6 +290,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _truthy = {"1", "true", "yes"}
     if platform_key == "desktop" or (os.getenv("HERMES_DESKTOP") or "").strip().lower() in _truthy:
         stable_parts.append(DESKTOP_QUESTIONNAIRE_GUIDANCE)
+    elif platform_key == "telegram":
+        stable_parts.append(TELEGRAM_INTERACTIVE_GUIDANCE)
 
     nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
     if nous_subscription_prompt:

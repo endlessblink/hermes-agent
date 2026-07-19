@@ -22,6 +22,20 @@ export interface AssistantPendingItem extends AssistantStateItem {
   status?: string
 }
 
+export interface AssistantCoverageReceipt {
+  id: string
+  cadence: 'daily' | 'weekly'
+  expectedItemIds: string[]
+  reviewedItemIds: string[]
+  missingItemIds: string[]
+  riskItemIds: string[]
+  unresolvedItemIds: string[]
+  blockingReasons: string[]
+  complete: boolean
+  allClear: boolean
+  createdAt: string
+}
+
 export interface AssistantState {
   schemaVersion: 1
   version: number
@@ -42,12 +56,15 @@ export interface AssistantState {
   }
   unreadCount: number
   episodes: AssistantStateItem[]
+  protectedItems?: AssistantStateItem[]
+  latestCoverageReceipt?: AssistantCoverageReceipt | null
 }
 
 export type AssistantStateSection =
   | 'blockers'
   | 'capacity'
   | 'commitments'
+  | 'captureProposals'
   | 'deferred'
   | 'focus'
   | 'outcomes'
@@ -80,7 +97,10 @@ function storePersonalAssistantState(state: AssistantState): AssistantState {
   }
 
   $personalAssistantState.set(state)
-  $personalAssistantPendingCount.set((state.pendingApprovals?.length ?? 0) + (state.captureProposals?.length ?? 0))
+  $personalAssistantPendingCount.set(
+    (state.pendingApprovals?.filter(item => !item.status || item.status === 'pending').length ?? 0) +
+      (state.captureProposals?.filter(item => !item.status || item.status === 'pending').length ?? 0)
+  )
 
   return state
 }

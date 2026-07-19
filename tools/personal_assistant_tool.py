@@ -369,6 +369,25 @@ def _handle_reconcile_inventory(args: dict, **kwargs) -> str:
     )
 
 
+def _handle_safety_review(args: dict, **kwargs) -> str:
+    """Persist the protected scope and proof that the current review covered it."""
+
+    try:
+        store = _store()
+        state, receipt = store.record_safety_review(
+            protected_items=args.get("protectedItems"),
+            cadence=str(args.get("cadence") or ""),
+            scope_fingerprint=str(args.get("scopeFingerprint") or ""),
+            sources=args.get("sources"),
+            reviewed_item_ids=args.get("reviewedItemIds"),
+            risk_item_ids=args.get("riskItemIds"),
+            unresolved_item_ids=args.get("unresolvedItemIds"),
+        )
+        return _result({"receipt": receipt, "stateVersion": state["version"]})
+    except Exception as exc:
+        return _error(exc)
+
+
 GET_STATE_SCHEMA = {
     "name": "personal_assistant_get_state",
     "description": "Read the persistent office-work assistant's current working picture and pending decisions.",
@@ -421,6 +440,91 @@ RECONCILE_INVENTORY_SCHEMA = {
             },
         },
         "required": ["inventoryQuestion", "sources"],
+    },
+}
+
+SAFETY_REVIEW_SCHEMA = {
+    "name": "personal_assistant_safety_review",
+    "description": (
+        "Atomically persist the protected active-project and commitment scope plus a coverage "
+        "receipt. Use this after fresh source reads and before giving a daily or weekly plan. "
+        "The result can be all-clear only when every protected item was reviewed and every "
+        "source was fresh. Existing active protected items omitted from the review remain visible."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "cadence": {"type": "string", "enum": ["daily", "weekly"]},
+            "scopeFingerprint": {"type": "string", "minLength": 1, "maxLength": 500},
+            "sources": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "minLength": 1, "maxLength": 200},
+                        "status": {
+                            "type": "string",
+                            "enum": ["fresh", "partial", "stale", "unavailable"],
+                        },
+                        "revision": {"type": ["string", "null"], "maxLength": 300},
+                    },
+                    "required": ["id", "status"],
+                },
+            },
+            "protectedItems": {
+                "type": "array",
+                "maxItems": 500,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "source": {"type": "string", "minLength": 1, "maxLength": 100},
+                        "sourceId": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "kind": {"type": "string", "enum": ["project", "commitment"]},
+                        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+                        "consequence": {"type": "string", "minLength": 1, "maxLength": 2000},
+                        "disposition": {
+                            "type": "string",
+                            "enum": [
+                                "actionable", "waiting", "deferred", "needs_context",
+                                "completed", "cancelled",
+                            ],
+                        },
+                        "nextAction": {"type": ["string", "null"], "maxLength": 2000},
+                        "dependencyIds": {
+                            "type": "array", "maxItems": 64, "items": {"type": "string"}
+                        },
+                        "missingFields": {
+                            "type": "array", "maxItems": 64, "items": {"type": "string"}
+                        },
+                        "deferralReason": {"type": ["string", "null"], "maxLength": 2000},
+                        "deadline": {"type": ["string", "null"]},
+                        "nextReviewAt": {"type": ["string", "null"]},
+                        "sourceRevision": {"type": ["string", "null"], "maxLength": 300},
+                        "verifiedAt": {"type": ["string", "null"]},
+                    },
+                    "required": [
+                        "id", "source", "sourceId", "kind", "title", "consequence",
+                        "disposition",
+                    ],
+                },
+            },
+            "reviewedItemIds": {
+                "type": "array", "maxItems": 500, "items": {"type": "string"}
+            },
+            "riskItemIds": {
+                "type": "array", "maxItems": 500, "items": {"type": "string"}
+            },
+            "unresolvedItemIds": {
+                "type": "array", "maxItems": 500, "items": {"type": "string"}
+            },
+        },
+        "required": [
+            "cadence", "scopeFingerprint", "sources", "protectedItems",
+            "reviewedItemIds", "riskItemIds", "unresolvedItemIds",
+        ],
     },
 }
 
@@ -543,6 +647,11 @@ for _name, _schema, _handler in (
         "personal_assistant_reconcile_inventory",
         RECONCILE_INVENTORY_SCHEMA,
         _handle_reconcile_inventory,
+    ),
+    (
+        "personal_assistant_safety_review",
+        SAFETY_REVIEW_SCHEMA,
+        _handle_safety_review,
     ),
     ("personal_assistant_propose_capture", PROPOSE_CAPTURE_SCHEMA, _handle_propose_capture),
     ("personal_assistant_state_change", STATE_CHANGE_SCHEMA, _handle_state_change),

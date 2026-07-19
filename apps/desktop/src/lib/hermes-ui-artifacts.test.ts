@@ -93,6 +93,50 @@ describe('form artifacts', () => {
     ])
   })
 
+  it('preserves first-class custom-answer settings on choice fields', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        fields: [
+          {
+            allowCustomAnswer: true,
+            customAnswerLabel: 'Something else',
+            id: 'priority',
+            label: 'What matters most?',
+            options: ['Health', 'Work'],
+            required: true,
+            type: 'single-choice'
+          }
+        ],
+        id: 'priority-check',
+        type: 'form'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'form' && result.artifact.fields[0]).toMatchObject({
+      allowCustomAnswer: true,
+      customAnswerLabel: 'Something else'
+    })
+  })
+
+  it('rejects custom-answer settings on non-choice fields', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        fields: [
+          {
+            allowCustomAnswer: true,
+            id: 'note',
+            label: 'Note',
+            type: 'short-text'
+          }
+        ],
+        type: 'form'
+      })
+    )
+
+    expect(result).toEqual({ error: 'fields[0].allowCustomAnswer is only valid for choice fields', ok: false })
+  })
+
   it('rejects fields outside the bounded form schema', () => {
     const result = parseHermesUiArtifact(
       JSON.stringify({
@@ -866,17 +910,20 @@ describe('parseHermesUiArtifact', () => {
   it('parses a mini-kanban artifact', () => {
     const result = parseHermesUiArtifact(
       JSON.stringify({
-        lanes: [
-          { id: 'today', tasks: [{ confidence: 'medium', id: 't1', title: 'טיוטה ללקוח' }], title: 'היום' },
-          { id: 'need-context', tasks: [{ id: 't2', note: 'צריך להבין משמעות', title: 'בדיקות' }], title: 'צריך הקשר' }
-        ],
+        actions: [{ id: 'revise-week', label: 'לתקן את השבוע', submitText: 'אני רוצה לתקן את טיוטת השבוע.' }],
+        lanes: Array.from({ length: 8 }, (_, index) => ({
+          id: `day-${index}`,
+          tasks: index === 0 ? [{ confidence: 'medium', id: 't1', title: 'טיוטה ללקוח' }] : [],
+          title: `יום ${index + 1}`
+        })),
         title: 'מיון קצר',
         type: 'mini-kanban'
       })
     )
 
     expect(result.ok).toBe(true)
-    expect(result.ok && result.artifact.type === 'mini-kanban' && result.artifact.lanes[1]?.id).toBe('need-context')
+    expect(result.ok && result.artifact.type === 'mini-kanban' && result.artifact.lanes).toHaveLength(8)
+    expect(result.ok && result.artifact.type === 'mini-kanban' && result.artifact.actions?.[0]?.id).toBe('revise-week')
   })
 
   it('parses a day-timeline artifact', () => {

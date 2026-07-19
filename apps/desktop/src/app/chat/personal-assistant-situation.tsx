@@ -8,12 +8,117 @@ import {
   $personalAssistantState,
   acknowledgePersonalAssistantRead,
   type AssistantStateItem,
+  type AssistantPendingItem,
   type AssistantStateSection,
   patchPersonalAssistantState
 } from '@/store/personal-assistant'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 
 const itemLabel = (item: AssistantStateItem) => item.title || item.summary || item.id
+
+const learningSection = (item: AssistantPendingItem): 'commitments' | 'outcomes' | 'preferences' | null => {
+  const section = item.section
+
+  return section === 'commitments' || section === 'outcomes' || section === 'preferences' ? section : null
+}
+
+function CaptureProposalItem({ item }: { item: AssistantPendingItem }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(itemLabel(item))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const section = learningSection(item)
+  const singular = section === 'commitments' ? 'commitment' : section === 'outcomes' ? 'outcome' : 'preference'
+
+  const review = async (status: 'accepted' | 'rejected') => {
+    if (status === 'accepted' && (!section || !draft.trim())) {
+      setError('This proposal is missing a valid learning category or title.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      await patchPersonalAssistantState(
+        status === 'accepted' && section
+          ? [
+              {
+                id: item.id,
+                op: 'upsert',
+                section,
+                value: { ...item, status: 'accepted', title: draft.trim() }
+              },
+              {
+                id: item.id,
+                op: 'upsert',
+                section: 'captureProposals',
+                value: { ...item, status: 'accepted', title: draft.trim() }
+              }
+            ]
+          : [
+              {
+                id: item.id,
+                op: 'upsert',
+                section: 'captureProposals',
+                value: { ...item, status: 'rejected', title: draft.trim() }
+              }
+            ]
+      )
+      setEditing(false)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The proposal could not be reviewed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <li className="rounded border border-(--ui-stroke-tertiary) px-1.5 py-1 text-start" dir="auto">
+      {editing ? (
+        <input
+          aria-label={`Edit ${itemLabel(item)}`}
+          autoFocus
+          className="w-full rounded border border-(--ui-stroke-secondary) bg-transparent px-1.5 py-1 text-xs outline-none focus:border-primary"
+          onChange={event => setDraft(event.target.value)}
+          value={draft}
+        />
+      ) : (
+        <span className="block text-xs">{draft}</span>
+      )}
+      <div className="mt-1 flex flex-wrap gap-1">
+        <Button
+          aria-label={`Accept learned ${singular}`}
+          disabled={busy || !section || !draft.trim()}
+          onClick={() => void review('accepted')}
+          size="xs"
+          type="button"
+        >
+          Accept
+        </Button>
+        <Button
+          aria-label={`Edit ${itemLabel(item)}`}
+          disabled={busy}
+          onClick={() => setEditing(value => !value)}
+          size="xs"
+          type="button"
+          variant="ghost"
+        >
+          Edit
+        </Button>
+        <Button
+          aria-label={`Reject learned ${singular}`}
+          disabled={busy}
+          onClick={() => void review('rejected')}
+          size="xs"
+          type="button"
+          variant="ghost"
+        >
+          Reject
+        </Button>
+      </div>
+      {error && <p className="mt-1 text-[0.6875rem] text-destructive">{error}</p>}
+    </li>
+  )
+}
 
 function SituationItem({ item, section }: { item: AssistantStateItem; section: AssistantStateSection }) {
   const [expanded, setExpanded] = useState(false)
@@ -197,6 +302,9 @@ export function PersonalAssistantSituation() {
     return null
   }
 
+  const pendingApprovals = state.pendingApprovals.filter(item => !item.status || item.status === 'pending')
+  const captureProposals = state.captureProposals.filter(item => !item.status || item.status === 'pending')
+
   return (
     <aside
       className="relative z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background)"
@@ -225,6 +333,40 @@ export function PersonalAssistantSituation() {
       </button>
       {open && (
         <div className="grid max-h-[min(42vh,24rem)] grid-cols-1 gap-3 overflow-auto px-3 pb-3 sm:grid-cols-2 xl:grid-cols-3">
+          <section aria-label="Protected safety sweep" className="min-w-0">
+            <h3 className="mb-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-(--ui-text-tertiary)">
+              Safety sweep
+            </h3>
+            {state.latestCoverageReceipt ? (
+              <>
+                <p className="text-xs">
+                  {state.latestCoverageReceipt.reviewedItemIds.length} protected{' '}
+                  {state.latestCoverageReceipt.reviewedItemIds.length === 1 ? 'item' : 'items'} checked
+                </p>
+                <p
+                  className={cn(
+                    'mt-1 text-xs font-medium',
+                    state.latestCoverageReceipt.complete && state.latestCoverageReceipt.riskItemIds.length === 0
+                      ? 'text-success'
+                      : 'text-warning'
+                  )}
+                >
+                  {state.latestCoverageReceipt.complete
+                    ? `${state.latestCoverageReceipt.riskItemIds.length} needs attention`
+                    : 'Safety sweep incomplete'}
+                </p>
+                {!state.latestCoverageReceipt.complete && state.latestCoverageReceipt.blockingReasons.length > 0 && (
+                  <p className="mt-1 text-[0.6875rem] text-(--ui-text-tertiary)" dir="auto">
+                    {state.latestCoverageReceipt.blockingReasons.join(' · ')}
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-warning">
+                Unverified · {(state.protectedItems ?? []).length} protected
+              </p>
+            )}
+          </section>
           <SituationSection items={state.outcomes} section="outcomes" title="Outcomes" />
           <SituationSection items={state.commitments} section="commitments" title="Commitments" />
           <section aria-label="Capacity and focus">
@@ -251,11 +393,11 @@ export function PersonalAssistantSituation() {
               Pending
             </h3>
             <p className="text-xs">
-              {state.pendingApprovals.length} approvals · {state.captureProposals.length} proposals
+              {pendingApprovals.length} approvals · {captureProposals.length} proposals
             </p>
-            {[...state.pendingApprovals, ...state.captureProposals].length > 0 && (
+            {pendingApprovals.length > 0 && (
               <ul className="mt-1 space-y-1 text-xs">
-                {[...state.pendingApprovals, ...state.captureProposals].map(item => (
+                {pendingApprovals.map(item => (
                   <li
                     className="rounded border border-(--ui-stroke-tertiary) px-1.5 py-1 text-start"
                     dir="auto"
@@ -263,6 +405,13 @@ export function PersonalAssistantSituation() {
                   >
                     {itemLabel(item)}
                   </li>
+                ))}
+              </ul>
+            )}
+            {captureProposals.length > 0 && (
+              <ul className="mt-1 space-y-1">
+                {captureProposals.map(item => (
+                  <CaptureProposalItem item={item} key={item.id} />
                 ))}
               </ul>
             )}

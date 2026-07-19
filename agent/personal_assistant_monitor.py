@@ -167,7 +167,17 @@ def _normalize_context(raw: Mapping[str, Any]) -> dict[str, Any]:
     pressure = payload.get("taskPressure")
     safe_pressure = {}
     if isinstance(pressure, Mapping):
-        for key in ("overdue", "dueToday", "dueSoon"):
+        for key in (
+            "todayCount",
+            "overdueCount",
+            "noDateCount",
+            "highPriorityOpenCount",
+            # Retain legacy snapshots until every installed FlowState version
+            # emits the canonical assistant-context count names above.
+            "overdue",
+            "dueToday",
+            "dueSoon",
+        ):
             if isinstance(pressure.get(key), (int, float)):
                 safe_pressure[key] = pressure[key]
     drift = payload.get("scheduleDriftMinutes")
@@ -254,6 +264,8 @@ def _candidate_events(
     current: dict[str, Any],
     now: datetime,
     occurrences: dict[str, int],
+    *,
+    baseline: bool = False,
 ) -> list[dict[str, Any]]:
     events = []
 
@@ -271,16 +283,18 @@ def _candidate_events(
         occurrences[occurrence_key] = occurrence
         events.append(_event(kind, evidence, now, occurrence, subject))
 
-    before_overdue = previous.get("taskPressure", {}).get("overdue", 0)
-    after_overdue = current.get("taskPressure", {}).get("overdue", 0)
-    if after_overdue > before_overdue:
+    before_pressure = previous.get("taskPressure", {})
+    after_pressure = current.get("taskPressure", {})
+    before_overdue = before_pressure.get("overdueCount", before_pressure.get("overdue", 0))
+    after_overdue = after_pressure.get("overdueCount", after_pressure.get("overdue", 0))
+    if not baseline and after_overdue > before_overdue:
         emit("deadline_risk", {"overdue": after_overdue})
 
     before_drift = previous.get("scheduleDriftMinutes", 0)
     after_drift = current.get("scheduleDriftMinutes", 0)
     crossed_drift_threshold = abs(before_drift) < 30 <= abs(after_drift)
     materially_changed_drift = abs(after_drift) >= 30 and abs(after_drift - before_drift) >= 15
-    if crossed_drift_threshold or materially_changed_drift:
+    if not baseline and (crossed_drift_threshold or materially_changed_drift):
         emit("material_schedule_drift", {"minutes": after_drift})
 
     old_tasks = {str(task["id"]): task for task in previous.get("tasks", [])}
@@ -299,7 +313,11 @@ def _candidate_events(
         for task in current.get("tasks", [])
         if "projectId" in task and task.get("projectId") in (None, "")
     ]
-    if project_metadata_was_known and len(current_uncategorized) > len(old_uncategorized):
+    if (
+        not baseline
+        and project_metadata_was_known
+        and len(current_uncategorized) > len(old_uncategorized)
+    ):
         added = [
             {
                 "taskId": str(task["id"]),
@@ -323,12 +341,14 @@ def _candidate_events(
         old = old_tasks.get(task_id)
         blocked = bool(task.get("blocked") or task.get("blocker"))
         was_blocked = bool(old and (old.get("blocked") or old.get("blocker")))
-        if blocked and not was_blocked:
+        if not baseline and blocked and not was_blocked:
             emit(
                 "blocker",
                 {"taskId": task_id, "title": task.get("title", "")},
             )
-        if old and old.get("priority") != "high" and task.get("priority") == "high":
+        if task.get("priority") == "high" and (
+            old is None or old.get("priority") != "high"
+        ):
             emit(
                 "changed_high_priority",
                 {
@@ -425,10 +445,12 @@ def run_monitor_check(
             if isinstance(raw_occurrences, dict)
             else {}
         )
-        candidates = (
-            []
-            if not isinstance(previous, dict)
-            else _candidate_events(previous, current, checked_at, occurrences)
+        candidates = _candidate_events(
+            previous if isinstance(previous, dict) else {},
+            current,
+            checked_at,
+            occurrences,
+            baseline=not isinstance(previous, dict),
         )
         local_now = checked_at.astimezone(JERUSALEM)
         assessment_dates = state.get("scheduled_assessment_dates", [])

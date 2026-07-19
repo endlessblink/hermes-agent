@@ -195,6 +195,17 @@ def _refresh_controls(state: dict[str, Any]) -> None:
                     field_index=field_index,
                     option_index=option_index,
                 )
+            if field.get("allowCustomAnswer") is True:
+                field_id = str(field.get("id"))
+                custom = str(state.get("custom_answers", {}).get(field_id) or "")
+                custom_label = str(field.get("customAnswerLabel") or "Other answer")
+                text = f"✍️ {custom_label}" if not custom else f"✍️ {custom_label}: {custom}"
+                _append_control(
+                    state,
+                    text,
+                    "request-custom-answer",
+                    field_index=field_index,
+                )
             if field_type == "multi-choice":
                 _append_control(state, "המשך / Continue", "submit-form" if field_index == len(fields) - 1 else "next-field")
             elif selected not in (None, ""):
@@ -303,6 +314,7 @@ def prepare_interaction(
         "expires_at": now + _TTL_SECONDS,
         "current_field": 0,
         "values": values,
+        "custom_answers": {},
         "selected_items": [],
         "page": 0,
         "task_decisions": {},
@@ -435,6 +447,7 @@ def apply_control(
             field_id = str(field.get("id"))
             if kind == "select-option":
                 state["values"][field_id] = value
+                state.setdefault("custom_answers", {}).pop(field_id, None)
                 state["revision"] += 1
                 _refresh_controls(state)
                 _write(path, state)
@@ -473,6 +486,19 @@ def apply_control(
             _refresh_controls(state)
             _write(path, state)
             return InteractionResult("prompt", state, prompt=str(field.get("label") or "Answer"))
+        if kind == "request-custom-answer":
+            field = _form_fields(state)[int(control["field_index"])]
+            state["status"] = "awaiting_text"
+            state["free_text_mode"] = "custom-answer"
+            state["custom_field_index"] = int(control["field_index"])
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+            return InteractionResult(
+                "prompt",
+                state,
+                prompt=str(field.get("customAnswerLabel") or "Other answer"),
+            )
         if kind == "skip-field":
             return _advance_form(state, path)
         if kind == "previous-field":
@@ -592,7 +618,20 @@ def apply_text_reply(token: str, text: str, *, root: Path | str | None = None) -
             return InteractionResult("error", state, error="Use YYYY-MM-DD")
         if field_type == "time" and value and not _TIME_RE.fullmatch(value):
             return InteractionResult("error", state, error="Use 24-hour time HH:mm")
-        state["values"][str(field.get("id"))] = value
+        field_id = str(field.get("id"))
+        if state.get("free_text_mode") == "custom-answer":
+            prior_custom = str(state.setdefault("custom_answers", {}).get(field_id) or "")
+            if field_type == "multi-choice":
+                selected = list(state["values"].get(field_id, []))
+                selected = [entry for entry in selected if entry != prior_custom]
+                state["values"][field_id] = [*selected, value]
+            else:
+                state["values"][field_id] = value
+            state["custom_answers"][field_id] = value
+            state.pop("free_text_mode", None)
+            state.pop("custom_field_index", None)
+        else:
+            state["values"][field_id] = value
         state["prompt_message_id"] = None
         return _advance_form(state, path)
     finally:

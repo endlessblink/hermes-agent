@@ -167,8 +167,77 @@ def test_personal_assistant_toolset_exposes_state_parity_tools():
         "personal_assistant_reconcile_inventory",
         "personal_assistant_propose_capture",
         "personal_assistant_state_change",
+        "personal_assistant_safety_review",
         "suggestion_rule_save",
     }
+
+
+def test_safety_review_atomically_registers_items_and_records_coverage(monkeypatch, tmp_path):
+    import tools.personal_assistant_tool as pat
+
+    monkeypatch.setattr(pat, "_profile_context", lambda: ("office-work", tmp_path))
+    payload = {
+        "cadence": "daily",
+        "scopeFingerprint": "flowstate:sequence-42",
+        "sources": [{"id": "flowstate", "status": "fresh", "revision": "42"}],
+        "protectedItems": [
+            {
+                "id": "flowstate:health-blood-test",
+                "source": "flowstate",
+                "sourceId": "health-blood-test",
+                "kind": "commitment",
+                "title": "Arrange the required blood test",
+                "consequence": "Surgery preparation can be delayed",
+                "disposition": "actionable",
+                "nextAction": "Call the clinic",
+            }
+        ],
+        "reviewedItemIds": ["flowstate:health-blood-test"],
+        "riskItemIds": ["flowstate:health-blood-test"],
+        "unresolvedItemIds": [],
+    }
+
+    result = json.loads(pat._handle_safety_review(payload))["result"]
+    state = json.loads(pat._handle_get_state({}))["result"]["state"]
+
+    assert result["receipt"]["complete"] is True
+    assert result["receipt"]["allClear"] is False
+    assert state["protectedItems"][0]["id"] == "flowstate:health-blood-test"
+    assert state["latestCoverageReceipt"]["scopeFingerprint"] == "flowstate:sequence-42"
+
+
+def test_invalid_safety_review_does_not_partially_register_items(monkeypatch, tmp_path):
+    import tools.personal_assistant_tool as pat
+
+    monkeypatch.setattr(pat, "_profile_context", lambda: ("office-work", tmp_path))
+    result = json.loads(
+        pat._handle_safety_review(
+            {
+                "cadence": "daily",
+                "scopeFingerprint": "flowstate:sequence-42",
+                "sources": [{"id": "flowstate", "status": "fresh", "revision": "42"}],
+                "protectedItems": [
+                    {
+                        "id": "flowstate:unsafe",
+                        "source": "flowstate",
+                        "sourceId": "unsafe",
+                        "kind": "commitment",
+                        "title": "Unsafe incomplete item",
+                        "consequence": "Could be missed",
+                        "disposition": "actionable",
+                    }
+                ],
+                "reviewedItemIds": [],
+                "riskItemIds": [],
+                "unresolvedItemIds": [],
+            }
+        )
+    )
+    state = json.loads(pat._handle_get_state({}))["result"]["state"]
+
+    assert "next action" in result["error"]
+    assert state["protectedItems"] == []
+    assert state["latestCoverageReceipt"] is None
 
 
 def test_inventory_reconciliation_returns_exact_counts_only_from_complete_sources():
