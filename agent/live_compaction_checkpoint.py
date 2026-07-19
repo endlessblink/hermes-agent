@@ -1,8 +1,9 @@
 """Off-path, version-fenced context compaction checkpoints.
 
 The foreground compaction path may consume a prepared checkpoint only when the
-durable message prefix is byte-for-byte identical to the snapshot summarized by
-the worker. Messages appended while preparation runs are retained verbatim.
+durable message prefix is semantically identical to the snapshot summarized by
+the worker. Persistence-only metadata may change across a database reload;
+messages appended while preparation runs are retained verbatim.
 """
 
 from __future__ import annotations
@@ -48,7 +49,11 @@ def _messages_digest(messages: list[dict[str, Any]]) -> str:
             message = {
                 key: value
                 for key, value in message.items()
-                if key != "_db_persisted"
+                # SQLite adds ``timestamp`` when a session is reloaded, while
+                # live in-memory turns may not carry it yet. Neither field is
+                # sent to the summary model, so they must not invalidate an
+                # otherwise identical restart-safe checkpoint.
+                if key not in {"_db_persisted", "timestamp"}
             }
         normalized.append(message)
     payload = json.dumps(
