@@ -101,8 +101,8 @@ def test_checkpoint_survives_process_restart(tmp_path):
     reloaded = LiveCompactionCheckpointStore(tmp_path)
 
     restored_without_runtime_markers = [
-        _turn("user", "request"),
-        _turn("assistant", "answer"),
+        {**_turn("user", "request"), "timestamp": 1784491628.0},
+        {**_turn("assistant", "answer"), "timestamp": 1784491629.0},
     ]
     assert (
         reloaded.consume_if_current("session-a", restored_without_runtime_markers)
