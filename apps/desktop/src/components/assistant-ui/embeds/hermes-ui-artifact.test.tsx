@@ -13,7 +13,8 @@ import type {
   HermesUiPlanningFunnelArtifact,
   HermesUiTaskBreakdownArtifact,
   HermesUiTaskContextArtifact,
-  HermesUiTaskTableArtifact
+  HermesUiTaskTableArtifact,
+  HermesUiWeekPlannerArtifact
 } from '@/lib/hermes-ui-artifacts'
 
 const requestComposerSubmit = vi.fn()
@@ -38,6 +39,7 @@ import {
   TaskTableCard,
   TaskTriageArtifactCard,
   UrgencyEnergyMatrixCard,
+  WeekPlannerCard,
   WorkloadBarsCard
 } from './hermes-ui-artifact'
 import { RichCodeBlock } from './registry'
@@ -971,6 +973,35 @@ describe('Planning toolkit primitives', () => {
     type: 'day-timeline'
   }
 
+  const weekPlanner: HermesUiWeekPlannerArtifact = {
+    actions: [{ id: 'approve-week', label: 'לאשר', submitText: 'מאשר את טיוטת השבוע הזו.' }],
+    currentDate: '2026-07-19',
+    days: Array.from({ length: 7 }, (_, index) => ({
+      blocks:
+        index === 0
+          ? [
+              {
+                actions: [{ id: 'revise', label: 'לשנות', submitText: 'בוא נתקן את הבלוק הראשון.' }],
+                doneEnough: 'קובץ וידאו אמיתי שאפשר להמשיך ממנו.',
+                durationMinutes: 35,
+                id: 'robot-film',
+                kind: 'focus',
+                label: 'סרטון הרמס',
+                note: 'לפתוח את החומרים ולהקליט טייק ראשון אחד.',
+                status: 'planned'
+              }
+            ]
+          : [],
+      date: `2026-07-${String(19 + index).padStart(2, '0')}`,
+      id: `day-${index + 1}`,
+      label: ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'][index]
+    })),
+    direction: 'rtl',
+    title: 'השבוע שלי',
+    type: 'week-planner',
+    weekStart: '2026-07-19'
+  }
+
   const mutationPreview: HermesUiMutationPreviewArtifact = {
     actions: [
       { id: 'approve', label: 'מאשר את השינויים האלה', submitText: 'מאשר לבצע את preview הזה ב־FlowState.' },
@@ -1032,6 +1063,31 @@ describe('Planning toolkit primitives', () => {
     fireEvent.click(screen.getByRole('button', { name: 'השתמש בבלוק' }))
 
     expect(requestComposerSubmit).toHaveBeenCalledWith('תציג preview לבלוק הזה.', { target: 'main' })
+  })
+
+  it('renders every week-planner detail visually and routes item and week actions', async () => {
+    render(<WeekPlannerCard artifact={weekPlanner} />)
+
+    expect(screen.getByText('השבוע שלי')).toBeTruthy()
+    expect(screen.getByText('ראשון')).toBeTruthy()
+    expect(screen.getByText('שבת')).toBeTruthy()
+    expect(screen.getByText('סרטון הרמס')).toBeTruthy()
+    expect(screen.getByText('לפתוח את החומרים ולהקליט טייק ראשון אחד.')).toBeTruthy()
+    expect(screen.getByText('קובץ וידאו אמיתי שאפשר להמשיך ממנו.')).toBeTruthy()
+    expect(document.querySelector('[data-current-day="true"]')).toBeTruthy()
+    expect(document.querySelector('[data-hermes-ui-artifact="week-planner"]')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'לשנות' }))
+    expect(requestComposerSubmit).toHaveBeenCalledWith('בוא נתקן את הבלוק הראשון.', { target: 'main' })
+    fireEvent.click(screen.getByRole('button', { name: 'לאשר' }))
+    expect(requestComposerSubmit).toHaveBeenCalledWith('מאשר את טיוטת השבוע הזו.', { target: 'main' })
+
+    cleanup()
+    render(
+      <MarkdownTextContent isRunning={false} text={['```hermes-ui', JSON.stringify(weekPlanner), '```'].join('\n')} />
+    )
+    await waitFor(() => expect(document.querySelector('[data-hermes-ui-artifact="week-planner"]')).toBeTruthy())
+    expect(screen.queryByText(/Code\s*·\s*hermes-ui/i)).toBeNull()
   })
 
   it('renders mutation-preview as preview-only and routes full approval labels', () => {

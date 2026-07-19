@@ -275,6 +275,25 @@ def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermes
                 if meta:
                     lines.append(f"  {text(meta)}")
 
+    elif artifact_type == "week-planner":
+        for day in artifact.get("days", []):
+            if not isinstance(day, dict):
+                continue
+            day_title = " · ".join(text(value) for value in (day.get("label"), day.get("date")) if value)
+            heading(day_title)
+            for block in day.get("blocks", []):
+                if not isinstance(block, dict):
+                    continue
+                clock = "–".join(str(block[key]) for key in ("startTime", "endTime") if block.get(key))
+                bullet(f"{clock + ' ' if clock else ''}{block.get('label', '')}")
+                meta = details(block, ("durationMinutes", "kind", "status", "confidence"))
+                if meta:
+                    lines.append(f"  {text(meta)}")
+                if block.get("note"):
+                    lines.append(f"  {text(block['note'])}")
+                if block.get("doneEnough"):
+                    lines.append(f"  ✓ {text(block['doneEnough'])}")
+
     elif artifact_type == "mutation-preview":
         for change in artifact.get("changes", []):
             if isinstance(change, dict):

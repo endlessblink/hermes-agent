@@ -130,6 +130,7 @@ import { useDesktopIntegrations } from './hooks/use-desktop-integrations'
 import { usePetBridge } from './hooks/use-pet-bridge'
 import { useSessionTileDelegate } from './hooks/use-session-tile-delegate'
 import { $restartPreviewServer, useTitlebarToolContributions } from './panes'
+import { openPersonalAssistantDestination as routePersonalAssistantDestination } from './personal-assistant-routing'
 import { ChatRoutesSurface, SidebarSurface, StatusbarSurface, TerminalSurface } from './surfaces'
 import type { WiringActions, WiringApi } from './types'
 
@@ -820,7 +821,11 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const openPersonalAssistantDestination = useCallback(async () => {
     try {
-      navigate(sessionRoute(await openPersonalAssistantHome()))
+      await routePersonalAssistantDestination({
+        navigate,
+        openHome: openPersonalAssistantHome,
+        resumeSession
+      })
     } catch (error) {
       notify({
         kind: 'error',
@@ -828,7 +833,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         message: error instanceof Error ? error.message : 'Please try again.'
       })
     }
-  }, [navigate])
+  }, [navigate, resumeSession])
 
   // Native-notification "View" action for a personal-assistant attention nudge.
   useEffect(() => {

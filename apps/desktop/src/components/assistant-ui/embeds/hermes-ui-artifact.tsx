@@ -26,6 +26,7 @@ import {
   type HermesUiTaskTriageArtifact,
   type HermesUiTriageDecision,
   type HermesUiUrgencyEnergyMatrixArtifact,
+  type HermesUiWeekPlannerArtifact,
   type HermesUiWorkloadBarsArtifact,
   isCanonical24HourTime,
   parseHermesUiArtifact,
@@ -87,6 +88,7 @@ function artifactDirection(
     | HermesUiTaskTableArtifact
     | HermesUiTaskTriageArtifact
     | HermesUiUrgencyEnergyMatrixArtifact
+    | HermesUiWeekPlannerArtifact
     | HermesUiWorkloadBarsArtifact
 ): 'ltr' | 'rtl' {
   if (artifact.direction === 'rtl' || artifact.direction === 'ltr') {
@@ -158,6 +160,14 @@ function artifactDirection(
   const timelineText =
     artifact.type === 'day-timeline' ? artifact.blocks.flatMap(block => [block.label, block.doneEnough]) : []
 
+  const weekPlannerText =
+    artifact.type === 'week-planner'
+      ? artifact.days.flatMap(day => [
+          day.label,
+          ...day.blocks.flatMap(block => [block.label, block.doneEnough, block.note])
+        ])
+      : []
+
   const mutationText =
     artifact.type === 'mutation-preview'
       ? artifact.changes.flatMap(change => [change.title, ...(change.untouched || [])])
@@ -195,6 +205,7 @@ function artifactDirection(
     ...taskTableText,
     ...kanbanText,
     ...timelineText,
+    ...weekPlannerText,
     ...mutationText,
     ...matrixText,
     ...workloadText,
@@ -242,7 +253,12 @@ function reconcileAlternativeChoiceValues(
     const alternative = values[field.id]
     const target = targetId ? values[targetId] : undefined
 
-    if (targetId && typeof alternative === 'string' && alternative.trim() && !(typeof target === 'string' && target.trim())) {
+    if (
+      targetId &&
+      typeof alternative === 'string' &&
+      alternative.trim() &&
+      !(typeof target === 'string' && target.trim())
+    ) {
       values[targetId] = alternative
     }
   })
@@ -330,10 +346,7 @@ function formValueInvalid(
   return formValueMissing(field, value)
 }
 
-function hasCustomTextAnswer(
-  fields: HermesUiFormField[],
-  values: Record<string, HermesUiFormValue>
-): boolean {
+function hasCustomTextAnswer(fields: HermesUiFormField[], values: Record<string, HermesUiFormValue>): boolean {
   return fields.some(field => {
     if (field.type !== 'short-text' && field.type !== 'long-text') {
       return false
@@ -425,9 +438,7 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
     >
       {artifact.title && <h3 className="text-sm font-semibold text-foreground">{artifact.title}</h3>}
       {artifact.description && (
-        <p className="mt-1 text-xs leading-relaxed whitespace-pre-line text-muted-foreground">
-          {artifact.description}
-        </p>
+        <p className="mt-1 text-xs leading-relaxed whitespace-pre-line text-muted-foreground">{artifact.description}</p>
       )}
       <div className="mt-3 space-y-3">
         {artifact.fields.map(field => {
@@ -2057,6 +2068,7 @@ function ArtifactShell({
     | HermesUiTaskGraphArtifact
     | HermesUiTaskTableArtifact
     | HermesUiUrgencyEnergyMatrixArtifact
+    | HermesUiWeekPlannerArtifact
     | HermesUiWorkloadBarsArtifact
   children: ReactNode
   label: string
@@ -2344,6 +2356,117 @@ export function DayTimelineCard({ artifact }: { artifact: HermesUiDayTimelineArt
   )
 }
 
+export function WeekPlannerCard({ artifact }: { artifact: HermesUiWeekPlannerArtifact }) {
+  const { direction, directionalStyle, isRtl } = useArtifactDirection(artifact)
+
+  return (
+    <ArtifactShell artifact={artifact} label={isRtl ? 'תכנון שבועי' : 'Week planner'}>
+      <div
+        className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3"
+        data-week-planner-layout="adaptive"
+        dir={direction}
+        style={directionalStyle}
+      >
+        {artifact.days.map(day => {
+          const isCurrentDay = day.date === artifact.currentDate
+
+          return (
+            <section
+              className={cn(
+                'min-w-0 border-b border-border/50 px-3 py-3 md:border-s md:border-border/40',
+                isCurrentDay && 'bg-foreground/[0.035]'
+              )}
+              data-current-day={isCurrentDay ? 'true' : undefined}
+              key={day.id}
+            >
+              <header className="mb-2.5 flex items-baseline justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      'size-1.5 shrink-0 rounded-full bg-foreground/20',
+                      isCurrentDay && 'bg-(--ui-accent)'
+                    )}
+                  />
+                  <h4 className="m-0 truncate text-[0.78rem] font-semibold text-foreground">{day.label}</h4>
+                </div>
+                <time
+                  className="shrink-0 text-[0.66rem] text-muted-foreground tabular-nums"
+                  dateTime={day.date}
+                  dir="ltr"
+                >
+                  {day.date}
+                </time>
+              </header>
+
+              <div className="space-y-3">
+                {day.blocks.length ? (
+                  day.blocks.map(block => {
+                    const clock = block.startTime
+                      ? `${block.startTime}${block.endTime ? `–${block.endTime}` : ''}`
+                      : block.durationMinutes
+                        ? `${block.durationMinutes}′`
+                        : '◇'
+
+                    return (
+                      <article
+                        className={cn(
+                          'border-s-2 border-foreground/15 ps-2.5',
+                          block.kind === 'focus' && 'border-(--ui-accent)',
+                          block.status === 'done' && 'opacity-60'
+                        )}
+                        key={block.id}
+                      >
+                        <div className="flex items-start gap-2">
+                          <time
+                            className="w-16 shrink-0 pt-0.5 text-[0.66rem] text-muted-foreground tabular-nums"
+                            dir="ltr"
+                          >
+                            {clock}
+                          </time>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[0.76rem] leading-snug font-semibold text-foreground wrap-anywhere">
+                              {block.label}
+                            </div>
+                            {(block.kind || block.status || block.confidence) && (
+                              <div className="mt-0.5 flex flex-wrap gap-x-2 text-[0.62rem] text-muted-foreground">
+                                {block.kind && <span>{valueLabel(block.kind, isRtl)}</span>}
+                                {block.status && <span>{valueLabel(block.status, isRtl)}</span>}
+                                {block.confidence && <span>{valueLabel(block.confidence, isRtl)}</span>}
+                              </div>
+                            )}
+                            {block.note && (
+                              <div className="mt-1 text-[0.69rem] leading-relaxed text-muted-foreground wrap-anywhere">
+                                {block.note}
+                              </div>
+                            )}
+                            {block.doneEnough && (
+                              <div className="mt-1 text-[0.69rem] leading-relaxed text-foreground/80 wrap-anywhere">
+                                <span aria-hidden="true">✓ </span>
+                                {block.doneEnough}
+                              </div>
+                            )}
+                            <PlanningActionButtons actions={block.actions} isRtl={isRtl} />
+                          </div>
+                        </div>
+                      </article>
+                    )
+                  })
+                ) : (
+                  <div className="text-[0.7rem] text-muted-foreground/70">—</div>
+                )}
+              </div>
+            </section>
+          )
+        })}
+      </div>
+      <div className="px-3 pb-3">
+        <PlanningActionButtons actions={artifact.actions} isRtl={isRtl} />
+      </div>
+    </ArtifactShell>
+  )
+}
+
 export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPreviewArtifact }) {
   const { direction, directionalStyle, isRtl } = useArtifactDirection(artifact)
 
@@ -2568,6 +2691,10 @@ export default function HermesUiArtifactRenderer({ code }: RichFenceProps) {
 
   if (result.artifact.type === 'day-timeline') {
     return <DayTimelineCard artifact={result.artifact} />
+  }
+
+  if (result.artifact.type === 'week-planner') {
+    return <WeekPlannerCard artifact={result.artifact} />
   }
 
   if (result.artifact.type === 'mutation-preview') {

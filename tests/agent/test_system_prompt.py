@@ -182,15 +182,17 @@ class TestDesktopQuestionnaireGuidance:
         assert "exact preview" in stable
         assert "flowstate_subtask_batch" in stable
         assert "closest supported `hermes-ui` artifact" in stable
-        assert "a `task-table` for a compact daily plan" in stable
-        assert "`day-timeline` for a plan with clock times" in stable
+        assert "a `task-table` for a compact untimed daily plan" in stable
+        assert "`day-timeline` for a one-day plan with clock times" in stable
+        assert "a `week-planner` for every weekly or multi-day plan" in stable
+        assert "Never use `mini-kanban` as a calendar" in stable
         assert "one short framing sentence" in stable
         assert "Never duplicate the artifact as prose" in stable
         assert "multi-day plan" in stable
         assert "agreed the outcomes" in stable
         assert "at most three planning items in prose" in stable
-        assert "one lane per day" in stable
-        assert "per-task actions" in stable
+        assert "one day per date" in stable
+        assert "per-block actions" in stable
         assert "visual artifact is the answer" in stable
         assert "daily-planning-list" not in stable
         assert "Do not merely offer or promise" in stable
@@ -211,6 +213,8 @@ class TestDesktopQuestionnaireGuidance:
         assert "Hermes Telegram interactive questions" in stable
         assert "multi-day plan" in stable
         assert "native Telegram controls" in stable
+        assert "one `week-planner` with one day per date" in stable
+        assert "Never use `mini-kanban` as a calendar" in stable
 
 
 class TestCodingContextBlock:
