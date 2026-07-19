@@ -41,6 +41,19 @@ _worker_slots = threading.BoundedSemaphore(1)
 _path_locks_guard = threading.Lock()
 _path_locks: dict[str, threading.RLock] = {}
 
+# Exact top-level fields that affect the compressor's boundary selection or
+# summary input. Session reload also restores timestamps, finish reasons,
+# reasoning carriers, platform ids, and FTS helper names; those fields are not
+# read by ContextCompressor and must not invalidate an otherwise identical
+# checkpoint after restart.
+_COMPACTION_SEMANTIC_FIELDS = {
+    "role",
+    "content",
+    "tool_call_id",
+    "tool_calls",
+    "_compressed_summary",
+}
+
 
 def _messages_digest(messages: list[dict[str, Any]]) -> str:
     normalized = []
@@ -49,11 +62,7 @@ def _messages_digest(messages: list[dict[str, Any]]) -> str:
             message = {
                 key: value
                 for key, value in message.items()
-                # SQLite adds ``timestamp`` when a session is reloaded, while
-                # live in-memory turns may not carry it yet. Neither field is
-                # sent to the summary model, so they must not invalidate an
-                # otherwise identical restart-safe checkpoint.
-                if key not in {"_db_persisted", "timestamp"}
+                if key in _COMPACTION_SEMANTIC_FIELDS
             }
         normalized.append(message)
     payload = json.dumps(
