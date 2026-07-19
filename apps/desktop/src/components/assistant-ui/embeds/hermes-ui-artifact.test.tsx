@@ -219,10 +219,11 @@ describe('ChecklistArtifactCard', () => {
 
     const input = screen.getByLabelText('שעת סיום קשיחה') as HTMLInputElement
 
-    expect(input.type).toBe('text')
+    expect(input.type).toBe('time')
     expect(input.dir).toBe('ltr')
     expect(input.inputMode).toBe('numeric')
     expect(input.placeholder).toBe('HH:mm')
+    expect(input.step).toBe('60')
 
     fireEvent.change(input, { target: { value: '20:00' } })
     unmount()
@@ -234,6 +235,43 @@ describe('ChecklistArtifactCard', () => {
     const message = requestComposerSubmit.mock.calls[0]?.[0]
     const response = JSON.parse(message.slice('Hermes UI form response:\n'.length))
     expect(response.values).toEqual({ scheduled_time: '20:00' })
+  })
+
+  it('treats an entered other time as the required single-choice selection', () => {
+    const mealPrepForm: HermesUiFormArtifact = {
+      direction: 'rtl',
+      fields: [
+        {
+          id: 'meal_prep_start',
+          label: 'שעת התחלה מועדפת',
+          options: [
+            { label: '19:30, כבלוק ערב מרכזי', value: '19:30, כבלוק ערב מרכזי' },
+            { label: '20:00, הכנה מצומצמת לפני האימון', value: '20:00, הכנה מצומצמת לפני האימון' }
+          ],
+          required: true,
+          type: 'single-choice'
+        },
+        { id: 'correction', label: 'שעה אחרת', required: false, type: 'time' }
+      ],
+      id: 'evening-meal-prep-start',
+      submitLabel: 'לבחור שעה',
+      type: 'form'
+    }
+
+    const { unmount } = render(<FormArtifactCard artifact={mealPrepForm} />)
+    const otherTime = screen.getByLabelText('שעה אחרת') as HTMLInputElement
+
+    expect(otherTime.type).toBe('time')
+    fireEvent.change(otherTime, { target: { value: '20:30' } })
+    unmount()
+
+    render(<FormArtifactCard artifact={mealPrepForm} />)
+    fireEvent.click(screen.getByRole('button', { name: 'לבחור שעה' }))
+
+    expect(screen.queryByText('שדה חובה')).toBeNull()
+    const message = requestComposerSubmit.mock.calls[0]?.[0]
+    const response = JSON.parse(message.slice('Hermes UI form response:\n'.length))
+    expect(response.values).toEqual({ correction: '20:30', meal_prep_start: '20:30' })
   })
 
   it('blocks non-canonical or out-of-range time values', () => {
@@ -249,9 +287,10 @@ describe('ChecklistArtifactCard', () => {
 
     for (const value of ['8:00', '24:00', '20:']) {
       fireEvent.change(input, { target: { value } })
+      expect(input).toHaveProperty('value', '')
       fireEvent.click(screen.getByRole('button', { name: 'Submit' }))
       expect(requestComposerSubmit).not.toHaveBeenCalled()
-      expect(screen.getByText('Use 24-hour time (HH:mm)')).toBeTruthy()
+      expect(screen.getByText('Required field')).toBeTruthy()
     }
   })
 
@@ -591,7 +630,7 @@ describe('ChecklistArtifactCard', () => {
     expect(screen.getByRole('alert').textContent).toContain('Interactive form could not be shown')
     fireEvent.click(screen.getByRole('button', { name: 'Ask Hermes to resend' }))
     expect(requestComposerSubmit).toHaveBeenCalledWith(
-      expect.stringContaining('resend it as one complete valid hermes-ui artifact'),
+      expect.stringMatching(/resend it as one complete valid hermes-ui artifact/i),
       { target: 'main' }
     )
   })
