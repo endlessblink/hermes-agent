@@ -28,6 +28,7 @@ these paths see no behavioural change.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 import os
@@ -40,6 +41,10 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from agent.model_metadata import estimate_request_tokens_rough
+from agent.live_compaction_checkpoint import (
+    LiveCompactionCheckpointStore,
+    schedule_live_compaction_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,123 @@ COMPACTION_STATUS = (
 )
 
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\|\.{1,2}/)[^\s`'\")\]}<>]+")
+
+
+def _live_checkpoint_store(agent: Any) -> LiveCompactionCheckpointStore:
+    """Resolve a profile-scoped durable store before entering worker threads."""
+    from hermes_constants import get_hermes_home
+
+    return LiveCompactionCheckpointStore(
+        get_hermes_home() / "cache" / "live-compaction-checkpoints"
+    )
+
+
+def _compress_messages(
+    agent: Any,
+    messages: list,
+    *,
+    approx_tokens: Optional[int],
+    focus_topic: Optional[str],
+    force: bool,
+) -> list:
+    """Prefer a version-fenced prepared checkpoint, then fall back synchronously."""
+    compressor = agent.context_compressor
+    if not force and not focus_topic and getattr(agent, "session_id", None):
+        prepared = _live_checkpoint_store(agent).consume_if_current(
+            agent.session_id, messages
+        )
+        if prepared is not None:
+            compressor._last_compression_made_progress = True
+            compressor._last_summary_fallback_used = False
+            compressor._last_compress_aborted = False
+            compressor._last_summary_error = None
+            try:
+                compressor.compression_count += 1
+            except (AttributeError, TypeError):
+                pass
+            logger.info(
+                "context compression using prepared checkpoint: session=%s "
+                "messages=%d->%d",
+                agent.session_id,
+                len(messages),
+                len(prepared),
+            )
+            return prepared
+
+    try:
+        return compressor.compress(
+            messages,
+            current_tokens=approx_tokens,
+            focus_topic=focus_topic,
+            force=force,
+        )
+    except TypeError:
+        # Plugin context engine with a strict signature.
+        return compressor.compress(messages, current_tokens=approx_tokens)
+
+
+def schedule_background_compaction_checkpoint(agent: Any, messages: list) -> bool:
+    """Prepare the next compaction off-path once prompt pressure is high enough."""
+    if not bool(getattr(agent, "compression_enabled", False)):
+        return False
+    if not bool(getattr(agent, "compression_background_checkpoint_enabled", False)):
+        return False
+    session_id = str(getattr(agent, "session_id", "") or "")
+    compressor = getattr(agent, "context_compressor", None)
+    if not session_id or compressor is None or not messages:
+        return False
+    if getattr(agent, "api_mode", None) == "codex_app_server":
+        return False
+
+    try:
+        threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
+        prompt_tokens = int(
+            getattr(compressor, "last_real_prompt_tokens", 0)
+            or getattr(compressor, "last_prompt_tokens", 0)
+            or 0
+        )
+        ratio = float(
+            getattr(agent, "compression_background_checkpoint_ratio", 0.70)
+            or 0.70
+        )
+    except (TypeError, ValueError):
+        return False
+    ratio = max(0.20, min(ratio, 0.95))
+    if threshold <= 0 or prompt_tokens < int(threshold * ratio):
+        return False
+
+    store = _live_checkpoint_store(agent)
+
+    def _prepare(snapshot: list) -> Optional[list]:
+        # The worker receives an immutable snapshot and an isolated compressor.
+        # It must never rewrite session state before the foreground version fence.
+        worker = copy.copy(compressor)
+        worker._session_db = None
+        worker._session_id = ""
+        worker.quiet_mode = True
+        prepared = worker.compress(
+            snapshot,
+            current_tokens=prompt_tokens,
+            force=True,
+        )
+        return prepared if prepared != snapshot else None
+
+    scheduled = schedule_live_compaction_checkpoint(
+        store=store,
+        session_id=session_id,
+        messages=messages,
+        prepare=_prepare,
+    )
+    if scheduled:
+        logger.info(
+            "background context checkpoint scheduled: session=%s "
+            "prompt_tokens=%d soft_watermark=%d hard_threshold=%d",
+            session_id,
+            prompt_tokens,
+            int(threshold * ratio),
+            threshold,
+        )
+    return scheduled
 
 
 def _working_state_text(value: Any, limit: int = 1200) -> str:
@@ -847,16 +969,13 @@ def compress_context(
     _schedule_pre_compress_memory_capture(agent, messages)
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        try:
-            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
-        except BaseException:
-            _finish_compression_status()
-            _release_lock()
-            raise
+        compressed = _compress_messages(
+            agent,
+            messages,
+            approx_tokens=approx_tokens,
+            focus_topic=focus_topic,
+            force=force,
+        )
     except BaseException:
         # ANY exception during compress() must release the lock so the
         # session isn't permanently blocked from future compression.
