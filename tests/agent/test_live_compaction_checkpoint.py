@@ -131,12 +131,41 @@ def test_checkpoint_survives_process_restart(tmp_path):
 
     restored_without_runtime_markers = [
         {**_turn("user", "request"), "timestamp": 1784491628.0},
-        {**_turn("assistant", "answer"), "timestamp": 1784491629.0},
+        {
+            **_turn("assistant", "answer"),
+            "timestamp": 1784491629.0,
+            "finish_reason": "stop",
+            "reasoning": "transient scratch work",
+            "codex_message_items": [{"type": "message"}],
+        },
     ]
     assert (
         reloaded.consume_if_current("session-a", restored_without_runtime_markers)
         == prepared
     )
+
+
+def test_checkpoint_rejects_changed_tool_call_semantics(tmp_path):
+    store = LiveCompactionCheckpointStore(tmp_path)
+    snapshot = [
+        _turn("user", "inspect"),
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path":"a"}'},
+                }
+            ],
+        },
+    ]
+    store.publish("session-a", snapshot, [_turn("user", "summary")])
+    changed = json.loads(json.dumps(snapshot))
+    changed[1]["tool_calls"][0]["function"]["arguments"] = '{"path":"b"}'
+
+    assert store.consume_if_current("session-a", changed) is None
 
 
 def test_checkpoint_rejects_changed_compaction_strategy(tmp_path):
