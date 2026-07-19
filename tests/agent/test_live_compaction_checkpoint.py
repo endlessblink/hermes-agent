@@ -36,6 +36,35 @@ def test_tool_iteration_checkpoint_hook_passes_complete_tool_result(monkeypatch)
     assert calls == [(agent, messages)]
 
 
+def test_background_checkpoint_skips_fully_protected_history(tmp_path, monkeypatch):
+    compressor = SimpleNamespace(
+        threshold_tokens=100,
+        last_real_prompt_tokens=80,
+        has_content_to_compress=lambda _messages: False,
+    )
+    agent = SimpleNamespace(
+        compression_enabled=True,
+        compression_background_checkpoint_enabled=True,
+        compression_background_checkpoint_ratio=0.5,
+        session_id="session-a",
+        context_compressor=compressor,
+        _cached_system_prompt="",
+        tools=[],
+        api_mode="codex_responses",
+    )
+    monkeypatch.setattr(
+        conversation_compression,
+        "_live_checkpoint_store",
+        lambda _agent: LiveCompactionCheckpointStore(tmp_path),
+    )
+
+    assert not conversation_compression.schedule_background_compaction_checkpoint(
+        agent, [_turn("user", "still protected")]
+    )
+    assert list(tmp_path.glob("*.json")) == []
+    assert list(tmp_path.glob("*.lock")) == []
+
+
 def test_checkpoint_apply_preserves_turns_appended_after_snapshot(tmp_path):
     store = LiveCompactionCheckpointStore(tmp_path)
     snapshot = [
