@@ -269,12 +269,38 @@ function formValueMissing(field: HermesUiFormField, value: HermesUiFormValue | u
   return typeof value !== 'string' || value.trim().length === 0
 }
 
-function formValueInvalid(field: HermesUiFormField, value: HermesUiFormValue | undefined): boolean {
+function formValueInvalid(
+  field: HermesUiFormField,
+  value: HermesUiFormValue | undefined,
+  waiveChoiceRequired = false
+): boolean {
   if (field.type === 'time' && typeof value === 'string' && value.length > 0) {
     return !isCanonical24HourTime(value)
   }
 
+  // A typed free-text answer IS an answer: when any text field in the form has
+  // content, a required choice field no longer blocks submission — the user
+  // must be able to approve a custom answer instead of picking an option.
+  if (waiveChoiceRequired && (field.type === 'single-choice' || field.type === 'multi-choice')) {
+    return false
+  }
+
   return formValueMissing(field, value)
+}
+
+function hasCustomTextAnswer(
+  fields: HermesUiFormField[],
+  values: Record<string, HermesUiFormValue>
+): boolean {
+  return fields.some(field => {
+    if (field.type !== 'short-text' && field.type !== 'long-text') {
+      return false
+    }
+
+    const value = values[field.id]
+
+    return typeof value === 'string' && value.trim().length > 0
+  })
 }
 
 export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact }) {
@@ -297,7 +323,9 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
       return
     }
 
-    if (artifact.fields.some(field => formValueInvalid(field, values[field.id]))) {
+    const waiveChoiceRequired = hasCustomTextAnswer(artifact.fields, values)
+
+    if (artifact.fields.some(field => formValueInvalid(field, values[field.id], waiveChoiceRequired))) {
       setShowErrors(true)
 
       return
