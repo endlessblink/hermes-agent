@@ -23,9 +23,9 @@ Research already gathered (reuse, don't redo):
   ~3590) + session.compress RPC (~9882) snapshots history WITHOUT holding history_lock during the
   LLM call and has history_version conflict detection — i.e. a post-turn (after message.complete)
   trigger at ~90% threshold can reuse it; pre-API compaction stays as backstop (task #35).
-- An Explore agent was mapping the compaction machinery when interrupted; its findings are lost —
-  re-explore: compaction call graph, existing async aux paths, post-turn housekeeping hooks,
-  summarizer input-size truncation (_CONTENT_MAX/_CONTENT_HEAD in agent/context_compressor.py).
+- Machinery map COMPLETE — read docs/superpowers/specs/2026-07-19-compaction-nonblocking-map.md
+  (call graph, locks/invariants, the 217s anatomy, ready-made seams incl. partial_compress.py
+  and the turn_finalizer post-response background pattern). Do NOT re-explore.
 
 ## Files touched / in flight
 All committed & pushed (tip 699e8a703). No uncommitted changes. Key recent work:
@@ -72,7 +72,7 @@ compaction (THE next implementation, plan first).
 User-confirmed working: queue-while-busy, custom form answers, folder drag+menu, profile
 switching, PA button, Google calendar access.
 
-Start by: re-launching an Explore agent on the compaction machinery map (list above), then
+Start by: reading docs/superpowers/specs/2026-07-19-compaction-nonblocking-map.md, then
 write the plan for #35 (post-message.complete trigger at ~90% threshold reusing
 _compress_session_history, PLUS tool-result trimming/offload as the likely bigger win) and
 present it for approval before touching anything.
