@@ -39,6 +39,26 @@ class TelegramHermesUiControls:
     labels: tuple[str, ...] = ()
     submit_label: str = ""
     placeholder: str = ""
+    artifact: Optional[dict[str, Any]] = None
+
+
+def _split_hermes_ui_content(content: str) -> list[str]:
+    """Split prose and artifacts so every interactive card gets its own message."""
+    text = str(content or "")
+    if "hermes-ui" not in text.lower():
+        return [text]
+    parts: list[str] = []
+    cursor = 0
+    for match in _HERMES_UI_FENCE_RE.finditer(text):
+        prose = text[cursor:match.start()].strip()
+        if prose:
+            parts.append(prose)
+        parts.append(match.group(0).strip())
+        cursor = match.end()
+    tail = text[cursor:].strip()
+    if tail:
+        parts.append(tail)
+    return parts or [text]
 
 
 def _telegram_display_line(value: object) -> str:
@@ -91,12 +111,11 @@ def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermes
             field_type = str(field.get("type") or "")
             options = field.get("options") if isinstance(field.get("options"), list) else []
             option_labels: list[str] = []
-            for option_index, option in enumerate(options, 1):
+            for option in options:
                 raw = option.get("label") or option.get("value") if isinstance(option, dict) else option
                 label = str(raw or "").strip()
                 if label:
                     option_labels.append(label)
-                    bullet(label, f"{option_index}.")
             meta: list[str] = []
             if field.get("required"):
                 meta.append("חובה" if rtl else "required")
@@ -108,19 +127,15 @@ def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermes
                 lines.append(text(" · ".join(meta)))
 
             if len(fields) == 1 and field_type == "single-choice" and option_labels:
-                if len(option_labels) <= 8:
-                    controls = TelegramHermesUiControls(
-                        kind="single-choice", labels=tuple(option_labels),
-                        submit_label=str(artifact.get("submitLabel") or ""),
-                    )
-                else:
-                    lines.append(text("השיבו עם מספר האפשרות" if rtl else "Reply with the option number"))
-                    controls = TelegramHermesUiControls(kind="single-choice-list", placeholder="1")
+                controls = TelegramHermesUiControls(
+                    kind="single-choice", labels=tuple(option_labels),
+                    submit_label=str(artifact.get("submitLabel") or ""),
+                )
             elif len(fields) == 1 and field_type == "boolean":
                 labels = ("כן", "לא", "✍️ תיקון") if rtl else ("Yes", "No", "✍️ Revise")
                 controls = TelegramHermesUiControls(kind="boolean", labels=labels)
             elif len(fields) == 1 and field_type == "multi-choice" and option_labels:
-                instruction = "השיבו עם כמה מספרים, למשל 1,3" if rtl else "Reply with several numbers, for example 1,3"
+                instruction = "בחרו אפשרות אחת או יותר בכפתורים" if rtl else "Select one or more options below"
                 lines.append(text(instruction))
                 controls = TelegramHermesUiControls(
                     kind="multi-choice", labels=tuple(option_labels),
@@ -142,16 +157,16 @@ def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermes
         raw_items = artifact.get("items")
         if not isinstance(raw_items, list) and artifact_type == "questionnaire":
             raw_items = artifact.get("questions")
-        for index, item in enumerate(raw_items if isinstance(raw_items, list) else [], 1):
+        item_count = 0
+        for item in raw_items if isinstance(raw_items, list) else []:
             if not isinstance(item, dict):
                 continue
-            bullet(item.get("label") or item.get("question") or item.get("prompt"), f"☐ {index}.")
-            item_description = item.get("description") or item.get("helpText")
-            if item_description:
-                lines.append(f"  {text(item_description)}")
+            item_count += 1
             for action in item.get("actions", []):
                 if isinstance(action, dict):
                     bullet(action.get("label"), "↳")
+        if item_count:
+            lines.append(text(f"בחרו פריטים בכפתורים למטה · {item_count}" if rtl else f"Select items below · {item_count}"))
 
     elif artifact_type == "task-triage":
         task = artifact.get("task") if isinstance(artifact.get("task"), dict) else {}
@@ -361,8 +376,7 @@ def _render_hermes_ui_payload_for_telegram(content: str) -> tuple[str, TelegramH
 
         nonlocal interaction
         lines, controls = _artifact_lines(artifact)
-        if controls.kind != "none":
-            interaction = controls
+        interaction = dataclasses.replace(controls, artifact=artifact)
         return "\n".join(lines).strip()
 
     rendered = _HERMES_UI_FENCE_RE.sub(_render, text)
@@ -376,25 +390,40 @@ def _render_hermes_ui_for_telegram(content: str) -> str:
     return rendered
 
 
-def _telegram_form_reply_markup(controls: TelegramHermesUiControls):
-    """Build a restart-safe native Telegram input for a Desktop artifact."""
-    normalized = [str(choice).strip() for choice in controls.labels if str(choice).strip()]
-    if controls.kind in {"single-choice", "boolean", "actions"} and normalized:
-        keyboard_factory = cast(Callable[..., Any], ReplyKeyboardMarkup)
-        return keyboard_factory(
-            [[choice] for choice in normalized],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-    if controls.kind != "none":
-        force_reply_factory = cast(Callable[..., Any], ForceReply)
-        kwargs: dict[str, Any] = {"selective": True}
-        if controls.placeholder:
-            kwargs["input_field_placeholder"] = controls.placeholder[:64]
-        return force_reply_factory(**kwargs)
-    if not normalized:
-        return None
-    return None
+def _telegram_form_reply_markup(
+    controls: TelegramHermesUiControls,
+    *,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    profile: Optional[str] = None,
+):
+    """Persist an artifact and build its native, restart-safe inline keyboard."""
+    if not controls.artifact:
+        return None, None
+    from plugins.platforms.telegram.hermes_ui import keyboard_rows, prepare_interaction
+
+    state = prepare_interaction(
+        controls.artifact,
+        chat_id=str(chat_id),
+        thread_id=str(thread_id) if thread_id is not None else None,
+        user_id=str(chat_id) if str(chat_id).lstrip("-").isdigit() and not str(chat_id).startswith("-") else None,
+        profile=profile,
+    )
+    rows = [
+        [InlineKeyboardButton(button["text"], callback_data=button["callback_data"]) for button in row]
+        for row in keyboard_rows(state)
+    ]
+    return InlineKeyboardMarkup(rows), state["token"]
+
+
+def _telegram_ui_markup_from_state(state: dict[str, Any]):
+    from plugins.platforms.telegram.hermes_ui import keyboard_rows
+
+    rows = [
+        [InlineKeyboardButton(button["text"], callback_data=button["callback_data"]) for button in row]
+        for row in keyboard_rows(state)
+    ]
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 def _redact_telegram_error_text(error: object) -> str:
@@ -4390,8 +4419,31 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
+        artifact_segments = _split_hermes_ui_content(content)
+        if len(artifact_segments) > 1:
+            last_result = SendResult(success=True)
+            for index, segment in enumerate(artifact_segments):
+                segment_metadata = dict(metadata or {})
+                if index < len(artifact_segments) - 1:
+                    segment_metadata.pop("notify", None)
+                last_result = await self.send(
+                    chat_id,
+                    segment,
+                    reply_to=reply_to if index == 0 else None,
+                    metadata=segment_metadata,
+                )
+                if not last_result.success:
+                    return last_result
+            return last_result
+
         content, form_choices = _render_hermes_ui_payload_for_telegram(content)
-        form_reply_markup = _telegram_form_reply_markup(form_choices)
+        initial_thread_id = self._metadata_thread_id(metadata)
+        form_reply_markup, hermes_ui_token = _telegram_form_reply_markup(
+            form_choices,
+            chat_id=str(chat_id),
+            thread_id=initial_thread_id,
+            profile=str((metadata or {}).get("profile") or "") or None,
+        )
 
         # getattr() — tests build adapters via object.__new__() (no __init__).
         if getattr(self, "_send_path_degraded", False):
@@ -4674,6 +4726,11 @@ class TelegramAdapter(BasePlatformAdapter):
                                 continue
                         raise
                 message_ids.append(str(msg.message_id))
+
+            if hermes_ui_token and message_ids:
+                from plugins.platforms.telegram.hermes_ui import bind_message
+
+                bind_message(hermes_ui_token, message_ids[-1])
 
             # Re-trigger typing indicator after sending a message.
             # Telegram clears the typing state when a new message is delivered,
@@ -6309,6 +6366,157 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception:
             pass
 
+    async def _dispatch_hermes_ui_payload(self, query, state: dict[str, Any], payload: str) -> None:
+        """Inject a completed card response into the normal shared session."""
+        message = query.message
+        chat = message.chat
+        user = query.from_user
+        raw_thread_id = getattr(message, "message_thread_id", None)
+        chat_type = "dm" if str(getattr(chat, "type", "")) == "private" else "group"
+        source = self.build_source(
+            chat_id=str(chat.id),
+            chat_name=getattr(chat, "title", None) or getattr(chat, "full_name", None),
+            chat_type=chat_type,
+            user_id=str(getattr(user, "id", "")) or None,
+            user_name=getattr(user, "full_name", None) or getattr(user, "first_name", None),
+            thread_id=str(raw_thread_id) if raw_thread_id is not None else None,
+            message_id=f"hu:{state['token']}",
+        )
+        if state.get("profile") and not source.profile:
+            source.profile = state["profile"]
+        event = MessageEvent(
+            text=payload,
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=query,
+            message_id=f"hu:{state['token']}",
+            reply_to_message_id=str(getattr(message, "message_id", "")) or None,
+            reply_to_text=getattr(message, "text", None),
+            timestamp=datetime.now(timezone.utc),
+        )
+        await self.handle_message(event)
+
+    async def _handle_hermes_ui_callback(self, query, data: str) -> None:
+        """Resolve a persistent Hermes UI inline-button callback."""
+        from plugins.platforms.telegram.hermes_ui import (
+            apply_control,
+            bind_prompt,
+            bind_user,
+            load_interaction,
+            mark_dispatched,
+            parse_callback,
+            reopen_submission,
+        )
+
+        parsed = parse_callback(data)
+        if not parsed or not query.message:
+            await query.answer(text="Invalid interaction.", show_alert=True)
+            return
+        token, revision, control_index = parsed
+        message = query.message
+        chat = message.chat
+        raw_thread_id = getattr(message, "message_thread_id", None)
+        caller_id = str(getattr(query.from_user, "id", ""))
+        if not self._is_callback_user_authorized(
+            caller_id,
+            chat_id=getattr(message, "chat_id", None),
+            chat_type=str(getattr(chat, "type", "")) or None,
+            thread_id=str(raw_thread_id) if raw_thread_id is not None else None,
+            user_name=getattr(query.from_user, "first_name", None),
+        ):
+            await query.answer(text="⛔ Not authorized.", show_alert=True)
+            return
+        try:
+            state = load_interaction(token)
+        except (OSError, ValueError, json.JSONDecodeError):
+            await query.answer(text="This card expired. Ask Hermes to resend it.", show_alert=True)
+            return
+        if (
+            str(state.get("chat_id")) != str(getattr(message, "chat_id", ""))
+            or (state.get("message_id") and str(state["message_id"]) != str(message.message_id))
+            or (state.get("thread_id") or None) != (str(raw_thread_id) if raw_thread_id is not None else None)
+            or (state.get("user_id") and str(state["user_id"]) != caller_id)
+        ):
+            await query.answer(text="This control belongs to another conversation.", show_alert=True)
+            return
+
+        if not state.get("user_id"):
+            state = bind_user(token, caller_id)
+
+        await query.answer()
+        result = apply_control(token, revision, control_index)
+        if result.outcome == "edit":
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=_telegram_ui_markup_from_state(result.state)
+                )
+            except Exception as exc:
+                if "not modified" not in str(exc).lower():
+                    raise
+            return
+        if result.outcome == "prompt":
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=_telegram_ui_markup_from_state(result.state)
+                )
+            except Exception:
+                pass
+            prompt_message = await self._bot.send_message(
+                chat_id=normalize_telegram_chat_id(str(message.chat_id)),
+                text=result.prompt,
+                reply_markup=ForceReply(selective=True),
+                reply_to_message_id=message.message_id,
+                **(
+                    {"message_thread_id": message.message_thread_id}
+                    if getattr(message, "message_thread_id", None) is not None
+                    else {}
+                ),
+            )
+            bind_prompt(token, chat_id=str(message.chat_id), message_id=str(prompt_message.message_id))
+            return
+        if result.outcome == "submit":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            try:
+                await self._dispatch_hermes_ui_payload(query, result.state, result.payload)
+                mark_dispatched(token)
+            except Exception:
+                reopened = reopen_submission(token)
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup=_telegram_ui_markup_from_state(reopened)
+                    )
+                except Exception:
+                    pass
+                raise
+            return
+        if result.outcome == "copy":
+            await self._bot.send_message(
+                chat_id=normalize_telegram_chat_id(str(message.chat_id)),
+                text=result.payload,
+                reply_to_message_id=message.message_id,
+            )
+            return
+        if result.outcome == "cancelled":
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+        if result.outcome in {"stale", "resolved"}:
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=_telegram_ui_markup_from_state(result.state)
+                )
+            except Exception:
+                pass
+            return
+        if result.error:
+            await self._bot.send_message(
+                chat_id=normalize_telegram_chat_id(str(message.chat_id)),
+                text=result.error,
+                reply_to_message_id=message.message_id,
+            )
+
     async def _handle_callback_query(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"
     ) -> None:
@@ -6323,6 +6531,10 @@ class TelegramAdapter(BasePlatformAdapter):
         query_chat_type = getattr(query_chat, "type", None)
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
+
+        if data.startswith("hu:"):
+            await self._handle_hermes_ui_callback(query, data)
+            return
 
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mpv:", "mm:", "mc:", "mb", "mx", "mg:")):
@@ -8543,6 +8755,86 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
 
+    async def _handle_hermes_ui_text_reply(self, msg: Message, *, update_id: Optional[int]) -> bool:
+        """Consume a ForceReply answer belonging to a persistent Hermes UI card."""
+        replied = getattr(msg, "reply_to_message", None)
+        if replied is None:
+            return False
+        from plugins.platforms.telegram.hermes_ui import (
+            apply_text_reply,
+            bind_prompt,
+            load_interaction,
+            lookup_prompt,
+            mark_dispatched,
+            reopen_submission,
+        )
+
+        token = lookup_prompt(str(msg.chat.id), str(replied.message_id))
+        if not token:
+            return False
+        try:
+            state = load_interaction(token)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        if str(state.get("chat_id")) != str(msg.chat.id):
+            return False
+        if state.get("user_id") and str(state["user_id"]) != str(getattr(msg.from_user, "id", "")):
+            return False
+        result = apply_text_reply(token, msg.text or "")
+        if result.outcome == "error":
+            prompt = await self._bot.send_message(
+                chat_id=normalize_telegram_chat_id(str(msg.chat.id)),
+                text=result.error,
+                reply_markup=ForceReply(selective=True),
+                reply_to_message_id=replied.message_id,
+                **(
+                    {"message_thread_id": msg.message_thread_id}
+                    if getattr(msg, "message_thread_id", None) is not None
+                    else {}
+                ),
+            )
+            bind_prompt(token, chat_id=str(msg.chat.id), message_id=str(prompt.message_id))
+            return True
+        if result.outcome == "edit":
+            if result.state.get("message_id"):
+                await self._bot.edit_message_reply_markup(
+                    chat_id=normalize_telegram_chat_id(str(msg.chat.id)),
+                    message_id=int(result.state["message_id"]),
+                    reply_markup=_telegram_ui_markup_from_state(result.state),
+                )
+            return True
+        if result.outcome == "submit":
+            if result.state.get("message_id"):
+                try:
+                    await self._bot.edit_message_reply_markup(
+                        chat_id=normalize_telegram_chat_id(str(msg.chat.id)),
+                        message_id=int(result.state["message_id"]),
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+            event = self._build_message_event(msg, MessageType.TEXT, update_id=update_id)
+            event.text = result.payload
+            if result.state.get("profile") and not event.source.profile:
+                event.source.profile = result.state["profile"]
+            try:
+                await self.handle_message(event)
+                mark_dispatched(token)
+            except Exception:
+                reopened = reopen_submission(token)
+                if reopened.get("message_id"):
+                    try:
+                        await self._bot.edit_message_reply_markup(
+                            chat_id=normalize_telegram_chat_id(str(msg.chat.id)),
+                            message_id=int(reopened["message_id"]),
+                            reply_markup=_telegram_ui_markup_from_state(reopened),
+                        )
+                    except Exception:
+                        pass
+                raise
+            return True
+        return result.outcome in {"stale", "resolved", "cancelled"}
+
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
 
@@ -8567,6 +8859,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._should_process_message(msg):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
+            return
+        if await self._handle_hermes_ui_text_reply(msg, update_id=update.update_id):
             return
         await self._ensure_forum_commands(update.message)
 

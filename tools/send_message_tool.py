@@ -1123,6 +1123,25 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
     instead, bypassing MarkdownV2 conversion.
     """
     try:
+        from plugins.platforms.telegram.adapter import _split_hermes_ui_content
+
+        artifact_segments = _split_hermes_ui_content(message)
+        if len(artifact_segments) > 1:
+            last_result = None
+            for index, segment in enumerate(artifact_segments):
+                last_result = await _send_telegram(
+                    token,
+                    chat_id,
+                    segment,
+                    media_files=media_files if index == len(artifact_segments) - 1 else [],
+                    thread_id=thread_id,
+                    disable_link_previews=disable_link_previews,
+                    force_document=force_document,
+                )
+                if isinstance(last_result, dict) and last_result.get("error"):
+                    return last_result
+            return last_result or {"error": "No Telegram segments were delivered"}
+
         from telegram import Bot
         from telegram.constants import ParseMode
         from plugins.platforms.telegram.adapter import (
@@ -1131,7 +1150,15 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         )
 
         message, form_choices = _render_hermes_ui_payload_for_telegram(message)
-        form_reply_markup = _telegram_form_reply_markup(form_choices)
+        form_reply_markup, hermes_ui_token = _telegram_form_reply_markup(
+            form_choices,
+            chat_id=str(chat_id),
+            thread_id=str(thread_id) if thread_id is not None else None,
+            # Let the live multiplexer resolve the profile from chat/thread on
+            # callback. A one-shot sender may run under a different sticky
+            # profile than the route that owns this Telegram conversation.
+            profile=None,
+        )
 
         # Auto-detect HTML tags — if present, skip MarkdownV2 and send as HTML.
         # Inspired by github.com/ashaney — PR #1568.
@@ -1229,6 +1256,11 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         _cap, _ = _media_caption_split(
             message, media_files, max_caption_len=_TELEGRAM_CAPTION_LIMIT
         )
+        if form_reply_markup is not None:
+            # Interactive artifacts need a text bubble that can own the inline
+            # keyboard. Do not consume that text as a media caption and then
+            # bind state to a button-less media message.
+            _cap = None
         if _cap is not None and _utf16_len(formatted) <= _TELEGRAM_CAPTION_LIMIT:
             _tg_caption = formatted
             formatted = ""  # suppress the separate text send below
@@ -1292,6 +1324,12 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                         )
                     else:
                         raise
+
+        interactive_message_id = (
+            str(last_msg.message_id)
+            if hermes_ui_token and last_msg is not None
+            else None
+        )
 
         for media_path, is_voice in media_files:
             if not os.path.exists(media_path):
@@ -1429,6 +1467,13 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             if warnings:
                 return {"error": error, "warnings": warnings}
             return {"error": error}
+
+        if hermes_ui_token:
+            from plugins.platforms.telegram.hermes_ui import bind_message
+
+            if not interactive_message_id:
+                return {"error": "Interactive Telegram card was not delivered as a text message"}
+            bind_message(hermes_ui_token, interactive_message_id)
 
         result = {
             "success": True,

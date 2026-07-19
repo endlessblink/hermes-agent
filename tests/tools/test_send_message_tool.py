@@ -1235,7 +1235,8 @@ class TestSendTelegramHtmlDetection:
         kwargs = bot.send_message.await_args.kwargs
         assert kwargs["parse_mode"] == "MarkdownV2"
 
-    def test_standalone_cron_send_renders_hermes_ui_form(self, monkeypatch):
+    def test_standalone_cron_send_renders_hermes_ui_form(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
         bot = self._make_bot()
         _install_telegram_mock(monkeypatch, bot)
         content = """Today's briefing.
@@ -1243,45 +1244,89 @@ class TestSendTelegramHtmlDetection:
 {"type":"form","title":"Capacity?","fields":[{"label":"Choose","type":"single-choice","options":["High","Low"]}]}
 ```"""
 
-        with patch(
-            "plugins.platforms.telegram.adapter.ReplyKeyboardMarkup",
-            side_effect=lambda keyboard, **kwargs: {"keyboard": keyboard, **kwargs},
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
         ):
             asyncio.run(_send_telegram("tok", "123", content))
 
-        kwargs = bot.send_message.await_args.kwargs
+        assert bot.send_message.await_count == 2
+        prose_kwargs = bot.send_message.await_args_list[0].kwargs
+        kwargs = bot.send_message.await_args_list[1].kwargs
         assert kwargs["parse_mode"] == "MarkdownV2"
-        assert "Today's briefing" in kwargs["text"]
+        assert "Today's briefing" in prose_kwargs["text"]
         assert "Capacity?" in kwargs["text"]
-        assert "High" in kwargs["text"]
-        assert "Low" in kwargs["text"]
         assert "hermes-ui" not in kwargs["text"]
         assert '"type"' not in kwargs["text"]
         keyboard = kwargs["reply_markup"]
-        assert keyboard["keyboard"] == [["High"], ["Low"]]
-        assert keyboard["one_time_keyboard"] is True
+        assert [row[0]["text"] for row in keyboard["inline_keyboard"][:2]] == ["○ High", "○ Low"]
 
-    def test_standalone_cron_multi_choice_uses_one_force_reply(self, monkeypatch):
+    def test_standalone_cron_multi_choice_uses_one_force_reply(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
         bot = self._make_bot()
         _install_telegram_mock(monkeypatch, bot)
         content = """```hermes-ui
 {"type":"form","title":"Pick several","fields":[{"id":"areas","label":"Areas","type":"multi-choice","options":["Work","Home","Health"]}]}
 ```"""
 
-        with patch(
-            "plugins.platforms.telegram.adapter.ForceReply",
-            side_effect=lambda **kwargs: {"force_reply": True, **kwargs},
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
         ):
             asyncio.run(_send_telegram("tok", "123", content))
 
         kwargs = bot.send_message.await_args.kwargs
-        assert "1\\. Work" in kwargs["text"]
-        assert "3\\. Health" in kwargs["text"]
-        assert kwargs["reply_markup"] == {
-            "force_reply": True,
-            "input_field_placeholder": "1,3",
-            "selective": True,
-        }
+        assert "Select one or more options below" in kwargs["text"]
+        assert [row[0]["text"] for row in kwargs["reply_markup"]["inline_keyboard"][:3]] == [
+            "☐ Work",
+            "☐ Home",
+            "☐ Health",
+        ]
+
+    def test_standalone_interactive_media_binds_buttons_to_text_card(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
+        bot = self._make_bot()
+        bot.send_message.return_value = SimpleNamespace(message_id=11)
+        bot.send_photo.return_value = SimpleNamespace(message_id=22)
+        _install_telegram_mock(monkeypatch, bot)
+        image = tmp_path / "card.png"
+        image.write_bytes(b"\x89PNG fake image")
+        content = """```hermes-ui
+{"type":"checklist","title":"Choose","items":[{"id":"a","label":"Alpha"}]}
+```"""
+
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
+        ):
+            result = asyncio.run(
+                _send_telegram("tok", "123", content, media_files=[(str(image), False)])
+            )
+
+        assert result["success"] is True
+        assert bot.send_message.await_args.kwargs["reply_markup"]
+        assert bot.send_photo.await_count == 1
+        states = [json.loads(path.read_text(encoding="utf-8")) for path in tmp_path.glob("*.json")]
+        assert len(states) == 1
+        assert states[0]["message_id"] == "11"
 
     def test_disable_link_previews_sets_disable_web_page_preview(self, monkeypatch):
         bot = self._make_bot()

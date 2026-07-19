@@ -127,9 +127,9 @@ class TestHermesUiTelegramRendering:
         assert "בוקר טוב — תמונת היום בקצרה." in rendered
         assert "**\u200fמה הקיבולת שלך היום?**" in rendered
         assert "**\u200fבחר אפשרות**" in rendered
-        assert "1. \u200fגבוהה" in rendered
-        assert "2. \u200fבינונית" in rendered
-        assert "3. \u200fנמוכה" in rendered
+        assert "גבוהה" not in rendered
+        assert "בינונית" not in rendered
+        assert "נמוכה" not in rendered
         assert "hermes-ui" not in rendered
         assert '"type":"form"' not in rendered
         assert "```" not in rendered
@@ -145,7 +145,8 @@ class TestHermesUiTelegramRendering:
         assert "broken json" not in rendered
 
     @pytest.mark.asyncio
-    async def test_send_never_exposes_raw_form_artifact(self, adapter):
+    async def test_send_never_exposes_raw_form_artifact(self, adapter, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
         adapter._bot = MagicMock()
         adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=7))
         adapter._bot.send_chat_action = AsyncMock()
@@ -154,25 +155,30 @@ class TestHermesUiTelegramRendering:
 {"type":"form","title":"Capacity?","fields":[{"label":"Choose","type":"single-choice","options":["High","Low"]}]}
 ```"""
 
-        with patch(
-            "plugins.platforms.telegram.adapter.ReplyKeyboardMarkup",
-            side_effect=lambda keyboard, **kwargs: {"keyboard": keyboard, **kwargs},
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
         ):
             result = await adapter.send("12345", content, metadata={"notify": True})
 
         assert result.success is True
         sent_text = adapter._bot.send_message.await_args.kwargs["text"]
         assert "Capacity?" in sent_text
-        assert "High" in sent_text
-        assert "Low" in sent_text
         assert "hermes-ui" not in sent_text
         assert '"type"' not in sent_text
         keyboard = adapter._bot.send_message.await_args.kwargs["reply_markup"]
-        assert keyboard["keyboard"] == [["High"], ["Low"]]
-        assert keyboard["one_time_keyboard"] is True
+        assert [row[0]["text"] for row in keyboard["inline_keyboard"][:2]] == ["○ High", "○ Low"]
+        assert all(row[0]["callback_data"].startswith("hu:") for row in keyboard["inline_keyboard"])
 
     @pytest.mark.asyncio
-    async def test_send_multi_choice_uses_force_reply_not_one_button_per_option(self, adapter):
+    async def test_send_multi_choice_uses_force_reply_not_one_button_per_option(self, adapter, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
         adapter._bot = MagicMock()
         adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=8))
         adapter._bot.send_chat_action = AsyncMock()
@@ -181,17 +187,79 @@ class TestHermesUiTelegramRendering:
 {"type":"form","title":"Pick several","fields":[{"id":"areas","label":"Areas","type":"multi-choice","options":["Work","Home","Health"]}]}
 ```"""
 
-        with patch(
-            "plugins.platforms.telegram.adapter.ForceReply",
-            side_effect=lambda **kwargs: {"force_reply": True, **kwargs},
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
         ):
             result = await adapter.send("12345", content, metadata={"notify": True})
 
         assert result.success is True
         markup = adapter._bot.send_message.await_args.kwargs["reply_markup"]
-        assert markup["force_reply"] is True
-        assert markup["input_field_placeholder"] == "1,3"
-        assert "keyboard" not in markup
+        assert [row[0]["text"] for row in markup["inline_keyboard"][:3]] == [
+            "☐ Work",
+            "☐ Home",
+            "☐ Health",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_multi_choice_buttons_toggle_then_submit_one_hidden_response(
+        self, adapter, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
+        adapter._bot = MagicMock()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=9))
+        adapter._bot.send_chat_action = AsyncMock()
+        adapter._rich_messages_enabled = False
+        adapter._is_callback_user_authorized = MagicMock(return_value=True)
+        adapter._dispatch_hermes_ui_payload = AsyncMock()
+        content = """```hermes-ui
+{"type":"form","id":"areas-form","fields":[{"id":"areas","label":"Areas","type":"multi-choice","options":[{"label":"Work","value":"work"},{"label":"Home","value":"home"}]}]}
+```"""
+
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
+        ):
+            await adapter.send("12345", content, metadata={"notify": True})
+            initial = adapter._bot.send_message.await_args.kwargs["reply_markup"]
+            message = SimpleNamespace(
+                chat_id=12345,
+                message_id=9,
+                message_thread_id=None,
+                text="Areas",
+                chat=SimpleNamespace(id=12345, type="private", title=None, full_name="Noam"),
+            )
+            query = SimpleNamespace(
+                data=initial["inline_keyboard"][0][0]["callback_data"],
+                message=message,
+                from_user=SimpleNamespace(id=12345, first_name="Noam", full_name="Noam"),
+                answer=AsyncMock(),
+                edit_message_reply_markup=AsyncMock(),
+            )
+            await adapter._handle_hermes_ui_callback(query, query.data)
+            toggled = query.edit_message_reply_markup.await_args.kwargs["reply_markup"]
+            assert toggled["inline_keyboard"][0][0]["text"] == "✅ Work"
+            submit_row = next(
+                row for row in toggled["inline_keyboard"] if "Continue" in row[0]["text"]
+            )
+            query.data = submit_row[0]["callback_data"]
+            await adapter._handle_hermes_ui_callback(query, query.data)
+
+        adapter._dispatch_hermes_ui_payload.assert_awaited_once()
+        payload = adapter._dispatch_hermes_ui_payload.await_args.args[2]
+        assert '"areas":["work"]' in payload
 
     def test_multi_choice_becomes_toggle_controls(self):
         content = """```hermes-ui
@@ -270,9 +338,9 @@ class TestHermesUiTelegramRendering:
             f"```hermes-ui\n{json.dumps(artifact)}\n```"
         )
 
-        assert "12. Option 12" in rendered
-        assert controls.kind == "single-choice-list"
-        assert controls.labels == ()
+        assert "Option 12" not in rendered
+        assert controls.kind == "single-choice"
+        assert controls.labels[-1] == "Option 12"
 
     def test_legacy_questionnaire_aliases_are_translated(self):
         artifact = {
@@ -284,8 +352,8 @@ class TestHermesUiTelegramRendering:
             f"```hermes-ui\n{json.dumps(artifact)}\n```"
         )
 
-        assert "Legacy question" in rendered
-        assert "Helpful context" in rendered
+        assert "Select items below" in rendered
+        assert "Legacy question" not in rendered
 
     def test_nested_card_actions_become_tappable_choices(self):
         artifact = {
@@ -309,8 +377,8 @@ class TestHermesUiTelegramRendering:
     @pytest.mark.parametrize(
         ("artifact", "expected"),
         [
-            ({"type": "checklist", "title": "Checklist", "items": [{"id": "a", "label": "First"}]}, "First"),
-            ({"type": "questionnaire", "title": "Questions", "items": [{"id": "a", "label": "Answer me"}]}, "Answer me"),
+            ({"type": "checklist", "title": "Checklist", "items": [{"id": "a", "label": "First"}]}, "Select items below"),
+            ({"type": "questionnaire", "title": "Questions", "items": [{"id": "a", "label": "Answer me"}]}, "Select items below"),
             ({"type": "task-triage", "task": {"id": "1", "title": "Triage me", "priority": "high"}}, "Triage me"),
             ({"type": "flowstate-task-batch", "tasks": [{"id": "1", "title": "Batch task", "recommendation": "today"}]}, "Batch task"),
             ({"type": "flowstate-planning-session", "mode": "day-start", "categories": [], "tasks": [{"id": "1", "title": "Plan task"}]}, "Plan task"),
