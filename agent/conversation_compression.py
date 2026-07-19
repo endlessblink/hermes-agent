@@ -183,6 +183,17 @@ def schedule_background_compaction_checkpoint(agent: Any, messages: list) -> boo
         return False
     if getattr(agent, "api_mode", None) == "codex_app_server":
         return False
+    has_content_to_compress = getattr(compressor, "has_content_to_compress", None)
+    if callable(has_content_to_compress):
+        try:
+            if not has_content_to_compress(messages):
+                return False
+        except Exception:
+            logger.debug(
+                "background checkpoint compressibility probe failed",
+                exc_info=True,
+            )
+            return False
 
     try:
         threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
