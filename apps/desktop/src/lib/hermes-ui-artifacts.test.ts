@@ -1064,3 +1064,58 @@ describe('parseHermesUiArtifact', () => {
     ).toBe(true)
   })
 })
+
+// Timeline day plans (2026-07-19): the model tried to build chronological
+// plans and the validator had no 'time' column, which looped it on resends.
+describe('task-table time column', () => {
+  it('parses a chronological day plan with a time column', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        columns: ['time', 'task'],
+        rows: [
+          { id: 'blk-1', time: '15:25', title: 'תיכון' },
+          { id: 'blk-2', time: '18:30-19:15', title: 'שיעור AI' }
+        ],
+        title: 'טיוטת המשך היום',
+        type: 'task-table'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+
+    if (result.ok && result.artifact.type === 'task-table') {
+      expect(result.artifact.columns).toEqual(['time', 'task'])
+      expect(result.artifact.rows[0].time).toBe('15:25')
+      expect(result.artifact.rows[1].time).toBe('18:30-19:15')
+    }
+  })
+
+  it('names the allowed columns when rejecting an unsupported one', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        columns: ['when'],
+        rows: [{ id: 'r1', title: 'x' }],
+        type: 'task-table'
+      })
+    )
+
+    expect(result.ok).toBe(false)
+
+    if (!result.ok) {
+      expect(result.error).toContain('allowed:')
+      expect(result.error).toContain('time')
+    }
+  })
+
+  it('accepts a long day-plan description without rejecting it', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        description: 'א'.repeat(900),
+        fields: [{ id: 'q', label: 'מה נכון?', options: [{ label: 'א', value: 'a' }], type: 'single-choice' }],
+        type: 'form'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+  })
+})

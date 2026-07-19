@@ -579,6 +579,7 @@ const SAFE_TASK_TABLE_ROW_KEYS = new Set([
   'id',
   'nextStep',
   'priority',
+  'time',
   'timeSize',
   'title',
   'urgency'
@@ -2352,8 +2353,16 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
     columns.push(column)
   }
 
-  if (!Array.isArray(parsed.rows) || parsed.rows.length < MIN_TASK_TABLE_ROWS) {
-    return { error: 'task-table requires at least 3 rows', ok: false }
+  // Timeline plans (a 'time' column) are legitimate at any length — the rest
+  // of an evening can be one or two blocks. The 3-row floor only guards
+  // against degenerate NON-timeline tables.
+  const isTimeline = columns.includes('time')
+
+  if (!Array.isArray(parsed.rows) || parsed.rows.length < (isTimeline ? 1 : MIN_TASK_TABLE_ROWS)) {
+    return {
+      error: isTimeline ? 'task-table requires at least 1 row' : 'task-table requires at least 3 rows',
+      ok: false
+    }
   }
 
   if (parsed.rows.length > MAX_TASK_TABLE_ROWS) {

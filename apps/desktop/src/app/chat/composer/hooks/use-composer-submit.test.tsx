@@ -20,7 +20,7 @@ function Harness({
 }: {
   attachments?: unknown[]
   busy?: boolean
-  onClarify?: (text: string) => boolean | Promise<boolean>
+  onClarify?: (text: string) => boolean | Promise<boolean | 'stale'>
   onQueue: () => boolean
   onSubmit: (text: string) => boolean | Promise<boolean>
   recoverLostClarifyWhileBusy?: boolean
@@ -180,5 +180,28 @@ describe('useComposerSubmit clarify routing', () => {
 
     expect(onClarify).not.toHaveBeenCalled()
     expect(onQueue).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Regression net for the 2026-07-19 "dead send button" trap: a clarify request
+// the gateway no longer tracks must not eat the user's message — the stale
+// path re-routes the same text to the queue in the same click.
+describe('useComposerSubmit stale clarify fallback', () => {
+  it('re-queues the typed text when the clarify request went stale on the gateway', async () => {
+    const onQueue = vi.fn(() => true)
+    const onClarify = vi.fn(async () => 'stale' as const)
+    const { getByTestId } = render(
+      <Harness busy onClarify={onClarify} onQueue={onQueue} onSubmit={vi.fn(() => true)} />
+    )
+    const editor = getByTestId('editor')
+    editor.textContent = 'my status update'
+    fireEvent.input(editor)
+
+    await act(async () => {
+      fireEvent.click(getByTestId('submit'))
+    })
+
+    await waitFor(() => expect(onQueue).toHaveBeenCalledTimes(1))
+    expect(onClarify).toHaveBeenCalledWith('my status update')
   })
 })
