@@ -1661,6 +1661,19 @@ def init_agent(
     compression_in_place = is_truthy_value(
         _compression_cfg.get("in_place"), default=False
     )
+    compression_background_checkpoint = is_truthy_value(
+        _compression_cfg.get("background_checkpoint"),
+        default=(agent.platform == "desktop"),
+    )
+    try:
+        compression_background_checkpoint_ratio = float(
+            _compression_cfg.get("background_checkpoint_ratio", 0.70)
+        )
+    except (TypeError, ValueError):
+        compression_background_checkpoint_ratio = 0.70
+    compression_background_checkpoint_ratio = max(
+        0.20, min(compression_background_checkpoint_ratio, 0.95)
+    )
     codex_app_server_auto_compaction = str(
         _compression_cfg.get("codex_app_server_auto", "native") or "native"
     ).lower()
@@ -1927,6 +1940,12 @@ def init_agent(
             pass
     agent.compression_enabled = compression_enabled
     agent.compression_in_place = compression_in_place
+    agent.compression_background_checkpoint_enabled = (
+        compression_background_checkpoint
+    )
+    agent.compression_background_checkpoint_ratio = (
+        compression_background_checkpoint_ratio
+    )
     agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
 
     # Reject models whose context window is below the minimum required
