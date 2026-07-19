@@ -88,6 +88,8 @@ def test_personal_assistant_scheduled_uses_daily_claim(monkeypatch, tmp_path):
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
     submitted = _install_session_stubs(monkeypatch, server, ["pa-1"])
+    session = {"personal_assistant": True}
+    monkeypatch.setitem(server._sessions, "pa-1", session)
 
     first = server._methods["personal_assistant.start"]("r1", {"trigger": "scheduled"})
     second = server._methods["personal_assistant.start"]("r2", {"trigger": "scheduled"})
@@ -95,10 +97,15 @@ def test_personal_assistant_scheduled_uses_daily_claim(monkeypatch, tmp_path):
     assert first["result"]["status"] == "launched"
     assert second["result"]["status"] == "already_completed"
     assert len(submitted) == 1
+    assert completed == []
+
+    server._finish_personal_assistant_daily_delivery(
+        session, status="complete", has_visible_response=True
+    )
     assert completed == [due]
 
 
-def test_daily_assistant_launch_submits_then_completes(monkeypatch, tmp_path):
+def test_daily_assistant_launch_completes_only_after_a_visible_persisted_response(monkeypatch, tmp_path):
     import tui_gateway.server as server
 
     claim = SimpleNamespace(claimed=True, status="due", local_date="2026-07-12")
@@ -118,6 +125,8 @@ def test_daily_assistant_launch_submits_then_completes(monkeypatch, tmp_path):
         "session.create",
         lambda rid, params: server._ok(rid, {"session_id": "morning-1"}),
     )
+    session = {"personal_assistant": True}
+    monkeypatch.setitem(server._sessions, "morning-1", session)
     submitted = []
     monkeypatch.setitem(
         server._methods,
@@ -130,7 +139,61 @@ def test_daily_assistant_launch_submits_then_completes(monkeypatch, tmp_path):
     assert response["result"]["status"] == "launched"
     assert submitted[0]["session_id"] == "morning-1"
     assert "FlowState" in submitted[0]["text"]
+    assert completed == []
+
+    server._finish_personal_assistant_daily_delivery(
+        session,
+        status="complete",
+        has_visible_response=True,
+    )
+
     assert completed == [(tmp_path, claim)]
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    assert PersonalAssistantStateStore(tmp_path).read()["episode_summaries"][0]["status"] == "completed"
+
+
+def test_daily_assistant_failed_turn_releases_claim_for_retry(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+
+    claim = SimpleNamespace(claimed=True, status="due", local_date="2026-07-12")
+    abandoned = []
+    monkeypatch.setattr(
+        "agent.daily_assistant_lifecycle.claim_daily_planning_trigger",
+        lambda *args, **kwargs: claim,
+    )
+    monkeypatch.setattr(
+        "agent.daily_assistant_lifecycle.abandon_daily_planning_trigger",
+        lambda home, value: abandoned.append((home, value)) or True,
+    )
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setitem(
+        server._methods,
+        "session.create",
+        lambda rid, params: server._ok(rid, {"session_id": "morning-failed"}),
+    )
+    session = {"personal_assistant": True}
+    monkeypatch.setitem(server._sessions, "morning-failed", session)
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, params: server._ok(rid, {"status": "streaming"}),
+    )
+
+    response = server._methods["daily_assistant.launch"]("r1", {})
+    assert response["result"]["status"] == "launched"
+
+    server._finish_personal_assistant_daily_delivery(
+        session,
+        status="error",
+        has_visible_response=False,
+    )
+
+    assert abandoned == [(tmp_path, claim)]
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    assert PersonalAssistantStateStore(tmp_path).read()["episode_summaries"][0]["status"] == "failed"
 
 
 def test_daily_assistant_launch_abandons_failed_submission(monkeypatch, tmp_path):
@@ -153,6 +216,7 @@ def test_daily_assistant_launch_abandons_failed_submission(monkeypatch, tmp_path
         "session.create",
         lambda rid, params: server._ok(rid, {"session_id": "morning-1"}),
     )
+    monkeypatch.setitem(server._sessions, "morning-1", {"personal_assistant": True})
     monkeypatch.setitem(
         server._methods,
         "prompt.submit",

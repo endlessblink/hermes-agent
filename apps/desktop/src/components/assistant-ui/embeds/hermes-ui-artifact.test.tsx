@@ -274,6 +274,72 @@ describe('ChecklistArtifactCard', () => {
     expect(response.values).toEqual({ correction: '20:30', meal_prep_start: '20:30' })
   })
 
+  it('accepts a first-class custom answer for a required single-choice field', () => {
+    const customForm: HermesUiFormArtifact = {
+      fields: [
+        {
+          allowCustomAnswer: true,
+          customAnswerLabel: 'My own answer',
+          id: 'next_move',
+          label: 'What should happen next?',
+          options: [
+            { label: 'Plan', value: 'plan' },
+            { label: 'Delegate', value: 'delegate' }
+          ],
+          required: true,
+          type: 'single-choice'
+        }
+      ],
+      id: 'next-move',
+      submitLabel: 'Continue',
+      type: 'form'
+    }
+
+    const { unmount } = render(<FormArtifactCard artifact={customForm} />)
+    fireEvent.change(screen.getByLabelText('My own answer'), { target: { value: 'Call the clinic first' } })
+    unmount()
+
+    render(<FormArtifactCard artifact={customForm} />)
+    expect(screen.getByLabelText('My own answer')).toHaveProperty('value', 'Call the clinic first')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    expect(screen.queryByText('Required field')).toBeNull()
+    const message = requestComposerSubmit.mock.calls[0]?.[0]
+    const response = JSON.parse(message.slice('Hermes UI form response:\n'.length))
+    expect(response.values).toEqual({ next_move: 'Call the clinic first' })
+  })
+
+  it('submits selected options and custom text from a multi-choice field', () => {
+    const customForm: HermesUiFormArtifact = {
+      fields: [
+        {
+          allowCustomAnswer: true,
+          customAnswerLabel: 'Add another area',
+          id: 'areas',
+          label: 'Areas',
+          options: [
+            { label: 'Work', value: 'work' },
+            { label: 'Home', value: 'home' }
+          ],
+          required: true,
+          type: 'multi-choice'
+        }
+      ],
+      id: 'areas',
+      submitLabel: 'Continue',
+      type: 'form'
+    }
+
+    render(<FormArtifactCard artifact={customForm} />)
+    fireEvent.click(screen.getByLabelText('Work'))
+    fireEvent.change(screen.getByLabelText('Add another area'), { target: { value: 'Health' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    const message = requestComposerSubmit.mock.calls[0]?.[0]
+    const response = JSON.parse(message.slice('Hermes UI form response:\n'.length))
+    expect(response.values).toEqual({ areas: ['work', 'Health'] })
+  })
+
   it('blocks non-canonical or out-of-range time values', () => {
     const timeForm: HermesUiFormArtifact = {
       fields: [{ id: 'scheduled_time', label: 'Hard stop', required: true, type: 'time' }],
@@ -865,6 +931,7 @@ describe('Planning toolkit primitives', () => {
   }
 
   const miniKanban: HermesUiMiniKanbanArtifact = {
+    actions: [{ id: 'revise-week', label: 'תקן את כל הטיוטה', submitText: 'בוא נתקן את טיוטת השבוע.' }],
     direction: 'rtl',
     lanes: [
       {
@@ -950,6 +1017,8 @@ describe('Planning toolkit primitives', () => {
     fireEvent.click(screen.getByRole('button', { name: 'בחר להיום' }))
 
     expect(requestComposerSubmit).toHaveBeenCalledWith('שים את t1 ב־today preview.', { target: 'main' })
+    fireEvent.click(screen.getByRole('button', { name: 'תקן את כל הטיוטה' }))
+    expect(requestComposerSubmit).toHaveBeenCalledWith('בוא נתקן את טיוטת השבוע.', { target: 'main' })
   })
 
   it('renders day-timeline with current time and routes block actions', () => {

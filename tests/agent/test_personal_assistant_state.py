@@ -248,3 +248,131 @@ def test_monitor_context_ledger_recovers_compatibly_from_legacy_or_invalid_state
     assert state["canonical_session_id"] == "assistant-home"
     assert state["context_ledger"] == []
     assert store.public()["contextLedger"] == []
+
+
+def test_protected_items_require_an_explicit_safe_disposition(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+
+    with pytest.raises(ValueError, match="next action"):
+        store.upsert_protected_item(
+            {
+                "id": "flowstate:health-blood-test",
+                "source": "flowstate",
+                "sourceId": "health-blood-test",
+                "kind": "commitment",
+                "title": "Arrange the required blood test",
+                "consequence": "The surgery preparation can be delayed",
+                "disposition": "actionable",
+            }
+        )
+
+    state = store.upsert_protected_item(
+        {
+            "id": "flowstate:health-blood-test",
+            "source": "flowstate",
+            "sourceId": "health-blood-test",
+            "kind": "commitment",
+            "title": "Arrange the required blood test",
+            "consequence": "The surgery preparation can be delayed",
+            "disposition": "actionable",
+            "nextAction": "Call the clinic and request a renewed referral",
+            "sourceRevision": "42",
+        }
+    )
+
+    assert state["protected_items"][0]["nextAction"].startswith("Call the clinic")
+    assert store.public()["protectedItems"][0]["id"] == "flowstate:health-blood-test"
+
+
+def test_protected_items_preserve_missing_context_as_a_visible_risk(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    state = store.upsert_protected_item(
+        {
+            "id": "notion:client-project",
+            "source": "notion",
+            "sourceId": "client-project",
+            "kind": "project",
+            "title": "Client delivery",
+            "consequence": "Unknown",
+            "disposition": "needs_context",
+            "missingFields": ["deadline", "stakeholder"],
+            "nextReviewAt": "2026-07-20T09:00:00+03:00",
+        }
+    )
+
+    assert state["protected_items"][0]["missingFields"] == ["deadline", "stakeholder"]
+
+
+def test_coverage_receipt_cannot_claim_all_clear_for_partial_or_unreviewed_scope(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.upsert_protected_item(
+        {
+            "id": "flowstate:health-blood-test",
+            "source": "flowstate",
+            "sourceId": "health-blood-test",
+            "kind": "commitment",
+            "title": "Arrange the required blood test",
+            "consequence": "The surgery preparation can be delayed",
+            "disposition": "actionable",
+            "nextAction": "Call the clinic",
+        }
+    )
+
+    receipt = store.record_coverage_receipt(
+        cadence="daily",
+        scope_fingerprint="flowstate:sequence-19",
+        sources=[
+            {"id": "flowstate", "status": "fresh", "revision": "19"},
+            {"id": "calendar", "status": "partial", "revision": None},
+        ],
+        expected_item_ids=["flowstate:health-blood-test"],
+        reviewed_item_ids=[],
+        risk_item_ids=[],
+        unresolved_item_ids=[],
+    )
+
+    assert receipt["complete"] is False
+    assert receipt["allClear"] is False
+    assert receipt["missingItemIds"] == ["flowstate:health-blood-test"]
+    assert receipt["blockingReasons"] == [
+        "source calendar is partial",
+        "1 protected item was not reviewed",
+    ]
+
+
+def test_complete_coverage_receipt_stays_non_clear_while_a_risk_needs_attention(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.upsert_protected_item(
+        {
+            "id": "flowstate:health-blood-test",
+            "source": "flowstate",
+            "sourceId": "health-blood-test",
+            "kind": "commitment",
+            "title": "Arrange the required blood test",
+            "consequence": "The surgery preparation can be delayed",
+            "disposition": "actionable",
+            "nextAction": "Call the clinic",
+        }
+    )
+
+    receipt = store.record_coverage_receipt(
+        cadence="weekly",
+        scope_fingerprint="portfolio:complete-19",
+        sources=[{"id": "flowstate", "status": "fresh", "revision": "19"}],
+        expected_item_ids=["flowstate:health-blood-test"],
+        reviewed_item_ids=["flowstate:health-blood-test"],
+        risk_item_ids=["flowstate:health-blood-test"],
+        unresolved_item_ids=[],
+    )
+
+    assert receipt["complete"] is True
+    assert receipt["allClear"] is False
+    assert store.public()["latestCoverageReceipt"]["cadence"] == "weekly"

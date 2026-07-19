@@ -91,6 +91,79 @@ def test_single_choice_uses_value_and_terminal_submit_is_idempotent(tmp_path):
     assert replay.outcome in {"stale", "resolved"}
 
 
+def test_required_single_choice_accepts_custom_text_in_existing_form_envelope(tmp_path):
+    artifact = {
+        "type": "form",
+        "id": "next-move",
+        "fields": [{
+            "id": "next_move",
+            "label": "What should happen next?",
+            "type": "single-choice",
+            "required": True,
+            "allowCustomAnswer": True,
+            "customAnswerLabel": "My own answer",
+            "options": [{"label": "Plan", "value": "plan"}],
+        }],
+    }
+    state = prepare_interaction(artifact, chat_id="123", root=tmp_path)
+
+    prompt = apply_control(
+        state["token"], state["revision"], _control(state, "request-custom-answer"), root=tmp_path
+    )
+    assert prompt.outcome == "prompt"
+    assert prompt.prompt == "My own answer"
+    answered = apply_text_reply(state["token"], "Call the clinic first", root=tmp_path)
+    result = apply_control(
+        answered.state["token"],
+        answered.state["revision"],
+        _control(answered.state, "submit-form"),
+        root=tmp_path,
+    )
+
+    assert result.outcome == "submit"
+    envelope = json.loads(result.payload.split("\n", 1)[1])
+    assert envelope["schemaVersion"] == 1
+    assert envelope["values"] == {"next_move": "Call the clinic first"}
+
+
+def test_multi_choice_preserves_buttons_and_custom_text_in_one_value_list(tmp_path):
+    artifact = {
+        "type": "form",
+        "id": "areas",
+        "fields": [{
+            "id": "areas",
+            "label": "Areas",
+            "type": "multi-choice",
+            "required": True,
+            "allowCustomAnswer": True,
+            "customAnswerLabel": "Add another area",
+            "options": [{"label": "Work", "value": "work"}],
+        }],
+    }
+    state = prepare_interaction(artifact, chat_id="123", root=tmp_path)
+    selected = apply_control(
+        state["token"], state["revision"], _control(state, "toggle-option", option_index=0), root=tmp_path
+    )
+    prompt = apply_control(
+        selected.state["token"],
+        selected.state["revision"],
+        _control(selected.state, "request-custom-answer"),
+        root=tmp_path,
+    )
+    answered = apply_text_reply(state["token"], "Health", root=tmp_path)
+    result = apply_control(
+        answered.state["token"],
+        answered.state["revision"],
+        _control(answered.state, "submit-form"),
+        root=tmp_path,
+    )
+
+    assert prompt.outcome == "prompt"
+    assert result.outcome == "submit"
+    envelope = json.loads(result.payload.split("\n", 1)[1])
+    assert envelope["values"] == {"areas": ["work", "Health"]}
+
+
 def test_typed_mixed_form_uses_persistent_prompt_anchor_and_advances(tmp_path):
     artifact = {
         "type": "form",

@@ -4289,6 +4289,38 @@ def _finish_personal_assistant_monitor_delivery(
     )
 
 
+def _finish_personal_assistant_daily_delivery(
+    session: dict[str, Any],
+    *,
+    status: str,
+    has_visible_response: bool,
+) -> None:
+    """Complete a daily claim only after its persisted turn has a visible result."""
+
+    delivery = session.pop("personal_assistant_daily_delivery", None)
+    if not isinstance(delivery, dict):
+        return
+    from agent.daily_assistant_lifecycle import (
+        abandon_daily_planning_trigger,
+        complete_daily_planning_trigger,
+    )
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    profile_home = Path(str(delivery.get("profile_home") or ""))
+    claim = delivery.get("claim")
+    completed = status == "complete" and has_visible_response
+    if completed:
+        completed = complete_daily_planning_trigger(profile_home, claim)
+    else:
+        abandon_daily_planning_trigger(profile_home, claim)
+    episode_id = str(delivery.get("episode_id") or "")
+    if episode_id:
+        PersonalAssistantStateStore(profile_home).mark_episode_status(
+            episode_id,
+            "completed" if completed else "failed",
+        )
+
+
 def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
     """Coalesce deterministic monitor work without interrupting an active turn."""
     from agent.personal_assistant_monitor import (
@@ -4706,7 +4738,7 @@ def _start_personal_assistant(rid, params: dict) -> dict:
             user_intent=user_intent,
             idempotency_key=idempotency_key,
         )
-        if duplicate and episode.get("status") == "accepted" and not monitor_events:
+        if duplicate and episode.get("status") in {"submitted", "completed"} and not monitor_events:
             return _ok(
                 rid,
                 {
@@ -4728,6 +4760,10 @@ def _start_personal_assistant(rid, params: dict) -> dict:
             "deferred": state.get("deferred", []),
             "pendingApprovals": state.get("pendingApprovals", []),
             "captureProposals": state.get("captureProposals", []),
+            "protectedItems": state.get("protected_items", []),
+            "latestCoverageReceipt": (
+                (state.get("coverage_receipts") or [None])[-1]
+            ),
             "sync": state.get("sync", {}),
             "recent_episodes": state.get("episode_summaries", [])[-20:],
             "contextLedger": [
@@ -4753,6 +4789,20 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                     "events": monitor_delivery,
                 }
 
+        if claim is not None:
+            with _sessions_lock:
+                daily_session = _sessions.get(session_id)
+                if daily_session is None:
+                    abandon_daily_planning_trigger(profile_home, claim)
+                    return _err(
+                        rid, 5000, "personal assistant runtime session is unavailable"
+                    )
+                daily_session["personal_assistant_daily_delivery"] = {
+                    "profile_home": str(profile_home),
+                    "episode_id": str(episode.get("episode_id") or "") or None,
+                    "claim": claim,
+                }
+
         submitted = _methods["prompt.submit"](
             rid,
             {
@@ -4776,13 +4826,16 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                         ):
                             monitor_session.pop("personal_assistant_monitor_delivery", None)
             if claim is not None:
+                with _sessions_lock:
+                    daily_session = _sessions.get(session_id)
+                    if daily_session is not None:
+                        daily_session.pop("personal_assistant_daily_delivery", None)
+            if claim is not None:
                 abandon_daily_planning_trigger(profile_home, claim)
             return submitted
         state, episode = store.mark_episode_status(
-            str(episode.get("episode_id") or ""), "accepted"
+            str(episode.get("episode_id") or ""), "submitted"
         )
-    if claim is not None and not complete_daily_planning_trigger(profile_home, claim):
-        return _err(rid, 5000, "personal assistant reservation could not be completed")
 
     result = {
         "status": "launched",
@@ -11933,6 +11986,17 @@ def _run_prompt_submit(
                         "Personal assistant monitor delivery settlement failed",
                         exc_info=True,
                     )
+                try:
+                    _finish_personal_assistant_daily_delivery(
+                        session,
+                        status=status,
+                        has_visible_response=isinstance(raw, str) and bool(raw.strip()),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Personal assistant daily delivery settlement failed",
+                        exc_info=True,
+                    )
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -12112,6 +12176,17 @@ def _run_prompt_submit(
                 except Exception:
                     logger.warning(
                         "Personal assistant deferred monitor delivery release failed",
+                        exc_info=True,
+                    )
+                try:
+                    _finish_personal_assistant_daily_delivery(
+                        session,
+                        status="error",
+                        has_visible_response=False,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Personal assistant deferred daily delivery release failed",
                         exc_info=True,
                     )
             _emit("session.info", sid, _session_info(agent, session))

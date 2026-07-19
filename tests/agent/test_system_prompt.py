@@ -131,6 +131,8 @@ class TestPersonalAssistantGuidance:
         assert "Do not silently save" in stable
         assert "smallest meaningful next step" in stable
         assert "end-of-day boundary" in stable
+        assert "most compact supported visual form" in stable
+        assert "Prefer an ordered action list" not in stable
         assert "protectively defer" in stable
         assert "matching context" in stable
         assert "consequential unknowns" in stable
@@ -150,6 +152,9 @@ class TestPersonalAssistantGuidance:
         assert "fresh=true" in stable
         assert "Never replace a failed or partial FlowState inventory" in stable
         assert "terminal code, ledger files, date-range brute force" in stable
+        assert "personal_assistant_safety_review" in stable
+        assert "protected item" in stable
+        assert "all-clear" in stable
 
     def test_absent_without_personal_assistant_tools(self):
         stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_list_tasks"]))
@@ -167,6 +172,9 @@ class TestDesktopQuestionnaireGuidance:
         assert "plain Markdown list" in stable
         assert "revise" in stable
         assert "long-text" in stable
+        assert "allowCustomAnswer" in stable
+        assert "customAnswerLabel" in stable
+        assert "custom answer" in stable
         assert '`type: "task-breakdown"`' in stable
         assert "editable ordered steps" in stable
         assert "stopping evidence" in stable
@@ -175,6 +183,15 @@ class TestDesktopQuestionnaireGuidance:
         assert "flowstate_subtask_batch" in stable
         assert "closest supported `hermes-ui` artifact" in stable
         assert "a `task-table` for a compact daily plan" in stable
+        assert "`day-timeline` for a plan with clock times" in stable
+        assert "one short framing sentence" in stable
+        assert "Never duplicate the artifact as prose" in stable
+        assert "multi-day plan" in stable
+        assert "agreed the outcomes" in stable
+        assert "at most three planning items in prose" in stable
+        assert "one lane per day" in stable
+        assert "per-task actions" in stable
+        assert "visual artifact is the answer" in stable
         assert "daily-planning-list" not in stable
         assert "Do not merely offer or promise" in stable
         assert '"columns" and "rows"' in stable
@@ -191,6 +208,9 @@ class TestDesktopQuestionnaireGuidance:
         stable = _stable_prompt(_make_agent(platform="telegram"))
 
         assert "Hermes Desktop interactive questions" not in stable
+        assert "Hermes Telegram interactive questions" in stable
+        assert "multi-day plan" in stable
+        assert "native Telegram controls" in stable
 
 
 class TestCodingContextBlock:

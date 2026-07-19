@@ -345,6 +345,20 @@ function hasCustomTextAnswer(
   })
 }
 
+function customChoiceValue(field: HermesUiFormField, value: HermesUiFormValue | undefined): string {
+  if (!field.allowCustomAnswer) {
+    return ''
+  }
+
+  const optionValues = new Set(field.options?.map(option => option.value) || [])
+
+  if (field.type === 'multi-choice' && Array.isArray(value)) {
+    return value.find(item => !optionValues.has(item)) || ''
+  }
+
+  return typeof value === 'string' && value && !optionValues.has(value) ? value : ''
+}
+
 export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact }) {
   const direction = artifactDirection(artifact)
   const storageKey = useMemo(() => `${stableArtifactStorageKey(artifact)}:draft`, [artifact])
@@ -418,6 +432,7 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
       <div className="mt-3 space-y-3">
         {artifact.fields.map(field => {
           const value = values[field.id]
+          const customAnswer = customChoiceValue(field, value)
           const invalid = showErrors && formValueInvalid(field, value)
           const common = { 'aria-invalid': invalid, id: `hermes-form-${artifact.id || 'form'}-${field.id}` }
 
@@ -450,6 +465,18 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
                       {option.label}
                     </label>
                   ))}
+                  {field.allowCustomAnswer && (
+                    <label className="block pt-1 text-xs text-muted-foreground">
+                      {field.customAnswerLabel || (direction === 'rtl' ? 'תשובה אחרת' : 'Other answer')}
+                      <input
+                        aria-label={field.customAnswerLabel || (direction === 'rtl' ? 'תשובה אחרת' : 'Other answer')}
+                        className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm text-foreground"
+                        onChange={event => updateValue(field.id, event.target.value)}
+                        type="text"
+                        value={customAnswer}
+                      />
+                    </label>
+                  )}
                 </div>
               ) : field.type === 'multi-choice' ? (
                 <div className="mt-1 space-y-1">
@@ -475,6 +502,24 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
                       </label>
                     )
                   })}
+                  {field.allowCustomAnswer && (
+                    <label className="block pt-1 text-xs text-muted-foreground">
+                      {field.customAnswerLabel || (direction === 'rtl' ? 'תשובה אחרת' : 'Other answer')}
+                      <input
+                        aria-label={field.customAnswerLabel || (direction === 'rtl' ? 'תשובה אחרת' : 'Other answer')}
+                        className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm text-foreground"
+                        onChange={event => {
+                          const selected = Array.isArray(value) ? value : []
+                          const optionValues = new Set(field.options?.map(option => option.value) || [])
+                          const selectedOptions = selected.filter(item => optionValues.has(item))
+                          const nextCustom = event.target.value
+                          updateValue(field.id, nextCustom ? [...selectedOptions, nextCustom] : selectedOptions)
+                        }}
+                        type="text"
+                        value={customAnswer}
+                      />
+                    </label>
+                  )}
                 </div>
               ) : field.type === 'boolean' ? (
                 <input
@@ -2243,6 +2288,11 @@ export function MiniKanbanCard({ artifact }: { artifact: HermesUiMiniKanbanArtif
           </section>
         ))}
       </div>
+      {artifact.actions?.length ? (
+        <div className="border-t border-border/50 px-3 pb-3 pt-1" dir={direction} style={directionalStyle}>
+          <PlanningActionButtons actions={artifact.actions} isRtl={isRtl} />
+        </div>
+      ) : null}
     </ArtifactShell>
   )
 }
