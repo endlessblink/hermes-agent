@@ -123,7 +123,7 @@ def _current_xauthority(env: dict[str, str]) -> str | None:
     configured = env.get("XAUTHORITY")
     if configured and Path(configured).is_file():
         return configured
-    runtime_dir = Path(env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    runtime_dir = Path(env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")  # windows-footgun: ok — Linux-only watchdog (X11/XDG paths throughout)
     try:
         candidates = [path for path in runtime_dir.glob("xauth_*") if path.is_file()]
         return str(max(candidates, key=lambda path: path.stat().st_mtime)) if candidates else None
