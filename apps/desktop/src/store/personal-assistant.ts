@@ -11,6 +11,11 @@ interface PersonalAssistantStartResult {
   status: string
 }
 
+export interface PersonalAssistantDestination {
+  canonicalSessionId: string
+  runtimeSessionId: string
+}
+
 export interface AssistantStateItem {
   id: string
   title?: string
@@ -143,7 +148,7 @@ export async function startPersonalAssistant(trigger: PersonalAssistantTrigger):
   return { sessionId, status }
 }
 
-export async function openPersonalAssistantHome(): Promise<string> {
+export async function openPersonalAssistantHome(): Promise<PersonalAssistantDestination> {
   const response = await (
     await ownerGateway()
   ).request<{
@@ -161,7 +166,10 @@ export async function openPersonalAssistantHome(): Promise<string> {
 
   storePersonalAssistantState(response.state)
 
-  return destinationSessionId
+  return {
+    canonicalSessionId: destinationSessionId,
+    runtimeSessionId: response.session_id
+  }
 }
 
 export async function refreshPersonalAssistantState(): Promise<AssistantState> {

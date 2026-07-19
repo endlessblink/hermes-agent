@@ -7,8 +7,8 @@ import { cn } from '@/lib/utils'
 import {
   $personalAssistantState,
   acknowledgePersonalAssistantRead,
-  type AssistantStateItem,
   type AssistantPendingItem,
+  type AssistantStateItem,
   type AssistantStateSection,
   patchPersonalAssistantState
 } from '@/store/personal-assistant'
@@ -33,10 +33,13 @@ function CaptureProposalItem({ item }: { item: AssistantPendingItem }) {
   const review = async (status: 'accepted' | 'rejected') => {
     if (status === 'accepted' && (!section || !draft.trim())) {
       setError('This proposal is missing a valid learning category or title.')
+
       return
     }
+
     setBusy(true)
     setError(null)
+
     try {
       await patchPersonalAssistantState(
         status === 'accepted' && section

@@ -91,7 +91,10 @@ describe('startPersonalAssistant', () => {
 
     request.mockResolvedValue({ session_id: 'assistant-live', state, status: 'ready' })
 
-    await expect(openPersonalAssistantHome()).resolves.toBe('assistant-home')
+    await expect(openPersonalAssistantHome()).resolves.toEqual({
+      canonicalSessionId: 'assistant-home',
+      runtimeSessionId: 'assistant-live'
+    })
     expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
     expect(request).toHaveBeenCalledWith('personal_assistant.home', { profile: 'office-work' })
     expect($personalAssistantState.get()).toEqual(state)

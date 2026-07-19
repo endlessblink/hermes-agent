@@ -392,6 +392,7 @@ def test_task_batch_cycles_each_decision_then_submits_preview_only(tmp_path):
         {"type": "task-table", "columns": ["task"], "rows": [{"id": "a", "title": "A"}]},
         {"type": "mini-kanban", "lanes": [{"id": "a", "title": "A", "tasks": []}]},
         {"type": "day-timeline", "date": "2026-07-19", "blocks": []},
+        {"type": "week-planner", "weekStart": "2026-07-19", "days": [{"id": "sun", "label": "Sunday", "date": "2026-07-19", "blocks": []}]},
         {"type": "mutation-preview", "changes": [], "actions": []},
         {"type": "urgency-energy-matrix", "xAxis": "energy", "yAxis": "urgency", "cells": []},
         {"type": "workload-bars", "bars": [{"id": "a", "label": "A", "value": 1}]},

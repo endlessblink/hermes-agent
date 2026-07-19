@@ -3,6 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { preprocessMarkdown } from '@/lib/markdown-preprocess'
 
 describe('preprocessMarkdown', () => {
+  it('routes a bare hermes-ui payload through the interactive renderer', () => {
+    const input = 'Choose one:\nhermes-ui {"type":"form","fields":[blocked]}'
+
+    expect(preprocessMarkdown(input)).toBe(
+      'Choose one:\n```hermes-ui\n{"type":"form","fields":[blocked]}\n```'
+    )
+  })
+
   it('strips inline accidental triple-backtick starts', () => {
     const input = [
       'Working as intended.',

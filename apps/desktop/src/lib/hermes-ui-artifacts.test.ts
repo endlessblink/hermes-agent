@@ -944,6 +944,61 @@ describe('parseHermesUiArtifact', () => {
     expect(result.ok && result.artifact.type === 'day-timeline' && result.artifact.currentTime).toBe('09:45')
   })
 
+  it('parses a complete RTL week-planner without dropping task detail', () => {
+    const days = Array.from({ length: 7 }, (_, index) => ({
+      blocks:
+        index === 0
+          ? [
+              {
+                actions: [{ id: 'revise', label: 'לשנות', submitText: 'בוא נתקן את הבלוק הראשון.' }],
+                doneEnough: 'קובץ וידאו אמיתי שאפשר להמשיך ממנו.',
+                durationMinutes: 35,
+                id: 'robot-film',
+                kind: 'focus',
+                label: 'סרטון הרמס',
+                note: 'לפתוח את החומרים ולהקליט טייק ראשון אחד.',
+                status: 'planned'
+              }
+            ]
+          : [],
+      date: `2026-07-${String(19 + index).padStart(2, '0')}`,
+      id: `day-${index + 1}`,
+      label: ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'][index]
+    }))
+
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        actions: [{ id: 'approve-week', label: 'לאשר', submitText: 'מאשר את טיוטת השבוע הזו.' }],
+        currentDate: '2026-07-19',
+        days,
+        direction: 'rtl',
+        title: 'השבוע שלי',
+        type: 'week-planner',
+        weekStart: '2026-07-19'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'week-planner' && result.artifact.days).toHaveLength(7)
+    expect(result.ok && result.artifact.type === 'week-planner' && result.artifact.days[0]?.blocks[0]?.note).toBe(
+      'לפתוח את החומרים ולהקליט טייק ראשון אחד.'
+    )
+    expect(result.ok && result.artifact.type === 'week-planner' && result.artifact.actions).toHaveLength(1)
+  })
+
+  it('rejects a week-planner whose dates are not seven consecutive days', () => {
+    const days = Array.from({ length: 7 }, (_, index) => ({
+      blocks: [],
+      date: `2026-07-${String(index === 4 ? 24 : 19 + index).padStart(2, '0')}`,
+      id: `day-${index + 1}`,
+      label: `Day ${index + 1}`
+    }))
+
+    expect(parseHermesUiArtifact(JSON.stringify({ days, type: 'week-planner', weekStart: '2026-07-19' })).ok).toBe(
+      false
+    )
+  })
+
   it('parses a mutation-preview artifact with approval actions', () => {
     const result = parseHermesUiArtifact(
       JSON.stringify({
