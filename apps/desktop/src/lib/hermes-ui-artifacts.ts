@@ -252,6 +252,7 @@ export interface HermesUiTaskContextArtifact {
 
 export type HermesUiTaskTableColumn =
   | 'task'
+  | 'time'
   | 'context'
   | 'timeSize'
   | 'energy'
@@ -270,6 +271,8 @@ export interface HermesUiPlanningTaskRow {
   title: string
   dueDate?: string | null
   priority?: HermesUiTaskPriority
+  /** Clock slot for timeline-style day plans, e.g. "15:25" or "18:30-19:15". */
+  time?: string
   context?: string
   timeSize?: HermesUiTaskSize
   energy?: HermesUiPlanningLevel
@@ -482,7 +485,9 @@ export interface HermesUiArtifactParseFailure {
 export type HermesUiArtifactParseResult = HermesUiArtifactParseFailure | HermesUiArtifactParseSuccess
 
 const MAX_TITLE_LENGTH = 160
-const MAX_DESCRIPTION_LENGTH = 500
+// 1200, not 500: real day-plan descriptions legitimately run long, and the
+// too-long rejection sent the model into resend loops (observed 2026-07-19).
+const MAX_DESCRIPTION_LENGTH = 1200
 const MAX_ITEMS = 100
 const MAX_ITEM_ID_LENGTH = 120
 const MAX_LABEL_LENGTH = 800
@@ -2286,6 +2291,7 @@ function parseTaskContextArtifact(parsed: Record<string, unknown>): HermesUiArti
 function parseTaskTableColumn(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiTaskTableColumn {
   if (
     value === 'task' ||
+    value === 'time' ||
     value === 'context' ||
     value === 'timeSize' ||
     value === 'energy' ||
@@ -2297,7 +2303,14 @@ function parseTaskTableColumn(value: unknown, field: string): HermesUiArtifactPa
     return value
   }
 
-  return { error: `${field} is not a supported task-table column`, ok: false }
+  // Name the allowed set: the model retries on this error verbatim, and a
+  // bare rejection sent it guessing in a loop (observed 2026-07-19).
+  return {
+    error:
+      `${field} is not a supported task-table column ` +
+      '(allowed: task, time, context, timeSize, energy, urgency, externality, nextStep, confidence)',
+    ok: false
+  }
 }
 
 function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
@@ -2379,6 +2392,12 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
       return dueDate
     }
 
+    const time = optionalText(rawRow.time, MAX_STATUS_LENGTH, `rows[${index}].time`)
+
+    if (time && typeof time !== 'string') {
+      return time
+    }
+
     const context = optionalText(rawRow.context, MAX_RATIONALE_LENGTH, `rows[${index}].context`)
 
     if (context && typeof context !== 'string') {
@@ -2420,6 +2439,7 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
       id: row.id,
       nextStep,
       priority: row.priority,
+      time,
       timeSize: timeSize as HermesUiTaskSize | undefined,
       title: row.title,
       urgency: urgency as HermesUiPlanningLevel | undefined

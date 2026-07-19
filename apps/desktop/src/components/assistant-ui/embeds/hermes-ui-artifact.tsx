@@ -349,7 +349,11 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
       dir={direction}
     >
       {artifact.title && <h3 className="text-sm font-semibold text-foreground">{artifact.title}</h3>}
-      {artifact.description && <p className="mt-1 text-xs text-muted-foreground">{artifact.description}</p>}
+      {artifact.description && (
+        <p className="mt-1 text-xs leading-relaxed whitespace-pre-line text-muted-foreground">
+          {artifact.description}
+        </p>
+      )}
       <div className="mt-3 space-y-3">
         {artifact.fields.map(field => {
           const value = values[field.id]
@@ -2060,6 +2064,7 @@ function columnLabel(column: HermesUiTaskTableArtifact['columns'][number], isRtl
     externality: { ltr: 'Externality', rtl: 'חיצוני' },
     nextStep: { ltr: 'Next step', rtl: 'צעד הבא' },
     task: { ltr: 'Task', rtl: 'משימה' },
+    time: { ltr: 'Time', rtl: 'שעה' },
     timeSize: { ltr: 'Size', rtl: 'גודל' },
     urgency: { ltr: 'Urgency', rtl: 'דחיפות' }
   }
@@ -2081,6 +2086,16 @@ export function TaskTableCard({ artifact }: { artifact: HermesUiTaskTableArtifac
           <span className="block text-muted-foreground">
             {row.dueDate || unknownLabel(isRtl)} · {priorityText(row.priority, isRtl)}
           </span>
+        </span>
+      )
+    }
+
+    // Clock slots render LTR even in RTL plans — "18:30-19:15" must not be
+    // bidi-scrambled (the unreadable-times report, 2026-07-19).
+    if (column === 'time') {
+      return (
+        <span className="font-mono tabular-nums whitespace-nowrap" dir="ltr">
+          {row.time || valueLabel(undefined, isRtl)}
         </span>
       )
     }

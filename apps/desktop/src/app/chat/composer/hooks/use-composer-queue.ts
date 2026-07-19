@@ -211,6 +211,13 @@ export function useComposerQueue({
     scope.attachments.clear()
     onDraftQueued?.()
     triggerHaptic('selection')
+    // Queueing must be as loud as sending: without this, a queued message
+    // whose panel is out of view reads as a dead send button.
+    notify({
+      kind: 'success',
+      title: t.composer.queueMessage,
+      message: text.trim().slice(0, 80)
+    })
 
     return true
   }, [
