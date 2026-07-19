@@ -32,7 +32,7 @@ interface UseComposerSubmitArgs {
   onSteer: ChatBarProps['onSteer']
   onSubmit: ChatBarProps['onSubmit']
   onSubmitAccepted?: () => void
-  onSubmitClarifyAnswer?: (answer: string) => Promise<boolean> | boolean
+  onSubmitClarifyAnswer?: (answer: string) => Promise<boolean | 'stale'> | boolean
   queueCurrentDraft: () => boolean
   queueEdit: QueueEditState | null
   recoverLostClarifyWhileBusy: boolean
@@ -143,7 +143,14 @@ export function useComposerSubmit({
 
     void Promise.resolve(onSubmitClarifyAnswer(text.trim()))
       .then(accepted => {
-        if (accepted === false) {
+        if (accepted === 'stale') {
+          // The pending clarify no longer exists on the gateway — the stale
+          // request was just cleared. Re-route the SAME text through the
+          // normal busy path (queue with auto-drain) so the user's message
+          // still lands without a second click.
+          restore()
+          queueCurrentDraft()
+        } else if (accepted === false) {
           restore()
         } else {
           clearSessionDraft(submittedScope)

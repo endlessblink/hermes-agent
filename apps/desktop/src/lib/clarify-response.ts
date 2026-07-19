@@ -22,7 +22,7 @@ export async function respondToClarifyRequest({
   onBeforeSend?: () => void
   onError?: (error: unknown) => void
   request: ClarifyRequest | null | undefined
-}): Promise<boolean> {
+}): Promise<boolean | 'stale'> {
   const trimmed = answer.trim()
 
   if (!trimmed && !allowEmpty) {
@@ -53,6 +53,20 @@ export async function respondToClarifyRequest({
 
     return true
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    // The gateway no longer tracks this clarify (the turn moved on, or a
+    // backend restart dropped it). Keeping the stale request would hijack
+    // EVERY subsequent send into this failing path — the "can't send
+    // anything while a form is on screen" trap. Drop the stale request so
+    // the composer returns to normal routing; the caller re-sends the text.
+    if (/no pending answer request/i.test(message)) {
+      clearClarifyRequest(request.requestId, request.sessionId)
+      onError?.(error)
+
+      return 'stale'
+    }
+
     notifyError(error, copy.sendFailed)
     onError?.(error)
 
