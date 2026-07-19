@@ -5,6 +5,7 @@ conversion pipeline), and edge cases that could produce invalid MarkdownV2
 or corrupt user-visible content.
 """
 
+import json
 import re
 import sys
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ _ensure_telegram_mock()
 from plugins.platforms.telegram.adapter import (  # noqa: E402
     TelegramAdapter,
     _escape_mdv2,
+    _render_hermes_ui_payload_for_telegram,
     _render_hermes_ui_for_telegram,
     _strip_mdv2,
     _wrap_markdown_tables,
@@ -125,9 +127,9 @@ class TestHermesUiTelegramRendering:
         assert "בוקר טוב — תמונת היום בקצרה." in rendered
         assert "**\u200fמה הקיבולת שלך היום?**" in rendered
         assert "**\u200fבחר אפשרות**" in rendered
-        assert "• \u200fגבוהה" in rendered
-        assert "• \u200fבינונית" in rendered
-        assert "• \u200fנמוכה" in rendered
+        assert "1. \u200fגבוהה" in rendered
+        assert "2. \u200fבינונית" in rendered
+        assert "3. \u200fנמוכה" in rendered
         assert "hermes-ui" not in rendered
         assert '"type":"form"' not in rendered
         assert "```" not in rendered
@@ -137,7 +139,9 @@ class TestHermesUiTelegramRendering:
 
         rendered = _render_hermes_ui_for_telegram(content)
 
-        assert rendered == "Before\n\nAfter"
+        assert "Before" in rendered
+        assert "After" in rendered
+        assert "could not be rendered" in rendered
         assert "broken json" not in rendered
 
     @pytest.mark.asyncio
@@ -166,6 +170,171 @@ class TestHermesUiTelegramRendering:
         keyboard = adapter._bot.send_message.await_args.kwargs["reply_markup"]
         assert keyboard["keyboard"] == [["High"], ["Low"]]
         assert keyboard["one_time_keyboard"] is True
+
+    @pytest.mark.asyncio
+    async def test_send_multi_choice_uses_force_reply_not_one_button_per_option(self, adapter):
+        adapter._bot = MagicMock()
+        adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=8))
+        adapter._bot.send_chat_action = AsyncMock()
+        adapter._rich_messages_enabled = False
+        content = """```hermes-ui
+{"type":"form","title":"Pick several","fields":[{"id":"areas","label":"Areas","type":"multi-choice","options":["Work","Home","Health"]}]}
+```"""
+
+        with patch(
+            "plugins.platforms.telegram.adapter.ForceReply",
+            side_effect=lambda **kwargs: {"force_reply": True, **kwargs},
+        ):
+            result = await adapter.send("12345", content, metadata={"notify": True})
+
+        assert result.success is True
+        markup = adapter._bot.send_message.await_args.kwargs["reply_markup"]
+        assert markup["force_reply"] is True
+        assert markup["input_field_placeholder"] == "1,3"
+        assert "keyboard" not in markup
+
+    def test_multi_choice_becomes_toggle_controls(self):
+        content = """```hermes-ui
+{"type":"form","direction":"rtl","id":"energy","title":"מה מתאים היום?","fields":[{"id":"areas","label":"אפשר לבחור כמה","type":"multi-choice","required":true,"options":[{"label":"עבודה","value":"work"},{"label":"בית","value":"home"},{"label":"בריאות","value":"health"}]}],"submitLabel":"אישור"}
+```"""
+
+        rendered, controls = _render_hermes_ui_payload_for_telegram(content)
+
+        assert "אפשר לבחור כמה" in rendered
+        assert controls.kind == "multi-choice"
+        assert controls.labels == ("עבודה", "בית", "בריאות")
+        assert controls.submit_label == "אישור"
+
+    @pytest.mark.parametrize(
+        ("field_type", "expected_kind", "placeholder"),
+        [
+            ("short-text", "short-text", ""),
+            ("long-text", "long-text", ""),
+            ("number", "number", "42"),
+            ("date", "date", "YYYY-MM-DD"),
+            ("time", "time", "HH:mm"),
+        ],
+    )
+    def test_typed_fields_become_native_reply_prompts(self, field_type, expected_kind, placeholder):
+        artifact = {
+            "type": "form",
+            "title": "Input",
+            "fields": [{"id": "answer", "label": "Answer", "type": field_type}],
+        }
+
+        _, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact)}\n```"
+        )
+
+        assert controls.kind == expected_kind
+        assert controls.placeholder == placeholder
+
+    def test_boolean_becomes_yes_no_buttons(self):
+        artifact = {
+            "type": "form",
+            "direction": "rtl",
+            "fields": [{"id": "confirm", "label": "מאשר?", "type": "boolean"}],
+        }
+
+        _, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact, ensure_ascii=False)}\n```"
+        )
+
+        assert controls.kind == "boolean"
+        assert controls.labels == ("כן", "לא", "✍️ תיקון")
+
+    def test_mixed_form_becomes_one_structured_reply(self):
+        artifact = {
+            "type": "form",
+            "fields": [
+                {"id": "name", "label": "Name", "type": "short-text", "required": True},
+                {"id": "when", "label": "When", "type": "time"},
+            ],
+        }
+
+        rendered, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact)}\n```"
+        )
+
+        assert controls.kind == "mixed-form"
+        assert "field: answer" in rendered
+
+    def test_long_single_choice_keeps_every_option_in_text_and_uses_one_reply(self):
+        options = [f"Option {index}" for index in range(1, 13)]
+        artifact = {
+            "type": "form",
+            "fields": [{"id": "choice", "label": "Choose", "type": "single-choice", "options": options}],
+        }
+
+        rendered, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact)}\n```"
+        )
+
+        assert "12. Option 12" in rendered
+        assert controls.kind == "single-choice-list"
+        assert controls.labels == ()
+
+    def test_legacy_questionnaire_aliases_are_translated(self):
+        artifact = {
+            "type": "questionnaire",
+            "questions": [{"name": "q1", "question": "Legacy question", "helpText": "Helpful context"}],
+        }
+
+        rendered = _render_hermes_ui_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact)}\n```"
+        )
+
+        assert "Legacy question" in rendered
+        assert "Helpful context" in rendered
+
+    def test_nested_card_actions_become_tappable_choices(self):
+        artifact = {
+            "type": "task-table",
+            "columns": ["task"],
+            "rows": [{
+                "id": "1",
+                "title": "Task",
+                "actions": [{"id": "start", "label": "Start now", "submitText": "Start task 1"}],
+            }],
+        }
+
+        rendered, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact)}\n```"
+        )
+
+        assert "Start now" in rendered
+        assert controls.kind == "actions"
+        assert controls.labels == ("Start now",)
+
+    @pytest.mark.parametrize(
+        ("artifact", "expected"),
+        [
+            ({"type": "checklist", "title": "Checklist", "items": [{"id": "a", "label": "First"}]}, "First"),
+            ({"type": "questionnaire", "title": "Questions", "items": [{"id": "a", "label": "Answer me"}]}, "Answer me"),
+            ({"type": "task-triage", "task": {"id": "1", "title": "Triage me", "priority": "high"}}, "Triage me"),
+            ({"type": "flowstate-task-batch", "tasks": [{"id": "1", "title": "Batch task", "recommendation": "today"}]}, "Batch task"),
+            ({"type": "flowstate-planning-session", "mode": "day-start", "categories": [], "tasks": [{"id": "1", "title": "Plan task"}]}, "Plan task"),
+            ({"type": "flowstate-next-block", "task": {"id": "1", "title": "Focus task"}, "durationMinutes": 25, "doneEnough": "Draft ready", "rationale": "Important", "previewSummary": {"duration": 25, "scheduledDate": "2026-07-19", "scheduledTime": "11:00"}, "actions": []}, "Draft ready"),
+            ({"type": "planning-funnel", "steps": [{"id": "1", "label": "Current step", "status": "current"}]}, "Current step"),
+            ({"type": "task-breakdown", "task": {"id": "1", "title": "Big task"}, "scope": "next-move", "steps": [{"id": "1", "title": "Small step", "doneEnough": "Evidence"}]}, "Evidence"),
+            ({"type": "task-context", "task": {"id": "1", "title": "Context task"}, "meaning": "Why it matters", "connections": ["Person A"]}, "Why it matters"),
+            ({"type": "task-table", "columns": ["task"], "rows": [{"id": "1", "title": "Table task"}]}, "Table task"),
+            ({"type": "mini-kanban", "lanes": [{"id": "now", "title": "Now", "tasks": [{"id": "1", "title": "Kanban task"}]}]}, "Kanban task"),
+            ({"type": "day-timeline", "date": "2026-07-19", "blocks": [{"id": "1", "label": "Lunch", "startTime": "13:00"}]}, "Lunch"),
+            ({"type": "mutation-preview", "changes": [{"taskId": "1", "title": "Changed task", "operation": "update", "risk": "low"}], "actions": []}, "Changed task"),
+            ({"type": "urgency-energy-matrix", "xAxis": "energy", "yAxis": "urgency", "cells": [{"x": "high", "y": "high", "label": "Do now", "tasks": [{"id": "1", "title": "Matrix task"}]}]}, "Matrix task"),
+            ({"type": "workload-bars", "bars": [{"id": "work", "label": "Work", "value": 7, "max": 10}]}, "7/10"),
+            ({"type": "task-graph", "nodes": [{"id": "1", "label": "Project"}, {"id": "2", "label": "Task"}], "edges": [{"source": "1", "target": "2", "label": "contains"}]}, "Project → Task"),
+        ],
+    )
+    def test_every_desktop_artifact_has_a_readable_telegram_translation(self, artifact, expected):
+        rendered = _render_hermes_ui_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact, ensure_ascii=False)}\n```"
+        )
+
+        assert expected in rendered
+        assert "hermes-ui" not in rendered
+        assert '"type"' not in rendered
 
 
 # =========================================================================

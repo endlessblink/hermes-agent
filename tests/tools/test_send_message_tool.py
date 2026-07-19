@@ -1261,6 +1261,28 @@ class TestSendTelegramHtmlDetection:
         assert keyboard["keyboard"] == [["High"], ["Low"]]
         assert keyboard["one_time_keyboard"] is True
 
+    def test_standalone_cron_multi_choice_uses_one_force_reply(self, monkeypatch):
+        bot = self._make_bot()
+        _install_telegram_mock(monkeypatch, bot)
+        content = """```hermes-ui
+{"type":"form","title":"Pick several","fields":[{"id":"areas","label":"Areas","type":"multi-choice","options":["Work","Home","Health"]}]}
+```"""
+
+        with patch(
+            "plugins.platforms.telegram.adapter.ForceReply",
+            side_effect=lambda **kwargs: {"force_reply": True, **kwargs},
+        ):
+            asyncio.run(_send_telegram("tok", "123", content))
+
+        kwargs = bot.send_message.await_args.kwargs
+        assert "1\\. Work" in kwargs["text"]
+        assert "3\\. Health" in kwargs["text"]
+        assert kwargs["reply_markup"] == {
+            "force_reply": True,
+            "input_field_placeholder": "1,3",
+            "selective": True,
+        }
+
     def test_disable_link_previews_sets_disable_web_page_preview(self, monkeypatch):
         bot = self._make_bot()
         _install_telegram_mock(monkeypatch, bot)

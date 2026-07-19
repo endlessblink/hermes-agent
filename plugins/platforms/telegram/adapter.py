@@ -31,6 +31,16 @@ _HERMES_UI_FENCE_RE = re.compile(
 _HEBREW_TEXT_RE = re.compile(r"[\u0590-\u05ff]")
 
 
+@dataclasses.dataclass(frozen=True)
+class TelegramHermesUiControls:
+    """Platform-neutral description of the Telegram input affordance."""
+
+    kind: str = "none"
+    labels: tuple[str, ...] = ()
+    submit_label: str = ""
+    placeholder: str = ""
+
+
 def _telegram_display_line(value: object) -> str:
     """Return a clean display line, with RTL direction pinned for Hebrew."""
     text = str(value or "").strip()
@@ -39,7 +49,295 @@ def _telegram_display_line(value: object) -> str:
     return text
 
 
-def _render_hermes_ui_payload_for_telegram(content: str) -> tuple[str, list[str]]:
+def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermesUiControls]:
+    """Translate every Desktop Hermes UI artifact to compact Telegram text."""
+    lines: list[str] = []
+    controls = TelegramHermesUiControls()
+    rtl = artifact.get("direction") == "rtl" or _HEBREW_TEXT_RE.search(
+        json.dumps(artifact, ensure_ascii=False)
+    ) is not None
+
+    def text(value: object) -> str:
+        return _telegram_display_line(value)
+
+    def heading(value: object) -> None:
+        value_text = text(value)
+        if value_text:
+            lines.extend(([""] if lines else []) + [f"**{value_text}**"])
+
+    def bullet(value: object, prefix: str = "•") -> None:
+        value_text = text(value)
+        if value_text:
+            lines.append(f"{prefix} {value_text}")
+
+    def details(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+        values = [str(item[key]).strip() for key in keys if item.get(key) not in (None, "", [])]
+        return " · ".join(values)
+
+    title = artifact.get("title")
+    if title:
+        lines.append(f"**{text(title)}**")
+    description = artifact.get("description") or artifact.get("prompt")
+    if description:
+        lines.append(text(description))
+
+    artifact_type = str(artifact.get("type") or "")
+    if artifact_type == "form":
+        fields = [field for field in artifact.get("fields", []) if isinstance(field, dict)]
+        for index, field in enumerate(fields, 1):
+            heading(field.get("label") or field.get("title"))
+            if field.get("description"):
+                lines.append(text(field["description"]))
+            field_type = str(field.get("type") or "")
+            options = field.get("options") if isinstance(field.get("options"), list) else []
+            option_labels: list[str] = []
+            for option_index, option in enumerate(options, 1):
+                raw = option.get("label") or option.get("value") if isinstance(option, dict) else option
+                label = str(raw or "").strip()
+                if label:
+                    option_labels.append(label)
+                    bullet(label, f"{option_index}.")
+            meta: list[str] = []
+            if field.get("required"):
+                meta.append("חובה" if rtl else "required")
+            if field.get("default") not in (None, "", []):
+                meta.append(f"{('ברירת מחדל' if rtl else 'default')}: {field['default']}")
+            if field.get("placeholder"):
+                meta.append(str(field["placeholder"]))
+            if meta:
+                lines.append(text(" · ".join(meta)))
+
+            if len(fields) == 1 and field_type == "single-choice" and option_labels:
+                if len(option_labels) <= 8:
+                    controls = TelegramHermesUiControls(
+                        kind="single-choice", labels=tuple(option_labels),
+                        submit_label=str(artifact.get("submitLabel") or ""),
+                    )
+                else:
+                    lines.append(text("השיבו עם מספר האפשרות" if rtl else "Reply with the option number"))
+                    controls = TelegramHermesUiControls(kind="single-choice-list", placeholder="1")
+            elif len(fields) == 1 and field_type == "boolean":
+                labels = ("כן", "לא", "✍️ תיקון") if rtl else ("Yes", "No", "✍️ Revise")
+                controls = TelegramHermesUiControls(kind="boolean", labels=labels)
+            elif len(fields) == 1 and field_type == "multi-choice" and option_labels:
+                instruction = "השיבו עם כמה מספרים, למשל 1,3" if rtl else "Reply with several numbers, for example 1,3"
+                lines.append(text(instruction))
+                controls = TelegramHermesUiControls(
+                    kind="multi-choice", labels=tuple(option_labels),
+                    submit_label=str(artifact.get("submitLabel") or ""),
+                    placeholder="1,3",
+                )
+            elif len(fields) == 1 and field_type in {"short-text", "long-text", "number", "date", "time"}:
+                examples = {"number": "42", "date": "YYYY-MM-DD", "time": "HH:mm"}
+                controls = TelegramHermesUiControls(
+                    kind=field_type,
+                    placeholder=str(field.get("placeholder") or examples.get(field_type, "")),
+                )
+
+        if len(fields) > 1:
+            lines.append(text("השיבו בשורה נפרדת לכל שדה: שם השדה: תשובה" if rtl else "Reply on a separate line for each field: field: answer"))
+            controls = TelegramHermesUiControls(kind="mixed-form")
+
+    elif artifact_type in {"checklist", "questionnaire"}:
+        raw_items = artifact.get("items")
+        if not isinstance(raw_items, list) and artifact_type == "questionnaire":
+            raw_items = artifact.get("questions")
+        for index, item in enumerate(raw_items if isinstance(raw_items, list) else [], 1):
+            if not isinstance(item, dict):
+                continue
+            bullet(item.get("label") or item.get("question") or item.get("prompt"), f"☐ {index}.")
+            item_description = item.get("description") or item.get("helpText")
+            if item_description:
+                lines.append(f"  {text(item_description)}")
+            for action in item.get("actions", []):
+                if isinstance(action, dict):
+                    bullet(action.get("label"), "↳")
+
+    elif artifact_type == "task-triage":
+        task = artifact.get("task") if isinstance(artifact.get("task"), dict) else {}
+        bullet(task.get("title"), "•")
+        meta = details(task, ("status", "priority", "dueDate", "projectId"))
+        if meta:
+            lines.append(text(meta))
+        lines.append(text("השיבו: היום / לא היום / מאוחר יותר / נדבר" if rtl else "Reply: today / not today / later / discuss"))
+        controls = TelegramHermesUiControls(kind="task-triage")
+
+    elif artifact_type in {"flowstate-task-batch", "flowstate-planning-session"}:
+        if artifact.get("mode"):
+            lines.append(text(artifact["mode"]))
+        for category in artifact.get("categories", []):
+            if isinstance(category, dict):
+                heading(category.get("label"))
+                bullet(category.get("recommendation"))
+                for example in category.get("examples", []):
+                    if isinstance(example, dict):
+                        bullet(example.get("title"), "↳")
+        for index, task in enumerate(artifact.get("tasks", []), 1):
+            if isinstance(task, dict):
+                bullet(task.get("title"), f"{index}.")
+                meta = details(task, ("recommendation", "recommendedPriority", "recommendedDueDate", "rationale"))
+                if meta:
+                    lines.append(text(meta))
+        lines.append(text("השיבו עם ההחלטות או התיקונים שלכם" if rtl else "Reply with your decisions or revisions"))
+        controls = TelegramHermesUiControls(kind="planning-response")
+
+    elif artifact_type == "flowstate-next-block":
+        task = artifact.get("task") if isinstance(artifact.get("task"), dict) else {}
+        bullet(task.get("title"))
+        meta = details(artifact, ("durationMinutes", "proposedStartTime", "doneEnough", "rationale"))
+        if meta:
+            lines.append(text(meta))
+        preview = artifact.get("previewSummary") if isinstance(artifact.get("previewSummary"), dict) else {}
+        preview_text = details(preview, ("scheduledDate", "scheduledTime", "duration"))
+        if preview_text:
+            lines.append(text(preview_text))
+
+    elif artifact_type == "planning-funnel":
+        icons = {"done": "✅", "current": "▶️", "blocked": "⛔", "pending": "○"}
+        for step in artifact.get("steps", []):
+            if isinstance(step, dict):
+                bullet(step.get("label"), icons.get(str(step.get("status")), "○"))
+                if step.get("description"):
+                    lines.append(f"  {text(step['description'])}")
+
+    elif artifact_type == "task-breakdown":
+        task = artifact.get("task") if isinstance(artifact.get("task"), dict) else {}
+        heading(task.get("title"))
+        for key in ("scope", "targetOutcome", "stoppingRule"):
+            if artifact.get(key):
+                lines.append(text(artifact[key]))
+        for index, step in enumerate(artifact.get("steps", []), 1):
+            if isinstance(step, dict):
+                optional = " (optional)" if step.get("optional") else ""
+                bullet(f"{step.get('title', '')}{optional}", f"{index}.")
+                meta = details(step, ("doneEnough", "estimateMinutes"))
+                if meta:
+                    lines.append(f"  {text(meta)}")
+        lines.append(text("השיבו עם אישור או תיקונים לתצוגה המקדימה" if rtl else "Reply with approval or revisions to this preview"))
+        controls = TelegramHermesUiControls(kind="task-breakdown-response")
+
+    elif artifact_type == "task-context":
+        task = artifact.get("task") if isinstance(artifact.get("task"), dict) else {}
+        heading(task.get("title"))
+        for key in ("meaning", "progress"):
+            if artifact.get(key):
+                lines.append(text(artifact[key]))
+        for key in ("connections", "waitingOn", "unknowns"):
+            values = artifact.get(key)
+            if isinstance(values, list) and values:
+                heading(key)
+                for value in values:
+                    bullet(value)
+
+    elif artifact_type == "task-table":
+        for index, row in enumerate(artifact.get("rows", []), 1):
+            if isinstance(row, dict):
+                bullet(row.get("title"), f"{index}.")
+                meta = details(row, ("dueDate", "priority", "context", "timeSize", "energy", "urgency", "externality", "nextStep", "confidence"))
+                if meta:
+                    lines.append(f"  {text(meta)}")
+
+    elif artifact_type == "mini-kanban":
+        for lane in artifact.get("lanes", []):
+            if isinstance(lane, dict):
+                heading(lane.get("title"))
+                if lane.get("description"):
+                    lines.append(text(lane["description"]))
+                for task in lane.get("tasks", []):
+                    if isinstance(task, dict):
+                        bullet(task.get("title"))
+                        if task.get("note"):
+                            lines.append(f"  {text(task['note'])}")
+
+    elif artifact_type == "day-timeline":
+        if artifact.get("date"):
+            lines.append(text(artifact["date"]))
+        for block in artifact.get("blocks", []):
+            if isinstance(block, dict):
+                clock = "–".join(str(block[k]) for k in ("startTime", "endTime") if block.get(k))
+                bullet(f"{clock + ' ' if clock else ''}{block.get('label', '')}")
+                meta = details(block, ("durationMinutes", "kind", "status", "doneEnough"))
+                if meta:
+                    lines.append(f"  {text(meta)}")
+
+    elif artifact_type == "mutation-preview":
+        for change in artifact.get("changes", []):
+            if isinstance(change, dict):
+                bullet(change.get("title"))
+                meta = details(change, ("operation", "risk"))
+                if meta:
+                    lines.append(f"  {text(meta)}")
+                for side in ("before", "after"):
+                    record = change.get(side)
+                    if isinstance(record, dict):
+                        lines.append(text(f"{side}: " + ", ".join(f"{k}={v}" for k, v in record.items())))
+
+    elif artifact_type == "urgency-energy-matrix":
+        for cell in artifact.get("cells", []):
+            if isinstance(cell, dict):
+                heading(cell.get("label") or f"{cell.get('x', '')} × {cell.get('y', '')}")
+                for task in cell.get("tasks", []):
+                    if isinstance(task, dict):
+                        bullet(task.get("title"))
+
+    elif artifact_type == "workload-bars":
+        for bar in artifact.get("bars", []):
+            if isinstance(bar, dict):
+                maximum = bar.get("max", 100)
+                bullet(f"{bar.get('label', '')}: {bar.get('value', 0)}/{maximum}")
+                if bar.get("note"):
+                    lines.append(f"  {text(bar['note'])}")
+
+    elif artifact_type == "task-graph":
+        nodes = {str(node.get("id")): str(node.get("label")) for node in artifact.get("nodes", []) if isinstance(node, dict)}
+        for edge in artifact.get("edges", []):
+            if isinstance(edge, dict):
+                connection = f"{nodes.get(str(edge.get('source')), edge.get('source', ''))} → {nodes.get(str(edge.get('target')), edge.get('target', ''))}"
+                if edge.get("label"):
+                    connection += f" · {edge['label']}"
+                bullet(connection)
+        if not artifact.get("edges"):
+            for label in nodes.values():
+                bullet(label)
+
+    # Actions on preview/card artifacts remain ordinary reply choices. The
+    # originating artifact is already in shared conversation history, so the
+    # assistant can resolve a tapped label without exposing hidden submitText.
+    action_labels: list[str] = []
+
+    def collect_actions(value: object, *, top_level: bool = False) -> None:
+        if isinstance(value, list):
+            for entry in value:
+                collect_actions(entry, top_level=top_level)
+            return
+        if not isinstance(value, dict):
+            return
+        actions = value.get("actions")
+        if isinstance(actions, list):
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                label = str(action.get("label") or "").strip()
+                if label and label not in action_labels:
+                    if top_level:
+                        bullet(label, "↳")
+                    if len(label) <= 64:
+                        action_labels.append(label)
+        for key, child in value.items():
+            if key != "actions" and isinstance(child, (dict, list)):
+                collect_actions(child)
+
+    collect_actions(artifact, top_level=True)
+    for label in action_labels:
+        if not any(label in line for line in lines):
+            bullet(label, "↳")
+    if controls.kind in {"none", "planning-response", "task-breakdown-response"} and action_labels:
+        controls = TelegramHermesUiControls(kind="actions", labels=tuple(action_labels[:8]))
+
+    return lines, controls
+
+
+def _render_hermes_ui_payload_for_telegram(content: str) -> tuple[str, TelegramHermesUiControls]:
     """Render desktop-only ``hermes-ui`` artifacts as Telegram Markdown.
 
     Telegram cannot interpret Hermes' interactive JSON fences.  Keeping this
@@ -49,63 +347,27 @@ def _render_hermes_ui_payload_for_telegram(content: str) -> tuple[str, list[str]
     """
     text = str(content or "")
     if "hermes-ui" not in text.lower():
-        return text, []
+        return text, TelegramHermesUiControls()
 
-    interactive_choices: list[str] = []
+    interaction = TelegramHermesUiControls()
 
     def _render(match: re.Match[str]) -> str:
         try:
             artifact = json.loads(match.group("payload"))
         except (TypeError, ValueError, json.JSONDecodeError):
-            return ""
+            return "⚠️ This interactive item could not be rendered. Ask Hermes to resend it."
         if not isinstance(artifact, dict):
-            return ""
+            return "⚠️ This interactive item could not be rendered. Ask Hermes to resend it."
 
-        lines: list[str] = []
-        title = _telegram_display_line(artifact.get("title"))
-        if title:
-            lines.append(f"**{title}**")
-
-        description = _telegram_display_line(
-            artifact.get("description") or artifact.get("prompt")
-        )
-        if description:
-            lines.append(description)
-
-        fields = artifact.get("fields")
-        if isinstance(fields, list):
-            for field in fields:
-                if not isinstance(field, dict):
-                    continue
-                label = _telegram_display_line(
-                    field.get("label") or field.get("title")
-                )
-                if label:
-                    if lines:
-                        lines.append("")
-                    lines.append(f"**{label}**")
-                options = field.get("options")
-                if not isinstance(options, list):
-                    continue
-                for option in options:
-                    if isinstance(option, dict):
-                        option = option.get("label") or option.get("value")
-                    option_text = _telegram_display_line(option)
-                    if option_text:
-                        lines.append(f"• {option_text}")
-                        plain_option = str(option or "").strip()
-                        if (
-                            field.get("type") == "single-choice"
-                            and plain_option
-                            and len(plain_option) <= 64
-                        ):
-                            interactive_choices.append(plain_option)
-
+        nonlocal interaction
+        lines, controls = _artifact_lines(artifact)
+        if controls.kind != "none":
+            interaction = controls
         return "\n".join(lines).strip()
 
     rendered = _HERMES_UI_FENCE_RE.sub(_render, text)
     rendered = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", rendered)
-    return rendered.strip(), interactive_choices[:8]
+    return rendered.strip(), interaction
 
 
 def _render_hermes_ui_for_telegram(content: str) -> str:
@@ -114,17 +376,25 @@ def _render_hermes_ui_for_telegram(content: str) -> str:
     return rendered
 
 
-def _telegram_form_reply_markup(choices: list[str]):
-    """Build a one-use native keyboard whose taps become ordinary messages."""
-    normalized = [str(choice).strip() for choice in choices if str(choice).strip()]
+def _telegram_form_reply_markup(controls: TelegramHermesUiControls):
+    """Build a restart-safe native Telegram input for a Desktop artifact."""
+    normalized = [str(choice).strip() for choice in controls.labels if str(choice).strip()]
+    if controls.kind in {"single-choice", "boolean", "actions"} and normalized:
+        keyboard_factory = cast(Callable[..., Any], ReplyKeyboardMarkup)
+        return keyboard_factory(
+            [[choice] for choice in normalized],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+    if controls.kind != "none":
+        force_reply_factory = cast(Callable[..., Any], ForceReply)
+        kwargs: dict[str, Any] = {"selective": True}
+        if controls.placeholder:
+            kwargs["input_field_placeholder"] = controls.placeholder[:64]
+        return force_reply_factory(**kwargs)
     if not normalized:
         return None
-    keyboard_factory = cast(Callable[..., Any], ReplyKeyboardMarkup)
-    return keyboard_factory(
-        [[choice] for choice in normalized],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
+    return None
 
 
 def _redact_telegram_error_text(error: object) -> str:
@@ -315,6 +585,7 @@ try:
         Message,
         InlineKeyboardButton,
         InlineKeyboardMarkup,
+        ForceReply,
         ReplyKeyboardMarkup,
     )
     try:
@@ -339,6 +610,7 @@ except ImportError:
     Message = Any
     InlineKeyboardButton = Any
     InlineKeyboardMarkup = Any
+    ForceReply = Any
     ReplyKeyboardMarkup = Any
     LinkPreviewOptions = None
     Application = Any
@@ -483,7 +755,7 @@ def check_telegram_requirements() -> bool:
     so the adapter's class-level type aliases get rebound.
     """
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
-    global InlineKeyboardMarkup, ReplyKeyboardMarkup, LinkPreviewOptions, Application
+    global InlineKeyboardMarkup, ForceReply, ReplyKeyboardMarkup, LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
     if TELEGRAM_AVAILABLE:
@@ -498,6 +770,7 @@ def check_telegram_requirements() -> bool:
         from telegram import (
             InlineKeyboardButton as _IKB,
             InlineKeyboardMarkup as _IKM,
+            ForceReply as _ForceReply,
             ReplyKeyboardMarkup as _RKM,
         )
         try:
@@ -519,6 +792,7 @@ def check_telegram_requirements() -> bool:
     Message = _Message
     InlineKeyboardButton = _IKB
     InlineKeyboardMarkup = _IKM
+    ForceReply = _ForceReply
     ReplyKeyboardMarkup = _RKM
     LinkPreviewOptions = _LPO
     Application = _App
