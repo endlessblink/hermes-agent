@@ -208,6 +208,48 @@ function artifactDirection(
   return hasRtlText(sample) ? 'rtl' : 'ltr'
 }
 
+function alternativeChoiceTargetId(fields: readonly HermesUiFormField[], fieldIndex: number): string | undefined {
+  const field = fields[fieldIndex]
+  const previousField = fields[fieldIndex - 1]
+
+  if (
+    !field ||
+    field.required ||
+    field.type === 'boolean' ||
+    field.type === 'single-choice' ||
+    field.type === 'multi-choice' ||
+    !previousField?.required ||
+    previousField.type !== 'single-choice'
+  ) {
+    return undefined
+  }
+
+  const cue = `${field.id} ${field.label}`.toLocaleLowerCase()
+  const isAlternative =
+    /(?:^|[\s_-])(correction|custom|other|alternative)(?:$|[\s_-])/.test(cue) || /(?:אחר|תיקון)/.test(cue)
+
+  return isAlternative ? previousField.id : undefined
+}
+
+function reconcileAlternativeChoiceValues(
+  fields: readonly HermesUiFormField[],
+  source: Record<string, HermesUiFormValue>
+): Record<string, HermesUiFormValue> {
+  const values = { ...source }
+
+  fields.forEach((field, index) => {
+    const targetId = alternativeChoiceTargetId(fields, index)
+    const alternative = values[field.id]
+    const target = targetId ? values[targetId] : undefined
+
+    if (targetId && typeof alternative === 'string' && alternative.trim() && !(typeof target === 'string' && target.trim())) {
+      values[targetId] = alternative
+    }
+  })
+
+  return values
+}
+
 function readFormDraft(key: string, fields: readonly HermesUiFormField[]): Record<string, HermesUiFormValue> {
   const raw = readKey(key)
   const defaults: Record<string, HermesUiFormValue> = {}
@@ -219,7 +261,7 @@ function readFormDraft(key: string, fields: readonly HermesUiFormField[]): Recor
   }
 
   if (!raw) {
-    return defaults
+    return reconcileAlternativeChoiceValues(fields, defaults)
   }
 
   try {
@@ -247,9 +289,9 @@ function readFormDraft(key: string, fields: readonly HermesUiFormField[]): Recor
       }
     }
 
-    return { ...defaults, ...Object.fromEntries(entries) }
+    return reconcileAlternativeChoiceValues(fields, { ...defaults, ...Object.fromEntries(entries) })
   } catch {
-    return defaults
+    return reconcileAlternativeChoiceValues(fields, defaults)
   }
 }
 
@@ -288,6 +330,25 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
 
   const updateValue = (id: string, value: HermesUiFormValue) => {
     const next = { ...values, [id]: value }
+    const fieldIndex = artifact.fields.findIndex(field => field.id === id)
+    const alternativeTargetId = alternativeChoiceTargetId(artifact.fields, fieldIndex)
+
+    if (alternativeTargetId) {
+      const previousAlternative = values[id]
+
+      if (typeof value === 'string' && value.trim()) {
+        next[alternativeTargetId] = value
+      } else if (next[alternativeTargetId] === previousAlternative) {
+        next[alternativeTargetId] = ''
+      }
+    } else if (artifact.fields[fieldIndex]?.type === 'single-choice') {
+      artifact.fields.forEach((field, index) => {
+        if (alternativeChoiceTargetId(artifact.fields, index) === id) {
+          next[field.id] = ''
+        }
+      })
+    }
+
     setValues(next)
     writeKey(storageKey, JSON.stringify(next))
   }
@@ -402,7 +463,8 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
                   maxLength={5}
                   onChange={event => updateValue(field.id, event.target.value)}
                   placeholder={field.placeholder || 'HH:mm'}
-                  type="text"
+                  step={60}
+                  type="time"
                   value={typeof value === 'string' ? value : ''}
                 />
               ) : (
@@ -422,7 +484,9 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
                     ? direction === 'rtl'
                       ? 'יש להזין שעה בפורמט 24 שעות (HH:mm)'
                       : 'Use 24-hour time (HH:mm)'
-                    : 'שדה חובה'}
+                    : direction === 'rtl'
+                      ? 'שדה חובה'
+                      : 'Required field'}
                 </p>
               )}
             </div>
