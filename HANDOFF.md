@@ -1,61 +1,79 @@
-# Hermes reliability + memory lane — handoff (2026-07-11 08:14 Saturday)
+# Dropoff — 2026-07-19 19:46 Sunday
 
-You are continuing work in **hermes-agent** on branch **consolidate/single-tree**
-(repo: `/home/endlessblink/.hermes/hermes-agent`). This is a long multi-phase effort to make
-Hermes' memory/recollection reliable and stop a class of derailments the user hit on 2026-07-10.
+```
+You are continuing work in hermes-agent (~/.hermes/hermes-agent, the LIVE install) on branch main.
 
 ## Current task & next step
-Phase 6 (desktop UI bugs). Just fixed the sidebar hiding compacted chats — the compression-tip
-projection copied the tip's (often blank) title, erasing the conversation's real title.
-Fix applied in `hermes_state.py::list_sessions_rich` (title/preview now fall back to the root when
-the tip is blank); verified on real film-maker data (4 of 6 rows now titled).
-**Next: investigate why `list_sessions_rich` returns only ~6 rows for 36 film-maker sessions** —
-the user says yesterday's un-archived chats still don't all show. Likely lineage over-collapse or a
-page/limit/profile filter. Then rebuild the desktop app and have the user visually verify.
+Design a reliable fix for blocking compaction pauses ("Summarizing thread", measured 112-235s,
+median ~217s, re-fires every ~10-30 min in the office-work profile) — next: finish the PLAN
+(user demanded deep research, NO ad-hoc changes), then implement task #35 after approval.
+A plan-mode session was interrupted mid-research; the plan file was never written
+(/home/endlessblink/.claude/plans/snuggly-baking-lecun.md is empty/absent).
 
-## The user's governing directive (2026-07-11)
-**"The same chat must persist — not creating new ones."** This is already delivered going FORWARD by
-two live config changes: `compression.in_place: true` (compact in the same session, scrollable) and
-`compression.summary_mode: drop` (instant compaction, no model summary, watchdog can't fire). The
-sidebar title fix is for chats that ALREADY rotated before this.
+Research already gathered (reuse, don't redo):
+- Measured: compaction succeeds 8/8 since Jul-18 but blocks 2-4 min; residue after compaction
+  was ~92k of ~120k because protect_last_n kept giant tool results (now 10, was 20, all 9 configs).
+- Industry patterns (Claude Code/Codex/OpenCode/Amp — see gist.github.com/badlogic/cd2ef65b0697c4dbe2d13fbecb0a0a5f
+  and codex.danielvaughan.com compaction deep dives): (1) trim/offload BULKY TOOL RESULTS first
+  (microcompaction — cheap, no LLM); (2) keep summaries small + prompt-cache-friendly (delete
+  less, keep prefix stable); (3) offload big outputs to files with path references (near-lossless;
+  Hermes already has archived rows + FTS recall to lean on); (4) parallel/async compaction exists
+  in research, but tool-result trimming is the proven cheap win.
+- Candidate insertion point (verified): gateway _compress_session_history (tui_gateway/server.py
+  ~3590) + session.compress RPC (~9882) snapshots history WITHOUT holding history_lock during the
+  LLM call and has history_version conflict detection — i.e. a post-turn (after message.complete)
+  trigger at ~90% threshold can reuse it; pre-API compaction stays as backstop (task #35).
+- An Explore agent was mapping the compaction machinery when interrupted; its findings are lost —
+  re-explore: compaction call graph, existing async aux paths, post-turn housekeeping hooks,
+  summarizer input-size truncation (_CONTENT_MAX/_CONTENT_HEAD in agent/context_compressor.py).
 
 ## Files touched / in flight
-- `hermes_state.py` — UNCOMMITTED sidebar title-fallback fix (verified, safe). Commit it.
-- Everything else committed (see git log): `agent/lane_resolver.py`, `agent/lane_recall.py`,
-  `agent/lane_gate.py`, `agent/memory_capture.py`, `agent/memory_extraction.py`,
-  `agent/context_compressor.py` (drop mode), `agent/agent_init.py`, `agent/turn_context.py`,
-  `agent/tool_executor.py` (gate), `plugins/memory/holographic/*` (capture/recall/mirror),
-  `tests/e2e/test_reliability_harness.py`, and many `tests/…`.
-- Other modified files in `git status` (gateway/config.py, toolsets.py, hermes-ui-artifact*,
-  vault_*) are the USER's own uncommitted WIP — DO NOT commit them as yours.
-- User plugin (outside repo): `~/.hermes/plugins/obsidian-source-of-truth/__init__.py` — per-turn
-  injection trimmed 1433→0 chars. Backed up in place.
+All committed & pushed (tip 699e8a703). No uncommitted changes. Key recent work:
+- tui_gateway/server.py (compression watchdog derives from aux budget), agent/auxiliary_client.py
+  (unconfigured providers 1h skip), agent/context_compressor.py (4k summary ceiling — DO NOT
+  change without fresh measurements, see memory no-blind-tuning), agent/prompt_builder.py
+  (skills-index cap; day-timeline + multi-choice + timeline guidance), apps/desktop/src/*
+  (folder menu+drag, PA button, profile restore, stale-clarify re-queue, queue toasts,
+  time column, day-timeline prompt support, description 1200).
+- Configs (outside git, all 9 = base + 8 profiles): reasoning_effort low, tool_search auto
+  (REVERTED from on — deferral cost LLM rounds), compression.threshold 0.35, protect_last_n 10.
+  Backups: *.bak-toolsearch-20260717, *.bak-compthresh-20260717.
 
 ## Key decisions & gotchas
-- **NEVER force-kill (`pkill -9`) the running Hermes.** A hard restart earlier misrouted a chat to
-  the wrong profile. Graceful stop; prefer letting the USER restart from the dock.
-- **No live cloud LLM calls on the user's account** (their rule). Compression fix is proven only by
-  wiring + the diagnostics log (`~/.hermes/logs/desktop-events.jsonl`, elapsed_seconds), not live.
-- **Low VRAM** — never propose local Ollama for heavy/large-context tasks (summarization). Small
-  CPU embeddings are fine, but Phase 4 recall used recency (no model) instead.
-- **Run tests only via `./scripts/run_tests.sh`**, never bare `pytest tests/` (needs per-file
-  isolation; bare pytest invents ~110 false failures). Use the tree's `.venv` (`./.venv/bin/python`).
-- **Compression root cause (measured):** summaries ran the MAIN reasoning model, 45–241s, killed by
-  a 12s watchdog → fresh sessions. Drop mode is the real cure (no summary at all).
-- **Memory is currently OFF** (`memory.provider: ''`) to test compression cleanly. To enable:
-  `hermes config set memory.provider holographic` + `plugins.hermes-memory-store.infer_facts true`.
-- Config backups: `~/.hermes/config.yaml.bak-*`. Launcher (dock) is `~/.local/bin/hermes-desktop`
-  (hardcodes the tree + `HERMES_COMPRESSION_WATCHDOG_SECONDS=60`).
-- The single working tree is `~/.hermes/hermes-agent`; the old `-updated-…` worktree was removed.
-- Task list (TaskCreate #1–7) tracks phases: 0–5 done, 6 (desktop UI) in progress. Fuller notes in
-  the Claude memory files `hermes-e2e-lane`, `hermes-lane-resolver`, `hermes-single-tree`,
-  `hardware-low-vram`, and the plan `/home/endlessblink/.claude/plans/answer-in-english-calm-locket.md`.
+- MEMORY FILES ARE CURRENT — read MEMORY.md first: hermes-speed-lane (full state),
+  upstream-merge-postmortem-20260718 (mandatory next-merge checklist), no-blind-tuning
+  (NEVER retune constants without fresh measurements — user exploded over this),
+  merge-preserve-all-features.
+- SINGLE WRITER: another Claude/codex session edits this tree sometimes (it cherry-picked
+  77f77f1cf and switched branches mid-day). Check `git branch --show-current` + `git status`
+  before EVERY commit; commits once landed on a stray branch (fix/desktop-custom-time-picker,
+  since merged).
+- The app re-serializes config.yaml (YAML `on` becomes `true`) — match both spellings when editing.
+- Desktop changes need: `npm run pack --workspace apps/desktop` from REPO ROOT (root install only;
+  an apps/desktop-local node_modules breaks the build), then the USER must quit+reopen the app.
+  Backend/prompt changes need `systemctl --user restart hermes-gateway.service` + app relaunch.
+- Several "bugs" were stale-build artifacts — ALWAYS verify the running app/process start time
+  vs the asar/commit timestamp before debugging (ps lstart vs stat app.asar).
+- rtk wraps grep/ls and mangles output — use awk/sed or ctx_execute for parsing.
+- Pre-existing red tests (NOT ours): desktop-fs picker (2), approval-group clarify-card (1),
+  skills index isolation (7 with full suite), tui_gateway env-sensitive family (5-13 by env).
+  CI: footguns now green; js-autofix gated off the fork.
+- User rules: responses 1-4 plain sentences + Next steps (hook enforces); no live cloud LLM
+  calls for testing; superpowers skills on demand; investigate before ANY fix.
 
 ## Env / run state
-Branch: consolidate/single-tree | Last commit: c3db03bb3 feat(compression): memory-backed drop mode
-Live config staged (needs a restart to load drop mode): in_place=true, summary_mode=drop,
-abort_on_summary_failure=true, aux.compression low reasoning effort, watchdog 60s, memory OFF.
-Desktop app must be REBUILT (`cd apps/desktop && npm run pack`) for the sidebar fix to reach the UI.
+Branch: main | Last commit: 699e8a703 feat(desktop+prompt): day-timeline + regression nets
+Running: hermes-gateway.service (restarted 16:10+ with all fixes), user's desktop app
+(restarts frequently — verify build stamp), FlowState app + local Supabase docker (healthy),
+hermes-live-watchdog.service, PA monitor timer (15-min, healthy).
+Open tasks: #32 verify speed settings live, #33 verify behavior rules, #34 verify cross-profile
+answers (SOUL rule added — session_search profile param, never raw sqlite), #35 post-reply
+compaction (THE next implementation, plan first).
+User-confirmed working: queue-while-busy, custom form answers, folder drag+menu, profile
+switching, PA button, Google calendar access.
 
-Start by: commit `hermes_state.py`, then figure out why `list_sessions_rich` returns so few rows
-for film-maker (36 sessions → ~6 rows) so yesterday's un-archived chats all appear.
+Start by: re-launching an Explore agent on the compaction machinery map (list above), then
+write the plan for #35 (post-message.complete trigger at ~90% threshold reusing
+_compress_session_history, PLUS tool-result trimming/offload as the likely bigger win) and
+present it for approval before touching anything.
+```
