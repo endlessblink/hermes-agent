@@ -1667,12 +1667,21 @@ def init_agent(
     )
     try:
         compression_background_checkpoint_ratio = float(
-            _compression_cfg.get("background_checkpoint_ratio", 0.70)
+            _compression_cfg.get("background_checkpoint_ratio", 0.50)
         )
     except (TypeError, ValueError):
-        compression_background_checkpoint_ratio = 0.70
+        compression_background_checkpoint_ratio = 0.50
     compression_background_checkpoint_ratio = max(
         0.20, min(compression_background_checkpoint_ratio, 0.95)
+    )
+    try:
+        compression_background_checkpoint_refresh_ratio = float(
+            _compression_cfg.get("background_checkpoint_refresh_ratio", 0.10)
+        )
+    except (TypeError, ValueError):
+        compression_background_checkpoint_refresh_ratio = 0.10
+    compression_background_checkpoint_refresh_ratio = max(
+        0.05, min(compression_background_checkpoint_refresh_ratio, 0.50)
     )
     codex_app_server_auto_compaction = str(
         _compression_cfg.get("codex_app_server_auto", "native") or "native"
@@ -1945,6 +1954,9 @@ def init_agent(
     )
     agent.compression_background_checkpoint_ratio = (
         compression_background_checkpoint_ratio
+    )
+    agent.compression_background_checkpoint_refresh_ratio = (
+        compression_background_checkpoint_refresh_ratio
     )
     agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
 

@@ -60,6 +60,76 @@ def _seed(db, sid, title, n=8):
 
 
 class TestInPlaceCompaction:
+    def test_prepared_checkpoint_skips_probe_and_visible_summarizing_status(self):
+        from hermes_state import SessionDB
+        from agent import conversation_compression
+        from agent.live_compaction_checkpoint import LiveCompactionCheckpointStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SessionDB(db_path=Path(tmp) / "t.db")
+            sid = "20260719_210000_prepared"
+            _seed(db, sid, "prepared-proof")
+            agent = _make_agent(db, sid, in_place=True)
+            agent._compression_feasibility_checked = False
+            messages = [
+                {"role": "user" if index % 2 == 0 else "assistant", "content": f"msg {index}"}
+                for index in range(8)
+            ]
+            prepared = [
+                {"role": "user", "content": "[CONTEXT COMPACTION] prepared summary"},
+                {"role": "assistant", "content": "recent reply"},
+            ]
+            store = LiveCompactionCheckpointStore(Path(tmp) / "checkpoints")
+            store.publish(
+                sid,
+                messages,
+                prepared,
+                strategy_fingerprint=(
+                    conversation_compression._live_checkpoint_strategy_fingerprint(agent)
+                ),
+                snapshot_tokens=100_000,
+            )
+            statuses = []
+            agent._emit_status = statuses.append
+
+            with (
+                patch.object(
+                    conversation_compression,
+                    "_live_checkpoint_store",
+                    return_value=store,
+                ),
+                patch.object(
+                    conversation_compression,
+                    "check_compression_model_feasibility",
+                    side_effect=AssertionError("prepared apply must not probe"),
+                ),
+            ):
+                compressed, _ = conversation_compression.compress_context(
+                    agent,
+                    messages,
+                    approx_tokens=100_000,
+                    system_message="sys",
+                )
+
+            assert compressed == prepared
+            assert not any(
+                conversation_compression.COMPACTION_STATUS_MARKER in status
+                for status in statuses
+            )
+            reloaded = db.get_messages_as_conversation(sid)
+            assert [
+                {"role": row["role"], "content": row["content"]}
+                for row in reloaded
+            ] == prepared
+            archived = [
+                row
+                for row in db.get_messages(sid, include_inactive=True)
+                if not row.get("active", 1)
+            ]
+            assert [row["content"] for row in archived] == [
+                f"msg {index}" for index in range(8)
+            ]
+
     def test_silent_timeout_preserves_full_history_and_pending_turn(self):
         """The complete recovery chain stays on one durable conversation."""
         from hermes_state import SessionDB
