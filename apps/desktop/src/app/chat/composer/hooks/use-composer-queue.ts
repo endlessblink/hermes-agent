@@ -174,7 +174,20 @@ export function useComposerQueue({
   const queueCurrentDraft = useCallback(() => {
     const text = draftRef.current
 
-    if (!activeQueueSessionKey || (!text.trim() && attachments.length === 0)) {
+    // A send while busy must NEVER die silently: every refusal states its
+    // reason. The silent-return version produced a "dead send button" that
+    // was undiagnosable from the outside (2026-07-19).
+    if (!activeQueueSessionKey) {
+      notify({
+        kind: 'error',
+        title: 'Could not queue the message',
+        message: 'No target chat resolved for the queue (missing session key) — please report this exact message.'
+      })
+
+      return false
+    }
+
+    if (!text.trim() && attachments.length === 0) {
       return false
     }
 
@@ -185,6 +198,12 @@ export function useComposerQueue({
         autoDrain: sendBlocked
       })
     ) {
+      notify({
+        kind: 'error',
+        title: 'Could not queue the message',
+        message: `The queue rejected the entry (key: ${activeQueueSessionKey}) — please report this exact message.`
+      })
+
       return false
     }
 
