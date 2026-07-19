@@ -717,6 +717,22 @@ def finalize_turn(
         messages=messages,
     )
 
+    # Prepare a version-fenced context checkpoint after a healthy turn. This is
+    # deliberately fire-and-forget: foreground replies never wait for summary
+    # inference, and the eventual apply keeps every message appended meanwhile.
+    if final_response and not interrupted and not failed:
+        try:
+            from agent.conversation_compression import (
+                schedule_background_compaction_checkpoint,
+            )
+
+            schedule_background_compaction_checkpoint(agent, list(messages))
+        except Exception:
+            logger.debug(
+                "background context checkpoint scheduling failed",
+                exc_info=True,
+            )
+
     # Background memory/skill review — runs AFTER the response is delivered
     # so it never competes with the user's task for model attention.
     if final_response and not interrupted and (_should_review_memory or _should_review_skills):
