@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 import hashlib
 import json
+import os
+import time
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
@@ -741,6 +743,66 @@ def test_activation_fetches_exact_page_and_uses_preview_apply_contract(tmp_path)
     assert duplicate["duplicate"] is True
     assert len([call for call in transport.calls if call[1].endswith("/activations")]) == 2
     assert len([call for call in transport.calls if call[1].endswith("/pages/page-1")]) == 3
+
+
+def test_activation_accepts_server_normalized_date_only_outside_utc(tmp_path):
+    previous_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Jerusalem"
+    time.tzset()
+    try:
+        response = activation_preview()
+        response["normalizedPayload"]["task"]["dueDate"] = (
+            "2026-07-20T00:00:00+00:00"
+        )
+        committed = activation_receipt()
+        committed["receipt"]["readBack"]["dueDate"] = (
+            "2026-07-20T00:00:00+00:00"
+        )
+        refresh_activation_hash(committed)
+        bridge = Bridge(
+            config(tmp_path),
+            transport=FakeTransport([page(), response, page(), committed]),
+            clock=lambda: 1000,
+        )
+
+        args = {
+            "operation_id": "activation-1",
+            "page_id": "page-1",
+            "task": {"title": "Work", "dueDate": "2026-07-20"},
+            "work_block": {
+                "scheduledDate": "2026-07-13",
+                "scheduledTime": "18:30",
+                "duration": 25,
+            },
+        }
+        preview = bridge.activate(args)
+        receipt = bridge.activate(
+            {**args, "mode": "apply", "preview_digest": preview["preview_digest"]}
+        )
+
+        assert preview["preview"]["task"]["dueDate"] == (
+            "2026-07-20T00:00:00+00:00"
+        )
+        assert receipt["flowstate_task_id"] == "flow-task-1"
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+
+
+@pytest.mark.parametrize(
+    ("actual", "requested"),
+    [
+        ("2026-W30-1", "2026-07-20"),
+        ("2026-07-20", "2026-W30-1"),
+    ],
+)
+def test_activation_due_date_comparison_rejects_non_contract_dates(
+    actual, requested
+):
+    assert Bridge._same_due_date(actual, requested) is False
 
 
 def test_activation_surfaces_existing_task_and_requires_exact_approved_block_in_readback(tmp_path):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 import urllib.error
@@ -24,6 +25,8 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_OUTPUT_BYTES = 256 * 1024
 MAX_IDENTIFIER = 256
 MAX_OPERATION_ID = 200
+DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+CANONICAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T)")
 
 
 class BridgeError(RuntimeError):
@@ -662,6 +665,23 @@ class Bridge:
         except BridgeError:
             return False
 
+    @staticmethod
+    def _same_due_date(actual: Any, requested: Any) -> bool:
+        if isinstance(requested, str) and len(requested) == 10:
+            if not DATE_ONLY_RE.fullmatch(requested):
+                return False
+            if not isinstance(actual, str) or not CANONICAL_DATE_RE.match(actual):
+                return False
+            try:
+                requested_date = datetime.fromisoformat(requested).date()
+                actual_date = datetime.fromisoformat(
+                    str(actual).replace("Z", "+00:00")
+                ).date()
+            except (TypeError, ValueError):
+                return False
+            return actual_date == requested_date
+        return Bridge._same_timestamp(actual, requested)
+
     def _activation_task_matches(self, actual: Any, requested: Mapping[str, Any]) -> bool:
         if not isinstance(actual, dict):
             return False
@@ -674,7 +694,7 @@ class Bridge:
             and (
                 actual.get("dueDate") is None
                 if requested_due_date is None
-                else self._same_timestamp(actual.get("dueDate"), requested_due_date)
+                else self._same_due_date(actual.get("dueDate"), requested_due_date)
             )
         )
 
