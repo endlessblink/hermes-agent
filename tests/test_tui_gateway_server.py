@@ -1336,6 +1336,26 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
     ]
 
 
+def test_history_to_messages_hides_legacy_iteration_limit_prompt():
+    history = [
+        {"role": "user", "content": "Start the timer"},
+        {
+            "role": "user",
+            "content": (
+                "You've reached the maximum number of tool-calling iterations allowed. "
+                "Please provide a final response summarizing what you've found and "
+                "accomplished so far, without calling any more tools."
+            ),
+        },
+        {"role": "assistant", "content": "The timer was not started."},
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "Start the timer"},
+        {"role": "assistant", "text": "The timer was not started."},
+    ]
+
+
 def test_history_to_messages_keeps_reasoning_only_assistant_turn():
     # A thinking-only assistant turn (reasoning present, no visible text) is
     # persisted and recallable, but was dropped from the resumed session view

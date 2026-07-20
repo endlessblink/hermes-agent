@@ -6477,6 +6477,13 @@ def _coerce_message_text(content: Any) -> str:
     return str(content)
 
 
+_LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST = (
+    "You've reached the maximum number of tool-calling iterations allowed. "
+    "Please provide a final response summarizing what you've found and accomplished so far, "
+    "without calling any more tools."
+)
+
+
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
@@ -6488,6 +6495,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if role not in {"user", "assistant", "tool", "system"}:
             continue
         content_text = _coerce_message_text(m.get("content"))
+        if role == "user" and content_text == _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST:
+            continue
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 fn = tc.get("function", {})
