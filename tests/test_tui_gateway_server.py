@@ -1341,7 +1341,7 @@ def test_history_to_messages_hides_legacy_iteration_limit_prompt():
         {"role": "user", "content": "Start the timer"},
         {
             "role": "user",
-            "content": (
+            "content": json.dumps(
                 "You've reached the maximum number of tool-calling iterations allowed. "
                 "Please provide a final response summarizing what you've found and "
                 "accomplished so far, without calling any more tools."

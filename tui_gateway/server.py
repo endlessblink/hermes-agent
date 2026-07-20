@@ -6482,6 +6482,9 @@ _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST = (
     "Please provide a final response summarizing what you've found and accomplished so far, "
     "without calling any more tools."
 )
+_LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST_JSON = json.dumps(
+    _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST
+)
 
 
 def _history_to_messages(history: list[dict]) -> list[dict]:
@@ -6495,7 +6498,10 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if role not in {"user", "assistant", "tool", "system"}:
             continue
         content_text = _coerce_message_text(m.get("content"))
-        if role == "user" and content_text == _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST:
+        if role == "user" and content_text in {
+            _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST,
+            _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST_JSON,
+        }:
             continue
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
