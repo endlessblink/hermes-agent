@@ -33,6 +33,7 @@ from agent.prompt_builder import (
     DESKTOP_QUESTIONNAIRE_GUIDANCE,
     TELEGRAM_INTERACTIVE_GUIDANCE,
     FLOWSTATE_TOOL_USE_GUIDANCE,
+    FLOWSTATE_TIMED_TASK_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
@@ -258,6 +259,11 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(SKILLS_GUIDANCE)
     if any(name.startswith("flowstate_") for name in agent.valid_tool_names):
         tool_guidance.append(FLOWSTATE_TOOL_USE_GUIDANCE)
+    if {
+        "flowstate_create_task",
+        "flowstate_create_work_block",
+    }.issubset(agent.valid_tool_names):
+        tool_guidance.append(FLOWSTATE_TIMED_TASK_GUIDANCE)
     if any(name.startswith("personal_assistant_") for name in agent.valid_tool_names):
         tool_guidance.append(PERSONAL_ASSISTANT_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the

@@ -358,6 +358,17 @@ FLOWSTATE_TOOL_USE_GUIDANCE = (
     "`verified`, and never describe local or declared evidence as live-verified."
 )
 
+FLOWSTATE_TIMED_TASK_GUIDANCE = (
+    "# FlowState timed-task completion\n"
+    "When an approved task-creation request includes a requested date and clock time, "
+    "creating the task alone is incomplete. After the task is created, create its work block "
+    "in the same turn with `flowstate_create_work_block`: preview it for that exact "
+    "task, date, time, and approved or explicitly confirmed duration; apply the exact "
+    "approved preview; then read back both the task and work block before reporting success. "
+    "Do not claim work-block support is unavailable when `flowstate_create_work_block` is "
+    "present unless an actual invocation returns a typed availability error."
+)
+
 PERSONAL_ASSISTANT_GUIDANCE = (
     "# Persistent personal assistant\n"
     "The office-work profile has a canonical personal assistant home with a visible working picture. "

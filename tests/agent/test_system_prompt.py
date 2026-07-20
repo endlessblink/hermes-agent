@@ -119,6 +119,27 @@ class TestFlowStateGuidance:
 
         assert "FlowState tool-use requirements" not in stable
 
+    def test_timed_task_guidance_requires_work_block_route(self):
+        stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_create_task"]))
+
+        assert "creating the task alone is incomplete" not in stable
+
+    def test_timed_task_creation_requires_verified_work_block(self):
+        stable = _stable_prompt(
+            _make_agent(
+                valid_tool_names=[
+                    "flowstate_create_task",
+                    "flowstate_create_work_block",
+                ]
+            )
+        )
+
+        assert "creating the task alone is incomplete" in stable
+        assert "requested date and clock time" in stable
+        assert "create its work block in the same turn" in stable
+        assert "read back both the task and work block" in stable
+        assert "Do not claim work-block support is unavailable" in stable
+
 
 class TestPersonalAssistantGuidance:
     def test_injected_when_capture_tool_is_available(self):
