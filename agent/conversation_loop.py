@@ -658,6 +658,7 @@ def run_conversation(
     failed = False
     codex_ack_continuations = 0
     unfinished_action_continuations = 0
+    flowstate_timed_task_continuations = 0
     length_continue_retries = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
@@ -5533,6 +5534,42 @@ def run_conversation(
                     )
                 ):
                     messages.pop()
+
+                try:
+                    from agent.flowstate_timed_task_stop import (
+                        build_flowstate_timed_task_stop_nudge,
+                    )
+
+                    _flowstate_timed_task_nudge = build_flowstate_timed_task_stop_nudge(
+                        user_message=original_user_message,
+                        messages=messages,
+                        valid_tool_names=agent.valid_tool_names,
+                        attempts=flowstate_timed_task_continuations,
+                    )
+                except Exception:
+                    logger.debug(
+                        "FlowState timed-task stop-loop check failed",
+                        exc_info=True,
+                    )
+                    _flowstate_timed_task_nudge = None
+
+                if _flowstate_timed_task_nudge:
+                    flowstate_timed_task_continuations += 1
+                    final_msg["finish_reason"] = "flowstate_timed_task_continue"
+                    final_msg["_flowstate_timed_task_synthetic"] = True
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": _flowstate_timed_task_nudge,
+                        "_flowstate_timed_task_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    logger.info(
+                        "FlowState timed task response withheld; continuing (attempt %d)",
+                        flowstate_timed_task_continuations,
+                    )
+                    final_response = None
+                    continue
 
                 try:
                     from agent.agent_runtime_helpers import (

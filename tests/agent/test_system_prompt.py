@@ -124,6 +124,12 @@ class TestFlowStateGuidance:
 
         assert "creating the task alone is incomplete" not in stable
 
+        stable = _stable_prompt(
+            _make_agent(valid_tool_names=["flowstate_create_work_block"])
+        )
+
+        assert "creating the task alone is incomplete" not in stable
+
     def test_timed_task_creation_requires_verified_work_block(self):
         stable = _stable_prompt(
             _make_agent(
