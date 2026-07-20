@@ -3851,7 +3851,9 @@ _PERSONAL_ASSISTANT_TRIGGERS = {
     "review",
 }
 _PERSONAL_ASSISTANT_OWNER_PROFILE = "office-work"
-_PERSONAL_ASSISTANT_MAX_ITERATIONS = 6
+# Still bounded for responsiveness, with headroom for preview/apply and
+# desktop verification after the six-round timer-start failure.
+_PERSONAL_ASSISTANT_MAX_ITERATIONS = 12
 _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY = """Personal Assistant responsiveness policy:
 - Return a useful visible response quickly; do not silently finish a broad audit first.
 - Use at most one focused batch of exact, relevant read-only tools by default.

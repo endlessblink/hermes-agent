@@ -190,6 +190,17 @@ def test_personal_assistant_runtime_policy_caps_only_its_agent():
     assert not hasattr(ordinary, "_tool_result_budget_override")
 
 
+def test_personal_assistant_runtime_policy_leaves_room_for_multi_step_actions():
+    """The live timer repro needed a seventh round after six safe/action rounds."""
+    import tui_gateway.server as server
+
+    agent = SimpleNamespace(max_iterations=50, ephemeral_system_prompt="")
+
+    server._apply_personal_assistant_runtime_policy({"agent": agent})
+
+    assert agent.max_iterations > 6
+
+
 def test_explicit_create_marks_personal_assistant_for_deferred_policy(monkeypatch, tmp_path):
     import tui_gateway.server as server
 

@@ -3864,6 +3864,45 @@ class TestHandleMaxIterations:
         assert len(result) > 0
         assert "summary" in result.lower()
 
+    def test_private_summary_instruction_is_not_left_in_conversation(self, agent):
+        """The iteration fallback prompt must never render as a user message."""
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="I could not finish the requested action."
+        )
+        agent._cached_system_prompt = "You are helpful."
+        messages = [
+            {"role": "user", "content": "Start the timer"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_timer",
+                        "function": {"name": "computer_use", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_timer", "content": "not started"},
+        ]
+
+        result = agent._handle_max_iterations(messages, 6)
+
+        assert result == "I could not finish the requested action."
+        assert [message["role"] for message in messages] == [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+        ]
+        assert not any(
+            "maximum number of tool-calling iterations" in str(message.get("content") or "")
+            for message in messages
+        )
+        sent_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        assert any(
+            "maximum number of tool-calling iterations" in str(message.get("content") or "")
+            for message in sent_messages
+        )
+
     def test_api_failure_returns_error(self, agent):
         agent.client.chat.completions.create.side_effect = Exception("API down")
         agent._cached_system_prompt = "You are helpful."
