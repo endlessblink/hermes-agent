@@ -5,6 +5,8 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from run_agent import AIAgent
 
 
@@ -357,6 +359,130 @@ def test_flowstate_recurrence_conflict_skips_later_mutation_in_same_tool_batch()
     )
     assert "not started" in update_result
     assert "recurrence resolution" in update_result
+
+
+@pytest.mark.parametrize(
+    ("error_code", "decision_code", "recovery_text"),
+    [
+        (
+            "state_conflict",
+            "flowstate_state_conflict_requires_fresh_preview",
+            "Read the exact affected task again",
+        ),
+        (
+            "preview_expired",
+            "flowstate_preview_expired_requires_fresh_approval",
+            "expired preview",
+        ),
+    ],
+)
+def test_typed_flowstate_conflict_skips_later_same_batch_mutation(
+    error_code, decision_code, recovery_text
+):
+    agent = _make_agent("flowstate_update_task", "flowstate_create_work_block", max_iterations=10)
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                _mock_tool_call(
+                    "flowstate_update_task",
+                    json.dumps({"id": "task-a", "baseRevision": 4, "patch": {"title": "Updated"}}),
+                    "conflicted-update",
+                ),
+                _mock_tool_call(
+                    "flowstate_create_work_block",
+                    json.dumps({"taskId": "task-a", "baseRevision": 5}),
+                    "must-not-run",
+                ),
+            ],
+        ),
+    ]
+    conflict = json.dumps({
+        "error": "The approved mutation cannot be applied",
+        "code": error_code,
+        "status": 409,
+    })
+
+    with (
+        patch("run_agent.handle_function_call", return_value=conflict) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("apply both approved changes to task-a")
+
+    mock_hfc.assert_called_once()
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == decision_code
+    assert recovery_text in result["final_response"]
+    skipped = next(
+        message["content"]
+        for message in result["messages"]
+        if message.get("role") == "tool"
+        and message.get("name") == "flowstate_create_work_block"
+    )
+    assert "not started" in skipped
+    assert decision_code in skipped
+
+
+def test_typed_flowstate_conflict_drains_every_later_mixed_batch_segment():
+    agent = _make_agent(
+        "flowstate_update_task",
+        "web_search",
+        "flowstate_create_work_block",
+        max_iterations=10,
+    )
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                _mock_tool_call(
+                    "flowstate_update_task",
+                    json.dumps({"id": "task-a", "baseRevision": 4, "patch": {"title": "Updated"}}),
+                    "conflicted-update",
+                ),
+                _mock_tool_call("web_search", json.dumps({"query": "first"}), "read-one"),
+                _mock_tool_call("web_search", json.dumps({"query": "second"}), "read-two"),
+                _mock_tool_call(
+                    "flowstate_create_work_block",
+                    json.dumps({"taskId": "task-a", "baseRevision": 5}),
+                    "must-not-run",
+                ),
+            ],
+        ),
+    ]
+    conflict = json.dumps({
+        "error": "The approved mutation cannot be applied",
+        "code": "state_conflict",
+        "status": 409,
+    })
+
+    with (
+        patch("run_agent.handle_function_call", return_value=conflict) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("apply the approved task-a changes and check references")
+
+    mock_hfc.assert_called_once()
+    assert mock_hfc.call_args.args[0] == "flowstate_update_task"
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "flowstate_state_conflict_requires_fresh_preview"
+    later_results = {
+        message["tool_call_id"]: message["content"]
+        for message in result["messages"]
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") in {"read-one", "read-two", "must-not-run"}
+    }
+    assert set(later_results) == {"read-one", "read-two", "must-not-run"}
+    assert all("not started" in content for content in later_results.values())
+    assert all(
+        "flowstate_state_conflict_requires_fresh_preview" in content
+        for content in later_results.values()
+    )
 
 
 def test_foreground_tool_batch_limit_forces_a_visible_response():

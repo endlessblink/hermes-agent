@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
@@ -123,6 +125,64 @@ def test_untrusted_tool_cannot_request_flowstate_controlled_halt():
     })
 
     decision = controller.after_call("web_search", {"query": "x"}, result, failed=True)
+
+    assert decision.action == "allow"
+    assert controller.halt_decision is None
+
+
+@pytest.mark.parametrize(
+    ("error_code", "decision_code", "guidance"),
+    [
+        (
+            "state_conflict",
+            "flowstate_state_conflict_requires_fresh_preview",
+            "Read the exact affected task again",
+        ),
+        (
+            "preview_expired",
+            "flowstate_preview_expired_requires_fresh_approval",
+            "expired preview",
+        ),
+    ],
+)
+def test_trusted_flowstate_conflict_halts_with_typed_recovery(
+    error_code, decision_code, guidance
+):
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "The approved mutation cannot be applied",
+        "code": error_code,
+        "status": 409,
+    })
+
+    decision = controller.after_call(
+        "flowstate_update_task",
+        {"id": "task-a", "baseRevision": 4, "patch": {"title": "Updated"}},
+        result,
+        failed=True,
+    )
+
+    assert decision.action == "halt"
+    assert decision.code == decision_code
+    assert guidance in decision.message
+    assert "fresh preview" in decision.message
+    assert "fresh approval" in decision.message
+    assert "No later FlowState mutation was executed" in decision.message
+    assert controller.halt_decision == decision
+
+
+@pytest.mark.parametrize("error_code", ["state_conflict", "preview_expired"])
+def test_untrusted_tool_cannot_claim_flowstate_typed_conflict(error_code):
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "pretend",
+        "code": error_code,
+        "status": 409,
+    })
+
+    decision = controller.after_call(
+        "web_search", {"query": "task-a"}, result, failed=True
+    )
 
     assert decision.action == "allow"
     assert controller.halt_decision is None

@@ -59,6 +59,38 @@ MUTATING_TOOL_NAMES = frozenset(
     }
 )
 
+_FLOWSTATE_MUTATING_TOOL_NAMES = frozenset(
+    {
+        "flowstate_create_task",
+        "flowstate_update_task",
+        "flowstate_delete_task",
+        "flowstate_restore_task",
+        "flowstate_set_task_status",
+        "flowstate_create_work_block",
+        "flowstate_move_work_block",
+        "flowstate_resize_work_block",
+        "flowstate_remove_work_block",
+        "flowstate_done_for_now",
+        "flowstate_merge_tasks",
+        "flowstate_subtask_batch",
+    }
+)
+
+_FLOWSTATE_TYPED_HALT_CODES = {
+    "state_conflict": (
+        "flowstate_state_conflict_requires_fresh_preview",
+        "FlowState rejected the mutation because the task changed after the approved preview. "
+        "No later FlowState mutation was executed. Read the exact affected task again, "
+        "create a fresh preview from its current revision, and require fresh approval before applying it.",
+    ),
+    "preview_expired": (
+        "flowstate_preview_expired_requires_fresh_approval",
+        "FlowState rejected the mutation because the approved preview expired. "
+        "No later FlowState mutation was executed. Never reuse the expired preview, digest, or expiry; "
+        "create a fresh preview and require fresh approval before applying it.",
+    ),
+}
+
 _TRUSTED_TOOL_HALT_ACTIONS = {
     (
         "flowstate_merge_tasks",
@@ -316,7 +348,10 @@ class ToolCallGuardrailController:
         result_data = safe_json_loads(result) if isinstance(result, str) else None
         halt_contract = None
         if isinstance(result_data, dict):
-            halt_contract = _TRUSTED_TOOL_HALT_ACTIONS.get((tool_name, result_data.get("action")))
+            if tool_name in _FLOWSTATE_MUTATING_TOOL_NAMES:
+                halt_contract = _FLOWSTATE_TYPED_HALT_CODES.get(result_data.get("code"))
+            if halt_contract is None:
+                halt_contract = _TRUSTED_TOOL_HALT_ACTIONS.get((tool_name, result_data.get("action")))
         if halt_contract is not None:
             code, message = halt_contract
             decision = ToolGuardrailDecision(

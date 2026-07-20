@@ -116,6 +116,25 @@ class TestPlanToolBatchSegments:
         assert _kinds(segments) == ["parallel", "sequential"]
         assert [tc.id for tc in segments[1][1]] == ["c1"]
 
+    def test_same_task_flowstate_mutations_are_never_parallelized(self):
+        calls = [
+            _tc(
+                "flowstate_update_task",
+                '{"id":"task-a","baseRevision":4,"patch":{"title":"Updated"}}',
+                call_id="update",
+            ),
+            _tc(
+                "flowstate_create_work_block",
+                '{"taskId":"task-a","baseRevision":5}',
+                call_id="block",
+            ),
+        ]
+
+        segments = _plan_tool_batch_segments(calls)
+
+        assert _kinds(segments) == ["sequential"]
+        assert not _should_parallelize_tool_batch(calls)
+
     def test_malformed_args_call_is_a_barrier_not_a_batch_poison(self):
         calls = [
             _tc("web_search", call_id="r1"),

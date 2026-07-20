@@ -146,6 +146,23 @@ class TestFlowStateGuidance:
         assert "read back both the task and work block" in stable
         assert "Do not claim work-block support is unavailable" in stable
 
+    def test_mutation_guidance_serializes_same_task_and_recovers_typed_conflicts(self):
+        stable = _stable_prompt(
+            _make_agent(
+                valid_tool_names=[
+                    "flowstate_update_task",
+                    "flowstate_create_work_block",
+                ]
+            )
+        )
+
+        assert "same FlowState task are dependent" in stable
+        assert "Do not batch them in one assistant response" in stable
+        assert "`state_conflict`" in stable
+        assert "`preview_expired`" in stable
+        assert "fresh preview" in stable
+        assert "fresh approval" in stable
+
 
 class TestPersonalAssistantGuidance:
     def test_injected_when_capture_tool_is_available(self):
