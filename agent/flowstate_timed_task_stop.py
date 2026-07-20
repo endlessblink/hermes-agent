@@ -42,8 +42,9 @@ def _is_success(message: dict[str, Any]) -> bool:
 def _is_committed(message: dict[str, Any]) -> bool:
     payload = _payload(message)
     receipt = payload.get("receipt")
-    return payload.get("status") == "committed" or (
-        isinstance(receipt, dict) and receipt.get("status") == "committed"
+    committed_statuses = {"committed", "replayed"}
+    return payload.get("status") in committed_statuses or (
+        isinstance(receipt, dict) and receipt.get("status") in committed_statuses
     )
 
 
@@ -101,7 +102,34 @@ def _committed_work_block(payload: dict[str, Any]) -> dict[str, Any]:
     return expected
 
 
-def _timed_task_sequence_complete(results: list[dict[str, Any]]) -> bool:
+def _created_task_id(results: list[dict[str, Any]]) -> str | None:
+    for message in reversed(results):
+        if _tool_name(message) != "flowstate_create_task" or not _is_committed(
+            message
+        ):
+            continue
+        payload = _payload(message)
+        receipt = payload.get("receipt")
+        if isinstance(receipt, dict):
+            entity_id = receipt.get("entityId")
+            if isinstance(entity_id, str) and entity_id:
+                return entity_id
+            read_back = receipt.get("readBack")
+            if isinstance(read_back, dict):
+                entity_id = read_back.get("id")
+                if isinstance(entity_id, str) and entity_id:
+                    return entity_id
+        task = payload.get("task")
+        if isinstance(task, dict):
+            entity_id = task.get("id")
+            if isinstance(entity_id, str) and entity_id:
+                return entity_id
+    return None
+
+
+def _timed_task_sequence_complete(
+    results: list[dict[str, Any]], created_task_id: str
+) -> bool:
     committed_index = next(
         (
             index
@@ -121,7 +149,10 @@ def _timed_task_sequence_complete(results: list[dict[str, Any]]) -> bool:
     if not previewed:
         return False
     expected = _committed_work_block(_payload(results[committed_index]))
-    if not expected.get("id") or not expected.get("taskId"):
+    if (
+        not expected.get("id")
+        or expected.get("taskId") != created_task_id
+    ):
         return False
     later = results[committed_index + 1 :]
     task_confirmed = any(
@@ -166,11 +197,10 @@ def build_flowstate_timed_task_stop_nudge(
         return None
 
     results = _tool_results(_current_turn_messages(messages or ()))
-    created = any(
-        _tool_name(message) == "flowstate_create_task" and _is_committed(message)
-        for message in results
-    )
-    if not created or _timed_task_sequence_complete(results):
+    created_task_id = _created_task_id(results)
+    if not created_task_id or _timed_task_sequence_complete(
+        results, created_task_id
+    ):
         return None
     if attempts >= max_attempts:
         return None

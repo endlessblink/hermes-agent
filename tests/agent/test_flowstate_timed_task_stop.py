@@ -218,3 +218,147 @@ def test_timed_task_stop_guard_rejects_apply_without_preview_receipt():
         messages=messages,
         valid_tool_names=TOOLS,
     ) is not None
+
+
+def test_timed_task_stop_guard_rejects_work_block_for_another_task():
+    messages = [
+        {"role": "user", "content": USER},
+        _result(
+            "flowstate_create_task",
+            "create",
+            {"ok": True, "status": "committed", "task": {"id": "task-a"}},
+        ),
+        _result(
+            "flowstate_create_work_block",
+            "preview",
+            {"ok": True, "status": "preview"},
+        ),
+        _result(
+            "flowstate_create_work_block",
+            "apply",
+            {
+                "ok": True,
+                "status": "committed",
+                "receipt": {
+                    "status": "committed",
+                    "entityId": "task-b",
+                    "workBlockId": "block-b",
+                    "readBack": {
+                        "workBlock": {
+                            "id": "block-b",
+                            "taskId": "task-b",
+                            "scheduledDate": "2026-07-23",
+                            "scheduledTime": "10:00",
+                        }
+                    },
+                },
+            },
+        ),
+        _result(
+            "flowstate_get_task",
+            "task-read",
+            {
+                "ok": True,
+                "task": {
+                    "id": "task-b",
+                    "instances": [{"id": "block-b", "taskId": "task-b"}],
+                },
+            },
+        ),
+        _result(
+            "flowstate_list_task_instances",
+            "instance-read",
+            {
+                "ok": True,
+                "task": {"id": "task-b"},
+                "instances": [{"id": "block-b", "taskId": "task-b"}],
+            },
+        ),
+    ]
+
+    assert build_flowstate_timed_task_stop_nudge(
+        user_message=USER,
+        messages=messages,
+        valid_tool_names=TOOLS,
+    ) is not None
+
+
+def test_timed_task_stop_guard_accepts_replayed_mutations():
+    messages = [
+        {"role": "user", "content": USER},
+        _result(
+            "flowstate_create_task",
+            "create",
+            {
+                "ok": True,
+                "status": "replayed",
+                "receipt": {"status": "replayed", "entityId": "task-1"},
+            },
+        ),
+        _result(
+            "flowstate_create_work_block",
+            "preview",
+            {"ok": True, "status": "preview"},
+        ),
+        _result(
+            "flowstate_create_work_block",
+            "apply",
+            {
+                "ok": True,
+                "status": "replayed",
+                "receipt": {
+                    "status": "replayed",
+                    "entityId": "task-1",
+                    "workBlockId": "block-1",
+                    "readBack": {
+                        "workBlock": {
+                            "id": "block-1",
+                            "taskId": "task-1",
+                            "scheduledDate": "2026-07-23",
+                            "scheduledTime": "10:00",
+                        }
+                    },
+                },
+            },
+        ),
+        _result(
+            "flowstate_get_task",
+            "task-read",
+            {
+                "ok": True,
+                    "task": {
+                        "id": "task-1",
+                        "instances": [
+                            {
+                                "id": "block-1",
+                                "taskId": "task-1",
+                                "scheduledDate": "2026-07-23",
+                                "scheduledTime": "10:00",
+                            }
+                        ],
+                },
+            },
+        ),
+        _result(
+            "flowstate_list_task_instances",
+            "instance-read",
+            {
+                    "ok": True,
+                    "task": {"id": "task-1"},
+                    "instances": [
+                        {
+                            "id": "block-1",
+                            "taskId": "task-1",
+                            "scheduledDate": "2026-07-23",
+                            "scheduledTime": "10:00",
+                        }
+                    ],
+            },
+        ),
+    ]
+
+    assert build_flowstate_timed_task_stop_nudge(
+        user_message=USER,
+        messages=messages,
+        valid_tool_names=TOOLS,
+    ) is None
