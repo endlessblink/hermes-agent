@@ -193,6 +193,8 @@ class TestDesktopQuestionnaireGuidance:
         assert "at most three planning items in prose" in stable
         assert "one day per date" in stable
         assert "per-block actions" in stable
+        assert "live local date from the current turn" in stable
+        assert "A `this week` planner must contain that date" in stable
         assert "visual artifact is the answer" in stable
         assert "daily-planning-list" not in stable
         assert "Do not merely offer or promise" in stable

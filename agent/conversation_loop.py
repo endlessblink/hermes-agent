@@ -64,6 +64,7 @@ from agent.retry_utils import (
     jittered_backoff,
     zai_coding_overload_retry_ceiling,
 )
+from agent.temporal_context import build_live_temporal_context
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import PARTIAL_STREAM_STUB_ID
@@ -648,6 +649,7 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
     _working_state_context = _ctx.working_state_context
+    _live_temporal_context = build_live_temporal_context()
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -853,7 +855,7 @@ def run_conversation(
             # API-call-time only — the original message in `messages` is
             # never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
-                _injections = []
+                _injections = [_live_temporal_context]
                 if _ext_prefetch_cache:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
@@ -866,6 +868,11 @@ def run_conversation(
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
                         api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                    elif isinstance(_base, list):
+                        api_msg["content"] = [
+                            *_base,
+                            {"type": "text", "text": "\n\n".join(_injections)},
+                        ]
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved

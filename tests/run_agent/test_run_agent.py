@@ -124,6 +124,23 @@ def test_working_state_context_is_api_only(agent, tmp_path):
     assert "<working-state>" not in result["messages"][-2]["content"]
 
 
+def test_live_temporal_context_is_fresh_api_only_context(agent):
+    agent._cached_system_prompt = "You are helpful."
+    agent.client.chat.completions.create.return_value = _mock_response("done")
+
+    with patch(
+        "agent.conversation_loop.build_live_temporal_context",
+        return_value="<live-temporal-context>fresh local moment</live-temporal-context>",
+    ):
+        result = agent.run_conversation("plan this week")
+
+    sent = agent.client.chat.completions.create.call_args.kwargs["messages"]
+    user_msg = next(msg for msg in sent if msg.get("role") == "user")
+    assert "fresh local moment" in user_msg["content"]
+    assert result["messages"][-2]["content"] == "plan this week"
+    assert "fresh local moment" not in result["messages"][-2]["content"]
+
+
 @pytest.fixture()
 def agent():
     """Minimal AIAgent with mocked OpenAI client and tool loading."""
@@ -4409,7 +4426,11 @@ class TestRunConversation:
         ]
         assert all("message_count" in c and isinstance(c.get("request_messages"), list) for c in pre_request_calls)
         assert all("request" in c and "messages" in c["request"]["body"] for c in pre_request_calls)
-        assert any(msg.get("role") == "user" and msg.get("content") == "search something" for msg in pre_request_calls[0]["request_messages"])
+        request_user_message = next(
+            msg for msg in pre_request_calls[0]["request_messages"] if msg.get("role") == "user"
+        )
+        assert request_user_message["content"].startswith("search something")
+        assert "<live-temporal-context>" in request_user_message["content"]
         assert all("usage" in c and "response" in c for c in post_request_calls)
         assert all("assistant_message" in c["response"] for c in post_request_calls)
 
