@@ -23,6 +23,13 @@ export type ChatMessage = {
 
 const HERMES_UI_FORM_RESPONSE_PREFIX = 'Hermes UI form response:\n'
 
+const LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST =
+  "You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools."
+
+function isLegacyIterationLimitPrompt(message: SessionMessage, displayContent: string): boolean {
+  return message.role === 'user' && displayContent === LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST
+}
+
 function isHiddenHermesUiResponse(message: SessionMessage, displayContent: string): boolean {
   return message.role === 'user' && displayContent.startsWith(HERMES_UI_FORM_RESPONSE_PREFIX)
 }
@@ -787,6 +794,14 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     const content = message.content || message.text || message.context || message.name
     const displayContent = displayContentForMessage(message.role, content)
+
+    if (isLegacyIterationLimitPrompt(message, displayContent)) {
+      flushPendingTools(index)
+      activeAssistantIndex = null
+
+      return
+    }
+
     const parts: ChatMessagePart[] = []
 
     const reasoning =

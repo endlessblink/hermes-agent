@@ -24,6 +24,21 @@ describe('toChatMessages', () => {
     expect(message.hidden).toBe(true)
   })
 
+  it('keeps legacy iteration-limit fallback prompts out of the visible transcript', () => {
+    const messages = toChatMessages([
+      { role: 'user', content: 'Start the timer', timestamp: 1 },
+      {
+        role: 'user',
+        content:
+          "You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools.",
+        timestamp: 2
+      },
+      { role: 'assistant', content: 'The timer was not started.', timestamp: 3 }
+    ])
+
+    expect(messages.map(chatMessageText)).toEqual(['Start the timer', 'The timer was not started.'])
+  })
+
   it('drops stored assistant session-busy bounces', () => {
     const messages = toChatMessages([
       { role: 'user', content: 'continue', timestamp: 1 },
