@@ -1195,6 +1195,32 @@ class TestMessageStorage:
         assert conv[1]["content"] == "Hi!"
         assert isinstance(conv[1]["timestamp"], float)
 
+    def test_get_messages_as_conversation_hides_legacy_iteration_limit_prompt(self, db):
+        """Old private fallback instructions must not render as user messages."""
+        db.create_session(session_id="s_limit", source="desktop")
+        db.append_message("s_limit", role="user", content="Start the timer")
+        db.append_message(
+            "s_limit",
+            role="user",
+            content=(
+                "You've reached the maximum number of tool-calling iterations allowed. "
+                "Please provide a final response summarizing what you've found and "
+                "accomplished so far, without calling any more tools."
+            ),
+        )
+        db.append_message(
+            "s_limit",
+            role="assistant",
+            content="The timer was not started.",
+        )
+
+        conv = db.get_messages_as_conversation("s_limit")
+
+        assert [message["content"] for message in conv] == [
+            "Start the timer",
+            "The timer was not started.",
+        ]
+
     def test_get_messages_as_conversation_orders_by_id_not_timestamp(self, db):
         """Replay must follow AUTOINCREMENT id (insertion order), never the
         wall-clock timestamp.
