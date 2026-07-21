@@ -1855,6 +1855,7 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_delete_task",
         "flowstate_get_current_timer",
         "flowstate_get_timer_diagnostics",
+        "flowstate_control_timer",
         "flowstate_list_task_instances",
         "flowstate_done_for_now",
         "flowstate_merge_tasks",
@@ -1914,6 +1915,97 @@ def test_timer_diagnostics_schema_is_read_only_and_verification_focused():
     assert "read-only" in schema["description"].lower()
     assert "leader" in schema["description"].lower()
     assert schema["parameters"] == {"type": "object", "properties": {}, "required": []}
+
+
+def test_timer_lifecycle_schema_is_preview_first_and_receipt_bound():
+    schema = fst.FLOWSTATE_TIMER_LIFECYCLE_SCHEMA
+
+    assert schema["name"] == "flowstate_control_timer"
+    assert schema["parameters"]["properties"]["action"]["enum"] == ["start", "pause", "resume", "stop"]
+    assert schema["parameters"]["required"] == ["action", "operationId", "sessionId", "baseRevision"]
+    assert "preview" in schema["description"].lower()
+    assert "companion" in schema["description"].lower()
+
+
+def test_timer_lifecycle_preview_calls_exact_companion_contract(monkeypatch):
+    seen = {}
+    normalized = {
+        "contractVersion": "timer-lifecycle-v1",
+        "source": "local-api",
+        "action": "start",
+        "sessionId": _LIFECYCLE_TASK_ID,
+        "baseRevision": 0,
+        "payload": {"taskId": "general", "duration": 1500, "isBreak": False},
+    }
+
+    def fake_request(method, path, body=None, **kwargs):
+        seen.update(method=method, path=path, body=body)
+        return {
+            "ok": True, "result": "preview", "contractVersion": "timer-lifecycle-v1",
+            "operationId": "timer-op-1", "action": "start", "sessionId": _LIFECYCLE_TASK_ID,
+            "baseRevision": 0, "requestHash": canonical_json_sha256(normalized),
+            "previewDigest": "a" * 64, "previewExpiresAt": "2099-01-01T00:00:00.000Z",
+            "normalizedPayload": normalized,
+            "proposed": {
+                "id": _LIFECYCLE_TASK_ID, "taskId": "general", "duration": 1500,
+                "remainingTime": 1500, "isActive": True, "isPaused": False,
+                "isBreak": False, "canonicalRevision": 1,
+            },
+        }
+
+    monkeypatch.setattr(fst, "_request", fake_request)
+    result = json.loads(fst._handle_timer_lifecycle({
+        "action": "start", "operationId": "timer-op-1", "sessionId": _LIFECYCLE_TASK_ID,
+        "baseRevision": 0, "taskId": "general", "duration": 1500, "isBreak": False,
+    }))
+
+    assert "error" not in result
+    assert seen == {
+        "method": "POST", "path": "/api/timer/lifecycle",
+        "body": {
+            "action": "start", "operationId": "timer-op-1", "sessionId": _LIFECYCLE_TASK_ID,
+            "baseRevision": 0, "payload": {"taskId": "general", "duration": 1500, "isBreak": False},
+            "preview": True,
+        },
+    }
+
+
+@pytest.mark.parametrize("action", ["pause", "resume", "stop"])
+def test_timer_lifecycle_state_actions_require_revision_and_empty_payload(monkeypatch, action):
+    seen = {}
+
+    def fake_request(method, path, body=None, **kwargs):
+        seen["body"] = body
+        normalized = {
+            "contractVersion": "timer-lifecycle-v1", "source": "local-api", "action": action,
+                "sessionId": _LIFECYCLE_TASK_ID, "baseRevision": 4, "payload": {},
+        }
+        return {
+            "ok": True, "result": "preview", "contractVersion": "timer-lifecycle-v1",
+                "operationId": "timer-op-1", "action": action, "sessionId": _LIFECYCLE_TASK_ID,
+            "baseRevision": 4, "requestHash": canonical_json_sha256(normalized),
+            "previewDigest": "a" * 64, "previewExpiresAt": "2099-01-01T00:00:00.000Z",
+            "normalizedPayload": normalized,
+                "proposed": {"id": _LIFECYCLE_TASK_ID, "canonicalRevision": 5},
+        }
+
+    monkeypatch.setattr(fst, "_request", fake_request)
+    result = json.loads(fst._handle_timer_lifecycle({
+        "action": action, "operationId": "timer-op-1", "sessionId": _LIFECYCLE_TASK_ID, "baseRevision": 4,
+    }))
+
+    assert "error" not in result
+    assert seen["body"]["payload"] == {}
+
+
+def test_timer_lifecycle_apply_requires_complete_approval_binding(monkeypatch):
+    monkeypatch.setattr(fst, "_request", lambda *args, **kwargs: pytest.fail("request must not run"))
+    result = json.loads(fst._handle_timer_lifecycle({
+        "action": "stop", "operationId": "timer-op-1", "sessionId": _LIFECYCLE_TASK_ID,
+        "baseRevision": 4, "preview": False,
+    }))
+
+    assert result["error"] == "previewDigest is required when preview is false"
 
 
 def test_search_tasks_schema_is_read_only_and_supports_safe_browsing():

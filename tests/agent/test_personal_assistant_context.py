@@ -9,6 +9,7 @@ def test_context_describes_only_registered_capabilities_in_user_vocabulary():
             "flowstate_create_task",
             "flowstate_list_subtasks",
             "flowstate_subtask_batch",
+            "flowstate_control_timer",
         },
         flowstate_available=True,
         assistant_context_result={"taskPressure": {"overdue": 2}},
@@ -19,7 +20,8 @@ def test_context_describes_only_registered_capabilities_in_user_vocabulary():
     assert context["capabilities"] == {
         "understand what needs attention": ["read assistant context", "list tasks"],
         "organize my tasks": ["create tasks"],
-        "break large tasks into steps": ["read subtasks", "apply an approved subtask plan"],
+        "break large tasks into steps": ["read subtasks", "preview or atomically apply an approved ordered subtask plan"],
+        "control my focus session": ["preview or apply an approved timer start, pause, resume, or stop"],
     }
     assert context["live_context"] == {"taskPressure": {"overdue": 2}}
 

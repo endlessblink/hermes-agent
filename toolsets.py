@@ -284,6 +284,7 @@ TOOLSETS = {
             "flowstate_set_task_status",
             "flowstate_get_current_timer",
             "flowstate_get_timer_diagnostics",
+            "flowstate_control_timer",
             "flowstate_list_task_instances",
             "flowstate_create_work_block",
             "flowstate_move_work_block",
