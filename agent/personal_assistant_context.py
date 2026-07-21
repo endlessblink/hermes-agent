@@ -22,6 +22,15 @@ _CAPABILITY_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ),
     ),
     (
+        "control my focus session",
+        (
+            (
+                "flowstate_control_timer",
+                "preview or apply an approved timer start, pause, resume, or stop",
+            ),
+        ),
+    ),
+    (
         "organize my tasks",
         (
             ("flowstate_create_task", "create tasks"),

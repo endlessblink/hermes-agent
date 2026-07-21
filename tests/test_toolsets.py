@@ -90,15 +90,18 @@ class TestResolveToolset:
             "flowstate_delete_task",
             "flowstate_get_current_timer",
             "flowstate_get_timer_diagnostics",
+            "flowstate_control_timer",
             "flowstate_list_task_instances",
-            "flowstate_schedule_task_instance",
+            "flowstate_create_work_block",
+            "flowstate_move_work_block",
+            "flowstate_resize_work_block",
+            "flowstate_remove_work_block",
             "flowstate_done_for_now",
             "flowstate_merge_tasks",
             "flowstate_list_subtasks",
-            "flowstate_create_subtask",
-            "flowstate_update_subtask",
-            "flowstate_delete_subtask",
             "flowstate_subtask_batch",
+            "flowstate_restore_task",
+            "flowstate_set_task_status",
         }
 
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):
