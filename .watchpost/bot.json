@@ -1,0 +1,22 @@
+{
+  "id": "hermes-gateway",
+  "name": "Hermes Gateway",
+  "aliases": ["hermes", "diet bot", "diet-bot", "food bot", "excersize bot", "exercise bot", "concil of bots"],
+  "platform": "telegram",
+  "lifecycle": "active",
+  "summary": "The live Telegram bot. One process serves several topic personas in the 'Concil of bots' forum group; each topic gets its own system prompt.",
+  "deployment": {
+    "kind": "vps-docker",
+    "vpsBotId": "hermes-gateway",
+    "container": "hermes-gateway",
+    "host": "84.46.253.137"
+  },
+  "chats": [{ "id": "-1004230590253", "label": "Concil of bots" }],
+  "personaSource": { "kind": "hermes-config", "path": "/opt/hermes-data/config.yaml" },
+  "personas": [
+    { "topicId": "306", "name": "Diet Bot" },
+    { "topicId": "303", "name": "excersize bot" }
+  ],
+  "docs": ["/opt/hermes-runtime/", "/opt/hermes-data/logs/agent.log"],
+  "notes": "Shares the Telegram bot token with claude-and-conquer, which is why that one stays stopped. Runs as uid 10000 — never docker exec as root. A chat must be in both TELEGRAM_ALLOWED_CHATS and TELEGRAM_GROUP_ALLOWED_CHATS in /opt/hermes-runtime/.env or its messages are dropped silently."
+}
