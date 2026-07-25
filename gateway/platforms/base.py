@@ -3287,17 +3287,26 @@ class BasePlatformAdapter(ABC):
                     safe_url_for_log(image_url),
                     alt_text[:30] if alt_text else "",
                 )
-                if image_url.startswith("file://"):
-                    img_result = await self.send_image_file(
+                if self._is_animation_url(image_url):
+                    # Animations are checked before the local-file branch: a GIF
+                    # sent as a photo is flattened to a single still frame by
+                    # the platform, which silently turns an animated demo into
+                    # a static image. Local paths need send_animation just as
+                    # much as remote URLs do.
+                    img_result = await self.send_animation(
                         chat_id=chat_id,
-                        image_path=_unquote(image_url[7:]),
+                        animation_url=(
+                            _unquote(image_url[7:])
+                            if image_url.startswith("file://")
+                            else image_url
+                        ),
                         caption=alt_text if alt_text else None,
                         metadata=metadata,
                     )
-                elif self._is_animation_url(image_url):
-                    img_result = await self.send_animation(
+                elif image_url.startswith("file://"):
+                    img_result = await self.send_image_file(
                         chat_id=chat_id,
-                        animation_url=image_url,
+                        image_path=_unquote(image_url[7:]),
                         caption=alt_text if alt_text else None,
                         metadata=metadata,
                     )
@@ -3345,8 +3354,19 @@ class BasePlatformAdapter(ABC):
         
         Override in subclasses to send GIFs as proper animations
         (e.g., Telegram send_animation) so they auto-play inline.
-        Default falls back to send_image.
+
+        ``animation_url`` may be a remote URL or a local filesystem path.
+        Default falls back to send_image (or send_image_file for a local
+        path — passing a path to send_image would render it as text).
         """
+        if not animation_url.startswith(("http://", "https://", "data:")):
+            return await self.send_image_file(
+                chat_id=chat_id,
+                image_path=animation_url,
+                caption=caption,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
         return await self.send_image(chat_id=chat_id, image_url=animation_url, caption=caption, reply_to=reply_to, metadata=metadata)
     
     @staticmethod

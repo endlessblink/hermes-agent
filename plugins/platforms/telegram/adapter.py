@@ -8,6 +8,7 @@ Uses python-telegram-bot library for:
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import faulthandler
 import inspect
@@ -7178,7 +7179,10 @@ class TelegramAdapter(BasePlatformAdapter):
         animations: List[tuple] = []
         photos: List[tuple] = []
         for image_url, alt_text in images:
-            if not image_url.startswith("file://") and self._is_animation_url(image_url):
+            # Local GIFs are animations too. Excluding file:// here sent them
+            # through send_photo, and Telegram flattens a GIF posted as a photo
+            # into a single still frame — the animation silently disappears.
+            if self._is_animation_url(image_url):
                 animations.append((image_url, alt_text))
             else:
                 photos.append((image_url, alt_text))
@@ -7575,10 +7579,22 @@ class TelegramAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send an animated GIF natively as a Telegram animation (auto-plays inline)."""
+        """Send an animated GIF natively as a Telegram animation (auto-plays inline).
+
+        ``animation_url`` may be a remote URL or a local filesystem path.
+        A local path is uploaded as a byte stream — handing Telegram a bare
+        path string would be interpreted as a URL or file_id and rejected.
+        """
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        
+
+        is_local = not animation_url.startswith(("http://", "https://"))
+        if is_local and not os.path.exists(animation_url):
+            return SendResult(
+                success=False,
+                error=self._missing_media_path_error("Animation", animation_url),
+            )
+
         try:
             _anim_thread = self._metadata_thread_id(metadata)
             reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
@@ -7589,20 +7605,31 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to_id,
                 reply_to_mode=self._reply_to_mode
             )
-            msg = await self._send_with_dm_topic_reply_anchor_retry(
-                self._bot.send_animation,
-                {
-                    "chat_id": normalize_telegram_chat_id(chat_id),
-                    "animation": animation_url,
-                    "caption": caption[:1024] if caption else None,
-                    "reply_to_message_id": reply_to_id,
-                    **animation_thread_kwargs,
-                    **self._notification_kwargs(metadata),
-                },
-                metadata,
-                reply_to_id,
-                "animation",
-            )
+
+            with contextlib.ExitStack() as stack:
+                if is_local:
+                    animation_file = stack.enter_context(open(animation_url, "rb"))
+                    animation_arg: Any = animation_file
+                    reset_media = lambda: animation_file.seek(0)  # noqa: E731
+                else:
+                    animation_arg = animation_url
+                    reset_media = None
+
+                msg = await self._send_with_dm_topic_reply_anchor_retry(
+                    self._bot.send_animation,
+                    {
+                        "chat_id": normalize_telegram_chat_id(chat_id),
+                        "animation": animation_arg,
+                        "caption": caption[:1024] if caption else None,
+                        "reply_to_message_id": reply_to_id,
+                        **animation_thread_kwargs,
+                        **self._notification_kwargs(metadata),
+                    },
+                    metadata,
+                    reply_to_id,
+                    "animation",
+                    reset_media=reset_media,
+                )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             logger.error(
