@@ -309,6 +309,20 @@ TOOLSETS = {
         "includes": []
     },
 
+    "exercise": {
+        "description": (
+            "Free exercise library — look up a movement by name or by a plain "
+            "description when the name is unknown, show it as an animated GIF, "
+            "and build balanced workout sets for the user's level and equipment"
+        ),
+        "tools": [
+            "exercise_find",
+            "exercise_demo",
+            "exercise_build_workout",
+        ],
+        "includes": []
+    },
+
     "kanban": {
         "description": (
             "Kanban multi-agent coordination — only active when the agent "
