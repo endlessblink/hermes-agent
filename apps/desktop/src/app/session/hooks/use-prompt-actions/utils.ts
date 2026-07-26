@@ -6,6 +6,8 @@ import { type CommandsCatalogLike, filterDesktopCommandsCatalog } from '@/lib/de
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import type { ComposerAttachment } from '@/store/composer'
 
+import { isSessionGoneError } from '../use-session-actions/utils'
+
 export type GatewayRequest = <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
 
 export function delay(ms: number): Promise<void> {
@@ -47,9 +49,7 @@ export function inlineErrorMessage(error: unknown, fallback: string): string {
 }
 
 export function isSessionNotFoundError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-
-  return /session not found/i.test(message)
+  return isSessionGoneError(error)
 }
 
 // Gateway JSON-RPC calls reject with "request timed out: <method>" when the

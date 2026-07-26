@@ -393,6 +393,18 @@ def _hermetic_environment(tmp_path, monkeypatch):
     # tests opt back in by patching the security config directly.
     monkeypatch.setenv("TIRITH_ENABLED", "false")
 
+    # Approval state is imported before this fixture runs in some test files,
+    # so clear any config-loaded allowlist/session state after import to keep
+    # tests hermetic.
+    try:
+        import tools.approval as _approval
+
+        _approval._permanent_approved.clear()
+        _approval._session_approved.clear()
+        _approval._session_yolo.clear()
+    except Exception:
+        pass
+
     # 5. Reset plugin singleton so tests don't leak plugins from
     #    ~/.hermes/plugins/ (which, per step 3, is now empty — but the
     #    singleton might still be cached from a previous test).

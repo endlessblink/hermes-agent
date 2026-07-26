@@ -16,8 +16,14 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import {
   activeRuntimeSessionRow,
   activeRuntimeSessionStatus,
+  canAutoRecoverSavedTurn,
+  compressionRecoveryTarget,
+  liveStatusReconcileMode,
+  liveStatusReconcileSessionId,
+  recoverSameSessionFromCompression,
   resolveProfileRestoreSessionId,
-  shouldSettleBusyFromLiveStatus
+  shouldSettleBusyFromLiveStatus,
+  storedSessionIdForCompressionContinuation
 } from '@/app/desktop-controller-utils'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
@@ -29,19 +35,23 @@ import { FloatingPet } from '@/components/pet/floating-pet'
 import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { emitGatewayEvent } from '@/contrib/events'
 import { getSession, getSessionMessages, triggerCronJob } from '@/hermes'
-import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
+import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, textPart, toChatMessages } from '@/lib/chat-messages'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
-import { setClarifyRequest } from '@/store/clarify'
+import { setClarifyRequestAliases } from '@/store/clarify'
 import { setCronFocusJobId } from '@/store/cron'
 import { startDailyAssistantScheduler } from '@/store/daily-assistant-scheduler'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
 import { notify } from '@/store/notifications'
 import {
+  $personalAssistantContextOpen,
   $personalAssistantState,
+  $personalAssistantTodayOpen,
   hydratePersonalAssistantStateWhenReady,
+  isPersonalAssistantSession,
   openPersonalAssistantHome,
+  PERSONAL_ASSISTANT_OWNER_PROFILE,
   refreshPersonalAssistantState,
   startPersonalAssistant
 } from '@/store/personal-assistant'
@@ -77,6 +87,7 @@ import {
   normalizeSessionProfileKey,
   sessionMatchesStoredId,
   sessionPinId,
+  setActiveSessionId,
   setAwaitingResponse,
   setBusy,
   setCurrentBranch,
@@ -84,15 +95,20 @@ import {
   setCurrentModel,
   setCurrentModelSource,
   setCurrentProvider,
-  setMessages
+  setFreshDraftReady,
+  setMessages,
+  setSelectedStoredSessionId,
+  setSessionStartedAt
 } from '@/store/session'
-import { focusOpenSession } from '@/store/session-states'
+import { focusOpenSession, openSessionTile } from '@/store/session-states'
 import { clearSessionTodos, setSessionTodos, todosForHydration } from '@/store/todos'
 import { isSecondaryWindow } from '@/store/windows'
 import { useSkinCommand } from '@/themes/use-skin-command'
 
 import { requestComposerInsert } from '../chat/composer/focus'
 import { useComposerActions } from '../chat/hooks/use-composer-actions'
+import { PersonalAssistantSituation } from '../chat/personal-assistant-situation'
+import { PersonalAssistantToday } from '../chat/personal-assistant-today'
 import { CommandPalette } from '../command-palette'
 import { useGatewayBoot } from '../gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from '../gateway/hooks/use-gateway-request'
@@ -113,6 +129,7 @@ import { useMessageStream } from '../session/hooks/use-message-stream'
 import { useModelControls } from '../session/hooks/use-model-controls'
 import { usePreviewRouting } from '../session/hooks/use-preview-routing'
 import { usePromptActions } from '../session/hooks/use-prompt-actions'
+import { consumeContinuationPrompt } from '../session/hooks/use-prompt-actions/continuation-recovery'
 import { useRouteResume } from '../session/hooks/use-route-resume'
 import { useSessionActions } from '../session/hooks/use-session-actions'
 import { useSessionListActions } from '../session/hooks/use-session-list-actions'
@@ -130,7 +147,13 @@ import { useDesktopIntegrations } from './hooks/use-desktop-integrations'
 import { usePetBridge } from './hooks/use-pet-bridge'
 import { useSessionTileDelegate } from './hooks/use-session-tile-delegate'
 import { $restartPreviewServer, useTitlebarToolContributions } from './panes'
-import { openPersonalAssistantDestination as routePersonalAssistantDestination } from './personal-assistant-routing'
+import {
+  createPersonalAssistantEntryActions,
+  launchPersonalAssistant,
+  openPersonalAssistantTab,
+  showPersonalAssistantContext as refreshAndShowPersonalAssistantContext,
+  openPersonalAssistantDestination as routePersonalAssistantDestination
+} from './personal-assistant-routing'
 import { ChatRoutesSurface, SidebarSurface, StatusbarSurface, TerminalSurface } from './surfaces'
 import type { WiringActions, WiringApi } from './types'
 
@@ -149,11 +172,62 @@ const StarmapView = lazy(async () => ({ default: (await import('../starmap')).St
 // the controller that assembles them.
 export { WiredPane } from './context'
 
-// While a turn is busy, poll authoritative live status to self-heal a stuck
-// `busy` flag (and re-sync a pending clarify request_id) when the stream event
-// that would have settled it was missed — e.g. after a reconnect or restart.
+// Poll authoritative live status while connected. A clarify request can become
+// waiting just after the renderer settles its local busy flag; continuing the
+// lightweight poll is what restores that late question instead of hiding it.
 const LIVE_BUSY_RECONCILE_INTERVAL_MS = 5_000
 const LIVE_BUSY_RECONCILE_TIMEOUT_MS = 5_000
+
+interface ContribSameSessionRecoveryArgs {
+  attempts: Map<string, number>
+  errorMessage: string
+  failedRuntimeSessionId: string
+  fallbackProfile: string | undefined
+  notifyError: (title: string, message: string) => void
+  parentStoredSessionId: string
+  requestGateway: Parameters<typeof recoverSameSessionFromCompression>[0]
+  sessions: Parameters<typeof compressionRecoveryTarget>[1]
+}
+
+export async function attemptContribSameSessionRecovery({
+  attempts,
+  errorMessage,
+  failedRuntimeSessionId,
+  fallbackProfile,
+  notifyError,
+  parentStoredSessionId,
+  requestGateway,
+  sessions
+}: ContribSameSessionRecoveryArgs): Promise<Awaited<ReturnType<typeof recoverSameSessionFromCompression>> | null> {
+  const recoveryStartedAt = Date.now()
+  const lastRecoveryAt = attempts.get(parentStoredSessionId)
+
+  if (!canAutoRecoverSavedTurn(lastRecoveryAt, recoveryStartedAt)) {
+    notifyError(
+      'Automatic recovery stopped',
+      'Hermes already retried this saved turn. You can retry it manually without being trapped in a loop.'
+    )
+
+    return null
+  }
+
+  attempts.set(parentStoredSessionId, recoveryStartedAt)
+
+  try {
+    const recoveryTarget = compressionRecoveryTarget(parentStoredSessionId, sessions, fallbackProfile)
+
+    return await recoverSameSessionFromCompression(requestGateway, {
+      error: errorMessage,
+      parentSessionId: recoveryTarget.sessionId,
+      profile: recoveryTarget.profile,
+      runtimeSessionId: failedRuntimeSessionId
+    })
+  } catch (error) {
+    notifyError('Continuation failed', error instanceof Error ? error.message : String(error))
+
+    return null
+  }
+}
 
 export function ContribWiring({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
@@ -163,6 +237,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const busyRef = useRef(false)
   const creatingSessionRef = useRef(false)
   const messagingTranscriptSignatureRef = useRef(new Map<string, string>())
+  const savedTurnRecoveryAtRef = useRef(new Map<string, number>())
   // Stable identity for the whole callback surface (see WiringActions). Mutated
   // in place each render so memoized surfaces never re-render on churn.
   const actionsRef = useRef<WiringActions | null>(null)
@@ -178,6 +253,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const messagingSessions = useStore($messagingSessions)
   const profileScope = useStore($profileScope)
   const personalAssistantState = useStore($personalAssistantState)
+  const personalAssistantContextOpen = useStore($personalAssistantContextOpen)
+  const personalAssistantTodayOpen = useStore($personalAssistantTodayOpen)
 
   const routedSessionId = routeSessionId(location.pathname)
   const routedSessionIdRef = useRef(routedSessionId)
@@ -239,46 +316,68 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const { connectionRef, gatewayRef, requestGateway } = useGatewayRequest()
 
-  // Authoritative self-heal for a stuck turn. Normal stream/session.info events
-  // are the primary lifecycle path, but a missed settle event (reconnect,
-  // restart, background session) can leave `busy` pinned forever. While busy,
-  // poll session.active_list and: re-surface/refresh a pending clarify request
+  // Authoritative self-heal for a stuck or just-settled turn. Normal
+  // stream/session.info events are the primary lifecycle path, but a missed
+  // event (reconnect, restart, background session, settle-before-waiting race)
+  // can leave `busy` pinned or hide a question. Poll session.active_list and:
+  // re-surface/refresh a pending clarify request
   // from live status (keeps the stored request_id fresh so `clarify.respond`
   // matches the gateway's pending entry instead of failing with "no pending
   // answer request"); otherwise settle the busy flag when the turn is done.
   const reconcileActiveBusyFromLiveStatus = useCallback(async () => {
     const runtimeSessionId = activeSessionIdRef.current
 
-    if (!runtimeSessionId || !busyRef.current || gatewayRef.current?.connectionState !== 'open') {
+    const storedSessionId =
+      selectedStoredSessionIdRef.current || selectedStoredSessionId || personalAssistantState?.sessionId
+
+    const reconcileSessionId = liveStatusReconcileSessionId(
+      runtimeSessionId,
+      storedSessionId,
+      routedSessionIdRef.current
+    )
+
+    if (!reconcileSessionId || gatewayRef.current?.connectionState !== 'open') {
       return
     }
 
     try {
       const result = await requestGateway<{ sessions?: Array<{ id?: string; session_key?: string; status?: string }> }>(
         'session.active_list',
-        { current_session_id: runtimeSessionId },
+        { current_session_id: reconcileSessionId },
         LIVE_BUSY_RECONCILE_TIMEOUT_MS
       )
 
-      const row = activeRuntimeSessionRow(result?.sessions, runtimeSessionId, selectedStoredSessionId)
-      const status = activeRuntimeSessionStatus(result?.sessions, runtimeSessionId, selectedStoredSessionId)
+      const row = activeRuntimeSessionRow(result?.sessions, runtimeSessionId, reconcileSessionId)
+      const status = activeRuntimeSessionStatus(result?.sessions, runtimeSessionId, reconcileSessionId)
 
       if (status === 'waiting' && row?.pending_prompt?.kind === 'clarify') {
         const pending = row.pending_prompt
 
         if (pending.request_id && pending.question) {
-          setClarifyRequest({
+          const restoredRequest = {
             choices: Array.isArray(pending.choices) ? pending.choices : null,
+            profile: $activeGatewayProfile.get() || undefined,
             question: pending.question,
             requestId: pending.request_id,
-            sessionId: runtimeSessionId
-          })
-          updateSessionState(runtimeSessionId, state => ({
-            ...state,
-            awaitingResponse: false,
-            busy: true,
-            needsInput: true
-          }))
+            sessionId: runtimeSessionId ?? null
+          }
+
+          setClarifyRequestAliases(restoredRequest, [
+            null,
+            runtimeSessionId,
+            reconcileSessionId,
+            row.id,
+            row.session_key
+          ])
+
+          if (runtimeSessionId) {
+            updateSessionState(runtimeSessionId, state => ({
+              ...state,
+              awaitingResponse: false,
+              busy: true,
+              needsInput: true
+            }))
+          }
         }
 
         return
@@ -286,37 +385,55 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       if (!shouldSettleBusyFromLiveStatus(status)) {
         if (status === 'working') {
-          clearAllPrompts(runtimeSessionId)
-          updateSessionState(runtimeSessionId, state => (state.needsInput ? { ...state, needsInput: false } : state))
+          if (runtimeSessionId) {
+            clearAllPrompts(runtimeSessionId)
+            updateSessionState(runtimeSessionId, state =>
+              state.needsInput ? { ...state, needsInput: false } : state
+            )
+          }
         }
 
         return
       }
 
-      clearAllPrompts(runtimeSessionId)
+      if (runtimeSessionId) {
+        clearAllPrompts(runtimeSessionId)
+      }
 
-      updateSessionState(runtimeSessionId, state =>
-        state.busy
-          ? {
-              ...state,
-              awaitingResponse: false,
-              busy: false,
-              needsInput: false,
-              pendingBranchGroup: null,
-              streamId: null,
-              turnStartedAt: null
-            }
-          : state
-      )
+      if (runtimeSessionId) {
+        updateSessionState(runtimeSessionId, state =>
+          state.busy
+            ? {
+                ...state,
+                awaitingResponse: false,
+                busy: false,
+                needsInput: false,
+                pendingBranchGroup: null,
+                streamId: null,
+                turnStartedAt: null
+              }
+            : state
+        )
+      }
     } catch {
       // Best-effort recovery. Normal stream/session.info events remain the
       // primary lifecycle path; failures here must never create user-facing
       // noise or interfere with an in-flight turn.
     }
-  }, [activeSessionIdRef, busyRef, gatewayRef, requestGateway, selectedStoredSessionId, updateSessionState])
+  }, [
+    activeSessionIdRef,
+    gatewayRef,
+    personalAssistantState?.sessionId,
+    requestGateway,
+    selectedStoredSessionId,
+    selectedStoredSessionIdRef,
+    updateSessionState
+  ])
 
   useEffect(() => {
-    if (!busy) {
+    const mode = liveStatusReconcileMode(gatewayState, busy)
+
+    if (mode === 'off') {
       return
     }
 
@@ -329,6 +446,13 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     }
 
     tick()
+
+    if (mode === 'once') {
+      return () => {
+        cancelled = true
+      }
+    }
+
     const interval = window.setInterval(tick, LIVE_BUSY_RECONCILE_INTERVAL_MS)
 
     const onVisible = () => {
@@ -346,7 +470,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       window.removeEventListener('focus', tick)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [busy, reconcileActiveBusyFromLiveStatus])
+  }, [busy, gatewayState, reconcileActiveBusyFromLiveStatus])
 
   const {
     loadMoreMessagingForPlatform,
@@ -438,6 +562,87 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     [activeSessionIdRef, selectedStoredSessionIdRef, updateSessionState]
   )
 
+  const continueFromCompressionExhausted = useCallback(
+    async (failedRuntimeSessionId: string, errorMessage: string) => {
+      consumeContinuationPrompt(failedRuntimeSessionId)
+      const parentStoredSessionId = selectedStoredSessionIdRef.current
+
+      if (!parentStoredSessionId) {
+        return false
+      }
+
+      const continued = await attemptContribSameSessionRecovery({
+        attempts: savedTurnRecoveryAtRef.current,
+        errorMessage,
+        failedRuntimeSessionId,
+        fallbackProfile: $activeGatewayProfile.get() || undefined,
+        notifyError: (title, message) => notify({ kind: 'error', title, message }),
+        parentStoredSessionId,
+        requestGateway,
+        sessions: $sessions.get()
+      })
+
+      const nextRuntimeId = continued?.session_id
+
+      if (!continued || !nextRuntimeId) {
+        setBusy(false)
+        setAwaitingResponse(false)
+
+        return false
+      }
+
+      const nextStoredId = storedSessionIdForCompressionContinuation(parentStoredSessionId)
+      const parentState = sessionStateByRuntimeIdRef.current.get(failedRuntimeSessionId)
+
+      const continuationNote: ChatMessage = {
+        id: `continuation-${Date.now()}`,
+        role: 'system',
+        parts: [textPart('Recovered the saved turn in this conversation.')]
+      }
+
+      activeSessionIdRef.current = nextRuntimeId
+      selectedStoredSessionIdRef.current = nextStoredId
+      runtimeIdByStoredSessionIdRef.current.set(nextStoredId, nextRuntimeId)
+
+      if (continued.stored_session_id && continued.stored_session_id !== nextStoredId) {
+        runtimeIdByStoredSessionIdRef.current.set(continued.stored_session_id, nextRuntimeId)
+      }
+
+      ensureSessionState(nextRuntimeId, nextStoredId)
+      setFreshDraftReady(false)
+      setActiveSessionId(nextRuntimeId)
+      setSelectedStoredSessionId(nextStoredId)
+      setSessionStartedAt(Date.now())
+      navigate(sessionRoute(nextStoredId), { replace: true })
+
+      updateSessionState(
+        nextRuntimeId,
+        state => ({
+          ...state,
+          messages: [...(parentState?.messages ?? state.messages), continuationNote],
+          busy: true,
+          awaitingResponse: true,
+          interrupted: false,
+          pendingBranchGroup: null,
+          sawAssistantPayload: false
+        }),
+        nextStoredId
+      )
+
+      return true
+    },
+    [
+      activeSessionIdRef,
+      ensureSessionState,
+      navigate,
+      requestGateway,
+      runtimeIdByStoredSessionIdRef,
+      selectedStoredSessionIdRef,
+      sessionStateByRuntimeIdRef,
+      updateSessionState
+    ]
+  )
+
   // Refresh the open messaging transcript (inbound platform turns arrive via
   // the background gateway, not the desktop websocket). Signature-gated so a
   // no-change poll doesn't churn the thread.
@@ -479,6 +684,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const { handleGatewayEvent } = useMessageStream({
     activeSessionIdRef,
+    continueFromCompressionExhausted,
     hydrateFromStoredSession,
     queryClient,
     refreshHermesConfig,
@@ -692,6 +898,27 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const handleSkinCommand = useSkinCommand()
 
+  const recoverMissingStoredSession = useCallback(
+    async (storedSessionId: string): Promise<null | string> => {
+      if (!isPersonalAssistantSession(storedSessionId)) {
+        return null
+      }
+
+      const destination = await routePersonalAssistantDestination({
+        knownSessionId: storedSessionId,
+        navigate,
+        openHome: openPersonalAssistantHome,
+        resumeSession
+      })
+      if (destination.canonicalSessionId !== storedSessionId) {
+        return null
+      }
+
+      return getRuntimeIdForStoredSession(destination.canonicalSessionId) || destination.runtimeSessionId
+    },
+    [getRuntimeIdForStoredSession, navigate, resumeSession]
+  )
+
   const {
     cancelRun,
     editMessage,
@@ -711,6 +938,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     getRoutedStoredSessionId,
     getRuntimeIdForStoredSession,
     getRouteToken,
+    recoverMissingStoredSession,
     handleSkinCommand,
     openMemoryGraph: openStarmap,
     refreshSessions,
@@ -800,12 +1028,11 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const openPersonalAssistant = useCallback(
     async (trigger: 'manual' | 'scheduled') => {
       try {
-        const result = await startPersonalAssistant(trigger)
-
-        if (result.sessionId) {
-          await refreshPersonalAssistantState()
-          navigate(sessionRoute(result.sessionId))
-        }
+        await launchPersonalAssistant(trigger, {
+          navigate,
+          refreshState: refreshPersonalAssistantState,
+          start: startPersonalAssistant
+        })
       } catch (error) {
         if (trigger === 'manual') {
           notify({
@@ -822,6 +1049,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const openPersonalAssistantDestination = useCallback(async () => {
     try {
       await routePersonalAssistantDestination({
+        knownSessionId: personalAssistantState?.sessionId,
+        loadKnownSessionId: async () => (await refreshPersonalAssistantState()).sessionId,
         navigate,
         openHome: openPersonalAssistantHome,
         resumeSession
@@ -833,18 +1062,72 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         message: error instanceof Error ? error.message : 'Please try again.'
       })
     }
-  }, [navigate, resumeSession])
+  }, [navigate, personalAssistantState?.sessionId, resumeSession])
+
+  const openPersonalAssistantInTab = useCallback(async () => {
+    try {
+      await openPersonalAssistantTab({
+        bindSessionRuntime: (storedSessionId, runtimeSessionId) => {
+          updateSessionState(runtimeSessionId, state => state, storedSessionId)
+          void getSessionMessages(storedSessionId, PERSONAL_ASSISTANT_OWNER_PROFILE)
+            .then(result => {
+              updateSessionState(
+                runtimeSessionId,
+                state => ({
+                  ...state,
+                  messages: state.messages.length > 0 ? state.messages : toChatMessages(result.messages ?? [])
+                }),
+                storedSessionId
+              )
+            })
+            .catch(() => undefined)
+        },
+        focusOpenSession,
+        openHome: openPersonalAssistantHome,
+        openSessionTile
+      })
+    } catch (error) {
+      notify({
+        kind: 'error',
+        title: 'Could not open personal assistant',
+        message: error instanceof Error ? error.message : 'Please try again.'
+      })
+    }
+  }, [updateSessionState])
+
+  const showPersonalAssistantContext = useCallback(() => {
+    void refreshAndShowPersonalAssistantContext({
+      onError: error => {
+        notify({
+          kind: 'error',
+          title: 'Could not open personal assistant',
+          message: error instanceof Error ? error.message : 'Please try again.'
+        })
+      },
+      refresh: refreshPersonalAssistantState,
+      setOpen: open => $personalAssistantContextOpen.set(open)
+    })
+  }, [])
+
+  const personalAssistantEntryActions = useMemo(
+    () =>
+      createPersonalAssistantEntryActions({
+        openChat: () => void openPersonalAssistantInTab(),
+        openContext: showPersonalAssistantContext
+      }),
+    [openPersonalAssistantInTab, showPersonalAssistantContext]
+  )
 
   // Native-notification "View" action for a personal-assistant attention nudge.
   useEffect(() => {
     const unsubscribe = window.hermesDesktop?.onNotificationAction?.(({ actionId }) => {
       if (actionId === 'view-personal-assistant') {
-        void openPersonalAssistantDestination()
+        personalAssistantEntryActions.notification()
       }
     })
 
     return () => unsubscribe?.()
-  }, [openPersonalAssistantDestination])
+  }, [personalAssistantEntryActions])
 
   // Daily assistant scheduler (9am Jerusalem) opens the assistant unattended for
   // the office-work profile. Returns its own teardown.
@@ -875,11 +1158,11 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       if (event.type === 'personal_assistant.attention') {
         void handlePersonalAssistantAttention(event.payload as PersonalAssistantAttentionPayload, () => {
-          void openPersonalAssistantDestination()
+          void openPersonalAssistantInTab()
         })
       }
     },
-    [handleDesktopGatewayEvent, openPersonalAssistantDestination]
+    [handleDesktopGatewayEvent, openPersonalAssistantInTab]
   )
 
   useGatewayBoot({
@@ -997,7 +1280,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onNewSessionSplit: dir => void openNewSessionTile(dir),
     // The sidebar's Personal assistant button — the retired DesktopController
     // passed this and the contrib port dropped it, leaving the button dead.
-    onStartPersonalAssistant: () => void openPersonalAssistantDestination(),
+    onStartPersonalAssistant: personalAssistantEntryActions.primary,
     onPasteClipboardImage: opts => composer.pasteClipboardImage(opts),
     onPickFiles: () => void composer.pickContextPaths('file'),
     onPickFolders: () => void composer.pickContextPaths('folder'),
@@ -1134,6 +1417,37 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       {/* The full real overlay set (mirrors DesktopController's `overlays`). */}
       <RemoteDisplayBanner />
+      <PersonalAssistantSituation
+        onOpenChange={open => {
+          if (open) {
+            $personalAssistantTodayOpen.set(false)
+          }
+
+          $personalAssistantContextOpen.set(open)
+        }}
+        onOpenChat={() => {
+          $personalAssistantContextOpen.set(false)
+          void openPersonalAssistantInTab()
+        }}
+        onReviewInChat={prompt => {
+          $personalAssistantContextOpen.set(false)
+          void openPersonalAssistantDestination().then(() => {
+            requestComposerInsert(prompt, { mode: 'block', target: 'main' })
+          })
+        }}
+        open={personalAssistantContextOpen}
+        showAttentionStrip={false}
+      />
+      <PersonalAssistantToday
+        onOpenChange={open => {
+          if (open) {
+            $personalAssistantContextOpen.set(false)
+          }
+
+          $personalAssistantTodayOpen.set(open)
+        }}
+        open={personalAssistantTodayOpen}
+      />
       {!isSecondaryWindow() && <DesktopInstallOverlay />}
       {!isSecondaryWindow() && (
         <DesktopOnboardingOverlay

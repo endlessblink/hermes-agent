@@ -1128,6 +1128,26 @@ def test_http_transport_redacts_credentials_and_remote_body_from_errors():
     assert "leaked-by-server" not in rendered
 
 
+def test_http_transport_accepts_a_response_larger_than_the_request_limit():
+    payload = json.dumps({"results": [{"title": "x" * (70 * 1024)}]}).encode()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit):
+            return payload
+
+    transport = JsonTransport(opener=lambda *_args, **_kwargs: Response())
+
+    result = transport.request("GET", "https://notion.test/pages", headers={})
+
+    assert len(result["results"][0]["title"]) == 70 * 1024
+
+
 def test_inputs_are_bounded_before_transport(tmp_path):
     bridge = Bridge(config(tmp_path), transport=FakeTransport())
     with pytest.raises(BridgeError) as error:

@@ -28,6 +28,7 @@ export const $gateway = atom<HermesGateway | null>(null)
 
 interface RegistryConfig {
   onEvent: (event: GatewayEvent) => void
+  onProfileReopened?: (profile: string) => void
 }
 
 let config: RegistryConfig | null = null
@@ -54,6 +55,7 @@ interface Secondary {
   reconnectTimer: ReturnType<typeof setTimeout> | null
   reconnectAttempt: number
   lastReportedReconnectAttempt: number
+  openedOnce: boolean
   reconnecting: boolean
   // While true the entry auto-reconnects on drop; pruning flips it off so a
   // deliberate close doesn't trigger the backoff loop.
@@ -174,6 +176,7 @@ function createSecondary(profile: string): Secondary {
     reconnectTimer: null,
     reconnectAttempt: 0,
     lastReportedReconnectAttempt: 0,
+    openedOnce: false,
     reconnecting: false,
     wantOpen: true
   }
@@ -183,6 +186,11 @@ function createSecondary(profile: string): Secondary {
     reportGatewayState(profile, state)
 
     if (state === 'open') {
+      if (entry.openedOnce) {
+        config?.onProfileReopened?.(profile)
+      }
+
+      entry.openedOnce = true
       entry.reconnectAttempt = 0
       entry.lastReportedReconnectAttempt = 0
       clearTimer(entry)

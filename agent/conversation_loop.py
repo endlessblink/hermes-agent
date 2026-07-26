@@ -25,7 +25,8 @@ import ssl
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Mapping, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.conversation_compression import conversation_history_after_compression
@@ -73,6 +74,752 @@ from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
 
 logger = logging.getLogger(__name__)
+
+_PERSONAL_ASSISTANT_COMPRESSION_THRESHOLD_TOKENS = 60_000
+_PERSONAL_ASSISTANT_COMMITTED_INTERVIEW_PREFIX = (
+    "Continue personal-assistant interview "
+)
+_PERSONAL_ASSISTANT_SAFE_ACKNOWLEDGEMENTS = frozenset(
+    {
+        "correct",
+        "כן",
+        "נכון",
+        "אוקיי",
+        "אוקי",
+        "בסדר",
+        "okay",
+        "ok",
+        "right",
+        "yes",
+    }
+)
+
+
+def _effective_pressure_threshold(canonical_threshold: int, *, personal_assistant_mode: bool) -> int:
+    if not personal_assistant_mode:
+        return canonical_threshold
+    return min(
+        canonical_threshold or _PERSONAL_ASSISTANT_COMPRESSION_THRESHOLD_TOKENS,
+        _PERSONAL_ASSISTANT_COMPRESSION_THRESHOLD_TOKENS,
+    )
+
+
+def _personal_assistant_pressure_exceeded(agent: Any, request_pressure_tokens: int) -> bool:
+    return bool(
+        getattr(agent, "personal_assistant_mode", False)
+        and request_pressure_tokens >= _PERSONAL_ASSISTANT_COMPRESSION_THRESHOLD_TOKENS
+    )
+
+
+def _personal_assistant_soft_pressure_requires_compaction(
+    agent: Any,
+    request_pressure_tokens: int,
+    compression_attempts: int,
+) -> bool:
+    return bool(
+        compression_attempts == 0
+        and _personal_assistant_pressure_exceeded(agent, request_pressure_tokens)
+    )
+
+
+def _build_fast_personal_assistant_interview_response(
+    agent: Any,
+    *,
+    interview: Any,
+    messages: List[dict],
+    current_turn_user_idx: int,
+    user_message: Any,
+) -> Optional[str]:
+    if not isinstance(interview, dict) or not isinstance(user_message, str):
+        return None
+
+    text = user_message.strip()
+    committed_continuation = text.startswith(
+        _PERSONAL_ASSISTANT_COMMITTED_INTERVIEW_PREFIX
+    ) and " after committed " in text
+    if (
+        not bool(getattr(agent, "personal_assistant_mode", False))
+        and not committed_continuation
+    ):
+        return None
+    if bool(interview.get("readinessApproved")):
+        if not committed_continuation or interview.get("mode") != "daily-grounding":
+            return None
+        tasks = interview.get("tasks")
+        day_context = next(
+            (
+                task
+                for task in tasks or []
+                if isinstance(task, dict)
+                and str(task.get("taskId") or task.get("id") or "") == "day-context"
+            ),
+            None,
+        )
+        profile = day_context.get("profile") if isinstance(day_context, dict) else None
+        work_boundary = (
+            str(profile.get("workBoundary") or "").strip().casefold()
+            if isinstance(profile, dict)
+            else ""
+        )
+        if work_boundary in {"now", "עכשיו"}:
+            return (
+                "הראיון הושלם. לפי שעת הסיום שהגדרת אין חלון עבודה נוסף להיום, "
+                "ולכן לא הוספתי משימה או שיניתי את התוכנית."
+            )
+        from agent.personal_assistant_calendar_gate import (
+            begin_calendar_first_planning_turn,
+        )
+
+        begin_calendar_first_planning_turn(required=True)
+        return _build_ready_personal_assistant_plan(agent, interview)
+    if str(interview.get("status") or "active") not in {"active", "paused"}:
+        return None
+
+    normalized_acknowledgement = re.sub(r"[\s.!…]+$", "", text).casefold()
+    safe_acknowledgement = (
+        normalized_acknowledgement in _PERSONAL_ASSISTANT_SAFE_ACKNOWLEDGEMENTS
+    )
+    if safe_acknowledgement:
+        previous_assistant_text = ""
+        for message in reversed(messages[:current_turn_user_idx]):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                previous_assistant_text = content.strip()
+                break
+        safe_acknowledgement = bool(
+            previous_assistant_text
+            and "```hermes-ui" not in previous_assistant_text
+            and "?" not in previous_assistant_text
+            and "؟" not in previous_assistant_text
+        )
+
+    if not committed_continuation and not safe_acknowledgement:
+        return None
+
+    from agent.personal_assistant_output_gate import build_safe_interview_fallback
+
+    response = build_safe_interview_fallback(interview)
+    if '"type":"task-profile-review"' not in response:
+        return None
+    return response
+
+
+def _build_post_tool_personal_assistant_interview_response(
+    agent: Any,
+    executed_tool_names: set[str],
+) -> Optional[str]:
+    if (
+        not bool(getattr(agent, "personal_assistant_mode", False))
+        or "personal_assistant_interview_start" not in executed_tool_names
+    ):
+        return None
+    store = getattr(agent, "personal_assistant_state_store", None)
+    interview = store.get_planning_interview() if store is not None else None
+    if (
+        not isinstance(interview, dict)
+        or str(interview.get("status") or "active") not in {"active", "paused"}
+    ):
+        return None
+    if bool(interview.get("readinessApproved")):
+        return _build_ready_personal_assistant_plan(agent, interview)
+
+    from agent.personal_assistant_output_gate import build_safe_interview_fallback
+
+    response = build_safe_interview_fallback(interview)
+    return response if '"type":"task-profile-review"' in response else None
+
+
+def _tool_result_payload(raw: Any) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    nested = payload.get("result")
+    return nested if isinstance(nested, dict) else payload
+
+
+def _hydrate_flowstate_shortlist(
+    draft: str | None,
+    flowstate_candidates: Mapping[str, Mapping[str, Any]],
+    task_details: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    hydrated = dict(task_details)
+    if not draft:
+        return hydrated
+    try:
+        artifact = json.loads(
+            draft.removeprefix("```hermes-ui\n").removesuffix("\n```")
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return hydrated
+    selected_ids = [
+        str(row.get("id") or "").strip()
+        for row in artifact.get("rows") or []
+        if isinstance(row, Mapping) and str(row.get("id") or "").strip()
+    ][:3]
+    from agent.personal_assistant_calendar_gate import (
+        record_calendar_first_task_detail,
+    )
+    from tools.flowstate_tool import _handle_get_task
+
+    for task_id in selected_ids:
+        if task_id not in flowstate_candidates or task_id in hydrated:
+            continue
+        payload = _tool_result_payload(_handle_get_task({"taskId": task_id}))
+        task = payload.get("task") if isinstance(payload, Mapping) else None
+        if not isinstance(task, Mapping) or str(task.get("id") or "").strip() != task_id:
+            continue
+        task_record = dict(task)
+        record_calendar_first_task_detail({"task": task_record})
+        hydrated[task_id] = task_record
+    return hydrated
+
+
+def _build_ready_personal_assistant_plan(
+    agent: Any,
+    interview: Mapping[str, Any],
+    *,
+    preferred_task_title: str = "",
+    excluded_task_titles: tuple[str, ...] = (),
+) -> Optional[str]:
+    from agent.personal_assistant_calendar_gate import (
+        calendar_receipt_covers,
+        calendar_receipt_is_fresh_complete,
+        calendar_first_candidate_records,
+        calendar_first_task_details,
+        calendar_first_task_records,
+        complete_calendar_first_planning_turn,
+        record_calendar_first_candidate_inventory,
+    )
+    from agent.personal_assistant_output_gate import build_grounded_plan_fallback
+    from tools.registry import registry
+
+    store = getattr(agent, "personal_assistant_state_store", None)
+    state = store.public() if store is not None and hasattr(store, "public") else {}
+    manifest = state.get("taskSourceManifest") or state.get("task_source_manifest") or []
+    configured_sources = [
+        source
+        for source in manifest
+        if isinstance(source, Mapping)
+        and source.get("available") is not False
+        and str(source.get("id") or "").strip()
+        and str(source.get("inventoryTool") or "").strip()
+    ]
+    if not configured_sources:
+        return None
+
+    source_snapshot = interview.get("sourceSnapshot")
+    calendar_receipt = (
+        source_snapshot.get("calendarReceipt")
+        if isinstance(source_snapshot, Mapping)
+        else None
+    )
+    planning_date = str(interview.get("planningDate") or "").strip()
+    try:
+        planning_end = (datetime.fromisoformat(planning_date).date() + timedelta(days=1)).isoformat()
+    except (TypeError, ValueError):
+        return None
+    if (
+        not calendar_receipt_is_fresh_complete(calendar_receipt)
+        or not calendar_receipt_covers(
+            calendar_receipt,
+            start_date=planning_date,
+            end_date=planning_end,
+        )
+    ):
+        return None
+    complete_calendar_first_planning_turn(complete=True)
+
+    captured = calendar_first_candidate_records()
+    for source in configured_sources:
+        source_id = str(source.get("id") or "").strip()
+        tool_name = str(source.get("inventoryTool") or "").strip()
+        if source_id in captured:
+            continue
+        args: dict[str, Any] = {}
+        if tool_name == "flowstate_list_tasks":
+            args = {"limit": 100}
+        elif tool_name == "notion_data_source_list":
+            args = {"page_size": 100}
+
+        combined_notion_results: list[dict[str, Any]] = []
+        for _page in range(20):
+            raw = registry.dispatch(tool_name, args)
+            payload = _tool_result_payload(raw)
+            if payload is None or payload.get("error") or payload.get("ok") is False:
+                logger.warning(
+                    "Deterministic planning source read failed source=%s tool=%s "
+                    "payload_keys=%s error_type=%s error=%s",
+                    source_id,
+                    tool_name,
+                    sorted(payload) if isinstance(payload, dict) else [],
+                    (
+                        payload.get("error_type") or payload.get("error", {}).get("code")
+                        if isinstance(payload, dict)
+                        and isinstance(payload.get("error"), Mapping)
+                        else payload.get("error_type") if isinstance(payload, dict) else None
+                    ),
+                    str(payload.get("error") or "")[:300] if isinstance(payload, dict) else "",
+                )
+                source_label = {
+                    "flowstate_list_tasks": "FlowState",
+                    "notion_data_source_list": "Notion",
+                }.get(tool_name, "אחד ממקורות המשימות")
+                return (
+                    f"לא הצלחתי לטעון משימות מ־{source_label}, ולכן לא בניתי תוכנית חלקית. "
+                    "היומן נבדק. אפשר לחבר מחדש את המקור ולנסות שוב, "
+                    "או לבקש במפורש תוכנית רק מהמקורות הזמינים."
+                )
+            if tool_name != "notion_data_source_list":
+                break
+            query = payload.get("query")
+            if not isinstance(query, Mapping) or not isinstance(query.get("results"), list):
+                logger.warning(
+                    "Deterministic Notion inventory had an invalid query envelope keys=%s",
+                    sorted(payload),
+                )
+                return (
+                    "לא הצלחתי לבדוק את כל מקורות המשימות, ולכן לא בניתי תוכנית חלקית. "
+                    "נסה שוב בעוד רגע."
+                )
+            combined_notion_results.extend(
+                item for item in query["results"] if isinstance(item, dict)
+            )
+            if query.get("has_more") is not True:
+                record_calendar_first_candidate_inventory(
+                    source_id,
+                    {
+                        "ok": True,
+                        "query": {
+                            "has_more": False,
+                            "results": combined_notion_results,
+                        },
+                    },
+                )
+                break
+            cursor = str(query.get("next_cursor") or "").strip()
+            if not cursor:
+                return (
+                    "לא הצלחתי להשלים את בדיקת כל המשימות, ולכן לא בניתי תוכנית חלקית. "
+                    "נסה שוב בעוד רגע."
+                )
+            args["start_cursor"] = cursor
+        else:
+            return (
+                "בדיקת מקור המשימות לא הסתיימה, ולכן לא בניתי תוכנית חלקית. "
+                "נסה שוב בעוד רגע."
+            )
+        captured = calendar_first_candidate_records()
+
+    expected_source_ids = {
+        str(source.get("id") or "").strip() for source in configured_sources
+    }
+    candidates_by_source = calendar_first_candidate_records()
+    if not expected_source_ids.issubset(candidates_by_source):
+        logger.warning(
+            "Deterministic planning inventory incomplete expected=%s captured=%s",
+            sorted(expected_source_ids),
+            sorted(candidates_by_source),
+        )
+        return (
+            "לא הצלחתי לאמת את כל מקורות המשימות, ולכן לא בניתי תוכנית חלקית. "
+            "נסה שוב בעוד רגע."
+        )
+
+    try:
+        from agent.suggestion_gate import active_profile_state_dir, recent_recommendations
+
+        recommendation_state_dir = active_profile_state_dir()
+        recommendation_history = (
+            recent_recommendations(recommendation_state_dir)
+            if recommendation_state_dir is not None
+            else []
+        )
+    except Exception:
+        recommendation_history = []
+    availability = ""
+    for task in interview.get("tasks") or []:
+        if not isinstance(task, Mapping) or str(
+            task.get("taskId") or task.get("id") or ""
+        ) != "day-context":
+            continue
+        profile = task.get("profile")
+        if isinstance(profile, Mapping):
+            availability = str(
+                profile.get("availability") or profile.get("workBoundary") or ""
+            ).strip()
+        break
+    task_details = calendar_first_task_details()
+    plan_kwargs = {
+        "task_inventory_records": calendar_first_task_records(),
+        "candidate_records": candidates_by_source,
+        "recent_recommendations": recommendation_history,
+        "protected_items": state.get("protectedItems") or state.get("protected_items") or [],
+        "calendar_receipt": calendar_receipt,
+        "availability": availability,
+        "planning_date": planning_date,
+        "preferred_task_title": preferred_task_title,
+        "excluded_task_titles": excluded_task_titles,
+        "user_message": "",
+    }
+    draft = build_grounded_plan_fallback(
+        task_details=task_details,
+        **plan_kwargs,
+    )
+    hydrated_details = _hydrate_flowstate_shortlist(
+        draft,
+        candidates_by_source.get("flowstate", {}),
+        task_details,
+    )
+    if hydrated_details == task_details:
+        return draft
+    return build_grounded_plan_fallback(
+        task_details=hydrated_details,
+        **plan_kwargs,
+    )
+
+
+def _parse_personal_assistant_plan_adjustment(
+    user_message: str,
+) -> tuple[str, tuple[str, ...]]:
+    selected_plan_match = re.fullmatch(
+        r"בחר באפשרות (?P<title>.+?) לתכנון (?:היום|מחר) ובנה סביבה תוכנית גמישה[.!]?",
+        user_message.strip(),
+    )
+    if selected_plan_match:
+        return selected_plan_match.group("title").strip(), ()
+
+    alternatives_match = re.fullmatch(
+        r"הצג שלוש אפשרויות אחרות לתכנון (?:היום|מחר)\. "
+        r"אל תחזור על (?P<titles>.+)\.",
+        user_message.strip(),
+    )
+    if not alternatives_match:
+        return "", ()
+    titles = tuple(
+        title.strip()
+        for title in re.findall(r"„([^”]+)”", alternatives_match.group("titles"))
+        if title.strip()
+    )
+    return "", titles
+
+
+def _build_initial_personal_assistant_planning_response(
+    agent: Any,
+    intent: Any,
+    user_message: Any,
+    interview: Mapping[str, Any] | None,
+) -> Optional[str]:
+    intent_action = getattr(intent, "action", None)
+    if intent_action != "planning.query" and isinstance(user_message, str):
+        try:
+            from agent.personal_assistant_intent import resolve_turn_intention
+
+            intent_action = resolve_turn_intention(user_message).action
+        except Exception:
+            intent_action = None
+    logger.info(
+        "Personal Assistant deterministic planning probe mode=%s action=%s interview=%s",
+        bool(getattr(agent, "personal_assistant_mode", False)),
+        intent_action or "none",
+        str(interview.get("interviewId") or "")
+        if isinstance(interview, Mapping)
+        else "none",
+    )
+    if (
+        not bool(getattr(agent, "personal_assistant_mode", False))
+        or intent_action != "planning.query"
+        or not isinstance(user_message, str)
+    ):
+        return None
+
+    from agent.personal_assistant_calendar_gate import (
+        calendar_receipt_covers,
+        calendar_receipt_is_fresh_complete,
+    )
+    from agent.personal_assistant_intent import (
+        _requested_planning_date,
+        _supports_daily_grounding,
+    )
+    from agent.personal_assistant_output_gate import (
+        build_safe_interview_fallback,
+        explicit_durable_update_requested,
+        explicit_task_fact_update_requested,
+    )
+    from tools.registry import registry
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("Asia/Jerusalem"))
+    preferred_task_title, excluded_task_titles = (
+        _parse_personal_assistant_plan_adjustment(user_message)
+    )
+    if (
+        explicit_task_fact_update_requested(user_message)
+        or explicit_durable_update_requested(user_message)
+        or re.search(
+            r"(?:תזכור|תזכרי|עדכן|שנה|תקן|remember|update|change|correct)",
+            user_message,
+            flags=re.IGNORECASE,
+        )
+    ):
+        return None
+    if not _supports_daily_grounding(user_message):
+        return None
+    planning_date = _requested_planning_date(user_message, today=now)
+    planning_end = (
+        datetime.fromisoformat(planning_date).date() + timedelta(days=1)
+    ).isoformat()
+
+    matching_interview = bool(
+        isinstance(interview, Mapping)
+        and str(interview.get("planningDate") or "").strip() == planning_date
+        and str(interview.get("mode") or "daily-grounding") == "daily-grounding"
+    )
+    if matching_interview:
+        source_snapshot = interview.get("sourceSnapshot")
+        receipt = (
+            source_snapshot.get("calendarReceipt")
+            if isinstance(source_snapshot, Mapping)
+            else None
+        )
+        if calendar_receipt_is_fresh_complete(receipt) and calendar_receipt_covers(
+            receipt,
+            start_date=planning_date,
+            end_date=planning_end,
+        ):
+            if interview.get("readinessApproved") is True:
+                from agent.personal_assistant_calendar_gate import (
+                    begin_calendar_first_planning_turn,
+                )
+
+                begin_calendar_first_planning_turn(required=True)
+                return _build_ready_personal_assistant_plan(
+                    agent,
+                    interview,
+                    preferred_task_title=preferred_task_title,
+                    excluded_task_titles=excluded_task_titles,
+                )
+            response = build_safe_interview_fallback(interview)
+            return response if '"type":"task-profile-review"' in response else None
+
+    preflight = _tool_result_payload(
+        registry.dispatch(
+            "personal_assistant_calendar_preflight",
+            {
+                "startDate": planning_date,
+                "endDate": planning_end,
+                "timezone": "Asia/Jerusalem",
+            },
+        )
+    )
+    receipt = preflight.get("receipt") if isinstance(preflight, Mapping) else None
+    if not calendar_receipt_is_fresh_complete(receipt):
+        return (
+            "לא הצלחתי לבדוק את היומן, ולכן לא התחלתי לתכנן על בסיס מידע חלקי. "
+            "נסה שוב בעוד רגע."
+        )
+
+    title = "תכנון מחר" if planning_date > now.date().isoformat() else "תכנון שאר היום"
+    start_result = _tool_result_payload(
+        registry.dispatch(
+            "personal_assistant_interview_start",
+            {
+                "interviewId": f"planning-{planning_date}",
+                "requestId": f"deterministic-start-{uuid.uuid4()}",
+                "planningDate": planning_date,
+                "mode": "daily-grounding",
+                "sourceSnapshot": {
+                    "calendarReceipt": receipt,
+                    "localDate": planning_date,
+                },
+                "tasks": [{"taskId": "day-context", "title": title}],
+            },
+        )
+    )
+    started = (
+        start_result.get("interview")
+        if isinstance(start_result, Mapping)
+        else None
+    )
+    if not isinstance(started, Mapping):
+        return (
+            "בדיקת היומן הושלמה, אבל לא הצלחתי לפתוח את שאלת התכנון. "
+            "נסה שוב בעוד רגע."
+        )
+    if started.get("readinessApproved") is True:
+        return _build_ready_personal_assistant_plan(agent, started)
+    response = build_safe_interview_fallback(started)
+    return response if '"type":"task-profile-review"' in response else None
+
+
+def _build_personal_assistant_empty_response_recovery(agent: Any) -> Optional[str]:
+    if not bool(getattr(agent, "personal_assistant_mode", False)):
+        return None
+    store = getattr(agent, "personal_assistant_state_store", None)
+    interview = store.get_planning_interview() if store is not None else None
+    if not isinstance(interview, dict):
+        return (
+            "לא התקבלה תשובה מהמודל, ולא שיניתי דבר. "
+            "נסה שוב את הבקשה האחרונה."
+        )
+    if bool(interview.get("readinessApproved")):
+        return (
+            "התשובה נשמרה, אבל לא הצלחתי להשלים את התכנון. "
+            "לא שיניתי משימות או יומן; נסה שוב את בקשת התכנון האחרונה."
+        )
+    return (
+        "ההתקדמות בראיון נשמרה, אבל לא התקבלה השאלה הבאה. "
+        "נסה שוב כדי להמשיך מאותה נקודה."
+    )
+
+
+def _successful_safety_review_in_batch(messages: List[dict], assistant_message: Any) -> bool:
+    call_ids = {
+        str(call.id)
+        for call in (getattr(assistant_message, "tool_calls", None) or [])
+        if getattr(getattr(call, "function", None), "name", None)
+        == "personal_assistant_safety_review"
+    }
+    if not call_ids:
+        return False
+    for message in reversed(messages):
+        if message.get("role") != "tool" or str(message.get("tool_call_id") or "") not in call_ids:
+            continue
+        try:
+            payload = json.loads(str(message.get("content") or ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        result = payload.get("result") if isinstance(payload, dict) else None
+        receipt = result.get("receipt") if isinstance(result, dict) else None
+        return isinstance(receipt, dict) and receipt.get("complete") is True
+    return False
+
+
+def _build_fast_personal_assistant_plan(
+    agent: Any,
+    intent: Any,
+    user_message: str,
+    messages: List[dict],
+    assistant_message: Any,
+) -> Optional[str]:
+    if (
+        not bool(getattr(agent, "personal_assistant_mode", False))
+        or getattr(intent, "action", None) != "planning.query"
+        or not _successful_safety_review_in_batch(messages, assistant_message)
+    ):
+        return None
+    from agent.personal_assistant_calendar_gate import (
+        calendar_first_candidate_records,
+        calendar_first_task_details,
+        calendar_first_task_inventory,
+        calendar_first_task_records,
+        record_calendar_first_task_detail,
+    )
+    from agent.personal_assistant_output_gate import build_grounded_plan_fallback
+
+    _task_ids, inventory_complete = calendar_first_task_inventory()
+    if not inventory_complete:
+        return None
+    task_records = calendar_first_task_records()
+    task_details = calendar_first_task_details()
+    candidate_records = calendar_first_candidate_records()
+    store = getattr(agent, "personal_assistant_state_store", None)
+    interview = store.get_planning_interview() if store is not None else None
+    planning_date = (
+        str(interview.get("planningDate") or "").strip()
+        if isinstance(interview, dict)
+        else ""
+    )
+    source_snapshot = (
+        interview.get("sourceSnapshot") if isinstance(interview, dict) else None
+    )
+    calendar_receipt = (
+        source_snapshot.get("calendarReceipt")
+        if isinstance(source_snapshot, Mapping)
+        else None
+    )
+    availability = ""
+    if isinstance(interview, dict):
+        for task in interview.get("tasks") or []:
+            if not isinstance(task, Mapping) or str(
+                task.get("taskId") or task.get("id") or ""
+            ) != "day-context":
+                continue
+            profile = task.get("profile")
+            if isinstance(profile, Mapping):
+                availability = str(
+                    profile.get("availability") or profile.get("workBoundary") or ""
+                ).strip()
+            break
+    try:
+        from agent.suggestion_gate import active_profile_state_dir, recent_recommendations
+
+        recommendation_state_dir = active_profile_state_dir()
+        recommendation_history = (
+            recent_recommendations(recommendation_state_dir)
+            if recommendation_state_dir is not None
+            else []
+        )
+    except Exception:
+        recommendation_history = []
+    draft = build_grounded_plan_fallback(
+        task_inventory_records=task_records,
+        task_details=task_details,
+        candidate_records=candidate_records,
+        recent_recommendations=recommendation_history,
+        calendar_receipt=calendar_receipt,
+        availability=availability,
+        planning_date=planning_date,
+        user_message=user_message,
+    )
+    try:
+        artifact = json.loads(
+            draft.removeprefix("```hermes-ui\n").removesuffix("\n```")
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return draft
+    selected_ids = [
+        str(row.get("id") or "").strip()
+        for row in artifact.get("rows") or []
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    ][:3]
+    flowstate_candidates = candidate_records.get("flowstate", {})
+    missing_ids = [
+        task_id
+        for task_id in selected_ids
+        if task_id not in task_details
+        and (not candidate_records or task_id in flowstate_candidates)
+    ]
+    if not missing_ids:
+        return draft
+    from tools.flowstate_tool import _handle_get_task
+
+    for task_id in missing_ids:
+        try:
+            payload = json.loads(_handle_get_task({"taskId": task_id}))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        result = payload.get("result") if isinstance(payload, dict) else None
+        task = result.get("task") if isinstance(result, dict) else None
+        if not isinstance(task, dict) or str(task.get("id") or "").strip() != task_id:
+            continue
+        record_calendar_first_task_detail({"task": task})
+        task_details[task_id] = task
+    return build_grounded_plan_fallback(
+        task_inventory_records=task_records,
+        task_details=task_details,
+        candidate_records=candidate_records,
+        recent_recommendations=recommendation_history,
+        calendar_receipt=calendar_receipt,
+        availability=availability,
+        planning_date=planning_date,
+        user_message=user_message,
+    )
+
 
 # Stable prefix of the local interrupt status string emitted when a turn is
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
@@ -612,6 +1359,48 @@ def run_conversation(
         except Exception:
             pass
 
+    _pre_turn_messages = list(
+        conversation_history
+        if conversation_history is not None
+        else (getattr(agent, "_session_messages", None) or [])
+    )
+    _pre_turn_timer_response = None
+    try:
+        from agent.personal_assistant_timer import (
+            build_deterministic_timer_response,
+        )
+
+        _pre_turn_timer_response = build_deterministic_timer_response(
+            agent, user_message
+        )
+    except Exception:
+        logger.warning(
+            "Personal Assistant deterministic timer path failed safely",
+            exc_info=True,
+        )
+    _pre_turn_interview = None
+    _pre_turn_store = getattr(agent, "personal_assistant_state_store", None)
+    if _pre_turn_store is not None:
+        try:
+            _pre_turn_interview = _pre_turn_store.get_planning_interview()
+        except Exception:
+            logger.debug(
+                "Personal Assistant fast-turn state probe failed",
+                exc_info=True,
+            )
+    _pre_turn_fast_interview_response = (
+        None
+        if _pre_turn_timer_response is not None
+        else
+        _build_fast_personal_assistant_interview_response(
+            agent,
+            interview=_pre_turn_interview,
+            messages=_pre_turn_messages,
+            current_turn_user_idx=len(_pre_turn_messages),
+            user_message=user_message,
+        )
+    )
+
     # ── Per-turn setup (the prologue) ──
     # All once-per-turn setup — stdio guarding, retry-counter resets, user
     # message sanitization, todo/nudge hydration, system-prompt restore-or-
@@ -636,6 +1425,10 @@ def run_conversation(
         set_session_context=set_session_context,
         set_current_write_origin=set_current_write_origin,
         ra=_ra,
+        deterministic_local_turn=(
+            _pre_turn_timer_response is not None
+            or _pre_turn_fast_interview_response is not None
+        ),
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
@@ -649,7 +1442,37 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
     _working_state_context = _ctx.working_state_context
-    _live_temporal_context = build_live_temporal_context()
+    _personal_assistant_turn_context = ""
+    _personal_assistant_intent = None
+    _personal_assistant_interview = _pre_turn_interview
+    if _pre_turn_fast_interview_response is not None:
+        _live_temporal_context = ""
+    else:
+        _live_temporal_context = build_live_temporal_context()
+        try:
+            from agent.personal_assistant_intent import build_personal_assistant_turn_context
+
+            (
+                _personal_assistant_turn_context,
+                _personal_assistant_intent,
+                _personal_assistant_interview,
+            ) = build_personal_assistant_turn_context(agent, original_user_message)
+        except Exception:
+            logger.warning("Personal Assistant turn context could not be assembled", exc_info=True)
+
+    _initial_planning_response = (
+        None
+        if (
+            _pre_turn_timer_response is not None
+            or _pre_turn_fast_interview_response is not None
+        )
+        else _build_initial_personal_assistant_planning_response(
+            agent,
+            _personal_assistant_intent,
+            original_user_message,
+            _personal_assistant_interview,
+        )
+    )
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -658,6 +1481,10 @@ def run_conversation(
     failed = False
     codex_ack_continuations = 0
     unfinished_action_continuations = 0
+    flowstate_timed_task_continuations = 0
+    personal_assistant_gate_continuations = 0
+    personal_assistant_gate_corrections: List[str] = []
+    desktop_clarify_gate_continuations = 0
     length_continue_retries = 0
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
@@ -667,6 +1494,7 @@ def run_conversation(
     post_compaction_probe_pending = False
     foreground_tool_batches = 0
     tool_execution_occurred = False
+    executed_tool_names: set[str] = set()
     force_visible_response = False
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
@@ -674,6 +1502,28 @@ def run_conversation(
     # user-facing result available; it must not be confused with error or
     # recovery text produced by unrelated exit paths.
     _pending_verification_response = None
+    _fast_interview_response = (
+        _pre_turn_timer_response
+        or _pre_turn_fast_interview_response
+        or _initial_planning_response
+        or _build_fast_personal_assistant_interview_response(
+            agent,
+            interview=_personal_assistant_interview,
+            messages=messages,
+            current_turn_user_idx=current_turn_user_idx,
+            user_message=original_user_message,
+        )
+    )
+    if _fast_interview_response is not None:
+        final_response = _fast_interview_response
+        messages.append(
+            {
+                "role": "assistant",
+                "content": final_response,
+                "finish_reason": "personal_assistant_interview_fast_path",
+            }
+        )
+        _turn_exit_reason = "personal_assistant_interview_fast_path"
 
     # Per-turn tally of consecutive successful credential-pool token refreshes,
     # keyed by (provider, pool-entry-id). A persistent upstream 401 lets
@@ -696,7 +1546,10 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    while final_response is None and (
+        (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0)
+        or agent._budget_grace_call
+    ):
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -864,6 +1717,8 @@ def run_conversation(
                     _injections.append(_plugin_user_context)
                 if _working_state_context:
                     _injections.append(_working_state_context)
+                if _personal_assistant_turn_context:
+                    _injections.append(_personal_assistant_turn_context)
                 if _injections:
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
@@ -1095,8 +1950,12 @@ def run_conversation(
                 )
         except Exception:
             logger.debug("prompt storage count probe failed", exc_info=True)
-        _pressure_threshold = int(
+        _canonical_pressure_threshold = int(
             getattr(agent.context_compressor, "threshold_tokens", 0) or 0
+        )
+        _pressure_threshold = _effective_pressure_threshold(
+            _canonical_pressure_threshold,
+            personal_assistant_mode=bool(getattr(agent, "personal_assistant_mode", False)),
         )
         _pressure_reason = (
             "compression_disabled"
@@ -1167,7 +2026,14 @@ def run_conversation(
             and compression_attempts < 3
             and not _defer_preflight(request_pressure_tokens)
             and not _compression_cooldown
-            and _compressor.should_compress(request_pressure_tokens)
+            and (
+                _compressor.should_compress(request_pressure_tokens)
+                or _personal_assistant_soft_pressure_requires_compaction(
+                    agent,
+                    request_pressure_tokens,
+                    compression_attempts,
+                )
+            )
         ):
             compression_attempts += 1
             logger.info(
@@ -5029,6 +5895,7 @@ def run_conversation(
                     and messages[-1].get("_thinking_prefill")
                 ):
                     messages.pop()
+
                     _had_prefill = True
 
                 # Reset prefill counter when tool calls follow a prefill
@@ -5075,6 +5942,22 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                executed_tool_names.update(
+                    str(call.function.name)
+                    for call in (getattr(assistant_message, "tool_calls", None) or [])
+                    if getattr(getattr(call, "function", None), "name", None)
+                )
+                if (
+                    bool(getattr(agent, "personal_assistant_mode", False))
+                    and api_call_count >= agent.max_iterations
+                    and not agent._budget_grace_call
+                ):
+                    # A tool result is not a user-visible outcome. Reserve one
+                    # final, tool-free pass so a long Personal Assistant turn
+                    # cannot end on its last readback with a generic iteration
+                    # failure after all authoritative work already completed.
+                    agent._budget_grace_call = True
+                    force_visible_response = True
                 _schedule_checkpoint_after_tool_iteration(agent, messages)
                 tool_execution_occurred = True
 
@@ -5088,6 +5971,29 @@ def run_conversation(
                     foreground_tool_batches += 1
                     if foreground_tool_batches >= foreground_tool_batch_limit:
                         force_visible_response = True
+
+                _fast_personal_assistant_plan = _build_fast_personal_assistant_plan(
+                    agent,
+                    _personal_assistant_intent,
+                    original_user_message,
+                    messages,
+                    assistant_message,
+                )
+                if _fast_personal_assistant_plan:
+                    final_response = _fast_personal_assistant_plan
+                    _turn_exit_reason = "personal_assistant_verified_fast_plan"
+                    messages.append({"role": "assistant", "content": final_response})
+                    agent._safe_print(f"\n{final_response}\n")
+                    if agent.stream_delta_callback:
+                        try:
+                            agent.stream_delta_callback(final_response)
+                            agent.stream_delta_callback(None)
+                        except Exception:
+                            pass
+                    logger.info(
+                        "Personal Assistant returned the verified compact plan immediately after safety review"
+                    )
+                    break
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
@@ -5110,6 +6016,30 @@ def run_conversation(
                                 agent.stream_delta_callback(None)
                             except Exception:
                                 pass
+                    break
+
+                _fast_interview_question = (
+                    _build_post_tool_personal_assistant_interview_response(
+                        agent,
+                        executed_tool_names,
+                    )
+                )
+                if _fast_interview_question:
+                    final_response = _fast_interview_question
+                    _turn_exit_reason = "personal_assistant_interview_tool_fast_path"
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": final_response,
+                            "finish_reason": _turn_exit_reason,
+                        }
+                    )
+                    if agent.stream_delta_callback:
+                        try:
+                            agent.stream_delta_callback(final_response)
+                            agent.stream_delta_callback(None)
+                        except Exception:
+                            pass
                     break
 
                 # Reset per-turn retry counters after successful tool
@@ -5351,6 +6281,7 @@ def run_conversation(
                         interim_msg["_thinking_prefill"] = True
                         messages.append(interim_msg)
                         agent._session_messages = messages
+                        final_response = None
                         continue
 
                     # ── Empty response retry ──────────────────────
@@ -5380,6 +6311,7 @@ def run_conversation(
                             f"⚠️ Empty response from model — retrying "
                             f"({agent._empty_content_retries}/3)"
                         )
+                        final_response = None
                         continue
 
                     # ── Exhausted retries — try fallback provider ──
@@ -5424,13 +6356,20 @@ def run_conversation(
                     reasoning_text = agent._extract_reasoning(assistant_message)
                     agent._drop_trailing_empty_response_scaffolding(messages)
                     assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
-                    assistant_msg["content"] = "(empty)"
+                    _personal_assistant_recovery = (
+                        _build_personal_assistant_empty_response_recovery(agent)
+                    )
+                    assistant_msg["content"] = (
+                        _personal_assistant_recovery or "(empty)"
+                    )
                     # This is a user-facing failure sentinel for the gateway,
                     # not real assistant content. Persisting it makes later
                     # "continue" turns replay assistant("(empty)") as if it
                     # were a meaningful model response, which can keep long
                     # tool-heavy sessions stuck in empty-response loops.
-                    assistant_msg["_empty_terminal_sentinel"] = True
+                    assistant_msg["_empty_terminal_sentinel"] = (
+                        _personal_assistant_recovery is None
+                    )
                     messages.append(assistant_msg)
 
                     if reasoning_text:
@@ -5458,7 +6397,9 @@ def run_conversation(
                                ". No fallback providers configured.")
                         )
 
-                    final_response = "(empty)"
+                    final_response = (
+                        _personal_assistant_recovery or "(empty)"
+                    )
                     break
                 
                 # Reset retry counter/signature on successful content
@@ -5533,6 +6474,351 @@ def run_conversation(
                     )
                 ):
                     messages.pop()
+
+                try:
+                    from agent.desktop_clarify_gate import (
+                        evaluate_desktop_clarify_output,
+                    )
+
+                    _desktop_platform = str(getattr(agent, "platform", "") or "")
+                    if (
+                        not _desktop_platform
+                        and (os.getenv("HERMES_DESKTOP") or "").strip().lower()
+                        in {"1", "true", "yes"}
+                    ):
+                        _desktop_platform = "desktop"
+                    _desktop_clarify_decision = evaluate_desktop_clarify_output(
+                        final_response,
+                        platform=_desktop_platform,
+                        valid_tool_names=getattr(agent, "valid_tool_names", ()),
+                        allow_personal_assistant_interview_artifact=bool(
+                            getattr(agent, "personal_assistant_mode", False)
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Desktop clarify output gate failed closed")
+                    _desktop_clarify_decision = None
+
+                if (
+                    _desktop_clarify_decision is None
+                    or not _desktop_clarify_decision.accepted
+                ):
+                    _clarify_reason = (
+                        getattr(_desktop_clarify_decision, "reason", None)
+                        or "desktop_clarify_gate_error"
+                    )
+                    _clarify_instruction = (
+                        getattr(_desktop_clarify_decision, "retry_instruction", None)
+                        or "Call the `clarify` tool for the user-directed question."
+                    )
+                    if (
+                        desktop_clarify_gate_continuations < 2
+                        and api_call_count < agent.max_iterations
+                        and agent.iteration_budget.remaining > 0
+                    ):
+                        desktop_clarify_gate_continuations += 1
+                        final_msg["finish_reason"] = "desktop_clarify_gate_continue"
+                        final_msg["_desktop_clarify_gate_synthetic"] = True
+                        messages.append(final_msg)
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "[Private Desktop correction - do not quote or mention "
+                                    f"this validation: {_clarify_instruction}]"
+                                ),
+                                "_desktop_clarify_gate_synthetic": True,
+                            }
+                        )
+                        agent._session_messages = messages
+                        logger.info(
+                            "Desktop prose question withheld; reason=%s attempt=%d",
+                            _clarify_reason,
+                            desktop_clarify_gate_continuations,
+                        )
+                        final_response = None
+                        continue
+
+                    logger.error(
+                        "Desktop clarify output gate exhausted; reason=%s",
+                        _clarify_reason,
+                    )
+                    final_response = (
+                        "I need your input, but the interactive question control could not be opened."
+                    )
+                    final_msg["content"] = final_response
+                    final_msg["finish_reason"] = "desktop_clarify_safe_fallback"
+
+                if bool(getattr(agent, "personal_assistant_mode", False)):
+                    try:
+                        from agent.personal_assistant_output_gate import (
+                            evaluate_personal_assistant_output,
+                            explicit_durable_update_requested,
+                            explicit_task_fact_update_requested,
+                        )
+                        from agent.personal_assistant_calendar_gate import (
+                            calendar_first_task_inventory,
+                            calendar_first_task_records,
+                        )
+
+                        # A tool call or the other client may have advanced the
+                        # shared interview during this generation. Validate
+                        # against the latest committed cursor, not the turn's
+                        # initial snapshot.
+                        _pa_store = getattr(
+                            agent, "personal_assistant_state_store", None
+                        )
+                        _calendar_preflight_receipt = None
+                        _latest_coverage_receipt = None
+                        _expected_task_source_ids: frozenset[str] = frozenset()
+                        if _pa_store is not None:
+                            _latest_interview = _pa_store.get_planning_interview()
+                            _read_pa_state = getattr(_pa_store, "read", None)
+                            if callable(_read_pa_state):
+                                _latest_pa_state = _read_pa_state()
+                                if isinstance(_latest_pa_state, dict):
+                                    _calendar_preflight_receipt = _latest_pa_state.get(
+                                        "calendar_preflight_receipt"
+                                    )
+                                    _latest_coverage_receipt = (
+                                        (_latest_pa_state.get("coverage_receipts") or [None])[-1]
+                                    )
+                                    _expected_task_source_ids = frozenset(
+                                        str(source.get("id") or "").strip()
+                                        for source in (
+                                            _latest_pa_state.get("task_source_manifest") or []
+                                        )
+                                        if isinstance(source, dict)
+                                        and str(source.get("id") or "").strip()
+                                    )
+                            if isinstance(_latest_interview, dict):
+                                _personal_assistant_interview = _latest_interview
+
+                        from agent.personal_assistant_calendar_gate import calendar_first_task_details
+
+                        _turn_task_ids, _turn_task_inventory_complete = (
+                            calendar_first_task_inventory()
+                        )
+                        _task_fact_update_required = explicit_task_fact_update_requested(
+                            original_user_message
+                        )
+                        _pa_gate_decision = evaluate_personal_assistant_output(
+                            final_response,
+                            interview=_personal_assistant_interview,
+                            intent_action=getattr(_personal_assistant_intent, "action", None),
+                            user_message=original_user_message,
+                            calendar_receipt=_calendar_preflight_receipt,
+                            timer_action_executed=(
+                                "flowstate_stop_timer" in executed_tool_names
+                                if getattr(_personal_assistant_intent, "action", None) == "task.timer.stop"
+                                else "flowstate_start_timer" in executed_tool_names
+                            ),
+                            durable_capture_required=(
+                                "personal_assistant_propose_capture" in agent.valid_tool_names
+                                and not _task_fact_update_required
+                                and explicit_durable_update_requested(original_user_message)
+                            ),
+                            durable_capture_executed=(
+                                "personal_assistant_propose_capture" in executed_tool_names
+                            ),
+                            task_inventory_ids=_turn_task_ids,
+                            task_inventory_complete=_turn_task_inventory_complete,
+                            task_inventory_records=calendar_first_task_records(),
+                            task_details=calendar_first_task_details(),
+                            expected_task_source_ids=_expected_task_source_ids,
+                            coverage_recorded=(
+                                "personal_assistant_safety_review" in executed_tool_names
+                            ),
+                            coverage_receipt=(
+                                _latest_coverage_receipt
+                                if isinstance(_latest_coverage_receipt, dict)
+                                else None
+                            ),
+                            planning_interview_required=(
+                                getattr(_personal_assistant_intent, "action", None)
+                                == "planning.query"
+                            ),
+                            task_fact_update_required=_task_fact_update_required,
+                            task_fact_update_executed=(
+                                "flowstate_update_task" in executed_tool_names
+                            ),
+                        )
+                    except Exception:
+                        logger.exception("Personal Assistant output gate failed closed")
+                        _pa_gate_decision = None
+
+                    _approval_explanation_repaired = False
+                    if (
+                        _pa_gate_decision is not None
+                        and not _pa_gate_decision.accepted
+                        and _pa_gate_decision.reason
+                        == "durable_capture_approval_explanation_required"
+                    ):
+                        final_response = (
+                            str(final_response or "").rstrip()
+                            + "\n\nהעדכון טרם נשמר: ההצעה ממתינה לאישור הגלוי שלך. "
+                            "התוכנית היא טיוטה בלבד, ולא שיניתי את מקורות המשימות או היומן."
+                        )
+                        final_msg["content"] = final_response
+                        _approval_explanation_repaired = True
+                        logger.info(
+                            "Personal Assistant added the deterministic pending-approval explanation"
+                        )
+
+                    if (
+                        _pa_gate_decision is None
+                        or (
+                            not _pa_gate_decision.accepted
+                            and not _approval_explanation_repaired
+                        )
+                    ):
+                        _gate_reason = (
+                            getattr(_pa_gate_decision, "reason", None)
+                            or "output_gate_error"
+                        )
+                        _gate_instruction = (
+                            getattr(_pa_gate_decision, "retry_instruction", None)
+                            or "Refresh the authoritative Personal Assistant state and return one "
+                            "valid focused interaction. Do not return a plan or raw JSON."
+                        )
+                        if _gate_instruction not in personal_assistant_gate_corrections:
+                            personal_assistant_gate_corrections.append(_gate_instruction)
+                        _gate_correction_checklist = "\n".join(
+                            f"- {instruction}"
+                            for instruction in personal_assistant_gate_corrections
+                        )
+                        from agent.personal_assistant_output_gate import (
+                            build_grounded_plan_fallback,
+                            build_safe_interview_fallback,
+                            should_build_grounded_plan_fallback,
+                        )
+
+                        # Never let a response rejected by the Personal Assistant
+                        # contract escape later as a generic iteration-budget
+                        # fallback. A safe failure is preferable to a polished but
+                        # factually wrong or non-actionable plan.
+                        _pending_verification_response = build_safe_interview_fallback(
+                            _personal_assistant_interview
+                        )
+                        _grounded_plan_fallback = None
+                        _current_task_details = calendar_first_task_details()
+                        if should_build_grounded_plan_fallback(
+                            reason=_gate_reason,
+                            task_inventory_complete=_turn_task_inventory_complete,
+                            task_details_count=len(_current_task_details),
+                        ):
+                            _grounded_plan_fallback = build_grounded_plan_fallback(
+                                task_inventory_records=calendar_first_task_records(),
+                                task_details=_current_task_details,
+                                user_message=original_user_message,
+                            )
+                        if _gate_reason == "missing_current_interaction":
+                            final_response = _pending_verification_response
+                            final_msg["content"] = final_response
+                            final_msg["finish_reason"] = "personal_assistant_safe_fallback"
+                            logger.info(
+                                "Personal Assistant resumed the authoritative interview card"
+                            )
+                        elif _grounded_plan_fallback:
+                            final_response = _grounded_plan_fallback
+                            final_msg["content"] = final_response
+                            final_msg["finish_reason"] = (
+                                "personal_assistant_grounded_plan_fallback"
+                            )
+                            logger.info(
+                                "Personal Assistant used the verified compact plan fallback; reason=%s",
+                                _gate_reason,
+                            )
+                        elif (
+                            personal_assistant_gate_continuations < 5
+                            and api_call_count < agent.max_iterations
+                            and agent.iteration_budget.remaining > 0
+                        ):
+                            personal_assistant_gate_continuations += 1
+                            final_msg["finish_reason"] = "personal_assistant_gate_continue"
+                            final_msg["_personal_assistant_gate_synthetic"] = True
+                            messages.append(final_msg)
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "[Private Personal Assistant correction — do not quote or "
+                                        "mention this validation. Correct every item below without "
+                                        "regressing earlier fixes:\n"
+                                        f"{_gate_correction_checklist}]"
+                                    ),
+                                    "_personal_assistant_gate_synthetic": True,
+                                }
+                            )
+                            agent._session_messages = messages
+                            logger.info(
+                                "Personal Assistant response withheld; reason=%s attempt=%d",
+                                _gate_reason,
+                                personal_assistant_gate_continuations,
+                            )
+                            final_response = None
+                            continue
+
+                        else:
+                            logger.error(
+                                "Personal Assistant output gate exhausted; reason=%s",
+                                _gate_reason,
+                            )
+                            if (
+                                getattr(_personal_assistant_intent, "action", None)
+                                == "planning.query"
+                                and _turn_task_inventory_complete
+                                and _grounded_plan_fallback is None
+                            ):
+                                _grounded_plan_fallback = build_grounded_plan_fallback(
+                                    task_inventory_records=calendar_first_task_records(),
+                                    task_details=calendar_first_task_details(),
+                                    user_message=original_user_message,
+                                )
+                            final_response = (
+                                _grounded_plan_fallback
+                                or build_safe_interview_fallback(
+                                    _personal_assistant_interview
+                                )
+                            )
+                            final_msg["content"] = final_response
+                            final_msg["finish_reason"] = "personal_assistant_safe_fallback"
+
+                try:
+                    from agent.flowstate_timed_task_stop import (
+                        build_flowstate_timed_task_stop_nudge,
+                    )
+
+                    _flowstate_timed_task_nudge = build_flowstate_timed_task_stop_nudge(
+                        user_message=original_user_message,
+                        messages=messages,
+                        valid_tool_names=agent.valid_tool_names,
+                        attempts=flowstate_timed_task_continuations,
+                    )
+                except Exception:
+                    logger.debug(
+                        "FlowState timed-task stop-loop check failed",
+                        exc_info=True,
+                    )
+                    _flowstate_timed_task_nudge = None
+
+                if _flowstate_timed_task_nudge:
+                    flowstate_timed_task_continuations += 1
+                    final_msg["finish_reason"] = "flowstate_timed_task_continue"
+                    final_msg["_flowstate_timed_task_synthetic"] = True
+                    messages.append(final_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": _flowstate_timed_task_nudge,
+                        "_flowstate_timed_task_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    logger.info(
+                        "FlowState timed task response withheld; continuing (attempt %d)",
+                        flowstate_timed_task_continuations,
+                    )
+                    final_response = None
+                    continue
 
                 try:
                     from agent.agent_runtime_helpers import (
@@ -5733,6 +7019,16 @@ def run_conversation(
                     final_response = None
                     continue
 
+                if bool(getattr(agent, "personal_assistant_mode", False)):
+                    try:
+                        from agent.suggestion_gate import record_personal_assistant_output
+
+                        record_personal_assistant_output(final_response)
+                    except Exception:
+                        logger.warning(
+                            "Personal Assistant recommendation history write failed",
+                            exc_info=True,
+                        )
                 messages.append(final_msg)
                 
                 _turn_exit_reason = f"text_response(finish_reason={finish_reason})"

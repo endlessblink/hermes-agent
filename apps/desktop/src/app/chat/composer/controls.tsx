@@ -38,6 +38,50 @@ interface ConversationProps {
   onToggleMute: () => void
 }
 
+export type ComposerBusyAction = 'answer' | 'queue' | 'stop'
+
+export function isComposerPrimaryActionDisabled({
+  busy,
+  canSubmit,
+  disabled
+}: {
+  busy: boolean
+  canSubmit: boolean
+  disabled: boolean
+}): boolean {
+  return disabled || (!busy && !canSubmit)
+}
+
+export function resolveComposerBusyAction({
+  answersClarify,
+  hasComposerPayload,
+  sendBlocked
+}: {
+  answersClarify: boolean
+  hasComposerPayload: boolean
+  sendBlocked: boolean
+}): ComposerBusyAction {
+  if (!sendBlocked || !hasComposerPayload) {
+    return 'stop'
+  }
+
+  return answersClarify ? 'answer' : 'queue'
+}
+
+export function shouldShowClarifyRecovery({
+  busy,
+  hasRequest
+}: {
+  busy: boolean
+  hasRequest: boolean
+}): boolean {
+  return hasRequest && !busy
+}
+
+export function resolveClarifyGateway<T>(provided: T | null | undefined, active: T | null | undefined): T | null {
+  return provided ?? active ?? null
+}
+
 export function ComposerControls({
   autoSpeak,
   busy,
@@ -56,7 +100,7 @@ export function ComposerControls({
 }: {
   autoSpeak: boolean
   busy: boolean
-  busyAction: 'queue' | 'stop'
+  busyAction: ComposerBusyAction
   canSteer: boolean
   canSubmit: boolean
   compactModelPill?: boolean
@@ -127,16 +171,18 @@ export function ComposerControls({
           </Button>
         </Tip>
       ) : (
-        <Tip label={busy ? (busyAction === 'queue' ? c.queueMessage : c.stop) : c.send}>
+        <Tip label={busy ? (busyAction === 'queue' ? c.queueMessage : busyAction === 'answer' ? c.send : c.stop) : c.send}>
           <Button
-            aria-label={busy ? (busyAction === 'queue' ? c.queueMessage : c.stop) : c.send}
+            aria-label={busy ? (busyAction === 'queue' ? c.queueMessage : busyAction === 'answer' ? c.send : c.stop) : c.send}
             className={PRIMARY_ICON_BTN}
-            disabled={disabled || !canSubmit}
+            disabled={isComposerPrimaryActionDisabled({ busy, canSubmit, disabled })}
             type="submit"
           >
             {busy ? (
               busyAction === 'queue' ? (
                 <Layers3 className={iconSize.sm} />
+              ) : busyAction === 'answer' ? (
+                <Codicon name="arrow-up" size="0.875rem" />
               ) : (
                 <span className="block size-2.5 rounded-[0.1875rem] bg-current" />
               )

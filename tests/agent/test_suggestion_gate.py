@@ -58,6 +58,46 @@ class TestDailyCap:
         assert sg.suggestions_today(tmp_path, now=T0 + 2 * DAY) == 0
 
 
+class TestRecommendationHistory:
+    def test_delivered_recommendations_survive_restart_and_shape_later_turns(self, tmp_path):
+        sg.record_recommendations(
+            tmp_path,
+            [
+                {"taskId": "task-alpha", "title": "Alpha", "surface": "day-timeline"},
+                {"taskId": "task-beta", "title": "Beta", "surface": "task-table"},
+            ],
+            now=T0,
+        )
+
+        assert [item["taskId"] for item in sg.recent_recommendations(tmp_path, now=T0)] == [
+            "task-alpha",
+            "task-beta",
+        ]
+        block = sg.build_discipline_block(tmp_path, now=T0)
+        assert "task-alpha" in block
+        assert "avoid repeating" in block
+        assert "unless it is urgent" in block
+
+    def test_requested_personal_assistant_plan_is_recorded_without_using_unsolicited_cap(self, tmp_path):
+        response = """```hermes-ui
+{"type":"day-timeline","date":"2026-07-22","blocks":[{"id":"b1","taskId":"task-alpha","label":"Alpha"}]}
+```"""
+
+        assert sg.record_personal_assistant_output(response, state_dir=tmp_path, now=T0) == 1
+        assert [item["taskId"] for item in sg.recent_recommendations(tmp_path, now=T0)] == [
+            "task-alpha"
+        ]
+        assert sg.suggestions_today(tmp_path, now=T0) == 0
+
+    def test_interview_card_is_not_recorded_as_a_recommendation(self, tmp_path):
+        response = """```hermes-ui
+{"type":"task-profile-review","task":{"id":"day-context","title":"תכנון שאר היום"}}
+```"""
+
+        assert sg.record_personal_assistant_output(response, state_dir=tmp_path, now=T0) == 0
+        assert sg.recent_recommendations(tmp_path, now=T0) == []
+
+
 class TestDisciplineBlock:
     def test_block_contains_time_cap_rules_and_mood(self, tmp_path):
         sg.save_rejection(tmp_path, "evening-appliance-check",

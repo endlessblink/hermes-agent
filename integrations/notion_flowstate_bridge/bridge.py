@@ -144,7 +144,15 @@ class JsonTransport:
             raise BridgeError("invalid_response", "Remote service returned invalid JSON") from None
         if not isinstance(result, dict):
             raise BridgeError("invalid_response", "Remote service returned an invalid object")
-        if len(_canonical(result).encode("utf-8")) > MAX_OUTPUT_BYTES:
+        try:
+            encoded_result = json.dumps(
+                result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            raise BridgeError(
+                "invalid_response", "Remote service returned invalid JSON data"
+            ) from None
+        if len(encoded_result) > MAX_OUTPUT_BYTES:
             raise BridgeError("response_too_large", "Remote response exceeded the tool output limit")
         return result
 

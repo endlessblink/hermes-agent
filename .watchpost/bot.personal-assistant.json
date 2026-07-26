@@ -1,0 +1,39 @@
+{
+  "id": "hermes-personal-assistant",
+  "name": "Personal Assistant Bot",
+  "aliases": [
+    "personal assistant bot",
+    "personal-assistant",
+    "personal-assistanty",
+    "life-boat",
+    "life boat",
+    "lifeboat",
+    "life-advisor",
+    "life advisor",
+    "orchestrator",
+    "hermes local",
+    "local hermes"
+  ],
+  "platform": "telegram",
+  "lifecycle": "active",
+  "summary": "Telegram bot @hermes_rheotelgchebpsdo_bot. Runs on the workstation and serves the Life-Boat, Orchestrator, Personal-assistant and General topics of the 'Concil of bots' forum group; each topic maps to its own Hermes profile.",
+  "deployment": {
+    "kind": "local",
+    "process": "python -m hermes_cli.main gateway run",
+    "cwd": "/media/endlessblink/data/my-projects/ai-development/devops/hermes/telegram-personal-assistant"
+  },
+  "chats": [{ "id": "-1004230590253", "label": "Concil of bots" }],
+  "personaSource": { "kind": "hermes-config", "path": "/home/endlessblink/.hermes/config.yaml" },
+  "personas": [
+    { "topicId": "1", "name": "General" },
+    { "topicId": "2", "name": "Life-Boat" },
+    { "topicId": "3", "name": "Orchestrator" },
+    { "topicId": "695", "name": "Personal-assistant" }
+  ],
+  "docs": [
+    "/home/endlessblink/.hermes/config.yaml",
+    "/home/endlessblink/.hermes/logs/gateway.log",
+    "/home/endlessblink/.hermes/logs/agent.log"
+  ],
+  "notes": "DIFFERENT BOT from hermes-gateway on the VPS, even though both post into 'Concil of bots'. This one is Telegram bot id 8770869266 and owns topics 1/2/3/695; the VPS hermes-gateway is bot id 8208050780 and owns only topics 303 (excersize bot) and 306 (Diet Bot). No shared token, so they do not conflict. Topic personas come from telegram.channel_prompts plus gateway.profile_routes.telegram.topics: 2 -> life-advisor, 3 -> orchestrator, 695 -> office-work. A topic must be listed in telegram.allowed_topics or its messages are silently ignored. Known failure mode: the gateway process stays alive while Telegram long-polling wedges after the recurring ~04:10 'Bad Gateway' reconnect ('forcing drain and restart without clean stop'); symptom is zero 'inbound message' lines in gateway.log while the process is up, and every topic goes quiet. Restarting the gateway is the fix."
+}

@@ -500,6 +500,8 @@ export const en: Translations = {
       automaticUpdates: 'Automatic updates',
       automaticUpdatesDesc:
         'Hermes checks for updates automatically in the background and lets you know when one is ready.',
+      quitHermes: 'Quit Hermes',
+      quitHermesDesc: 'Fully stop Hermes and its background services.',
       branchCommit: (branch, commit) => `Branch ${branch} · Commit ${commit}`,
       never: 'never',
       justNow: 'just now',

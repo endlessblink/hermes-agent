@@ -70,6 +70,8 @@ export type TileDock = 'center' | SplitDir
 export interface SessionTile {
   /** Stored session id — the durable identity (runtime ids are ephemeral). */
   storedSessionId: string
+  /** Owning backend profile when it differs from the visible workspace. */
+  profile?: string
   /** Dock against `anchor` on adoption (default right; center = stack). */
   dir?: TileDock
   /** Pane to dock against (a drop's target zone) — default the workspace.
@@ -93,9 +95,13 @@ export interface SessionTile {
 const TILES_KEY = 'hermes.desktop.sessionTiles.v2'
 const LEGACY_TILES_KEY = 'hermes.desktop.sessionTiles.v1'
 
-type StoredTile = Pick<SessionTile, 'dir' | 'storedSessionId'>
+type StoredTile = Pick<SessionTile, 'dir' | 'profile' | 'storedSessionId'>
 
-const toStored = (t: SessionTile): StoredTile => ({ dir: t.dir, storedSessionId: t.storedSessionId })
+const toStored = (t: SessionTile): StoredTile => ({
+  dir: t.dir,
+  profile: t.profile,
+  storedSessionId: t.storedSessionId
+})
 
 function parseTileList(value: unknown): StoredTile[] {
   return Array.isArray(value)
@@ -184,11 +190,17 @@ export function patchSessionTile(storedSessionId: string, patch: Partial<Session
 
 /** Drop live runtime bindings so every tile re-resumes — used on gateway
  *  reconnect, where a respawned backend re-mints (recycles) runtime ids. */
-export function resetTileRuntimeBindings() {
+export function shouldResetTileRuntimeBinding(tileProfile: string | undefined, reconnectedProfile: string): boolean {
+  return !tileProfile || tileProfile === reconnectedProfile
+}
+
+export function resetTileRuntimeBindings(reconnectedProfile: string) {
   const tiles = $sessionTiles.get()
 
-  if (tiles.some(t => t.runtimeId)) {
-    $sessionTiles.set(tiles.map(toStored))
+  if (tiles.some(t => t.runtimeId && shouldResetTileRuntimeBinding(t.profile, reconnectedProfile))) {
+    $sessionTiles.set(
+      tiles.map(tile => (shouldResetTileRuntimeBinding(tile.profile, reconnectedProfile) ? toStored(tile) : tile))
+    )
   }
 }
 
@@ -212,7 +224,7 @@ export interface SessionTileDelegate {
   interruptSession(runtimeId: string): Promise<void>
   /** Bind a live runtime id for a stored session (resume without touching
    *  the main view). Returns the runtime id, or throws. */
-  resumeTile(storedSessionId: string): Promise<string>
+  resumeTile(storedSessionId: string, profile?: string): Promise<string>
   /** Submit a prompt to a tile's live session. */
   submitToSession(runtimeId: string, text: string): Promise<void>
   /** THE session-state write path — routes through the wiring cache so the
@@ -240,7 +252,9 @@ export function openSessionTile(
   storedSessionId: string,
   dir: TileDock = 'right',
   anchor?: string,
-  before?: null | string
+  before?: null | string,
+  profile?: string,
+  runtimeId?: string
 ) {
   const tiles = $sessionTiles.get()
 
@@ -249,9 +263,13 @@ export function openSessionTile(
   }
 
   if (!tiles.some(t => t.storedSessionId === storedSessionId)) {
-    saveTiles([...tiles, { anchor, before, dir, storedSessionId }])
+    saveTiles([...tiles, { anchor, before, dir, profile, runtimeId, storedSessionId }])
 
     return
+  }
+
+  if (runtimeId) {
+    patchSessionTile(storedSessionId, { profile, runtimeId })
   }
 
   // Already open: relocate the existing pane to the drop target (pane-mirror
@@ -305,7 +323,13 @@ export function closeSessionTile(storedSessionId: string) {
   const tile = $sessionTiles.get().find(t => t.storedSessionId === storedSessionId)
 
   if (tile) {
-    closedStack().push({ anchor: tile.anchor, before: tile.before, dir: tile.dir, storedSessionId })
+    closedStack().push({
+      anchor: tile.anchor,
+      before: tile.before,
+      dir: tile.dir,
+      profile: tile.profile,
+      storedSessionId
+    })
   }
 
   saveTiles($sessionTiles.get().filter(t => t.storedSessionId !== storedSessionId))
@@ -338,7 +362,7 @@ export function reopenLastClosedTile(): void {
     }
 
     if (!$sessionTiles.get().some(t => t.storedSessionId === storedSessionId)) {
-      openSessionTile(storedSessionId, tile.dir, tile.anchor, tile.before)
+      openSessionTile(storedSessionId, tile.dir, tile.anchor, tile.before, tile.profile)
 
       return
     }

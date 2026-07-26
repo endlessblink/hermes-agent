@@ -163,6 +163,9 @@ def test_empty_pending_verification_response_uses_summary_fallback(monkeypatch):
     assert result["final_response"] == "summary from extra call"
     assert result["turn_exit_reason"] == "max_iterations_reached(60/60)"
     assert agent._handle_max_iterations_called is True
+    assert result["tool_iteration_exhausted"] is True
+    assert result["tool_iteration_count"] == 60
+    assert result["tool_iteration_limit"] == 60
 
 
 def test_short_generated_summary_keeps_abnormal_turn_explainer(monkeypatch):
@@ -203,6 +206,27 @@ def test_text_response_exit_not_rewritten_at_iteration_limit(monkeypatch):
 
     assert result["turn_exit_reason"] == exit_reason
     assert agent._handle_max_iterations_called is False
+
+
+def test_literal_iteration_control_message_is_marked_exhausted(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent(budget_remaining=5)
+    control_echo = (
+        "You've reached the maximum number of tool-calling iterations allowed. "
+        "Please provide a final response summarizing what you've found and accomplished so far, "
+        "without calling any more tools."
+    )
+
+    result = _finalize(
+        agent,
+        final_response=control_echo,
+        exit_reason="text_response(finish_reason=stop)",
+        api_call_count=59,
+    )
+
+    assert result["tool_iteration_exhausted"] is True
+    assert result["tool_iteration_count"] == 59
+    assert result["tool_iteration_limit"] == 60
 
 
 @pytest.mark.parametrize(

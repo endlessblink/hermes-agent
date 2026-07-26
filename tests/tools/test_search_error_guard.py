@@ -27,6 +27,7 @@ import shutil
 import pytest
 
 from tools.file_operations import (
+    ExecuteResult,
     ShellFileOperations,
     _pattern_has_regex_newline,
     _split_tool_diagnostics,
@@ -87,6 +88,28 @@ class TestSearchErrorGuard:
         assert res.error is not None, "search error was silently swallowed"
         assert "Search failed" in res.error
         assert not res.matches
+
+    def test_nested_permission_denial_without_matches_is_a_warning(
+        self, method, match_tree, monkeypatch
+    ):
+        """A broad search should skip one unreadable subtree, not fail entirely."""
+        ops = _ops(match_tree)
+        blocked = match_tree / "postgres_data"
+        monkeypatch.setattr(
+            ops,
+            "_exec",
+            lambda *_args, **_kwargs: ExecuteResult(
+                stdout=f"rg: {blocked}: Permission denied (os error 13)\n",
+                exit_code=2,
+            ),
+        )
+
+        res = _search(ops, method, "missing-company", match_tree)
+
+        assert res.error is None
+        assert res.total_count == 0
+        assert res.warning is not None
+        assert "unreadable" in res.warning.lower()
 
     def test_partial_error_keeps_matches(self, method, partial_error_tree):
         # rg/grep exit 2 because of the unreadable file, but the readable

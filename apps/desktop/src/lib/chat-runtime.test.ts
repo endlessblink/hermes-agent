@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ComposerAttachment } from '@/store/composer'
+import type { SessionInfo } from '@/types/hermes'
 
 import {
   attachmentDisplayText,
   coerceThinkingText,
   optimisticAttachmentRef,
   parseCommandDispatch,
-  parseSlashCommand
+  parseSlashCommand,
+  sessionTitle
 } from './chat-runtime'
 
 const DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANS'
@@ -55,6 +57,19 @@ describe('optimisticAttachmentRef', () => {
 
   it('returns null for a null attachment instead of throwing', () => {
     expect(optimisticAttachmentRef(null as unknown as ComposerAttachment)).toBeNull()
+  })
+})
+
+describe('sessionTitle', () => {
+  it('keeps the canonical personal assistant named even when its stored row has no title', () => {
+    const session = {
+      id: 'assistant-tip',
+      _lineage_root_id: 'assistant-home',
+      title: null,
+      preview: null
+    } as SessionInfo
+
+    expect(sessionTitle(session, 'assistant-home')).toBe('Personal assistant')
   })
 })
 

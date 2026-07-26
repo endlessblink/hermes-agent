@@ -6,6 +6,10 @@ import { cn } from '@/lib/utils'
 // Braille spinner frames — reads as a tiny ASCII loader in monospace.
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
+export function profileSwapTargetForSurface(profile: string | null, surface: 'primary' | 'tile'): string | null {
+  return surface === 'primary' ? profile : null
+}
+
 // Shown over the conversation while the live gateway swaps to another profile's
 // backend (lazily spawned). Keeps the last profile name through the fade-out so
 // the label doesn't blank. Purely visual — pointer-events-none.

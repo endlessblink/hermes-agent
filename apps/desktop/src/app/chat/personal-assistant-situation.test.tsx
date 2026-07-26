@@ -1,11 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AssistantState } from '@/store/personal-assistant'
 
 const patchPersonalAssistantState = vi.fn(async () => undefined)
 const acknowledgePersonalAssistantRead = vi.fn(async () => undefined)
+const refreshPersonalAssistantState = vi.fn(async () => undefined)
 const $threadScrolledUp = atom(false)
 
 const baseState: AssistantState = {
@@ -38,18 +40,51 @@ function mountBottomedThreadViewport() {
 vi.mock('@/store/personal-assistant', () => ({
   $personalAssistantState,
   acknowledgePersonalAssistantRead,
-  patchPersonalAssistantState
+  patchPersonalAssistantState,
+  refreshPersonalAssistantState
 }))
 vi.mock('@/store/thread-scroll', () => ({ $threadScrolledUp }))
 
 const { PersonalAssistantSituation } = await import('./personal-assistant-situation')
 
+const reviewInChat = vi.fn()
+
+const openChat = vi.fn()
+
+function SituationHarness({
+  initiallyOpen = false,
+  showAttentionStrip = true
+}: {
+  initiallyOpen?: boolean
+  showAttentionStrip?: boolean
+}) {
+  const [open, setOpen] = useState(initiallyOpen)
+
+  return (
+    <PersonalAssistantSituation
+      onOpenChange={setOpen}
+      onOpenChat={openChat}
+      onReviewInChat={reviewInChat}
+      open={open}
+      showAttentionStrip={showAttentionStrip}
+    />
+  )
+}
+
+function renderSituation(initiallyOpen = false) {
+  return render(<SituationHarness initiallyOpen={initiallyOpen} />)
+}
+
 function expandSituation() {
-  fireEvent.click(screen.getByRole('button', { name: /Situation/ }))
+  fireEvent.click(screen.getByRole('button', { name: 'Review assistant context' }))
 }
 
 beforeEach(() => {
   acknowledgePersonalAssistantRead.mockClear()
+  refreshPersonalAssistantState.mockClear()
+  patchPersonalAssistantState.mockClear()
+  reviewInChat.mockClear()
+  openChat.mockClear()
   $personalAssistantState.set(baseState)
   $threadScrolledUp.set(false)
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
@@ -60,37 +95,114 @@ afterEach(() => {
 })
 
 describe('PersonalAssistantSituation', () => {
-  it('starts collapsed and expands on demand', () => {
-    render(<PersonalAssistantSituation />)
+  it('shows whether the watchdog is actually observing and repairing failures', () => {
+    $personalAssistantState.set({
+      ...baseState,
+      watchdog: {
+        state: 'active',
+        heartbeatAt: '2026-07-21T07:20:16Z',
+        startedAt: '2026-07-21T07:00:00Z',
+        watchedSources: 12,
+        latestEvent: 'tool_failure',
+        latestAt: '2026-07-21T07:18:00Z',
+        latestSeverity: 'error',
+        latestTool: 'personal_assistant_interview_start',
+        repairStatus: 'queued',
+        repairTaskId: 'repair-123'
+      }
+    })
 
-    const toggle = screen.getByRole('button', { name: /Situation/ })
+    renderSituation(true)
 
-    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByText('Watchdog active')).toBeTruthy()
+    expect(screen.getByText('12 signals monitored')).toBeTruthy()
+    expect(screen.getByText('Tool failure')).toBeTruthy()
+    expect(screen.getByText('Repair queued')).toBeTruthy()
+  })
+
+  it('never presents a verified candidate as an applied repair', () => {
+    $personalAssistantState.set({
+      ...baseState,
+      watchdog: {
+        state: 'active',
+        heartbeatAt: '2026-07-21T09:00:00Z',
+        startedAt: '2026-07-21T07:00:00Z',
+        watchedSources: 12,
+        latestEvent: 'composer_action_mismatch',
+        latestAt: '2026-07-21T08:58:00Z',
+        latestSeverity: 'error',
+        latestTool: null,
+        repairStatus: 'candidate_ready',
+        repairTaskId: 'repair-456',
+        repairUpdatedAt: '2026-07-21T09:00:00Z',
+        repairOutcomeCode: 'verification_passed'
+      }
+    })
+
+    renderSituation(true)
+
+    expect(screen.getByText('Tested candidate ready — not applied')).toBeTruthy()
+    expect(screen.getByText('Task repair-456 · verification passed')).toBeTruthy()
+    expect(document.querySelector('time[datetime="2026-07-21T09:00:00Z"]')).toBeTruthy()
+    expect(screen.queryByText(/recovered/i)).toBeNull()
+  })
+
+  it('keeps the dashboard out of the transcript and opens details on demand', () => {
+    renderSituation()
+
+    const toggle = screen.getByRole('button', { name: 'Review assistant context' })
+
+    expect(screen.getByText('1 decision waiting')).toBeTruthy()
     expect(screen.queryByText('Ship the launch')).toBeNull()
 
     fireEvent.click(toggle)
 
-    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('dialog', { name: 'Assistant context' })).toBeTruthy()
     expect(screen.getByText('Ship the launch')).toBeTruthy()
   })
 
+  it('hides the attention strip when nothing needs attention', () => {
+    $personalAssistantState.set({
+      ...baseState,
+      blockers: [],
+      pendingApprovals: [],
+      captureProposals: [],
+      protectedItems: [],
+      latestCoverageReceipt: undefined,
+      unreadCount: 0
+    })
+
+    renderSituation(true)
+
+    expect(screen.queryByRole('button', { name: 'Review assistant context' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Assistant context' })).toBeTruthy()
+  })
+
+  it('can be opened globally without adding its attention strip to another chat', () => {
+    render(<SituationHarness initiallyOpen showAttentionStrip={false} />)
+
+    expect(screen.queryByRole('button', { name: 'Review assistant context' })).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Assistant context' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open assistant chat' }))
+    expect(openChat).toHaveBeenCalledTimes(1)
+  })
+
   it('shows the complete live situation and pending count', () => {
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     expect(screen.getByText('Ship the launch')).toBeTruthy()
     expect(screen.getByText('Three focused hours')).toBeTruthy()
     expect(screen.getByText('Waiting for approval')).toBeTruthy()
-    expect(screen.getByText('1 approvals · 0 proposals')).toBeTruthy()
+    expect(screen.getByText('1 approval · 0 proposals')).toBeTruthy()
     expect(screen.getByText('fresh')).toBeTruthy()
   })
 
   it('shows whether the protected safety sweep is complete and actionable', () => {
     $personalAssistantState.set({
       ...baseState,
-      protectedItems: [
-        { id: 'flowstate:health', title: 'Arrange the required blood test', disposition: 'actionable' }
-      ],
+      protectedItems: [{ id: 'flowstate:health', title: 'Arrange the required blood test', disposition: 'actionable' }],
       latestCoverageReceipt: {
         id: 'receipt-1',
         cadence: 'daily',
@@ -106,11 +218,40 @@ describe('PersonalAssistantSituation', () => {
       }
     })
 
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     expect(screen.getByText('1 protected item checked')).toBeTruthy()
     expect(screen.getByText('1 needs attention')).toBeTruthy()
+  })
+
+  it('moves read-only safety review into the composer instead of acting automatically', () => {
+    $personalAssistantState.set({
+      ...baseState,
+      protectedItems: [{ id: 'flowstate:health', title: 'Arrange the required blood test', disposition: 'actionable' }],
+      latestCoverageReceipt: {
+        id: 'receipt-1',
+        cadence: 'daily',
+        expectedItemIds: ['flowstate:health'],
+        reviewedItemIds: ['flowstate:health'],
+        missingItemIds: [],
+        riskItemIds: ['flowstate:health'],
+        unresolvedItemIds: [],
+        blockingReasons: [],
+        complete: true,
+        allClear: false,
+        createdAt: '2026-07-19T09:00:00Z'
+      }
+    })
+
+    renderSituation()
+    expandSituation()
+    fireEvent.click(screen.getByRole('button', { name: 'Review safety issues in chat' }))
+
+    expect(reviewInChat).toHaveBeenCalledWith(
+      'Review the unresolved protected items and help me decide the next action for each one.'
+    )
+    expect(screen.queryByRole('dialog', { name: 'Assistant context' })).toBeNull()
   })
 
   it('uses unread activity for the header badge without treating pending proposals as unread', async () => {
@@ -127,7 +268,7 @@ describe('PersonalAssistantSituation', () => {
       unreadCount: 2
     })
 
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     expect(screen.getByText('0 approvals · 3 proposals')).toBeTruthy()
@@ -135,10 +276,7 @@ describe('PersonalAssistantSituation', () => {
 
     $personalAssistantState.set({ ...baseState, captureProposals: proposals, pendingApprovals: [], unreadCount: 0 })
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Situation/ }).textContent).toBe('Situationfresh')
-      expect(screen.queryByLabelText(/unread personal assistant updates/i)).toBeNull()
-    })
+    await waitFor(() => expect(screen.queryByLabelText(/unread personal assistant updates/i)).toBeNull())
   })
 
   it('lets the user edit, accept, or reject learned context proposals', async () => {
@@ -148,9 +286,10 @@ describe('PersonalAssistantSituation', () => {
       section: 'preferences',
       status: 'pending'
     }
+
     $personalAssistantState.set({ ...baseState, captureProposals: [proposal], unreadCount: 0 })
 
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit Keep weekly plans compact' }))
@@ -189,9 +328,39 @@ describe('PersonalAssistantSituation', () => {
     )
   })
 
+  it('reviews a large proposal queue one decision at a time', () => {
+    const proposals = Array.from({ length: 24 }, (_, index) => ({
+      id: `proposal-${index + 1}`,
+      section: 'preferences',
+      status: 'pending',
+      title: `Proposal ${index + 1}`
+    }))
+
+    $personalAssistantState.set({
+      ...baseState,
+      blockers: [],
+      captureProposals: proposals,
+      pendingApprovals: [],
+      unreadCount: 0
+    })
+
+    renderSituation()
+    expandSituation()
+
+    expect(screen.getByText('1 of 24')).toBeTruthy()
+    expect(screen.getByText('Proposal 1')).toBeTruthy()
+    expect(screen.queryByText('Proposal 2')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next decision' }))
+
+    expect(screen.getByText('2 of 24')).toBeTruthy()
+    expect(screen.getByText('Proposal 2')).toBeTruthy()
+    expect(screen.queryByText('Proposal 1')).toBeNull()
+  })
+
   it('acknowledges unread activity when the open assistant is visible at the bottom', async () => {
     mountBottomedThreadViewport()
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     expect(screen.getByLabelText('1 unread personal assistant update')).toBeTruthy()
@@ -209,7 +378,7 @@ describe('PersonalAssistantSituation', () => {
   it('waits to acknowledge until the assistant is visible and scrolled to the bottom', async () => {
     mountBottomedThreadViewport()
     $threadScrolledUp.set(true)
-    render(<PersonalAssistantSituation />)
+    renderSituation()
 
     await Promise.resolve()
     expect(acknowledgePersonalAssistantRead).not.toHaveBeenCalled()
@@ -219,7 +388,7 @@ describe('PersonalAssistantSituation', () => {
   })
 
   it('waits for the transcript viewport to load before acknowledging', async () => {
-    render(<PersonalAssistantSituation />)
+    renderSituation()
 
     await Promise.resolve()
     expect(acknowledgePersonalAssistantRead).not.toHaveBeenCalled()
@@ -239,7 +408,7 @@ describe('PersonalAssistantSituation', () => {
         })
     )
     mountBottomedThreadViewport()
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     await waitFor(() => expect(acknowledgePersonalAssistantRead).toHaveBeenCalledTimes(1))
 
     document.body.append(document.createElement('span'), document.createElement('span'))
@@ -252,7 +421,7 @@ describe('PersonalAssistantSituation', () => {
   it('acknowledges unread activity when a bottomed assistant window becomes visible', async () => {
     mountBottomedThreadViewport()
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
-    render(<PersonalAssistantSituation />)
+    renderSituation()
 
     await Promise.resolve()
     expect(acknowledgePersonalAssistantRead).not.toHaveBeenCalled()
@@ -270,13 +439,13 @@ describe('PersonalAssistantSituation', () => {
       pendingApprovals: [{ id: 'approval-he', title: 'להכין לוח שנה לאירועים' }]
     })
 
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     const outcome = screen.getByText('לסיים את תכנון השבוע')
     const pending = screen.getByText('להכין לוח שנה לאירועים')
 
-    expect(screen.getByText('Situation').closest('aside')?.getAttribute('dir')).toBe('ltr')
+    expect(screen.getByRole('dialog', { name: 'Assistant context' }).getAttribute('dir')).toBe('ltr')
     expect(outcome.getAttribute('dir')).toBe('auto')
     expect(outcome.className).toContain('text-start')
     expect(pending.closest('li')?.getAttribute('dir')).toBe('auto')
@@ -286,7 +455,7 @@ describe('PersonalAssistantSituation', () => {
   })
 
   it('edits an item through a versioned state operation', async () => {
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit Ship the launch' }))
@@ -301,7 +470,7 @@ describe('PersonalAssistantSituation', () => {
 
   it('keeps a failed state change visible', async () => {
     patchPersonalAssistantState.mockRejectedValueOnce(new Error('State changed elsewhere'))
-    render(<PersonalAssistantSituation />)
+    renderSituation()
     expandSituation()
 
     fireEvent.click(screen.getByRole('button', { name: 'Archive Waiting for approval' }))

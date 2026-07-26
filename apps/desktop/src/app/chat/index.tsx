@@ -11,6 +11,7 @@ import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts
 import { $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
+import { Codicon } from '@/components/ui/codicon'
 import { ErrorState } from '@/components/ui/error-state'
 import { TitleMenuTrigger } from '@/components/ui/title-menu-trigger'
 import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
@@ -22,7 +23,11 @@ import { cn } from '@/lib/utils'
 import { $compactionActive } from '@/store/compaction'
 import type { ComposerAttachment } from '@/store/composer'
 import { $pinnedSessionIds } from '@/store/layout'
-import { $personalAssistantState } from '@/store/personal-assistant'
+import {
+  $personalAssistantContextOpen,
+  $personalAssistantState,
+  $personalAssistantTodayOpen
+} from '@/store/personal-assistant'
 import { $petActive } from '@/store/pet'
 import { $petOverlayActive } from '@/store/pet-overlay'
 import { $gatewaySwapTarget } from '@/store/profile'
@@ -41,10 +46,15 @@ import { isSecondaryWindow, isWatchWindow } from '@/store/windows'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 import { routeSessionId } from '../routes'
-import { titlebarHeaderBaseClass, titlebarHeaderShadowClass, titlebarHeaderTitleClass } from '../shell/titlebar'
+import {
+  titlebarButtonClass,
+  titlebarHeaderBaseClass,
+  titlebarHeaderShadowClass,
+  titlebarHeaderTitleClass
+} from '../shell/titlebar'
 
 import { ChatDropOverlay } from './chat-drop-overlay'
-import { ChatSwapOverlay } from './chat-swap-overlay'
+import { ChatSwapOverlay, profileSwapTargetForSurface } from './chat-swap-overlay'
 import { ChatBar, ChatBarFallback } from './composer'
 import { requestComposerInsert } from './composer/focus'
 import { droppedFileInlineRefs } from './composer/inline-refs'
@@ -52,7 +62,7 @@ import { useComposerScope } from './composer/scope'
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { type DragKind, useFileDropZone } from './hooks/use-file-drop-zone'
-import { PersonalAssistantSituation } from './personal-assistant-situation'
+import { getPersonalAssistantAttention } from './personal-assistant-situation'
 import { useRuntimeMessageRepository } from './runtime-repository'
 import { ScrollToBottomButton } from './scroll-to-bottom-button'
 import { useSessionView } from './session-view'
@@ -94,6 +104,8 @@ interface ChatHeaderProps {
   activeSessionId: null | string
   isRoutedSessionView: boolean
   onDeleteSelectedSession: () => void
+  onOpenAssistantContext: () => void
+  onOpenAssistantToday: () => void
   onToggleSelectedPin: () => void
   selectedSessionId: null | string
 }
@@ -102,6 +114,8 @@ function ChatHeader({
   activeSessionId,
   isRoutedSessionView,
   onDeleteSelectedSession,
+  onOpenAssistantContext,
+  onOpenAssistantToday,
   onToggleSelectedPin,
   selectedSessionId
 }: ChatHeaderProps) {
@@ -122,6 +136,8 @@ function ChatHeader({
     : activeStoredSession
       ? sessionTitle(activeStoredSession)
       : 'New session'
+
+  const assistantAttention = getPersonalAssistantAttention(assistantState)
 
   // Pins live on the durable lineage-root id, but selectedSessionId is the live
   // (tip) id — resolve through the loaded row so the menu reflects the pin
@@ -160,6 +176,37 @@ function ChatHeader({
           <TitleMenuTrigger>{title}</TitleMenuTrigger>
         </SessionActionsMenu>
       </div>
+      {assistantState && (
+        <div className="flex shrink-0 items-center">
+          <Button
+            aria-label="Open today plan"
+            className={cn('pointer-events-auto shrink-0', titlebarButtonClass)}
+            onClick={onOpenAssistantToday}
+            size="icon-titlebar"
+            title="Today"
+            type="button"
+            variant="ghost"
+          >
+            <Codicon name="calendar" />
+          </Button>
+          <Button
+            aria-label="Open assistant context"
+            className={cn('pointer-events-auto relative shrink-0', titlebarButtonClass)}
+            onClick={onOpenAssistantContext}
+            size="icon-titlebar"
+            title="Assistant context"
+            type="button"
+            variant="ghost"
+          >
+            <Codicon name="sparkle" />
+            {assistantAttention.total > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 grid min-w-3.5 place-items-center rounded-full bg-warning px-0.5 text-[0.5625rem] leading-3.5 text-black">
+                {assistantAttention.total > 9 ? '9+' : assistantAttention.total}
+              </span>
+            )}
+          </Button>
+        </div>
+      )}
     </header>
   )
 }
@@ -445,6 +492,14 @@ export function ChatView({
           activeSessionId={activeSessionId}
           isRoutedSessionView={isRoutedSessionView}
           onDeleteSelectedSession={onDeleteSelectedSession}
+          onOpenAssistantContext={() => {
+            $personalAssistantTodayOpen.set(false)
+            $personalAssistantContextOpen.set(true)
+          }}
+          onOpenAssistantToday={() => {
+            $personalAssistantContextOpen.set(false)
+            $personalAssistantTodayOpen.set(true)
+          }}
           onToggleSelectedPin={onToggleSelectedPin}
           selectedSessionId={selectedSessionId}
         />
@@ -454,8 +509,6 @@ export function ChatView({
           so a tiled/background session's blocking prompt surfaces instead of
           stalling to timeout. */}
       <PromptOverlays sessionId={activeSessionId} />
-
-      {isPersonalAssistant && <PersonalAssistantSituation />}
 
       <ChatRuntimeBoundary
         busy={busy}
@@ -515,7 +568,7 @@ export function ChatView({
           {/* A session drag hovering an EDGE hands the visual to the zone
               target; the link overlay shows only for the center region. */}
           <ChatDropOverlay kind={overlayKind} />
-          <ChatSwapOverlay profile={gatewaySwapTarget} />
+          <ChatSwapOverlay profile={profileSwapTargetForSurface(gatewaySwapTarget, isPrimary ? 'primary' : 'tile')} />
         </div>
         {/* Composer renders OUTSIDE the contain:[layout paint] wrapper above:
             that wrapper is a containing block for — and clips — position:fixed

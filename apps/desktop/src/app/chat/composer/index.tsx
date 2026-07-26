@@ -13,10 +13,10 @@ import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
 import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
-import { $clarifyRequest } from '@/store/clarify'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
 import { removeQueuedPrompt } from '@/store/composer-queue'
+import { activeGateway } from '@/store/gateway'
 import {
   $messageRepliesEnabled,
   $messageReplyTarget,
@@ -36,7 +36,12 @@ import { AttachmentList } from './attachments'
 import { COMPOSER_FADE_BACKGROUND, type QueueEditState, slashArgStage } from './composer-utils'
 import { ContextMenu } from './context-menu'
 import { COMPOSER_AREAS, runComposerMiddleware } from './contrib'
-import { ComposerControls } from './controls'
+import {
+  ComposerControls,
+  resolveClarifyGateway,
+  resolveComposerBusyAction,
+  shouldShowClarifyRecovery
+} from './controls'
 import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
 import { markActiveComposer } from './focus'
 import { HelpHint } from './help-hint'
@@ -129,7 +134,7 @@ export function ChatBar({
   // would discard a question the user may want to come back to. The blocking
   // prompt owns its own dismissal (Skip, Reject, dialog close).
   const awaitingInput = useStore(scope.$awaitingInput)
-  const clarifyRequest = useStore($clarifyRequest)
+  const clarifyRequest = useStore(scope.$clarifyRequest)
   const activeQueueSessionKey = queueSessionKey || sessionId || null
   const sendBlocked = busy || compacting
 
@@ -266,7 +271,12 @@ export function ChatBar({
   const { compactPill, stacked } = useComposerMetrics({ composerRef, composerSurfaceRef, editorRef, poppedOut })
   const hasComposerPayload = hasText || attachments.length > 0
   const canSubmit = busy || hasComposerPayload
-  const busyAction = sendBlocked && hasComposerPayload ? 'queue' : 'stop'
+
+  const busyAction = resolveComposerBusyAction({
+    answersClarify: Boolean(clarifyRequest),
+    hasComposerPayload,
+    sendBlocked
+  })
 
   // Steer only makes sense mid-turn, text-only (the gateway can't carry images
   // into a tool result) and never for a slash command (those execute inline).
@@ -279,7 +289,7 @@ export function ChatBar({
       respondToClarifyRequest({
         answer,
         copy: t.assistant.clarify,
-        gateway,
+        gateway: resolveClarifyGateway(gateway, activeGateway()),
         request: clarifyRequest
       }),
     [clarifyRequest, gateway, t.assistant.clarify]
@@ -308,6 +318,7 @@ export function ChatBar({
     onSubmit,
     onSubmitAccepted: replyActive ? clearMessageReply : undefined,
     onSubmitClarifyAnswer: clarifyRequest ? submitClarifyAnswer : undefined,
+    presentedBusyAction: busyAction,
     queueCurrentDraft,
     queueEdit,
     recoverLostClarifyWhileBusy,
@@ -350,6 +361,17 @@ export function ChatBar({
   // flushes to one per paint is lossless.
   const flushRafRef = useRef<number | undefined>(undefined)
 
+  // localStorage is the crash boundary: pagehide/effect cleanup never runs
+  // when the packaged Electron process is killed. Persist committed DOM text
+  // synchronously before any rAF or React-state work so the last keystroke is
+  // already recoverable if Hermes exits in that window.
+  const persistEditorDraft = (editor: HTMLDivElement) => {
+    const text = sanitizeComposerInput(composerPlainText(editor))
+    stashAt(activeQueueSessionKeyRef.current, text)
+
+    return text
+  }
+
   const flushEditorToDraft = (editor: HTMLDivElement) => {
     if (flushRafRef.current !== undefined) {
       window.cancelAnimationFrame(flushRafRef.current)
@@ -358,7 +380,7 @@ export function ChatBar({
 
     normalizeComposerEditorDom(editor)
 
-    const nextDraft = sanitizeComposerInput(composerPlainText(editor))
+    const nextDraft = persistEditorDraft(editor)
 
     if (nextDraft !== draftRef.current) {
       draftRef.current = nextDraft
@@ -399,6 +421,7 @@ export function ChatBar({
       return
     }
 
+    persistEditorDraft(event.currentTarget)
     scheduleFlushEditorToDraft(event.currentTarget)
   }
 
@@ -449,6 +472,7 @@ export function ChatBar({
 
     event.preventDefault()
     insertPlainTextAtCaret(event.currentTarget, pastedText)
+    persistEditorDraft(event.currentTarget)
     scheduleFlushEditorToDraft(event.currentTarget)
   }
 
@@ -894,6 +918,38 @@ export function ChatBar({
           }}
         />
       )}
+      {shouldShowClarifyRecovery({ busy, hasRequest: Boolean(clarifyRequest) }) && clarifyRequest ? (
+        <div
+          className="absolute bottom-[calc(var(--composer-shell-height,4rem)+1rem)] left-1/2 z-40 grid w-[min(var(--composer-width),calc(100%-2rem))] -translate-x-1/2 gap-2 rounded-xl border border-border bg-background/95 p-3 shadow-lg backdrop-blur"
+          data-slot="clarify-recovery"
+          dir="auto"
+        >
+          <p className="whitespace-pre-wrap text-sm font-medium" data-bidi-plaintext="" dir="auto">
+            {clarifyRequest.question}
+          </p>
+          {clarifyRequest.choices?.length ? (
+            <div className="grid gap-1">
+              {clarifyRequest.choices.map(choice => (
+                <Button
+                  className="h-auto justify-start whitespace-normal px-2 py-1.5 text-start"
+                  key={choice}
+                  onClick={() => void submitClarifyAnswer(choice)}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {choice}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+          <p className="text-xs text-(--ui-text-tertiary)" dir="auto">
+            {clarifyRequest.choices?.length
+              ? 'אפשר לבחור כאן או לכתוב תשובה אחרת למטה.'
+              : 'אפשר לכתוב את התשובה למטה.'}
+          </p>
+        </div>
+      ) : null}
       <ComposerPrimitive.Unstable_TriggerPopoverRoot>
         <ComposerPrimitive.Root
           className={cn(

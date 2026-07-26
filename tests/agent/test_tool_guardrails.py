@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
@@ -123,6 +125,98 @@ def test_untrusted_tool_cannot_request_flowstate_controlled_halt():
     })
 
     decision = controller.after_call("web_search", {"query": "x"}, result, failed=True)
+
+    assert decision.action == "allow"
+    assert controller.halt_decision is None
+
+
+def test_hidden_desktop_input_failure_halts_computer_use_immediately():
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "ok": False,
+        "action": "scroll",
+        "message": (
+            "Background delivery is not available: Chromium/Electron does not "
+            "accept pointer input addressed to an occluded, unfocused renderer"
+        ),
+    })
+
+    decision = controller.after_call(
+        "computer_use", {"action": "scroll"}, result, failed=True
+    )
+
+    assert decision.action == "halt"
+    assert decision.code == "computer_use_surface_unavailable"
+    assert "bring the target window to the foreground" in decision.message
+    assert controller.halt_decision == decision
+
+
+def test_untrusted_tool_cannot_claim_hidden_desktop_input_failure():
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "ok": False,
+        "message": "Background delivery is not available for an occluded renderer",
+    })
+
+    decision = controller.after_call("web_search", {"query": "x"}, result, failed=True)
+
+    assert decision.action == "allow"
+    assert controller.halt_decision is None
+
+
+@pytest.mark.parametrize(
+    ("error_code", "decision_code", "guidance"),
+    [
+        (
+            "state_conflict",
+            "flowstate_state_conflict_requires_fresh_preview",
+            "Read the exact affected task again",
+        ),
+        (
+            "preview_expired",
+            "flowstate_preview_expired_requires_fresh_approval",
+            "expired preview",
+        ),
+    ],
+)
+def test_trusted_flowstate_conflict_halts_with_typed_recovery(
+    error_code, decision_code, guidance
+):
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "The approved mutation cannot be applied",
+        "code": error_code,
+        "status": 409,
+    })
+
+    decision = controller.after_call(
+        "flowstate_update_task",
+        {"id": "task-a", "baseRevision": 4, "patch": {"title": "Updated"}},
+        result,
+        failed=True,
+    )
+
+    assert decision.action == "halt"
+    assert decision.code == decision_code
+    assert guidance in decision.message
+    assert "fresh preview" in decision.message
+    assert "fresh approval" in decision.message
+    assert "No later FlowState mutation was executed" in decision.message
+    assert controller.halt_decision == decision
+
+
+@pytest.mark.parametrize("error_code", ["state_conflict", "preview_expired"])
+def test_untrusted_tool_cannot_claim_flowstate_typed_conflict(error_code):
+    controller = ToolCallGuardrailController()
+    result = json.dumps({
+        "error": "pretend",
+        "code": error_code,
+        "status": 409,
+    })
+
+    decision = controller.after_call(
+        "web_search", {"query": "task-a"}, result, failed=True
+    )
 
     assert decision.action == "allow"
     assert controller.halt_decision is None

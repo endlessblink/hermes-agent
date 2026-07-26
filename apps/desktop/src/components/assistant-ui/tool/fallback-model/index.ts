@@ -686,6 +686,22 @@ function toolStatus(part: ToolPart, resultRecord: Record<string, unknown>): Tool
   return toolErrorText(part, resultRecord) ? 'error' : 'success'
 }
 
+export function isToolFailureRecovered(parts: readonly ToolPart[], target: ToolPart): boolean {
+  const targetIndex = parts.findIndex(part => part.toolCallId === target.toolCallId)
+
+  if (targetIndex < 0 || !toolErrorText(target, parseMaybeObject(target.result))) {
+    return false
+  }
+
+  return parts.slice(targetIndex + 1).some(part => {
+    if (part.toolName !== target.toolName || part.result === undefined) {
+      return false
+    }
+
+    return !toolErrorText(part, parseMaybeObject(part.result))
+  })
+}
+
 function durationLabel(resultRecord: Record<string, unknown>): string | undefined {
   const seconds = numberValue(resultRecord.duration_s)
 
@@ -1349,11 +1365,12 @@ function dynamicTitle(
   return fallback
 }
 
-export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
+export function buildToolView(part: ToolPart, inlineDiff: string, recovered = false): ToolView {
   const argsRecord = parseMaybeObject(part.args)
   const resultRecord = parseMaybeObject(part.result)
   const meta = toolMeta(part.toolName)
-  const status = toolStatus(part, resultRecord)
+  const baseStatus = toolStatus(part, resultRecord)
+  const status = recovered && baseStatus === 'error' ? 'warning' : baseStatus
   const error = toolErrorText(part, resultRecord)
   const baseTitle = part.result === undefined ? meta.pending : meta.done
 

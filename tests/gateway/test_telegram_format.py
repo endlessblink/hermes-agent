@@ -115,6 +115,119 @@ class TestFormatMessageBasic:
 
 
 class TestHermesUiTelegramRendering:
+    @pytest.mark.asyncio
+    async def test_streamed_final_task_profile_review_is_rendered_with_native_controls(
+        self, adapter, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
+        adapter._bot = MagicMock()
+        adapter._bot.edit_message_text = AsyncMock()
+        adapter._rich_messages_enabled = False
+        content = """Done preparing this review.
+```hermes-ui
+{"type":"task-profile-review","id":"review","interviewId":"i1","interviewRevision":2,"taskId":"t1","questionId":"q1","title":"Review","summary":[{"field":"outcome","label":"Outcome","value":"Ship it"}],"question":{"field":"effort","label":"Effort?","type":"single-choice","options":[{"value":"small","label":"Small"},{"value":"large","label":"Large"}]}}
+```"""
+
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
+        ):
+            result = await adapter.edit_message("123", "77", content, finalize=True)
+
+        assert result.success is True
+        sent = adapter._bot.edit_message_text.await_args.kwargs
+        assert "hermes-ui" not in sent["text"]
+        assert '"interviewId"' not in sent["text"]
+        assert "Ship it" in sent["text"]
+        assert sent["reply_markup"]["inline_keyboard"]
+
+    @pytest.mark.asyncio
+    async def test_profile_review_commit_failure_keeps_controls_and_success_dispatches_receipt(
+        self, adapter, monkeypatch, tmp_path
+    ):
+        from plugins.platforms.telegram.hermes_ui import apply_control, bind_message, prepare_interaction
+
+        monkeypatch.setenv("HERMES_TELEGRAM_UI_STATE_DIR", str(tmp_path))
+        artifact = {
+            "type": "task-profile-review",
+            "id": "review",
+            "interviewId": "i1",
+            "interviewRevision": 2,
+            "taskId": "t1",
+            "questionId": "q1",
+            "summary": [],
+            "question": {
+                "field": "effort", "label": "Effort?", "type": "single-choice",
+                "options": [{"value": "small", "label": "Small"}],
+            },
+        }
+        state = prepare_interaction(artifact, chat_id="123", user_id="123")
+        bind_message(state["token"], "77")
+        selected = apply_control(
+            state["token"], state["revision"],
+            next(i for i, control in enumerate(state["controls"]) if control["kind"] == "profile-option"),
+        )
+        confirm_data = next(
+            control["callback_data"] for control in selected.state["controls"]
+            if control["kind"] == "confirm-profile-review"
+        )
+        message = SimpleNamespace(
+            chat_id=123, message_id=77, message_thread_id=None, text="Review",
+            chat=SimpleNamespace(id=123, type="private", title=None, full_name="Noam"),
+        )
+        query = SimpleNamespace(
+            data=confirm_data,
+            message=message,
+            from_user=SimpleNamespace(id=123, first_name="Noam", full_name="Noam"),
+            answer=AsyncMock(),
+            edit_message_reply_markup=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        adapter._is_callback_user_authorized = MagicMock(return_value=True)
+        adapter._dispatch_hermes_ui_payload = AsyncMock()
+        adapter.set_hermes_ui_commit_callback(AsyncMock(side_effect=RuntimeError("write failed")))
+
+        with (
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: {"text": text, "callback_data": callback_data},
+            ),
+            patch(
+                "plugins.platforms.telegram.adapter.InlineKeyboardMarkup",
+                side_effect=lambda rows: {"inline_keyboard": rows},
+            ),
+            pytest.raises(RuntimeError, match="write failed"),
+        ):
+            await adapter._handle_hermes_ui_callback(query, query.data)
+
+        assert query.edit_message_reply_markup.await_args.kwargs["reply_markup"]["inline_keyboard"]
+        adapter._dispatch_hermes_ui_payload.assert_not_awaited()
+
+        refreshed = __import__(
+            "plugins.platforms.telegram.hermes_ui", fromlist=["load_interaction"]
+        ).load_interaction(state["token"])
+        query.data = next(
+            control["callback_data"] for control in refreshed["controls"]
+            if control["kind"] == "confirm-profile-review"
+        )
+        adapter.set_hermes_ui_commit_callback(AsyncMock(return_value={
+            "interview": {"id": "i1", "revision": 3},
+            "stateVersion": 12,
+            "duplicate": False,
+            "receipt": {"id": "receipt-1", "summary": "Saved"},
+        }))
+        await adapter._handle_hermes_ui_callback(query, query.data)
+
+        adapter._dispatch_hermes_ui_payload.assert_awaited_once()
+        continuation = adapter._dispatch_hermes_ui_payload.await_args.args[2]
+        assert "receipt-1" in continuation
+        assert "Saved" in continuation
     def test_form_becomes_readable_telegram_markdown(self):
         content = """בוקר טוב — תמונת היום בקצרה.
 
@@ -373,6 +486,194 @@ class TestHermesUiTelegramRendering:
         assert "Start now" in rendered
         assert controls.kind == "actions"
         assert controls.labels == ("Start now",)
+
+    def test_task_table_renders_declared_dynamic_cells_in_column_order(self):
+        artifact = {
+            "type": "task-table",
+            "direction": "rtl",
+            "columns": [
+                {"key": "source", "label": "מקור"},
+                {"key": "status", "label": "מצב"},
+                {"key": "due", "label": "מועד"},
+            ],
+            "rows": [
+                {
+                    "id": "1",
+                    "title": "להשלים את הבדיקה",
+                    "dueDate": "2026-07-20",
+                    "priority": "high",
+                    "cells": {
+                        "source": "FlowState",
+                        "status": "פתוח",
+                        "due": "היום",
+                    },
+                    "actions": [{"id": "start", "label": "להתחיל", "submitText": "Start task 1"}],
+                },
+                {
+                    "id": "2",
+                    "title": "לעבור על הרשימה",
+                    "source": "Notion",
+                    "status": "ממתין",
+                    "due": "ללא מועד",
+                },
+            ],
+        }
+
+        rendered, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact, ensure_ascii=False)}\n```"
+        )
+
+        assert rendered.index("מקור: FlowState") < rendered.index("מצב: פתוח") < rendered.index("מועד: היום")
+        assert rendered.index("מקור: Notion") < rendered.index("מצב: ממתין") < rendered.index("מועד: ללא מועד")
+        assert "2026-07-20 · high" in rendered
+        assert "להתחיל" in rendered
+        assert controls.kind == "actions"
+        assert controls.labels == ("להתחיל",)
+        assert '"cells"' not in rendered
+
+    def test_task_table_rejects_nested_cell_actions_before_controls_or_persistence(self):
+        artifact = {
+            "type": "task-table",
+            "columns": ["task", "status"],
+            "rows": [{
+                "id": "1",
+                "title": "Safe title",
+                "cells": {
+                    "status": {
+                        "actions": [{
+                            "id": "hidden",
+                            "label": "Hidden action",
+                            "submitText": "Run hidden action",
+                        }],
+                    },
+                },
+            }],
+        }
+
+        rendered, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact)}\n```"
+        )
+
+        assert "could not be rendered" in rendered
+        assert "Hidden action" not in rendered
+        assert controls.kind == "none"
+        assert controls.artifact is None
+
+    def test_task_table_normalizes_maximum_shape_and_bounds_interaction_keyboard(self, tmp_path):
+        artifact = {
+            "type": "task-table",
+            "direction": "rtl",
+            "columns": [{"key": f"field{index}", "label": f"שדה {index}"} for index in range(11)],
+            "rows": [
+                {
+                    "id": f"row-{index}",
+                    "title": f"משימה {index}",
+                    "field0": "FlowState" if index == 0 else index,
+                    "cells": {"field1": None},
+                    "actions": [
+                        {
+                            "id": f"action-{index}-{action_index}",
+                            "label": f"פעולה {index}-{action_index}",
+                            "submitText": f"Run {index}-{action_index}",
+                        }
+                        for action_index in range(3)
+                    ],
+                }
+                for index in range(100)
+            ],
+        }
+
+        rendered, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact, ensure_ascii=False)}\n```"
+        )
+
+        assert "שדה 1: לא ידוע" in rendered
+        assert controls.artifact is not None
+        assert controls.artifact["columns"][0] == "task"
+        assert len(controls.artifact["columns"]) == 12
+        assert len(controls.artifact["rows"]) == 100
+        assert controls.artifact["rows"][0]["cells"]["field0"] == "FlowState"
+        assert "field0" not in controls.artifact["rows"][0]
+        persisted_actions = [
+            action
+            for row in controls.artifact["rows"]
+            for action in row.get("actions", [])
+        ]
+        assert len(persisted_actions) == 8
+
+        from plugins.platforms.telegram.hermes_ui import keyboard_rows, prepare_interaction
+
+        state = prepare_interaction(controls.artifact, chat_id="123", root=tmp_path)
+        assert sum(len(row) for row in keyboard_rows(state)) == 8
+
+    @pytest.mark.parametrize(
+        "artifact",
+        [
+            {
+                "type": "task-table",
+                "columns": [f"field{index}" for index in range(12)],
+                "rows": [{"id": "1", "title": "Too many columns"}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task"],
+                "rows": [{"id": str(index), "title": "Too many rows"} for index in range(101)],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task", "status", {"key": "status", "label": "Status"}],
+                "rows": [{"id": "1", "title": "Duplicate column"}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task", "actions"],
+                "rows": [{"id": "1", "title": "Reserved column"}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task", "status"],
+                "rows": [{"id": "1", "title": "Undeclared cell", "cells": {"source": "FlowState"}}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task", "status"],
+                "rows": [{"id": "1", "title": "Duplicate value", "status": "open", "cells": {"status": "done"}}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task", "context"],
+                "rows": [{"id": "1", "title": "Duplicate canonical value", "context": "top", "cells": {"context": "cell"}}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task"],
+                "rows": [{"id": "1", "title": "Task cell", "cells": {"task": "shadow title"}}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task", "x" * 121],
+                "rows": [{"id": "1", "title": "Long key"}],
+            },
+            {
+                "type": "task-table",
+                "columns": ["task", "status"],
+                "rows": [{"id": "1", "title": "Long value", "cells": {"status": "x" * 1001}}],
+            },
+            {
+                "type": "task-table",
+                "direction": {"actions": [{"label": "Hidden direction action"}]},
+                "columns": ["task"],
+                "rows": [{"id": "1", "title": "Malformed direction"}],
+            },
+        ],
+    )
+    def test_task_table_rejects_contract_violations(self, artifact):
+        rendered, controls = _render_hermes_ui_payload_for_telegram(
+            f"```hermes-ui\n{json.dumps(artifact)}\n```"
+        )
+
+        assert "could not be rendered" in rendered
+        assert controls.artifact is None
 
     @pytest.mark.parametrize(
         ("artifact", "expected"),

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   $composerAttachments,
@@ -82,6 +82,15 @@ describe('session drafts', () => {
     >
 
     expect(persisted['session-a']).toBe('survives reload')
+  })
+
+  it('restores persisted text after the renderer process is recreated', async () => {
+    stashSessionDraft('session-a', 'survives a hard restart', [])
+
+    vi.resetModules()
+    const restartedComposerStore = await import('./composer')
+
+    expect(restartedComposerStore.takeSessionDraft('session-a').text).toBe('survives a hard restart')
   })
 
   it('evicts empty drafts instead of leaving stale entries behind', () => {

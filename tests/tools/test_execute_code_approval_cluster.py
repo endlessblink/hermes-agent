@@ -188,6 +188,20 @@ def test_guard_cron_deny_blocks(monkeypatch):
     assert res["outcome"] == "blocked"
 
 
+def test_interactive_gateway_context_ignores_stale_process_cron_marker(monkeypatch):
+    """A cron tick in the shared gateway process must not poison later UI turns."""
+    from gateway.session_context import clear_session_vars, reset_session_vars, set_session_vars
+
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    tokens = set_session_vars(platform="desktop")
+    try:
+        assert A._is_gateway_approval_context() is True
+    finally:
+        clear_session_vars(tokens)
+        reset_session_vars()
+
+
 def test_guard_gateway_user_approves_is_one_shot(gw_session):
     _register_resolver(gw_session, "once")
     res = A.check_execute_code_guard("import os; print(1)", "local")

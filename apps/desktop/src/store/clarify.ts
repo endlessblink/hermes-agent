@@ -7,6 +7,8 @@ export interface ClarifyRequest {
   question: string
   choices: string[] | null
   sessionId: string | null
+  profile?: string
+  allowFocusFallback?: boolean
 }
 
 // Pending clarify requests keyed by the runtime session id that raised them.
@@ -23,7 +25,20 @@ export const $clarifyRequests = atom<Record<string, ClarifyRequest>>({})
 // focus-scoped view rather than reaching into the whole map.
 export const $clarifyRequest = computed(
   [$clarifyRequests, $activeSessionId],
-  (requests, activeId) => requests[keyFor(activeId)] ?? null
+  (requests, activeId) => {
+    const exact = requests[keyFor(activeId)]
+
+    if (exact) {
+      return exact
+    }
+
+    const pending = Object.values(requests)
+    const requestIds = new Set(pending.map(request => request.requestId))
+
+    return requestIds.size === 1 && pending.some(request => request.allowFocusFallback)
+      ? (pending[0] ?? null)
+      : null
+  }
 )
 
 /** The clarify request for one specific session — the tile counterpart of the
@@ -33,6 +48,25 @@ export const sessionClarifyRequest = (sessionId: string | null) =>
 
 export function setClarifyRequest(request: ClarifyRequest): void {
   $clarifyRequests.set({ ...$clarifyRequests.get(), [keyFor(request.sessionId)]: request })
+}
+
+export function setClarifyRequestAliases(
+  request: ClarifyRequest,
+  sessionIds: Array<string | null | undefined>
+): void {
+  const next = { ...$clarifyRequests.get() }
+
+  for (const sessionId of sessionIds) {
+    const normalizedSessionId = sessionId?.trim() || null
+
+    next[keyFor(normalizedSessionId)] = {
+      ...request,
+      allowFocusFallback: true,
+      sessionId: normalizedSessionId
+    }
+  }
+
+  $clarifyRequests.set(next)
 }
 
 export function clearClarifyRequest(requestId?: string, sessionId?: string | null): void {
@@ -70,5 +104,13 @@ export function clearClarifyRequest(requestId?: string, sessionId?: string | nul
 
   if (changed) {
     $clarifyRequests.set(next)
+  }
+}
+
+export function clearClarifyRequestAliasesForSession(sessionId: string | null): void {
+  const request = $clarifyRequests.get()[keyFor(sessionId)]
+
+  if (request) {
+    clearClarifyRequest(request.requestId)
   }
 }

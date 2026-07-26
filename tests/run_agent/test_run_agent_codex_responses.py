@@ -2054,6 +2054,19 @@ def test_interim_commentary_is_not_marked_already_streamed_without_callbacks(mon
     }
 
 
+def test_personal_assistant_buffers_unvalidated_stream_output(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+    agent.personal_assistant_mode = True
+    agent.stream_delta_callback = observed.append
+    agent._stream_callback = observed.append
+
+    agent._fire_stream_delta("unvalidated schedule")
+
+    assert observed == []
+    assert agent._current_streamed_assistant_text == ""
+
+
 def test_interim_commentary_is_not_marked_already_streamed_when_stream_callback_fails(monkeypatch):
     agent = _build_agent(monkeypatch)
     observed = {}

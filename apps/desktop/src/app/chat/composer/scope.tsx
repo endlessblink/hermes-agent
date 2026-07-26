@@ -2,6 +2,7 @@ import type { ReadableAtom } from 'nanostores'
 import { createContext, useContext } from 'react'
 
 import type { ChatMessage } from '@/lib/chat-messages'
+import { $clarifyRequest, type ClarifyRequest } from '@/store/clarify'
 import { type ComposerAttachmentScope, mainComposerScope } from '@/store/composer'
 import { $activeSessionAwaitingInput } from '@/store/prompts'
 import { $messages } from '@/store/session'
@@ -20,6 +21,8 @@ import type { ComposerTarget } from './focus'
  * differs per surface.
  */
 export interface ComposerScope {
+  /** Clarification request owned by this exact chat surface. */
+  $clarifyRequest: ReadableAtom<ClarifyRequest | null>
   /** This scope's "turn parked on user input" edge — gates Esc-to-stop. */
   $awaitingInput: ReadableAtom<boolean>
   attachments: ComposerAttachmentScope
@@ -28,11 +31,21 @@ export interface ComposerScope {
   /** Imperative read of this scope's transcript (input-history browse) —
    *  never subscribed, so streaming stays out of the composer's renders. */
   readMessages: () => ChatMessage[]
+  /** Request through the gateway owned by this surface, when it is not the globally active chat. */
+  requestGateway?: <T>(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ) => Promise<T>
+  /** Exact live gateway session owned by this surface when it is pinned. */
+  runtimeSessionId?: string
   /** Focus-bus routing key (`'main'` | `'tile:<id>'`). */
   target: ComposerTarget
 }
 
 export const MAIN_COMPOSER_SCOPE: ComposerScope = {
+  $clarifyRequest,
   $awaitingInput: $activeSessionAwaitingInput,
   attachments: mainComposerScope,
   popoutAllowed: true,

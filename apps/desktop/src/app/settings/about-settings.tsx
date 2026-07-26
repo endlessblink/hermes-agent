@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { type Translations, useI18n } from '@/i18n'
 import { CheckCircle2, ExternalLink, Loader2, RefreshCw } from '@/lib/icons'
+import { quitHermes } from '@/lib/quit-app'
 import { cn } from '@/lib/utils'
 import {
   $desktopVersion,
@@ -175,6 +176,18 @@ export function AboutSettings() {
           hint={a.branchCommit(status?.branch ?? 'unknown', status?.currentSha?.slice(0, 7) ?? 'unknown')}
           title={a.automaticUpdates}
         />
+
+        <div className="mt-6 rounded-xl border border-border/70 px-4 py-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium">{a.quitHermes}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{a.quitHermesDesc}</p>
+            </div>
+            <Button onClick={() => void quitHermes()} size="sm" variant="secondary">
+              {a.quitHermes}
+            </Button>
+          </div>
+        </div>
 
         <UninstallSection />
       </div>

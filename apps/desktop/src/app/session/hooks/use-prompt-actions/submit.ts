@@ -38,6 +38,7 @@ interface SubmitPromptDeps {
   getRoutedStoredSessionId: () => null | string
   getRuntimeIdForStoredSession: (storedSessionId: string) => null | string
   getRouteToken: () => string
+  recoverMissingStoredSession?: (storedSessionId: string) => Promise<null | string>
   requestGateway: GatewayRequest
   resumeStoredSession: (storedSessionId: string) => Promise<void> | void
   selectedStoredSessionIdRef: MutableRefObject<string | null>
@@ -83,6 +84,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
     getRoutedStoredSessionId,
     getRuntimeIdForStoredSession,
     getRouteToken,
+    recoverMissingStoredSession,
     requestGateway,
     resumeStoredSession,
     selectedStoredSessionIdRef,
@@ -192,7 +194,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         id: optimisticId,
         role: 'user',
         parts: [textPart(visibleText || (attachmentRefs.length ? '' : attachments.map(a => a.label).join(', ')))],
-        attachmentRefs
+        attachmentRefs,
+        hidden: options?.hidden || undefined
       })
 
       const releaseBusy = () => {
@@ -284,13 +287,24 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // swap/reconnect left its volatile session binding incomplete or
         // cross-wired. Run the full profile-aware resume path. Creating here
         // would fork a contextless chat against whichever profile is active.
-        try {
-          await resumeStoredSession(routedStoredSessionId)
-        } catch {
-          return abortForSessionSwitch(null)
+        const canonicalRuntimeId = recoverMissingStoredSession
+          ? await recoverMissingStoredSession(routedStoredSessionId)
+          : null
+
+        if (canonicalRuntimeId) {
+          sessionId = canonicalRuntimeId
+          startingStoredSessionId = selectedStoredSessionIdRef.current
+          startingRouteToken = getRouteToken()
+          seedOptimistic(sessionId)
+        } else {
+          try {
+            await resumeStoredSession(routedStoredSessionId)
+          } catch {
+            return abortForSessionSwitch(null)
+          }
         }
 
-        if (sessionContextDrifted()) {
+        if (!sessionId && sessionContextDrifted()) {
           return abortForSessionSwitch(null)
         }
 
@@ -302,15 +316,18 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // swap may leave the previous profile's runtime active, while a recycled
         // runtime id may leave a cross-wired stored-session mapping.
         if (
-          !recoveredRuntimeId ||
-          recoveredRuntimeId !== validatedRuntimeId ||
-          selectedStoredSessionIdRef.current !== routedStoredSessionId
+          !sessionId &&
+          (!recoveredRuntimeId ||
+            recoveredRuntimeId !== validatedRuntimeId ||
+            selectedStoredSessionIdRef.current !== routedStoredSessionId)
         ) {
           return abortForSessionSwitch(null)
         }
 
-        sessionId = recoveredRuntimeId
-        seedOptimistic(sessionId)
+        if (!sessionId && recoveredRuntimeId) {
+          sessionId = recoveredRuntimeId
+          seedOptimistic(sessionId)
+        }
       }
 
       if (!sessionId && startingStoredSessionId) {
@@ -322,17 +339,27 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // to session creation when NO stored session is selected (a genuine
         // new-chat draft).
         try {
-          const resumed = await requestGateway<{ session_id: string }>('session.resume', {
-            session_id: startingStoredSessionId
-          })
+          await resumeStoredSession(startingStoredSessionId)
 
           if (sessionContextDrifted()) {
             return abortForSessionSwitch(sessionId)
           }
 
-          if (resumed?.session_id) {
-            sessionId = resumed.session_id
-            activeSessionIdRef.current = sessionId
+          const recoveredRuntimeId = activeSessionIdRef.current
+          const validatedRuntimeId = getRuntimeIdForStoredSession(startingStoredSessionId)
+          if (recoveredRuntimeId && recoveredRuntimeId === validatedRuntimeId) {
+            sessionId = recoveredRuntimeId
+          } else {
+            // Legacy/default-profile sessions may not have an owner route or a
+            // stored→runtime cache entry. Preserve their direct recovery only
+            // after the profile-aware path had a chance to bind the session.
+            const resumed = await requestGateway<{ session_id: string }>('session.resume', {
+              session_id: startingStoredSessionId
+            })
+            if (resumed?.session_id) {
+              sessionId = resumed.session_id
+              activeSessionIdRef.current = sessionId
+            }
           }
         } catch {
           // A selected stored conversation is not a new-chat draft. If its
@@ -430,21 +457,34 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             // backend loop (#55578 symptom d) rejects the submit even though
             // the stored session is fine — resume + retry instead of erroring
             // out and losing the session binding.
-            const resumed = await requestGateway<{ session_id: string }>('session.resume', {
-              session_id: startingStoredSessionId,
-              source: 'desktop'
-            })
+            try {
+              await resumeStoredSession(startingStoredSessionId)
+            } catch {
+              // Canonical/special sessions may outlive their ordinary stored
+              // runtime row. Give their owner one bounded chance to reopen the
+              // canonical destination below.
+            }
 
             if (sessionContextDrifted()) {
               return abortForSessionSwitch(sessionId)
             }
 
-            const recoveredId = resumed?.session_id
+            const recoveredId = activeSessionIdRef.current
+            const validatedRuntimeId = getRuntimeIdForStoredSession(startingStoredSessionId)
 
-            if (recoveredId) {
-              activeSessionIdRef.current = recoveredId
+            let retrySessionId = recoveredId && recoveredId === validatedRuntimeId ? recoveredId : null
+
+            if (!retrySessionId && recoverMissingStoredSession) {
+              retrySessionId = await recoverMissingStoredSession(startingStoredSessionId)
+              if (retrySessionId) {
+                startingStoredSessionId = selectedStoredSessionIdRef.current
+                startingRouteToken = getRouteToken()
+              }
+            }
+
+            if (retrySessionId) {
               await withSessionBusyRetry(() =>
-                requestGateway('prompt.submit', { session_id: recoveredId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+                requestGateway('prompt.submit', { session_id: retrySessionId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
               )
             } else {
               submitErr = firstErr
@@ -516,6 +556,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       getRoutedStoredSessionId,
       getRuntimeIdForStoredSession,
       getRouteToken,
+      recoverMissingStoredSession,
       requestGateway,
       resumeStoredSession,
       scope,

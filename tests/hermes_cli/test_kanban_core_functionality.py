@@ -3611,6 +3611,20 @@ def test_cli_daemon_help_marks_deprecated():
 # Gateway embedded dispatcher watcher
 # ---------------------------------------------------------------------------
 
+def test_generic_gateway_filters_repair_only_boards():
+    from gateway.kanban_watchers import _generic_dispatch_boards
+
+    boards = [
+        {"slug": "default"},
+        {"slug": "product", "dispatcher_mode": "generic"},
+        {"slug": "hermes-repairs", "dispatcher_mode": "repair-only"},
+    ]
+
+    assert [board["slug"] for board in _generic_dispatch_boards(boards)] == [
+        "default",
+        "product",
+    ]
+
 def test_gateway_dispatcher_watcher_respects_config_flag_off(monkeypatch):
     """dispatch_in_gateway=false -> watcher exits fast, no loop."""
     import asyncio

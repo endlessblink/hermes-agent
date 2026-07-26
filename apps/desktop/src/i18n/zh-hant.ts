@@ -582,6 +582,8 @@ export const zhHant = defineLocale({
       justNowSuffix: ' · 剛剛',
       automaticUpdates: '自動更新',
       automaticUpdatesDesc: 'Hermes 會在背景自動檢查更新，並在有可用更新時通知你。',
+      quitHermes: '結束 Hermes',
+      quitHermesDesc: '完全停止 Hermes 及其背景服務。',
       branchCommit: (branch, commit) => `分支 ${branch} · 提交 ${commit}`,
       never: '從未',
       justNow: '剛剛',

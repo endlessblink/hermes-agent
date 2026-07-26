@@ -40,11 +40,14 @@ _VALID_PRIORITIES = {"low", "medium", "high"}
 _CANONICAL_TASK_CONTRACT = "task-v1"
 _CANONICAL_TASK_SOURCE = "local-api"
 _TASK_LIFECYCLE_CONTRACT = "task-lifecycle-v1"
+_TIMER_LIFECYCLE_CONTRACT = "timer-lifecycle-v1"
 _SUBTASK_BATCH_CONTRACT = _CANONICAL_TASK_CONTRACT
 _WORK_BLOCK_CONTRACT = "work-block-v1"
 _LIFECYCLE_CREATE_STATUSES = {"planned", "in_progress", "backlog", "on_hold"}
 _LIFECYCLE_STATUSES = _LIFECYCLE_CREATE_STATUSES | {"done"}
-_CANONICAL_PATCH_FIELDS = {"title", "description", "priority", "dueDate", "progress"}
+_CANONICAL_PATCH_FIELDS = {
+    "title", "description", "priority", "dueDate", "progress"
+}
 _CANONICAL_UPDATE_FIELDS = {
     "id",
     "operationId",
@@ -85,6 +88,7 @@ _REGISTERED_ROUTE_REQUIREMENTS = (
     ("POST", "/api/tasks/lifecycle", "task-lifecycle-v1"),
     ("PATCH", "/api/tasks/:id", "task-v1"),
     ("GET", "/api/timer/current", "timer-current-v1"),
+    ("POST", "/api/timer/lifecycle", "timer-lifecycle-v1"),
     ("GET", "/api/timer/diagnostics", "timer-diagnostics-v1"),
     ("GET", "/api/tasks/:id/instances", "task-instances-v1"),
     ("POST", "/api/tasks/:id/work-blocks", "work-block-v1"),
@@ -112,6 +116,14 @@ _FLOWSTATE_TOOL_REQUIREMENTS = {
     "flowstate_restore_task": (("POST", "/api/tasks/lifecycle", "task-lifecycle-v1"),),
     "flowstate_set_task_status": (("POST", "/api/tasks/lifecycle", "task-lifecycle-v1"),),
     "flowstate_get_current_timer": (("GET", "/api/timer/current", "timer-current-v1"),),
+    "flowstate_start_timer": (
+        ("POST", "/api/timer/lifecycle", "timer-lifecycle-v1"),
+        ("GET", "/api/timer/current", "timer-current-v1"),
+    ),
+    "flowstate_stop_timer": (
+        ("POST", "/api/timer/lifecycle", "timer-lifecycle-v1"),
+        ("GET", "/api/timer/current", "timer-current-v1"),
+    ),
     "flowstate_get_timer_diagnostics": (("GET", "/api/timer/diagnostics", "timer-diagnostics-v1"),),
     "flowstate_list_task_instances": (("GET", "/api/tasks/:id/instances", "task-instances-v1"),),
     "flowstate_create_work_block": (("POST", "/api/tasks/:id/work-blocks", "work-block-v1"),),
@@ -149,7 +161,8 @@ def _get_env_value(key: str) -> Optional[str]:
 
 def _get_config() -> tuple[str, str]:
     base_url = (
-        _FLOW_STATE_API_URL
+        os.getenv("HERMES_FLOW_STATE_API_URL_OVERRIDE")
+        or _FLOW_STATE_API_URL
         or _get_env_value("FLOW_STATE_API_URL")
         or _get_env_value("FLOWSTATE_API_URL")
         or _DEFAULT_BASE_URL
@@ -604,12 +617,18 @@ def _check_flowstate_available() -> bool:
 
 
 def _handle_health(args: dict, **kw) -> str:
-    try:
-        health = _request("GET", "/api/health")
-        return _tool_result({**health, "compatibility": _flowstate_compatibility_report()})
-    except Exception as exc:
-        logger.error("flowstate_health error: %s", exc)
-        return _tool_error(str(exc))
+    last_error: Exception | None = None
+    attempts = 20
+    for attempt in range(attempts):
+        try:
+            health = _request("GET", "/api/health", allow_stale_cache=False)
+            return _tool_result({**health, "compatibility": _flowstate_compatibility_report()})
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(0.5)
+    logger.error("flowstate_health error: %s", last_error)
+    return _tool_error(str(last_error))
 
 
 def _handle_assistant_context(args: dict, **kw) -> str:
@@ -726,6 +745,8 @@ def _handle_list_tasks(args: dict, **kw) -> str:
     status = args.get("status")
     due = args.get("due")
     limit = args.get("limit")
+    mode = str(args.get("mode") or "").strip()
+    cursor = str(args.get("cursor") or "").strip()
 
     if status not in (None, "") and status not in _VALID_STATUS_FILTERS:
         return _tool_error("status must be todo|open|done")
@@ -733,6 +754,12 @@ def _handle_list_tasks(args: dict, **kw) -> str:
         return _tool_error("due must be today|overdue|open|YYYY-MM-DD")
     use_inventory = status in (None, "", "todo", "open") and due in (None, "")
     max_limit = 100 if use_inventory else 25
+    if mode and mode not in {"full", "page"}:
+        return _tool_error("mode must be full|page")
+    if mode and not use_inventory:
+        return _tool_error("mode is only supported for the open-task inventory")
+    if cursor and mode != "page":
+        return _tool_error("cursor requires mode=page")
     if limit not in (None, ""):
         try:
             n = int(limit)
@@ -744,7 +771,16 @@ def _handle_list_tasks(args: dict, **kw) -> str:
 
     try:
         if use_inventory:
-            params = urllib.parse.urlencode({"limit": limit} if limit not in (None, "") else {})
+            inventory_params = {
+                key: value
+                for key, value in {
+                    "mode": mode,
+                    "limit": limit,
+                    "cursor": cursor,
+                }.items()
+                if value not in (None, "")
+            }
+            params = urllib.parse.urlencode(inventory_params)
             suffix = f"?{params}" if params else ""
             payload = _request(
                 "GET", f"/api/tasks/inventory{suffix}", allow_stale_cache=False,
@@ -1324,7 +1360,22 @@ def _handle_list_task_instances(args: dict, **kw) -> str:
         return _tool_error("id is required")
 
     try:
-        return _tool_result(_request("GET", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances"))
+        response = _request("GET", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/instances")
+        instances = response.get("instances")
+        if isinstance(instances, list):
+            normalized_instances = []
+            for value in instances:
+                if not isinstance(value, dict):
+                    normalized_instances.append(value)
+                    continue
+                instance = dict(value)
+                revision = instance.get("workBlockRevision", instance.get("canonicalRevision", 0))
+                if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+                    revision = 0
+                instance["workBlockRevision"] = revision
+                normalized_instances.append(instance)
+            response = {**response, "instances": normalized_instances}
+        return _tool_result(response)
     except Exception as exc:
         logger.error("flowstate_list_task_instances error: %s", exc)
         return _tool_error(str(exc))
@@ -1883,6 +1934,227 @@ def _handle_work_block(args: dict, *, action: str) -> str:
     except _FlowStateApiError as exc:
         logger.error("flowstate work-block API error: status=%s code=%s", exc.status, exc.code)
         return _typed_tool_error(exc)
+
+
+def _timer_task_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    timer = payload.get("timer") or payload.get("current") or payload
+    if not isinstance(timer, dict):
+        return ""
+    return str(timer.get("taskId") or timer.get("task_id") or "").strip()
+
+
+def _valid_timer_preview(response: Any, body: Dict[str, Any]) -> bool:
+    normalized = response.get("normalizedPayload") if isinstance(response, dict) else None
+    return bool(
+        isinstance(response, dict)
+        and response.get("ok") is True
+        and response.get("result") == "preview"
+        and response.get("contractVersion") == _TIMER_LIFECYCLE_CONTRACT
+        and response.get("operationId") == body["operationId"]
+        and response.get("action") == "start"
+        and response.get("sessionId") == body["sessionId"]
+        and response.get("baseRevision") == 0
+        and isinstance(response.get("requestHash"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(response["requestHash"]))
+        and isinstance(response.get("previewDigest"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(response["previewDigest"]))
+        and _is_iso_timestamp(response.get("previewExpiresAt"))
+        and isinstance(normalized, dict)
+        and normalized.get("contractVersion") == _TIMER_LIFECYCLE_CONTRACT
+        and normalized.get("source") == _CANONICAL_TASK_SOURCE
+        and normalized.get("action") == "start"
+        and normalized.get("sessionId") == body["sessionId"]
+        and normalized.get("baseRevision") == 0
+        and normalized.get("payload") == body["payload"]
+        and canonical_json_sha256(normalized) == response["requestHash"]
+    )
+
+
+def _valid_timer_commit(response: Any, body: Dict[str, Any]) -> bool:
+    if not (
+        isinstance(response, dict)
+        and response.get("ok") is True
+        and response.get("result") == "committed"
+        and response.get("status") == "committed"
+        and response.get("requestHash") == body.get("requestHash")
+        and isinstance(response.get("receipt"), dict)
+    ):
+        return False
+    try:
+        validate_nested_canonical_receipt(
+            response["receipt"],
+            expected={
+                "contractVersion": _TIMER_LIFECYCLE_CONTRACT,
+                "operationId": body["operationId"],
+                "source": _CANONICAL_TASK_SOURCE,
+                "entityType": "timer_session",
+                "action": "start",
+                "entityId": body["sessionId"],
+                "requestHash": body["requestHash"],
+            },
+            valid_read_back=lambda read_back: (
+                isinstance(read_back, dict)
+                and read_back.get("id") == body["sessionId"]
+                and read_back.get("taskId") == body["payload"]["taskId"]
+                and read_back.get("isActive") is True
+                and read_back.get("isPaused") is False
+            ),
+        )
+    except CanonicalReceiptError:
+        return False
+    return True
+
+
+def _handle_start_timer(args: dict, **kw) -> str:
+    task_id = str(args.get("taskId") or "").strip()
+    session_id = str(args.get("sessionId") or "").strip()
+    operation_id = args.get("operationId")
+    duration = args.get("durationMinutes", 25)
+    if not task_id:
+        return _tool_error("taskId is required")
+    if not _UUID_RE.fullmatch(session_id):
+        return _tool_error("sessionId is required and must be a UUID")
+    if not _valid_operation_id(operation_id):
+        return _tool_error("operationId is required and must be at most 160 trimmed characters")
+    if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= 480:
+        return _tool_error("durationMinutes must be an integer between 1 and 480")
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return _tool_error("preview must be a boolean")
+    body = {
+        "operationId": operation_id,
+        "sessionId": session_id,
+        "baseRevision": 0,
+        "action": "start",
+        "payload": {"taskId": task_id, "duration": duration * 60, "isBreak": False},
+        "preview": preview,
+    }
+    if not preview:
+        for field in ("previewDigest", "requestHash"):
+            value = args.get(field)
+            if not isinstance(value, str) or not _SHA256_HEX_RE.fullmatch(value):
+                return _tool_error(f"{field} is required when preview is false")
+            body[field] = value
+        if not _is_iso_timestamp(args.get("previewExpiresAt")):
+            return _tool_error("previewExpiresAt is required when preview is false")
+        body["previewExpiresAt"] = args["previewExpiresAt"]
+    try:
+        response = _request("POST", "/api/timer/lifecycle", body)
+        valid = _valid_timer_preview(response, body) if preview else _valid_timer_commit(response, body)
+        if not valid:
+            return _tool_error(f"Canonical timer {'preview' if preview else 'receipt'} could not be verified")
+        return _tool_result(response)
+    except _FlowStateApiError as exc:
+        return _typed_tool_error(exc)
+    except Exception as exc:
+        logger.error("flowstate_start_timer error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _valid_timer_stop_preview(response: Any, body: Dict[str, Any]) -> bool:
+    normalized = response.get("normalizedPayload") if isinstance(response, dict) else None
+    return bool(
+        isinstance(response, dict)
+        and response.get("ok") is True
+        and response.get("result") == "preview"
+        and response.get("contractVersion") == _TIMER_LIFECYCLE_CONTRACT
+        and response.get("operationId") == body["operationId"]
+        and response.get("action") == "stop"
+        and response.get("sessionId") == body["sessionId"]
+        and response.get("baseRevision") == body["baseRevision"]
+        and isinstance(response.get("requestHash"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(response["requestHash"]))
+        and isinstance(response.get("previewDigest"), str)
+        and bool(_SHA256_HEX_RE.fullmatch(response["previewDigest"]))
+        and _is_iso_timestamp(response.get("previewExpiresAt"))
+        and isinstance(normalized, dict)
+        and normalized.get("contractVersion") == _TIMER_LIFECYCLE_CONTRACT
+        and normalized.get("source") == _CANONICAL_TASK_SOURCE
+        and normalized.get("action") == "stop"
+        and normalized.get("sessionId") == body["sessionId"]
+        and normalized.get("baseRevision") == body["baseRevision"]
+        and normalized.get("payload") == {}
+        and canonical_json_sha256(normalized) == response["requestHash"]
+    )
+
+
+def _valid_timer_stop_commit(response: Any, body: Dict[str, Any]) -> bool:
+    if not (
+        isinstance(response, dict)
+        and response.get("ok") is True
+        and response.get("result") == "committed"
+        and response.get("status") == "committed"
+        and response.get("requestHash") == body.get("requestHash")
+        and isinstance(response.get("receipt"), dict)
+    ):
+        return False
+    try:
+        validate_nested_canonical_receipt(
+            response["receipt"],
+            expected={
+                "contractVersion": _TIMER_LIFECYCLE_CONTRACT,
+                "operationId": body["operationId"],
+                "source": _CANONICAL_TASK_SOURCE,
+                "entityType": "timer_session",
+                "action": "stop",
+                "entityId": body["sessionId"],
+                "requestHash": body["requestHash"],
+            },
+            valid_read_back=lambda read_back: (
+                isinstance(read_back, dict)
+                and read_back.get("id") == body["sessionId"]
+                and read_back.get("isActive") is False
+                and _is_iso_timestamp(read_back.get("completedAt"))
+            ),
+        )
+    except CanonicalReceiptError:
+        return False
+    return True
+
+
+def _handle_stop_timer(args: dict, **kw) -> str:
+    session_id = str(args.get("sessionId") or "").strip()
+    operation_id = args.get("operationId")
+    base_revision = args.get("baseRevision")
+    if not _UUID_RE.fullmatch(session_id):
+        return _tool_error("sessionId is required and must be a UUID")
+    if not _valid_operation_id(operation_id):
+        return _tool_error("operationId is required and must be at most 160 trimmed characters")
+    if not isinstance(base_revision, int) or isinstance(base_revision, bool) or base_revision < 1:
+        return _tool_error("baseRevision must be a positive integer from the current timer readback")
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return _tool_error("preview must be a boolean")
+    body = {
+        "operationId": operation_id,
+        "sessionId": session_id,
+        "baseRevision": base_revision,
+        "action": "stop",
+        "payload": {},
+        "preview": preview,
+    }
+    if not preview:
+        for field in ("previewDigest", "requestHash"):
+            value = args.get(field)
+            if not isinstance(value, str) or not _SHA256_HEX_RE.fullmatch(value):
+                return _tool_error(f"{field} is required when preview is false")
+            body[field] = value
+        if not _is_iso_timestamp(args.get("previewExpiresAt")):
+            return _tool_error("previewExpiresAt is required when preview is false")
+        body["previewExpiresAt"] = args["previewExpiresAt"]
+    try:
+        response = _request("POST", "/api/timer/lifecycle", body)
+        valid = _valid_timer_stop_preview(response, body) if preview else _valid_timer_stop_commit(response, body)
+        if not valid:
+            return _tool_error(f"Canonical timer {'preview' if preview else 'receipt'} could not be verified")
+        return _tool_result(response)
+    except _FlowStateApiError as exc:
+        return _typed_tool_error(exc)
+    except Exception as exc:
+        logger.error("flowstate_stop_timer error: %s", exc)
+        return _tool_error(str(exc))
     except Exception as exc:
         logger.error("flowstate work-block error: %s", type(exc).__name__)
         return _tool_error("Flow State canonical work-block command failed")
@@ -2667,8 +2939,10 @@ FLOWSTATE_AUDIT_COVERAGE_SCHEMA = {
 FLOWSTATE_LIST_TASKS_SCHEMA = {
     "name": "flowstate_list_tasks",
     "description": (
-        "List Flow State tasks. With no due filter and open/todo status, this returns the complete "
+        "List Flow State tasks. With no due filter and open/todo status, mode=full returns the complete "
         "live open-task inventory with explicit completeness, freshness, total, and receipt metadata. "
+        "For item-by-item review, use mode=page with limit up to 25 and follow each opaque nextCursor "
+        "until hasMore=false so every returned task remains visible to the model. "
         "Flow State is the user's personal task app; "
         "it is not a project name. Use returned task ids for later updates. "
         "Do not answer FlowState list/check requests with Markdown, JSON, or "
@@ -2680,7 +2954,16 @@ FLOWSTATE_LIST_TASKS_SCHEMA = {
         "properties": {
             "status": {"type": "string", "description": "Optional: todo, open, or done."},
             "due": {"type": "string", "description": "Optional: today, overdue, open, or YYYY-MM-DD."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Optional page size, 1-25."},
+            "mode": {
+                "type": "string",
+                "enum": ["full", "page"],
+                "description": "Use full for an exact complete receipt; use page for bounded item-by-item inspection.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "Opaque nextCursor from the previous mode=page response.",
+            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Optional inventory scan/page size, 1-100; use at most 25 for item review."},
         },
         "required": [],
     },
@@ -2770,7 +3053,8 @@ FLOWSTATE_UPDATE_TASK_SCHEMA = {
         "Preview an exact Flow State task patch before mutation. Apply only after the user "
         "approves that preview by resending the exact operation, base revision, patch, "
         "preview digest, expiry, and request hash with preview=false. This generic patch is not a substitute "
-        "for task completion; recurring tasks use Done for now through flowstate_done_for_now."
+        "for task completion or calendar scheduling; use the dedicated lifecycle and work-block tools. "
+        "Recurring tasks use Done for now through flowstate_done_for_now."
     ),
     "parameters": {
         "type": "object",
@@ -2878,6 +3162,55 @@ FLOWSTATE_CURRENT_TIMER_SCHEMA = {
 }
 
 
+FLOWSTATE_START_TIMER_SCHEMA = {
+    "name": "flowstate_start_timer",
+    "description": (
+        "Preview or start the timer for one exact FlowState task using the canonical approval contract. "
+        "Use a stable UUID sessionId and operationId. Defaults to preview; apply only after approval "
+        "with the exact receipt fields. Never replace another running timer silently."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "taskId": {"type": "string", "minLength": 1},
+            "sessionId": {"type": "string", "format": "uuid"},
+            "operationId": {"type": "string", "minLength": 1},
+            "durationMinutes": {"type": "integer", "minimum": 1, "maximum": 480, "default": 25},
+            "preview": {"type": "boolean", "default": True},
+            "previewDigest": {"type": "string"},
+            "previewExpiresAt": {"type": "string"},
+            "requestHash": {"type": "string"},
+        },
+        "required": ["taskId", "sessionId", "operationId"],
+        "additionalProperties": False,
+    },
+}
+
+
+FLOWSTATE_STOP_TIMER_SCHEMA = {
+    "name": "flowstate_stop_timer",
+    "description": (
+        "Preview or stop the exact active FlowState timer using the canonical approval contract. "
+        "First read the current timer and pass its exact sessionId and canonicalRevision. Defaults "
+        "to preview; apply only after approval with the exact receipt fields."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "sessionId": {"type": "string", "format": "uuid"},
+            "operationId": {"type": "string", "minLength": 1},
+            "baseRevision": {"type": "integer", "minimum": 1},
+            "preview": {"type": "boolean", "default": True},
+            "previewDigest": {"type": "string"},
+            "previewExpiresAt": {"type": "string"},
+            "requestHash": {"type": "string"},
+        },
+        "required": ["sessionId", "operationId", "baseRevision"],
+        "additionalProperties": False,
+    },
+}
+
+
 FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA = {
     "name": "flowstate_get_timer_diagnostics",
     "description": (
@@ -2894,7 +3227,8 @@ FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA = {
     "name": "flowstate_list_task_instances",
     "description": (
         "Read calendar/time-block instances for one exact FlowState task id. "
-        "This is read-only and never returns the full task body."
+        "This is read-only and never returns the full task body. Each instance includes the exact "
+        "workBlockRevision to reuse for move, resize, or remove; legacy instances explicitly use 0."
     ),
     "parameters": {
         "type": "object",
@@ -3361,6 +3695,8 @@ for _name, _schema, _handler in [
     ("flowstate_restore_task", FLOWSTATE_RESTORE_TASK_SCHEMA, _handle_restore_task),
     ("flowstate_set_task_status", FLOWSTATE_SET_TASK_STATUS_SCHEMA, _handle_set_task_status),
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
+    ("flowstate_start_timer", FLOWSTATE_START_TIMER_SCHEMA, _handle_start_timer),
+    ("flowstate_stop_timer", FLOWSTATE_STOP_TIMER_SCHEMA, _handle_stop_timer),
     ("flowstate_get_timer_diagnostics", FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA, _handle_timer_diagnostics),
     ("flowstate_list_task_instances", FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA, _handle_list_task_instances),
     ("flowstate_create_work_block", FLOWSTATE_CREATE_WORK_BLOCK_SCHEMA, _handle_create_work_block),
@@ -3378,7 +3714,10 @@ for _name, _schema, _handler in [
         schema=_schema,
         handler=_handler,
         check_fn=(
-            _check_flowstate_available
+            # Health is the availability probe. Gating it on a faster,
+            # single-attempt availability check would reject the call before
+            # the health handler's bounded startup retries can run.
+            (lambda: True)
             if _name == "flowstate_health"
             # Tools without a route-requirement entry (e.g. audit_coverage,
             # which degrades gracefully server-side) fall back to the plain

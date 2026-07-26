@@ -21,6 +21,7 @@ vi.mock('@/store/starmap', () => ({ resetStarmapGraph }))
 const {
   $activeGatewayProfile,
   $freshSessionRequest,
+  $gatewaySwapTarget,
   $profileIcons,
   $profileScope,
   $profileSessionRestoreRequest,
@@ -103,6 +104,50 @@ describe('setProfileIcon', () => {
 })
 
 describe('ensureGatewayProfile → $connection sync (#46651)', () => {
+  it('clears the waking overlay once the gateway is active even if descriptor sync hangs', async () => {
+    getConnection.mockImplementation(() => new Promise(() => undefined))
+
+    await ensureGatewayProfile('office-work')
+
+    expect($activeGatewayProfile.get()).toBe('office-work')
+    expect($gatewaySwapTarget.get()).toBeNull()
+  })
+
+  it('does not leave the waking overlay visible forever when gateway activation hangs', async () => {
+    vi.useFakeTimers()
+    ensureGatewayForProfile.mockImplementationOnce(() => new Promise(() => undefined))
+
+    const activation = ensureGatewayProfile('office-work')
+    await vi.advanceTimersByTimeAsync(15_000)
+    await activation
+
+    expect($activeGatewayProfile.get()).toBe('office-work')
+    expect($gatewaySwapTarget.get()).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('ignores a late descriptor from a profile that is no longer active', async () => {
+    let resolveOffice!: (connection: HermesConnection) => void
+
+    const officeConnection = new Promise<HermesConnection>(resolve => {
+      resolveOffice = resolve
+    })
+
+    getConnection.mockImplementation(async profileName => {
+      if (profileName === 'office-work') {
+        return officeConnection
+      }
+
+      return localConn()
+    })
+
+    await ensureGatewayProfile('office-work')
+    await ensureGatewayProfile('default')
+    resolveOffice(remoteConn({ profile: 'office-work' }))
+
+    await vi.waitFor(() => expect($connection.get()?.profile).toBe('default'))
+  })
+
   it('can activate a background owner without replacing the visible profile scope', async () => {
     $selectedProfileScope.set('content-creator')
     getConnection.mockResolvedValue(localConn({ profile: 'office-work' }))

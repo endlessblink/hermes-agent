@@ -1,12 +1,14 @@
 [Unit]
 Description=Hermes live turn watchdog
 After=default.target
+RequiresMountsFor="@REPO_ROOT@"
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=@REPO_ROOT@
 ExecStart="@PYTHON@" "@REPO_ROOT@/scripts/hermes_live_watchdog.py" --home "@HERMES_HOME@"
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]

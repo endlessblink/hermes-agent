@@ -13,6 +13,8 @@ import {
   useState
 } from 'react'
 
+import { requestComposerSubmit } from '@/app/chat/composer/focus'
+import { useComposerScope } from '@/app/chat/composer/scope'
 import { useSessionView } from '@/app/chat/session-view'
 import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
 import { Button } from '@/components/ui/button'
@@ -22,8 +24,8 @@ import { useI18n } from '@/i18n'
 import { respondToClarifyRequest } from '@/lib/clarify-response'
 import { CircleLetterA, Loader2, MessageQuestion } from '@/lib/icons'
 import { cn } from '@/lib/utils'
-import { $clarifyRequest, sessionClarifyRequest } from '@/store/clarify'
-import { $gateway } from '@/store/gateway'
+import { sessionClarifyRequest } from '@/store/clarify'
+import { $gateway, gatewayForProfile } from '@/store/gateway'
 
 import { selectMessageRunning } from './tool/fallback-model'
 import { parseMaybeObject } from './tool/fallback-model/format'
@@ -37,6 +39,34 @@ interface ClarifyResult {
   question?: string
   answer?: string
   error?: string
+}
+
+type ClarifyRequestGateway = <T>(method: string, params: Record<string, unknown>) => Promise<T>
+
+export function clarifyRequestGateway(
+  profile: string | undefined,
+  fallback: ClarifyRequestGateway | undefined,
+  resolveProfileGateway = gatewayForProfile
+): ClarifyRequestGateway | undefined {
+  if (!profile) {
+    return fallback
+  }
+
+  return async <T,>(method: string, params: Record<string, unknown>) => {
+    const gateway = await resolveProfileGateway(profile)
+
+    if (!gateway) {
+      throw new Error(`Hermes gateway is unavailable for ${profile}`)
+    }
+
+    return gateway.request<T>(method, params)
+  }
+}
+
+export function clarifyRecoveryMessage(question: string, answer: string): string {
+  const response = answer.trim() || 'דלג'
+
+  return `תשובה לשאלה ״${question}״: ${response}. המשך מאותה נקודה ואל תשאל שוב את אותה שאלה.`
 }
 
 function stringField(row: Record<string, unknown>, ...keys: string[]): string | undefined {
@@ -81,7 +111,7 @@ const OPTION_ROW_CLASS =
 
 const RTL_TEXT_RE = /[\u0590-\u05ff\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/
 
-function clarifyDirection(question: string, choices: readonly string[]): 'ltr' | 'rtl' {
+export function clarifyDirection(question: string, choices: readonly string[]): 'ltr' | 'rtl' {
   return RTL_TEXT_RE.test([question, ...choices].join('\n')) ? 'rtl' : 'ltr'
 }
 
@@ -130,9 +160,63 @@ function KeyBadge({ char, preview, selected }: { char: string; preview?: boolean
   )
 }
 
+function useSessionScopedClarifyRequest() {
+  const sessionId = useStore(useSessionView().$runtimeId)
+  const $request = useMemo(() => sessionClarifyRequest(sessionId), [sessionId])
+
+  return useStore($request)
+}
+
 export const ClarifyTool = (props: ToolCallMessagePartProps) => {
+  const request = useSessionScopedClarifyRequest()
+  const fromArgs = useMemo(() => readClarifyArgs(props.args), [props.args])
+  const latestMatchingPendingToolCallId = useAuiState(state => {
+    if (!request?.question) {
+      return null
+    }
+
+    for (let messageIndex = state.thread.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+      const content = state.thread.messages[messageIndex]?.content
+
+      if (!Array.isArray(content)) {
+        continue
+      }
+
+      for (let partIndex = content.length - 1; partIndex >= 0; partIndex -= 1) {
+        const part = content[partIndex]
+
+        if (
+          part?.type === 'tool-call' &&
+          part.toolName === 'clarify' &&
+          part.result === undefined &&
+          readClarifyArgs(part.args).question === request.question
+        ) {
+          return part.toolCallId
+        }
+      }
+    }
+
+    return null
+  })
+
+  const requestStillWaiting = Boolean(
+    request?.question &&
+      (!fromArgs.question || fromArgs.question === request.question) &&
+      (!latestMatchingPendingToolCallId || props.toolCallId === latestMatchingPendingToolCallId)
+  )
+
+  if (
+    props.result !== undefined &&
+    latestMatchingPendingToolCallId &&
+    props.toolCallId !== latestMatchingPendingToolCallId
+  ) {
+    return null
+  }
+
   // Answered → settled Q&A (ToolFallback collapsed the answer away).
-  if (props.result !== undefined) {
+  // A tool.complete can race ahead of the authoritative clarify request; the
+  // request wins until the user actually answers it.
+  if (props.result !== undefined && !requestStillWaiting) {
     return <ClarifyToolSettled {...props} />
   }
 
@@ -142,8 +226,24 @@ export const ClarifyTool = (props: ToolCallMessagePartProps) => {
 function ClarifyToolLive(props: ToolCallMessagePartProps) {
   const messageRunning = useAuiState(selectMessageRunning)
   const messageId = useAuiState(state => state.message.id)
-  const request = useStore($clarifyRequest)
+  const request = useSessionScopedClarifyRequest()
   const fromArgs = useMemo(() => readClarifyArgs(props.args), [props.args])
+
+  const latestUnansweredClarifyMessageId = useAuiState(state => {
+    for (let index = state.thread.messages.length - 1; index >= 0; index -= 1) {
+      const message = state.thread.messages[index]
+      const content = Array.isArray(message.content) ? message.content : []
+      const hasUnansweredClarify = content.some(
+        part => part.type === 'tool-call' && part.toolName === 'clarify' && part.result === undefined
+      )
+
+      if (hasUnansweredClarify) {
+        return message.id
+      }
+    }
+
+    return null
+  })
 
   const latestMatchingClarifyMessageId = useAuiState(state => {
     if (!request?.question) {
@@ -191,10 +291,82 @@ function ClarifyToolLive(props: ToolCallMessagePartProps) {
     !isSupersededMatchingRequest && ((messageRunning && props.result === undefined) || hasLiveMatchingRequest)
 
   if (!isPending) {
+    const canRecoverAfterRestart = Boolean(
+      props.result === undefined &&
+        !messageRunning &&
+        !request &&
+        fromArgs.question &&
+        messageId === latestUnansweredClarifyMessageId
+    )
+
+    if (canRecoverAfterRestart) {
+      return <ClarifyToolRecovery args={fromArgs} />
+    }
+
     return <ToolFallback {...props} />
   }
 
   return <ClarifyToolPending {...props} />
+}
+
+function ClarifyToolRecovery({ args }: { args: ClarifyArgs }) {
+  const { target } = useComposerScope()
+  const question = args.question ?? ''
+  const choices = args.choices ?? []
+  const direction = clarifyDirection(question, choices)
+  const [draft, setDraft] = useState('')
+
+  const submit = (answer: string) => {
+    requestComposerSubmit(clarifyRecoveryMessage(question, answer), { target })
+  }
+
+  return (
+    <ClarifyShell className="grid gap-2 px-2.5 py-2" data-slot="clarify-recovery" dir={direction}>
+      <div className="flex items-start gap-2">
+        <span className="flex-1 whitespace-pre-wrap font-medium" data-bidi-plaintext="" dir="auto">
+          {question}
+        </span>
+        <MessageQuestion aria-hidden className={CLARIFY_ICON_CLASS} />
+      </div>
+      {choices.length > 0 ? (
+        <div className="grid gap-px">
+          {choices.map((choice, index) => (
+            <button className={OPTION_ROW_CLASS} key={`${index}-${choice}`} onClick={() => submit(choice)} type="button">
+              <KeyBadge char={letterFor(index)} selected={false} />
+              <span className="flex-1 wrap-anywhere" data-bidi-plaintext="" dir="auto">
+                {choice}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <form
+        className="flex items-end gap-1"
+        onSubmit={event => {
+          event.preventDefault()
+          if (draft.trim()) {
+            submit(draft)
+          }
+        }}
+      >
+        <Textarea
+          className={CLARIFY_TEXTAREA_CLASS}
+          dir={direction}
+          onChange={event => setDraft(event.target.value)}
+          placeholder={direction === 'rtl' ? 'תשובה אחרת' : 'Other answer'}
+          rows={1}
+          size="sm"
+          value={draft}
+        />
+        <Button disabled={!draft.trim()} size="xs" type="submit">
+          {direction === 'rtl' ? 'המשך' : 'Continue'}
+        </Button>
+        <Button onClick={() => submit('')} size="xs" type="button" variant="text">
+          {direction === 'rtl' ? 'דלג' : 'Skip'}
+        </Button>
+      </form>
+    </ClarifyShell>
+  )
 }
 
 function ClarifyToolSettled({ args, result }: ToolCallMessagePartProps) {
@@ -207,10 +379,11 @@ function ClarifyToolSettled({ args, result }: ToolCallMessagePartProps) {
   const answer = fromResult.answer
   const error = fromResult.error
   const skipped = !error && answer !== undefined && !answer.trim()
-  const answerText = error || (skipped ? copy.skipped : (answer ?? '').trim())
+  const direction = clarifyDirection(question, answer ? [answer] : [])
+  const answerText = error || (skipped ? (direction === 'rtl' ? 'דולג' : copy.skipped) : (answer ?? '').trim())
 
   return (
-    <ClarifyShell className="grid gap-1.5 px-2.5 py-2" data-clarify-settled="">
+    <ClarifyShell className="grid gap-1.5 px-2.5 py-2" data-clarify-settled="" dir={direction}>
       {question ? (
         <ClarifyLine icon={MessageQuestion}>
           <span className="whitespace-pre-wrap font-medium leading-(--conversation-line-height)">{question}</span>
@@ -240,6 +413,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   // The tool row is in whichever session's transcript rendered it — read THAT
   // session's clarify (primary or tile), not the globally-active one.
   const sessionId = useStore(useSessionView().$runtimeId)
+  const scope = useComposerScope()
   const $request = useMemo(() => sessionClarifyRequest(sessionId), [sessionId])
   const request = useStore($request)
   const gateway = useStore($gateway)
@@ -266,12 +440,18 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
 
   const hasChoices = choices.length > 0
   const direction = clarifyDirection(question, choices)
+  const rtl = direction === 'rtl'
+  const actionCopy = rtl ? { continueLabel: 'המשך', other: 'תשובה אחרת', placeholder: 'כתבו תשובה', skip: 'דלג' } : copy
 
   const [draft, setDraft] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [selectedChoices, setSelectedChoices] = useState<string[]>([])
   const [otherFocused, setOtherFocused] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const requestGateway = useMemo(
+    () => clarifyRequestGateway(matchingRequest?.profile, scope.requestGateway),
+    [matchingRequest?.profile, scope.requestGateway]
+  )
 
   // Race: tool.start fires a tick before clarify.request, so request_id
   // arrives slightly after the tool block mounts. Hold the whole panel on a
@@ -289,12 +469,13 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         gateway,
         onBeforeSend: () => setSubmitting(true),
         onError: () => setSubmitting(false),
-        request: ready ? matchingRequest : null
+        request: ready ? matchingRequest : null,
+        requestGateway
       })
       // The matching tool.complete will land shortly after, swapping this panel
       // for the ToolFallback view above.
     },
-    [copy, gateway, matchingRequest, ready]
+    [copy, gateway, matchingRequest, ready, requestGateway]
   )
 
   const trimmedDraft = draft.trim()
@@ -454,6 +635,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
               <KeyBadge char={letterFor(choices.length)} preview={otherFocused} selected={Boolean(trimmedDraft)} />
               <Textarea
                 className={CLARIFY_TEXTAREA_CLASS}
+                dir={direction}
                 disabled={submitting}
                 onBlur={() => setOtherFocused(false)}
                 onChange={event => onDraftChange(event.target.value)}
@@ -462,7 +644,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
                   setOtherFocused(true)
                 }}
                 onKeyDown={handleTextareaKey}
-                placeholder={copy.other}
+                placeholder={actionCopy.other}
                 ref={textareaRef}
                 rows={1}
                 size="sm"
@@ -473,10 +655,11 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         ) : (
           <Textarea
             className={CLARIFY_TEXTAREA_CLASS}
+            dir={direction}
             disabled={submitting}
             onChange={event => onDraftChange(event.target.value)}
             onKeyDown={handleTextareaKey}
-            placeholder={copy.placeholder}
+            placeholder={actionCopy.placeholder}
             ref={textareaRef}
             rows={1}
             size="sm"
@@ -484,7 +667,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
           />
         )}
 
-        <div className="flex items-center justify-end gap-1">
+        <div className={cn('flex items-center gap-1', rtl ? 'justify-start' : 'justify-end')}>
           <Button
             disabled={submitting}
             onClick={() => void respond('', { allowEmpty: true })}
@@ -492,15 +675,15 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
             type="button"
             variant="text"
           >
-            {copy.skip}
+            {actionCopy.skip}
           </Button>
           <Button disabled={submitting || !pendingAnswer} size="xs" type="submit">
             {submitting ? (
               <Loader2 className="size-3 animate-spin" />
             ) : (
               <>
-                {copy.continueLabel}
-                <span aria-hidden className="ml-0.5 text-[0.625rem] opacity-70">
+                {actionCopy.continueLabel}
+                <span aria-hidden className={cn('text-[0.625rem] opacity-70', rtl ? 'mr-0.5' : 'ml-0.5')}>
                   ⏎
                 </span>
               </>

@@ -303,7 +303,7 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
                 className="flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap)"
                 key={group.id}
               >
-                <MessageRenderBoundary resetKey={messageSignature}>
+                <MessageRenderBoundary key={messageSignature}>
                   {group.kind === 'turn' ? (
                     <div
                       className="composer-human-ai-pair-container relative flex min-w-0 flex-col gap-(--conversation-turn-gap)"
