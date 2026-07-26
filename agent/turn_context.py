@@ -168,6 +168,7 @@ def build_turn_context(
     set_session_context,
     set_current_write_origin,
     ra,
+    deterministic_local_turn: bool = False,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.
 
@@ -219,7 +220,10 @@ def build_turn_context(
     # or when the tool set is unchanged (``refresh_agent_mcp_tools`` diffs by
     # name and leaves the snapshot untouched on no-change).
     try:
-        if not getattr(agent, "_skip_mcp_refresh", False):
+        if (
+            not deterministic_local_turn
+            and not getattr(agent, "_skip_mcp_refresh", False)
+        ):
             # Import-cost gate: ``tools.mcp_tool`` pulls in the whole ``mcp``
             # package (~0.4s measured) even when the user has zero MCP servers
             # configured.  MCP tools can only be registered by code that has
@@ -344,11 +348,19 @@ def build_turn_context(
             agent._pending_cli_user_message = None
 
     # Hydrate todo store from conversation history.
-    if conversation_history and not agent._todo_store.has_items():
+    if (
+        not deterministic_local_turn
+        and conversation_history
+        and not agent._todo_store.has_items()
+    ):
         agent._hydrate_todo_store(conversation_history)
 
     # Hydrate per-session nudge counters from persisted history (issue #22357).
-    if conversation_history and agent._user_turn_count == 0:
+    if (
+        not deterministic_local_turn
+        and conversation_history
+        and agent._user_turn_count == 0
+    ):
         prior_user_turns = sum(
             1 for m in conversation_history if m.get("role") == "user"
         )
@@ -429,35 +441,44 @@ def build_turn_context(
         agent._ensure_db_session()
         agent._persist_session(messages, conversation_history)
 
-    # Crash-resilience: persist the inbound user turn as soon as the session row exists.
-    try:
-        if persist_lock is None:
-            _ensure_and_persist()
-        else:
-            with persist_lock:
+    # The Personal Assistant's deterministic continuation follows an answer
+    # that was already committed durably by the versioned interview endpoint.
+    # Rewriting a very long transcript before rendering the derived next state
+    # adds seconds but no crash protection; the normal turn-final persist stores
+    # the hidden continuation and visible result together.
+    if not deterministic_local_turn:
+        try:
+            if persist_lock is None:
                 _ensure_and_persist()
-    except Exception:
-        logger.warning(
-            "Early turn-start session persistence failed for session=%s",
-            agent.session_id or "none",
-            exc_info=True,
-        )
-    finally:
-        # Keep an unmarked staged input available to a later close retry if the
-        # normal persistence attempt failed. Once the marker is present, the
-        # close path must no longer treat it as a pre-worker UI input.
-        if not isinstance(pending_cli_message, dict) or pending_cli_message.get("_db_persisted"):
-            agent._pending_cli_user_message = None
+            else:
+                with persist_lock:
+                    _ensure_and_persist()
+        except Exception:
+            logger.warning(
+                "Early turn-start session persistence failed for session=%s",
+                agent.session_id or "none",
+                exc_info=True,
+            )
+        finally:
+            # Keep an unmarked staged input available to a later close retry if the
+            # normal persistence attempt failed. Once the marker is present, the
+            # close path must no longer treat it as a pre-worker UI input.
+            if not isinstance(pending_cli_message, dict) or pending_cli_message.get("_db_persisted"):
+                agent._pending_cli_user_message = None
 
     # ── Preflight context compression ──
     # Gate the (expensive) full token estimate behind a cheap pre-check.
     # See ``_should_run_preflight_estimate`` for the OR semantics that fix
     # issue #27405 (a few very large messages slipping past the count gate).
-    if agent.compression_enabled and _should_run_preflight_estimate(
+    if (
+        not deterministic_local_turn
+        and agent.compression_enabled
+        and _should_run_preflight_estimate(
         messages,
         agent.context_compressor.protect_first_n,
         agent.context_compressor.protect_last_n,
         agent.context_compressor.threshold_tokens,
+        )
     ):
         _preflight_tokens = estimate_request_tokens_rough(
             messages,
@@ -567,17 +588,21 @@ def build_turn_context(
     plugin_user_context = ""
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _pre_results = _invoke_hook(
-            "pre_llm_call",
-            session_id=agent.session_id,
-            task_id=effective_task_id,
-            turn_id=turn_id,
-            user_message=original_user_message,
-            conversation_history=list(messages),
-            is_first_turn=(not bool(conversation_history)),
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-            sender_id=getattr(agent, "_user_id", None) or "",
+        _pre_results = (
+            []
+            if deterministic_local_turn
+            else _invoke_hook(
+                "pre_llm_call",
+                session_id=agent.session_id,
+                task_id=effective_task_id,
+                turn_id=turn_id,
+                user_message=original_user_message,
+                conversation_history=list(messages),
+                is_first_turn=(not bool(conversation_history)),
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+                sender_id=getattr(agent, "_user_id", None) or "",
+            )
         )
         _ctx_parts: list[str] = []
         # Spill oversized per-hook context to disk so a runaway plugin
@@ -636,7 +661,7 @@ def build_turn_context(
         agent._interrupt_thread_signal_pending = False
 
     # Notify memory providers of the new turn (BEFORE prefetch_all).
-    if agent._memory_manager:
+    if agent._memory_manager and not deterministic_local_turn:
         try:
             _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
             agent._memory_manager.on_turn_start(agent._user_turn_count, _turn_msg)
@@ -648,7 +673,7 @@ def build_turn_context(
     # Fail-open: any error leaves project_id None, which disables scoping so
     # recall/capture behave exactly as before.
     ext_prefetch_cache = ""
-    if agent._memory_manager:
+    if agent._memory_manager and not deterministic_local_turn:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             _project_id = None
@@ -669,7 +694,11 @@ def build_turn_context(
 
     working_state_context = ""
     try:
-        if agent._session_db and getattr(agent, "session_id", None):
+        if (
+            not deterministic_local_turn
+            and agent._session_db
+            and getattr(agent, "session_id", None)
+        ):
             working_state_context = agent._session_db.render_working_state_context(
                 agent.session_id
             )
@@ -710,13 +739,19 @@ def build_turn_context(
     try:
         from agent.conversation_recall import build_archived_conversation_context
 
-        _archived_recall = build_archived_conversation_context(
-            getattr(agent, "_session_db", None),
-            session_id=getattr(agent, "session_id", "") or "",
-            user_message=(
-                original_user_message if isinstance(original_user_message, str) else ""
-            ),
-            fallback_query_context=working_state_context,
+        _archived_recall = (
+            ""
+            if deterministic_local_turn
+            else build_archived_conversation_context(
+                getattr(agent, "_session_db", None),
+                session_id=getattr(agent, "session_id", "") or "",
+                user_message=(
+                    original_user_message
+                    if isinstance(original_user_message, str)
+                    else ""
+                ),
+                fallback_query_context=working_state_context,
+            )
         )
         if _archived_recall:
             ext_prefetch_cache = (

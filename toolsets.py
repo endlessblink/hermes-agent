@@ -274,6 +274,7 @@ TOOLSETS = {
         "tools": [
             "flowstate_get_assistant_context",
             "flowstate_health",
+            "flowstate_audit_coverage",
             "flowstate_list_tasks",
             "flowstate_search_tasks",
             "flowstate_get_task",
@@ -283,6 +284,8 @@ TOOLSETS = {
             "flowstate_restore_task",
             "flowstate_set_task_status",
             "flowstate_get_current_timer",
+            "flowstate_start_timer",
+            "flowstate_stop_timer",
             "flowstate_get_timer_diagnostics",
             "flowstate_list_task_instances",
             "flowstate_create_work_block",
@@ -301,6 +304,7 @@ TOOLSETS = {
         "description": "Persistent office-work assistant state, capture proposals, and approved state edits",
         "tools": [
             "personal_assistant_get_state",
+            "personal_assistant_interview_start",
             "personal_assistant_reconcile_inventory",
             "personal_assistant_safety_review",
             "personal_assistant_propose_capture",

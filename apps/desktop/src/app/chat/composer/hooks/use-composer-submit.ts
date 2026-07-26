@@ -1,6 +1,7 @@
 import { type RefObject, useEffect, useRef } from 'react'
 
 import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
+import { emitDesktopDiagnostic } from '@/lib/desktop-diagnostics'
 import { triggerHaptic } from '@/lib/haptics'
 import { clearSessionDraft, type ComposerAttachment } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
@@ -33,6 +34,7 @@ interface UseComposerSubmitArgs {
   onSubmit: ChatBarProps['onSubmit']
   onSubmitAccepted?: () => void
   onSubmitClarifyAnswer?: (answer: string) => Promise<boolean | 'stale'> | boolean
+  presentedBusyAction: 'answer' | 'queue' | 'stop'
   queueCurrentDraft: () => boolean
   queueEdit: QueueEditState | null
   recoverLostClarifyWhileBusy: boolean
@@ -73,6 +75,7 @@ export function useComposerSubmit({
   onSubmit,
   onSubmitAccepted,
   onSubmitClarifyAnswer,
+  presentedBusyAction,
   queueCurrentDraft,
   queueEdit,
   recoverLostClarifyWhileBusy,
@@ -83,6 +86,38 @@ export function useComposerSubmit({
   transformSubmitText
 }: UseComposerSubmitArgs) {
   const scope = useComposerScope()
+
+  const reportBusyActionMismatch = (actualAction: 'answer' | 'queue' | 'send' | 'stop') => {
+    if (!sendBlocked || presentedBusyAction === actualAction) {
+      return
+    }
+    emitDesktopDiagnostic({
+      component: 'composer',
+      event: 'queue.action_mismatch',
+      severity: 'error',
+      message: 'Composer control performed a different action than it presented',
+      details: {
+        actual_action: actualAction,
+        presented_action: presentedBusyAction
+      }
+    })
+  }
+
+  const queueDraft = () => {
+    const accepted = queueCurrentDraft()
+
+    if (!accepted) {
+      emitDesktopDiagnostic({
+        component: 'queue',
+        event: 'queue.error',
+        severity: 'error',
+        message: 'Composer could not add the draft to the queue',
+        details: { reason: 'enqueue_rejected' }
+      })
+    }
+
+    return accepted
+  }
 
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
   // === false) or throws, re-load + re-stash the draft so the words survive.
@@ -149,7 +184,7 @@ export function useComposerSubmit({
           // normal busy path (queue with auto-drain) so the user's message
           // still lands without a second click.
           restore()
-          queueCurrentDraft()
+          queueDraft()
         } else if (accepted === false) {
           restore()
         } else {
@@ -165,11 +200,11 @@ export function useComposerSubmit({
   useEffect(
     () =>
       onComposerSubmitRequest(({ allowWhileBusy, hidden, target, text }) => {
-        if (target === 'main' && !inputDisabled) {
+        if (target === scope.target && !inputDisabled) {
           dispatchSubmitRef.current(text, allowWhileBusy || hidden ? { allowWhileBusy, hidden } : undefined)
         }
       }),
-    [inputDisabled]
+    [inputDisabled, scope.target]
   )
 
   const submitDraft = () => {
@@ -210,6 +245,7 @@ export function useComposerSubmit({
       // /send directives).  Queuing them would make every slash command wait
       // for the current turn to finish, which is how the TUI never behaves.
       if (onSubmitClarifyAnswer && payloadPresent && !attachments.length && text.trim()) {
+        reportBusyActionMismatch('answer')
         dispatchClarifyAnswer(text)
       } else if (recoverLostClarifyWhileBusy && busy && !attachments.length && text.trim()) {
         // A reconnect can lose the renderer's one-shot clarify.request while
@@ -218,20 +254,24 @@ export function useComposerSubmit({
         // the gateway's PA-only busy handler resolves a pending clarify, and
         // otherwise retains its normal interrupt/next-turn behavior.
         triggerHaptic('submit')
+        reportBusyActionMismatch('send')
         resetBrowseState(sessionId)
         clearDraft()
         dispatchSubmit(text.trim(), { allowWhileBusy: true })
       } else if (busy && !attachments.length && SLASH_COMMAND_RE.test(text.trim())) {
         triggerHaptic('submit')
+        reportBusyActionMismatch('send')
         clearDraft()
         dispatchSubmit(text)
       } else if (payloadPresent) {
-        queueCurrentDraft()
+        reportBusyActionMismatch('queue')
+        queueDraft()
       } else {
         // Stop button (the only way to reach here while truly busy with an
         // empty composer — empty Enter is short-circuited in the keydown
         // handler). Compaction without payload has nothing to submit/cancel.
         if (busy) {
+          reportBusyActionMismatch('stop')
           triggerHaptic('cancel')
           void Promise.resolve(onCancel())
         }

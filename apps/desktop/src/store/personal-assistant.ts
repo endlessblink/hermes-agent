@@ -1,6 +1,8 @@
 import { atom } from 'nanostores'
 
+import type { HermesUiTaskProfileReviewArtifact } from '@/lib/hermes-ui-artifacts'
 import { gatewayForProfile } from '@/store/gateway'
+import { $activeSessionId } from '@/store/session'
 
 export const PERSONAL_ASSISTANT_OWNER_PROFILE = 'office-work'
 
@@ -14,6 +16,24 @@ interface PersonalAssistantStartResult {
 export interface PersonalAssistantDestination {
   canonicalSessionId: string
   runtimeSessionId: string
+}
+
+export interface PersonalAssistantDayBlock {
+  durationMinutes: number | null
+  id: string
+  priority?: string | null
+  startTime: string
+  taskId: string
+  title: string
+}
+
+export interface PersonalAssistantDayPlan {
+  blocks: PersonalAssistantDayBlock[]
+  capturedAt: string | null
+  complete: true
+  date: string
+  fresh: true
+  source: 'flowstate'
 }
 
 export interface AssistantStateItem {
@@ -41,6 +61,21 @@ export interface AssistantCoverageReceipt {
   createdAt: string
 }
 
+export interface AssistantWatchdogStatus {
+  heartbeatAt: string | null
+  latestAt: string | null
+  latestEvent: string | null
+  latestSeverity: string | null
+  latestTool: string | null
+  repairStatus: 'cancelled' | 'candidate_ready' | 'failed' | 'none' | 'queued' | 'running' | 'timed_out' | 'verifying'
+  repairTaskId: string | null
+  repairUpdatedAt?: string | null
+  repairOutcomeCode?: string | null
+  startedAt: string | null
+  state: 'active' | 'stale' | 'unavailable'
+  watchedSources: number
+}
+
 export interface AssistantState {
   schemaVersion: 1
   version: number
@@ -63,6 +98,7 @@ export interface AssistantState {
   episodes: AssistantStateItem[]
   protectedItems?: AssistantStateItem[]
   latestCoverageReceipt?: AssistantCoverageReceipt | null
+  watchdog?: AssistantWatchdogStatus
 }
 
 export type AssistantStateSection =
@@ -83,8 +119,34 @@ export interface AssistantStateOperation {
   value?: Record<string, unknown>
 }
 
+export interface PersonalAssistantInterviewResponse {
+  action?: 'answer' | 'back' | 'pause'
+  customAnswer?: string
+  fieldEdits?: Record<string, string | string[]>
+  selectedValues?: string[]
+}
+
+export interface PersonalAssistantInterviewRespondParams {
+  expectedRevision: number
+  interviewId: string
+  questionId: string
+  requestId: string
+  response: PersonalAssistantInterviewResponse
+  taskId: string
+}
+
+export interface PersonalAssistantInterviewRespondResult {
+  duplicate: boolean
+  interview: unknown
+  nextArtifact?: HermesUiTaskProfileReviewArtifact | null
+  receipt: unknown
+  stateVersion: number
+}
+
 export const $personalAssistantState = atom<AssistantState | null>(null)
 export const $personalAssistantPendingCount = atom<number | null>(null)
+export const $personalAssistantContextOpen = atom(false)
+export const $personalAssistantTodayOpen = atom(false)
 
 let stateHydration: Promise<AssistantState> | null = null
 
@@ -182,6 +244,13 @@ export async function refreshPersonalAssistantState(): Promise<AssistantState> {
   return storePersonalAssistantState(response.state)
 }
 
+export async function fetchPersonalAssistantDayPlan(date: string): Promise<PersonalAssistantDayPlan> {
+  return (await ownerGateway()).request<PersonalAssistantDayPlan>('personal_assistant.day_plan', {
+    date,
+    profile: PERSONAL_ASSISTANT_OWNER_PROFILE
+  })
+}
+
 export async function hydratePersonalAssistantStateWhenReady(gatewayState: string): Promise<AssistantState | null> {
   const current = $personalAssistantState.get()
 
@@ -230,4 +299,35 @@ export async function patchPersonalAssistantState(operations: AssistantStateOper
   })
 
   return storePersonalAssistantState(response.state)
+}
+
+export async function respondToPersonalAssistantInterview(
+  params: PersonalAssistantInterviewRespondParams
+): Promise<PersonalAssistantInterviewRespondResult> {
+  const result = await (
+    await ownerGateway()
+  ).request<PersonalAssistantInterviewRespondResult>('personal_assistant.interview.respond', {
+    ...params,
+    profile: PERSONAL_ASSISTANT_OWNER_PROFILE
+  })
+
+  const current = $personalAssistantState.get()
+
+  if (current && Number.isFinite(result.stateVersion) && result.stateVersion > current.version) {
+    storePersonalAssistantState({ ...current, version: result.stateVersion })
+  }
+
+  return result
+}
+
+export async function continuePersonalAssistantInterview(text: string, runtimeSessionId?: string): Promise<void> {
+  const gateway = await ownerGateway()
+  const activeRuntimeSessionId = runtimeSessionId || $activeSessionId.get()
+  const destination = activeRuntimeSessionId ? null : await openPersonalAssistantHome()
+
+  await gateway.request('prompt.submit', {
+    reject_if_busy: true,
+    session_id: activeRuntimeSessionId || destination?.runtimeSessionId,
+    text
+  })
 }

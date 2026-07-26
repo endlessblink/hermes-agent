@@ -233,6 +233,7 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_verification_stop_synthetic",
     "_pre_verify_synthetic",
     "_unfinished_action_synthetic",
+    "_personal_assistant_gate_synthetic",
     # kanban worker stop-guard: narrated exit without kanban_complete/block
     "_kanban_stop_synthetic",
 )
@@ -4788,6 +4789,11 @@ class AIAgent:
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
+        # Personal Assistant responses are validated as a complete artifact
+        # before delivery. Streaming here would leak an invalid schedule or raw
+        # artifact before the output gate has a chance to reject it.
+        if bool(getattr(self, "personal_assistant_mode", False)):
+            return
         # If a tool iteration set the break flag, prepend a single paragraph
         # break before the first real text delta.  This prevents the original
         # problem (text concatenation across tool boundaries) without stacking

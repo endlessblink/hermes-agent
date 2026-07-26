@@ -25,10 +25,11 @@ import { notifyError } from '@/store/notifications'
 import { clearPreviewArtifacts } from '@/store/preview-status'
 import { clearAllPrompts } from '@/store/prompts'
 import { $connection } from '@/store/session'
-import { $sessionStates, sessionTileDelegate } from '@/store/session-states'
+import { $sessionStates, patchSessionTile, sessionTileDelegate } from '@/store/session-states'
 import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos } from '@/store/todos'
 
+import type { GatewayRequester } from '../contrib/types'
 import { uploadComposerAttachment } from '../session/hooks/use-prompt-actions'
 import {
   applyBranchVisibility,
@@ -46,15 +47,45 @@ import { type SubmitTextOptions } from '../session/hooks/use-prompt-actions/util
 import type { ComposerScope } from './composer/scope'
 
 interface SessionTileActionsArgs {
+  profile?: string
+  requestGateway?: GatewayRequester
   runtimeId: string
   scope: ComposerScope
   storedSessionId: string
 }
 
-export function useSessionTileActions({ runtimeId, scope, storedSessionId }: SessionTileActionsArgs) {
+interface RecoverSessionTileRuntimeArgs {
+  patchTile: (storedSessionId: string, patch: { error: undefined; runtimeId: string }) => void
+  profile?: string
+  resumeTile: (storedSessionId: string, profile?: string) => Promise<string>
+  runtimeIdRef: { current: string }
+  storedSessionId: string
+}
+
+export async function recoverSessionTileRuntime({
+  patchTile,
+  profile,
+  resumeTile,
+  runtimeIdRef,
+  storedSessionId
+}: RecoverSessionTileRuntimeArgs): Promise<void> {
+  const replacementRuntimeId = await resumeTile(storedSessionId, profile)
+
+  runtimeIdRef.current = replacementRuntimeId
+  patchTile(storedSessionId, { error: undefined, runtimeId: replacementRuntimeId })
+}
+
+export function useSessionTileActions({
+  profile,
+  requestGateway: requestGatewayOverride,
+  runtimeId,
+  scope,
+  storedSessionId
+}: SessionTileActionsArgs) {
   const { t } = useI18n()
   const copy = t.desktop
-  const { requestGateway } = useGatewayRequest()
+  const { requestGateway: activeRequestGateway } = useGatewayRequest()
+  const requestGateway = requestGatewayOverride ?? activeRequestGateway
 
   const runtimeIdRef = useRef(runtimeId)
   runtimeIdRef.current = runtimeId
@@ -140,9 +171,21 @@ export function useSessionTileActions({ runtimeId, scope, storedSessionId }: Ses
     // token is a stable constant (the guard never trips for a tile).
     getRouteToken: () => runtimeId,
     requestGateway,
-    // Tile ids are always bound before this hook mounts, so routed recovery is
-    // unreachable here; keep the shared submit contract explicit.
-    resumeStoredSession: () => undefined,
+    resumeStoredSession: async storedId => {
+      const delegate = sessionTileDelegate()
+
+      if (!delegate) {
+        throw new Error('Hermes session recovery is unavailable')
+      }
+
+      await recoverSessionTileRuntime({
+        patchTile: patchSessionTile,
+        profile,
+        resumeTile: delegate.resumeTile,
+        runtimeIdRef,
+        storedSessionId: storedId
+      })
+    },
     selectedStoredSessionIdRef: storedIdRef,
     syncAttachmentsForSubmit,
     updateSessionState: (sessionId, updater) => sessionTileDelegate()!.updateSession(sessionId, updater),

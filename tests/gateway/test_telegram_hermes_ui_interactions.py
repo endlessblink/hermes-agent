@@ -404,3 +404,179 @@ def test_every_desktop_artifact_has_native_controls_or_safe_discussion(artifact,
 
     assert state["controls"], artifact["type"]
     assert all(control["callback_data"].startswith("hu:") for control in state["controls"])
+
+
+def _profile_review_artifact(*, question_type="multi-choice", option_count=3):
+    return {
+        "type": "task-profile-review",
+        "id": "review-card",
+        "interviewId": "interview-7",
+        "interviewRevision": 4,
+        "taskId": "task-9",
+        "questionId": "question-2",
+        "title": "Check the task profile",
+        "progress": {"current": 2, "total": 5},
+        "summary": [
+            {"field": "outcome", "label": "Outcome", "value": "Publish the draft"},
+            {"field": "duration", "label": "Duration", "value": "30 min", "uncertain": True},
+        ],
+        "question": {
+            "field": "support",
+            "label": "What support is useful?",
+            "description": "Choose everything that applies.",
+            "type": question_type,
+            "options": [
+                {"value": f"option-{index}", "label": f"Option {index}", "description": f"Detail {index}"}
+                for index in range(option_count)
+            ],
+            "allowCustomAnswer": True,
+            "customAnswerLabel": "Something else",
+        },
+    }
+
+
+def test_task_profile_review_has_summary_edits_paged_question_back_and_confirm(tmp_path):
+    state = prepare_interaction(
+        _profile_review_artifact(option_count=11),
+        chat_id="123",
+        thread_id="8",
+        user_id="42",
+        root=tmp_path,
+    )
+
+    assert len([control for control in state["controls"] if control["kind"] == "profile-option"]) == 8
+    assert _control(state, "edit-profile-field", summary_index=0) >= 0
+    assert _control(state, "request-profile-custom") >= 0
+    assert _control(state, "profile-page", page=1) >= 0
+    assert _control(state, "confirm-profile-review") >= 0
+    assert max(len(control["callback_data"].encode()) for control in state["controls"]) <= 64
+
+    page_two = apply_control(
+        state["token"], state["revision"], _control(state, "profile-page", page=1), root=tmp_path
+    )
+    assert page_two.outcome == "edit"
+    assert any(control["text"].endswith("Option 8") for control in page_two.state["controls"])
+    assert _control(page_two.state, "profile-page", page=0) >= 0
+
+
+def test_desktop_task_profile_contract_translates_to_telegram_controls_and_commit(tmp_path):
+    artifact = {
+        "type": "task-profile-review",
+        "interviewId": "interview-7",
+        "revision": 4,
+        "task": {"id": "task-9", "title": "Check PET results"},
+        "profileFields": [
+            {"id": "urgency", "label": "Urgency", "value": "unknown"}
+        ],
+        "progress": {"current": 1, "total": 3},
+        "question": {
+            "id": "urgency",
+            "profileFieldId": "urgency",
+            "label": "How urgent is this?",
+            "type": "single-choice",
+            "required": True,
+            "options": [
+                {"value": "high", "label": "High"},
+                {"value": "low", "label": "Low"},
+            ],
+        },
+    }
+
+    state = prepare_interaction(
+        artifact, chat_id="123", profile="office-work", root=tmp_path
+    )
+    selected = apply_control(
+        state["token"],
+        state["revision"],
+        _control(state, "profile-option", option_index=0),
+        root=tmp_path,
+    )
+    committed = apply_control(
+        state["token"],
+        selected.state["revision"],
+        _control(selected.state, "confirm-profile-review"),
+        root=tmp_path,
+    )
+
+    assert state["artifact"]["taskId"] == "task-9"
+    assert state["artifact"]["questionId"] == "urgency"
+    assert _control(state, "edit-profile-field", summary_index=0) >= 0
+    assert committed.commit_payload["expectedRevision"] == 4
+    assert committed.commit_payload["taskId"] == "task-9"
+    assert committed.commit_payload["questionId"] == "urgency"
+    assert committed.commit_payload["response"]["selectedValues"] == ["high"]
+
+
+def test_task_profile_review_persists_multi_custom_and_field_edit_in_commit_rpc(tmp_path):
+    artifact = _profile_review_artifact()
+    state = prepare_interaction(
+        artifact, chat_id="123", profile="office-work", root=tmp_path
+    )
+
+    selected = apply_control(
+        state["token"], state["revision"], _control(state, "profile-option", option_index=0), root=tmp_path
+    )
+    custom_prompt = apply_control(
+        state["token"], selected.state["revision"], _control(selected.state, "request-profile-custom"), root=tmp_path
+    )
+    assert custom_prompt.outcome == "prompt"
+    custom = apply_text_reply(state["token"], "Call me first", root=tmp_path)
+    edit_prompt = apply_control(
+        state["token"], custom.state["revision"],
+        _control(custom.state, "edit-profile-field", summary_index=1), root=tmp_path,
+    )
+    assert edit_prompt.outcome == "prompt"
+    edited = apply_text_reply(state["token"], "45 min", root=tmp_path)
+    committed = apply_control(
+        state["token"], edited.state["revision"], _control(edited.state, "confirm-profile-review"), root=tmp_path
+    )
+
+    assert committed.outcome == "commit"
+    assert committed.commit_payload == {
+        "profile": "office-work",
+        "interviewId": "interview-7",
+        "expectedRevision": 4,
+        "taskId": "task-9",
+        "questionId": "question-2",
+        "response": {
+            "selectedValues": ["option-0"],
+            "customAnswer": "Call me first",
+            "fieldEdits": {"duration": "45 min"},
+            "action": "confirm",
+        },
+        "requestId": committed.commit_payload["requestId"],
+    }
+    assert committed.commit_payload["requestId"].startswith("telegram-profile-review:")
+
+
+def test_task_profile_review_back_abandons_pending_edit_without_losing_draft(tmp_path):
+    state = prepare_interaction(_profile_review_artifact(), chat_id="123", root=tmp_path)
+    selected = apply_control(
+        state["token"], state["revision"], _control(state, "profile-option", option_index=1), root=tmp_path
+    )
+    prompt = apply_control(
+        state["token"], selected.state["revision"],
+        _control(selected.state, "edit-profile-field", summary_index=0), root=tmp_path,
+    )
+    backed = apply_control(
+        state["token"], prompt.state["revision"], _control(prompt.state, "profile-back"), root=tmp_path
+    )
+
+    assert backed.outcome == "edit"
+    assert backed.state["selected_values"] == ["option-1"]
+    assert backed.state["status"] == "active"
+
+
+def test_task_profile_review_can_resume_an_expired_card_with_a_new_revision(tmp_path, monkeypatch):
+    from plugins.platforms.telegram.hermes_ui import resume_interaction
+
+    state = prepare_interaction(_profile_review_artifact(), chat_id="123", root=tmp_path)
+    monkeypatch.setattr("plugins.platforms.telegram.hermes_ui.time.time", lambda: state["expires_at"] + 1)
+    expired = load_interaction(state["token"], root=tmp_path)
+    assert expired["status"] == "expired"
+
+    resumed = resume_interaction(state["token"], root=tmp_path)
+
+    assert resumed["status"] == "active"
+    assert resumed["revision"] > state["revision"]
+    assert resumed["controls"]

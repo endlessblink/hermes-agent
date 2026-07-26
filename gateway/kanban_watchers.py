@@ -25,6 +25,15 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+def _generic_dispatch_boards(boards: list[dict]) -> list[dict]:
+    """Return only boards owned by the ordinary Hermes dispatcher."""
+    return [
+        board
+        for board in boards
+        if board.get("dispatcher_mode", "generic") == "generic"
+    ]
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -1072,7 +1081,7 @@ class GatewayKanbanWatchersMixin:
             except Exception:
                 boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             out: list[tuple[str, "Optional[object]"]] = []
-            for b in boards:
+            for b in _generic_dispatch_boards(boards):
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 out.append((slug, _tick_once_for_board(slug)))
             return out
@@ -1093,7 +1102,7 @@ class GatewayKanbanWatchersMixin:
                 boards = _kb.list_boards(include_archived=False)
             except Exception:
                 boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
+            for b in _generic_dispatch_boards(boards):
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 conn = None
                 try:
@@ -1149,7 +1158,7 @@ class GatewayKanbanWatchersMixin:
                 boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             attempted = 0
             successes = 0
-            for b in boards:
+            for b in _generic_dispatch_boards(boards):
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
                 if attempted >= auto_decompose_per_tick:
                     break

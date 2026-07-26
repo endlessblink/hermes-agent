@@ -24,6 +24,143 @@ describe('toChatMessages', () => {
     expect(message.hidden).toBe(true)
   })
 
+  it('keeps persisted personal-assistant continuation receipts out of the visible transcript', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'user',
+        content:
+          'Continue personal-assistant interview evening-plan after committed answer; receipt={"requestId":"r1"}.',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.hidden).toBe(true)
+  })
+
+  it('keeps internal suggestion-discipline prompts out of the visible transcript', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'user',
+        content: '# Suggestion discipline\nLocal time: Wednesday. Suggestions voiced today: 0/2.',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.hidden).toBe(true)
+  })
+
+  it('keeps internal context-compaction handoffs out of the visible transcript', () => {
+    const [message] = toChatMessages([
+      {
+        role: 'user',
+        content: '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.',
+        timestamp: 1
+      }
+    ])
+
+    expect(message.hidden).toBe(true)
+  })
+
+  it.each(['user', 'assistant'] as const)(
+    'keeps %s fallback context summaries with an end marker out of the visible transcript',
+    role => {
+      const [message] = toChatMessages([
+        {
+          role,
+          content:
+            'SYSTEM: compacted history\nTOOL: private result\n--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---',
+          timestamp: 1
+        }
+      ])
+
+      expect(message.hidden).toBe(true)
+    }
+  )
+
+  it('shows only the latest copy of the same unanswered daily-grounding question', () => {
+    const artifact = (revision: number) =>
+      `\`\`\`hermes-ui\n${JSON.stringify({
+        type: 'task-profile-review',
+        id: 'resume-energy',
+        interviewId: 'planning-today',
+        revision,
+        title: 'תכנון שאר היום',
+        task: { id: 'day-context', title: 'תכנון שאר היום' },
+        question: { id: 'energy', profileFieldId: 'energy', label: 'כמה אנרגיה יש לך?', type: 'single-choice' }
+      })}\n\`\`\``
+
+    const messages = toChatMessages([
+      { role: 'assistant', content: artifact(1), timestamp: 1 },
+      { role: 'user', content: 'תכנן לי את שאר היום', timestamp: 2 },
+      { role: 'assistant', content: artifact(1), timestamp: 3 }
+    ])
+    const copies = messages.filter(message => chatMessageText(message).includes('"id":"resume-energy"'))
+
+    expect(copies).toHaveLength(2)
+    expect(copies.map(message => message.hidden)).toEqual([true, undefined])
+  })
+
+  it('shows only the current daily-grounding question from the same interview', () => {
+    const artifact = (questionId: string, revision: number) =>
+      `\`\`\`hermes-ui\n${JSON.stringify({
+        type: 'task-profile-review',
+        id: `resume-${questionId}`,
+        interviewId: 'planning-today',
+        revision,
+        title: 'תכנון שאר היום',
+        task: { id: 'day-context', title: 'תכנון שאר היום' },
+        question: { id: questionId, profileFieldId: questionId, label: questionId, type: 'single-choice' }
+      })}\n\`\`\``
+
+    const messages = toChatMessages([
+      { role: 'assistant', content: artifact('energy', 1), timestamp: 1 },
+      { role: 'assistant', content: artifact('workBoundary', 2), timestamp: 2 }
+    ])
+
+    expect(messages.map(message => message.hidden)).toEqual([true, undefined])
+  })
+
+  it('hides the completed daily-grounding card once the plan is visible', () => {
+    const interview = `\`\`\`hermes-ui\n${JSON.stringify({
+      type: 'task-profile-review',
+      interviewId: 'planning-today',
+      revision: 4,
+      task: { id: 'day-context', title: 'תכנון שאר היום' },
+      question: { id: 'location', profileFieldId: 'location', label: 'מאיפה תעבוד?', type: 'single-choice' }
+    })}\n\`\`\``
+    const plan = `\`\`\`hermes-ui\n${JSON.stringify({
+      type: 'day-timeline',
+      date: '2026-07-22',
+      blocks: []
+    })}\n\`\`\``
+
+    const messages = toChatMessages([
+      { role: 'assistant', content: interview, timestamp: 1 },
+      { role: 'assistant', content: plan, timestamp: 2 }
+    ])
+
+    expect(messages.map(message => message.hidden)).toEqual([true, undefined])
+  })
+
+  it('keeps private correction retries and their rejected draft out of the visible transcript', () => {
+    const messages = toChatMessages([
+      {
+        role: 'assistant',
+        content: 'Which syllabus should we continue with?',
+        finish_reason: 'desktop_clarify_gate_continue',
+        timestamp: 1
+      },
+      {
+        role: 'user',
+        content: '[Private Desktop correction - do not quote or mention this validation: Call clarify.]',
+        timestamp: 2
+      },
+      { role: 'assistant', content: 'The interactive question is ready.', timestamp: 3 }
+    ])
+
+    expect(messages.map(chatMessageText)).toEqual(['The interactive question is ready.'])
+  })
+
   it('drops stored assistant session-busy bounces', () => {
     const messages = toChatMessages([
       { role: 'user', content: 'continue', timestamp: 1 },

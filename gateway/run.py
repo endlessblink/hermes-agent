@@ -2973,6 +2973,15 @@ async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None
         )
 
 
+def _is_dedicated_personal_assistant_source(source: SessionSource) -> bool:
+    """Identify the Telegram credential route owned by the PA profile."""
+
+    return bool(
+        source.platform == Platform.TELEGRAM
+        and str(getattr(source, "profile", None) or "").strip() == "office-work"
+    )
+
+
 class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     """
     Main gateway controller.
@@ -7371,6 +7380,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
             adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
             adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
+            self._configure_personal_assistant_interview_commit(
+                adapter, self._active_profile_name()
+            )
             adapter._busy_text_mode = self._busy_text_mode
             
             # Try to connect
@@ -8157,6 +8169,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             return "default"
 
+    def _personal_assistant_interview_controller(self, profile_name: str):
+        """Resolve the one durable interview controller shared by PA clients."""
+        from agent.personal_assistant_interview import PlanningInterviewController
+        from agent.personal_assistant_state import PersonalAssistantStateStore
+        from hermes_cli.profiles import get_profile_dir
+
+        return PlanningInterviewController(
+            PersonalAssistantStateStore(get_profile_dir(profile_name))
+        )
+
+    def _make_personal_assistant_interview_commit_callback(
+        self,
+        default_profile: str | None,
+    ):
+        """Build a Telegram commit handler scoped to the office-work profile."""
+        async def commit(payload: dict[str, Any]) -> dict[str, Any]:
+            request = dict(payload)
+            profile = str(request.pop("profile", None) or default_profile or "").strip()
+            if profile != "office-work":
+                raise ValueError(
+                    "Personal Assistant interview commits require the office-work profile"
+                )
+            return self._personal_assistant_interview_controller(profile).respond(request)
+
+        return commit
+
+    def _configure_personal_assistant_interview_commit(
+        self,
+        adapter: Any,
+        default_profile: str | None,
+    ) -> None:
+        setter = getattr(adapter, "set_hermes_ui_commit_callback", None)
+        if callable(setter):
+            setter(
+                self._make_personal_assistant_interview_commit_callback(default_profile)
+            )
+
     def _start_personal_assistant_telegram_monitor_bridge(
         self,
         profile_home: "Path",
@@ -8303,6 +8352,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
                     adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
                     adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
+                    self._configure_personal_assistant_interview_commit(
+                        adapter, self._active_profile_name()
+                    )
                     adapter._busy_text_mode = self._busy_text_mode
 
                     # Reconnect after an outage: preserve the platform's
@@ -9081,6 +9133,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_authorization_check(
                 self._make_adapter_auth_check(adapter.platform, profile_name=profile_name)
             )
+            self._configure_personal_assistant_interview_commit(adapter, profile_name)
             adapter._busy_text_mode = self._busy_text_mode
 
             try:
@@ -19462,6 +19515,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            # Refresh on every turn because a cached agent can outlive route
+            # configuration changes. Only the Telegram credential explicitly
+            # owned by the office-work profile receives PA workflow semantics.
+            _personal_assistant_mode = _is_dedicated_personal_assistant_source(source)
+            agent.personal_assistant_mode = _personal_assistant_mode
+            agent.personal_assistant_state_store = None
+            if _personal_assistant_mode:
+                try:
+                    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+                    agent.personal_assistant_state_store = PersonalAssistantStateStore(
+                        self._resolve_profile_home_for_source(source)
+                    )
+                except (FileNotFoundError, OSError, ValueError):
+                    logger.warning(
+                        "Personal Assistant state store is unavailable for Telegram route",
+                        exc_info=True,
+                    )
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.

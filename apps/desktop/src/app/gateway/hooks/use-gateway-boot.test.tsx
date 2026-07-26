@@ -1,8 +1,21 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { $desktopBoot } from '@/store/boot'
-import { $gatewayState } from '@/store/session'
+import { $gatewaySwitching } from '@/store/gateway-switch'
+import { $notifications } from '@/store/notifications'
+import {
+  $awaitingResponse,
+  $busy,
+  $gatewayState,
+  $workingSessionIds,
+  setActiveSessionId,
+  setSelectedStoredSessionId,
+  setSessionWorking,
+  setWorkingSessionIds
+} from '@/store/session'
+import { $sessionStates, $sessionTiles } from '@/store/session-states'
 
 import { useGatewayBoot } from './use-gateway-boot'
 
@@ -75,6 +88,8 @@ class FakeWebSocket {
 }
 
 function fakeDesktop() {
+  let backendExit: ((payload: { code: number | null; profile?: string; signal: string | null }) => void) | null = null
+
   const conn = {
     authMode: 'token' as const,
     baseUrl: 'https://vps.example.com',
@@ -96,7 +111,15 @@ function fakeDesktop() {
       timestamp: Date.now()
     })),
     onBootProgress: vi.fn(() => () => undefined),
-    onBackendExit: vi.fn(() => () => undefined),
+    onBackendExit: vi.fn(callback => {
+      backendExit = callback
+
+      return () => {
+        backendExit = null
+      }
+    }),
+    emitBackendExit: (payload: { code: number | null; profile?: string; signal: string | null }) =>
+      backendExit?.(payload),
     onConnectionApplied: vi.fn(() => () => undefined),
     onPowerResume: vi.fn(() => () => undefined),
     onWindowStateChanged: vi.fn(() => () => undefined),
@@ -126,6 +149,15 @@ beforeEach(() => {
   ;(globalThis as { WebSocket: unknown }).WebSocket = FakeWebSocket
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = fakeDesktop()
   $gatewayState.set('idle')
+  $gatewaySwitching.set(false)
+  $notifications.set([])
+    $sessionStates.set({})
+    $sessionTiles.set([])
+    setActiveSessionId(null)
+    setSelectedStoredSessionId(null)
+    $awaitingResponse.set(false)
+    $busy.set(false)
+  setWorkingSessionIds(() => [])
   $desktopBoot.set({
     error: null,
     fakeMode: false,
@@ -162,6 +194,94 @@ async function advanceBackoff() {
 }
 
 describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => {
+  it('releases an in-flight session when its backend process exits', async () => {
+    const desktop = fakeDesktop()
+
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    setSessionWorking('running-default', true, 'default')
+    $gatewaySwitching.set(true)
+    render(<Harness />)
+    await flushAsync()
+
+    act(() => desktop.emitBackendExit({ code: 1, profile: 'default', signal: null }))
+
+    expect($workingSessionIds.get()).not.toContain('running-default')
+    expect($notifications.get()[0]).toMatchObject({
+      title: 'Hermes restarted',
+      message: expect.stringContaining('retry the last request')
+    })
+    $gatewaySwitching.set(false)
+  })
+
+  it('settles a busy profile tile even when transport teardown already removed its working marker', async () => {
+    const desktop = fakeDesktop()
+
+    const state = createClientSessionState('profile-tile')
+
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    $sessionTiles.set([{ profile: 'default', runtimeId: 'profile-runtime', storedSessionId: 'profile-tile' }])
+    $sessionStates.set({
+      'profile-runtime': { ...state, awaitingResponse: true, busy: true }
+    })
+    $gatewaySwitching.set(true)
+
+    render(<Harness />)
+    await flushAsync()
+
+    act(() => desktop.emitBackendExit({ code: 1, profile: 'default', signal: null }))
+
+    expect($notifications.get()[0]).toMatchObject({
+      title: 'Hermes restarted',
+      message: expect.stringContaining('retry the last request')
+    })
+    $gatewaySwitching.set(false)
+  })
+
+  it('settles the active primary conversation when its profile backend exits without a working marker', async () => {
+    const desktop = fakeDesktop()
+
+    const state = createClientSessionState('primary-stored')
+
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    setActiveSessionId('primary-runtime')
+    $sessionStates.set({
+      'primary-runtime': { ...state, awaitingResponse: true, busy: true }
+    })
+    $gatewaySwitching.set(true)
+
+    render(<Harness />)
+    await flushAsync()
+
+    act(() => desktop.emitBackendExit({ code: 1, profile: 'default', signal: null }))
+
+    expect($notifications.get()[0]).toMatchObject({
+      title: 'Hermes restarted',
+      message: expect.stringContaining('retry the last request')
+    })
+    $gatewaySwitching.set(false)
+  })
+
+  it('settles the visible primary composer when only its global busy state survived transport teardown', async () => {
+    const desktop = fakeDesktop()
+
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    setSelectedStoredSessionId('visible-primary')
+    $awaitingResponse.set(true)
+    $busy.set(true)
+    $gatewaySwitching.set(true)
+
+    render(<Harness />)
+    await flushAsync()
+
+    act(() => desktop.emitBackendExit({ code: 1, profile: 'default', signal: null }))
+
+    expect($notifications.get()[0]).toMatchObject({
+      title: 'Hermes restarted',
+      message: expect.stringContaining('retry the last request')
+    })
+    $gatewaySwitching.set(false)
+  })
+
   it('INITIAL boot against a dead VPS: getConnection hangs (waitForHermes) → app sits in the connecting combo, then fails', async () => {
     // The report's actual path: a fresh launch pointed at an unreachable VPS.
     // startHermes()'s remote branch awaits waitForHermes() for 45s before it

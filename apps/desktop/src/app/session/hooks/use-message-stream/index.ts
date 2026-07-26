@@ -9,11 +9,13 @@ import {
   type ChatMessage,
   type ChatMessagePart,
   chatMessageText,
+  collapseRepeatedDailyGroundingQuestions,
   type GatewayEventPayload,
   reasoningPart,
   renderMediaTags,
   upsertToolPart
 } from '@/lib/chat-messages'
+import { emitDesktopDiagnostic } from '@/lib/desktop-diagnostics'
 import {
   dedupeGeneratedImageEchoesInParts,
   generatedImageEchoSources,
@@ -420,8 +422,11 @@ export function useMessageStream({
             const index = prev.length - 1 - fallbackIndex
             const existing = prev[index]
             const existingText = chatMessageText(existing).trim()
+            const hasNewerUserMessage = prev
+              .slice(index + 1)
+              .some(message => message.role === 'user' && !message.hidden)
 
-            if (existing.pending || (finalText && existingText === finalText)) {
+            if (existing.pending || (finalText && existingText === finalText && !hasNewerUserMessage)) {
               nextMessages = prev.map((message, messageIndex) =>
                 messageIndex === index ? completeMessage(message) : message
               )
@@ -441,7 +446,7 @@ export function useMessageStream({
 
         return {
           ...state,
-          messages: nextMessages,
+          messages: collapseRepeatedDailyGroundingQuestions(nextMessages),
           streamId: null,
           pendingBranchGroup: null,
           awaitingResponse: false,
@@ -460,8 +465,28 @@ export function useMessageStream({
         shouldHydrate = false
       }
 
-      if (shouldHydrate) {
-        void hydrateFromStoredSession(3, completedState.storedSessionId, sessionId)
+      const activeRuntimeId = activeSessionIdRef.current
+      const activeState = activeRuntimeId ? sessionStateByRuntimeIdRef.current.get(activeRuntimeId) : undefined
+
+      const completionBelongsToVisibleAlias =
+        Boolean(activeRuntimeId) &&
+        activeRuntimeId !== sessionId &&
+        Boolean(completedState.storedSessionId) &&
+        activeState?.storedSessionId === completedState.storedSessionId
+
+      if (shouldHydrate || completionBelongsToVisibleAlias) {
+        const hydrationRuntimeId = completionBelongsToVisibleAlias ? activeRuntimeId! : sessionId
+
+        if (completionBelongsToVisibleAlias) {
+          emitDesktopDiagnostic({
+            component: 'session',
+            event: 'completion_alias_reconciled',
+            message: 'Rehydrating the visible session after a runtime id changed',
+            severity: 'warn'
+          })
+        }
+
+        void hydrateFromStoredSession(3, completedState.storedSessionId, hydrationRuntimeId)
       }
 
       dispatchNativeNotification({
@@ -483,7 +508,7 @@ export function useMessageStream({
 
       setSessionReplyReady(replyReadyId, true, replyReadyProfile)
     },
-    [hydrateFromStoredSession, refreshSessions, updateSessionState]
+    [activeSessionIdRef, hydrateFromStoredSession, refreshSessions, sessionStateByRuntimeIdRef, updateSessionState]
   )
 
   const failAssistantMessage = useCallback(

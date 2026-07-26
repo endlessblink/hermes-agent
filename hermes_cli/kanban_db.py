@@ -650,6 +650,7 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
         "default_workdir": None,
         "created_at": None,
         "archived": False,
+        "dispatcher_mode": "generic",
     }
     try:
         p = board_metadata_path(slug)
@@ -675,6 +676,7 @@ def write_board_metadata(
     color: Optional[str] = None,
     archived: Optional[bool] = None,
     default_workdir: Optional[str] = None,
+    dispatcher_mode: Optional[str] = None,
 ) -> dict:
     """Create / update ``board.json`` for ``board``.
 
@@ -698,6 +700,11 @@ def write_board_metadata(
         meta["archived"] = bool(archived)
     if default_workdir is not None:
         meta["default_workdir"] = str(default_workdir) if default_workdir else None
+    if dispatcher_mode is not None:
+        mode = str(dispatcher_mode).strip()
+        if mode not in {"generic", "repair-only"}:
+            raise ValueError("dispatcher_mode must be 'generic' or 'repair-only'")
+        meta["dispatcher_mode"] = mode
     if not meta.get("created_at"):
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
@@ -718,6 +725,7 @@ def create_board(
     icon: Optional[str] = None,
     color: Optional[str] = None,
     default_workdir: Optional[str] = None,
+    dispatcher_mode: Optional[str] = None,
 ) -> dict:
     """Create a new board directory + DB + metadata. Idempotent.
 
@@ -735,6 +743,7 @@ def create_board(
         icon=icon,
         color=color,
         default_workdir=default_workdir,
+        dispatcher_mode=dispatcher_mode,
     )
     # Touch the DB so list_boards() sees it immediately.
     init_db(board=normed)
@@ -855,6 +864,7 @@ class Task:
     claim_lock: Optional[str]
     claim_expires: Optional[int]
     tenant: Optional[str]
+    executor_kind: str = "hermes"
     branch_name: Optional[str] = None
     project_id: Optional[str] = None
     result: Optional[str] = None
@@ -946,6 +956,11 @@ class Task:
             claim_lock=row["claim_lock"],
             claim_expires=row["claim_expires"],
             tenant=row["tenant"] if "tenant" in keys else None,
+            executor_kind=(
+                str(row["executor_kind"] or "hermes")
+                if "executor_kind" in keys
+                else "hermes"
+            ),
             result=row["result"] if "result" in keys else None,
             idempotency_key=row["idempotency_key"] if "idempotency_key" in keys else None,
             consecutive_failures=(
@@ -1115,6 +1130,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     claim_lock           TEXT,
     claim_expires        INTEGER,
     tenant               TEXT,
+    executor_kind        TEXT NOT NULL DEFAULT 'hermes',
     result               TEXT,
     idempotency_key      TEXT,
     -- Unified consecutive-failure counter. Incremented on spawn
@@ -1971,6 +1987,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "session_id", "session_id TEXT"
         )
 
+    if "executor_kind" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "executor_kind",
+            "executor_kind TEXT NOT NULL DEFAULT 'hermes'",
+        )
+
     if "block_kind" not in cols:
         # Typed block reason (VALID_BLOCK_KINDS) or NULL for legacy/un-typed
         # blocks. Existing blocked rows get NULL, which is treated as a
@@ -2408,6 +2432,7 @@ def create_task(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     project_id: Optional[str] = None,
+    executor_kind: str = "hermes",
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2433,6 +2458,9 @@ def create_task(
     translation skill regardless of the profile's default config).
     """
     assignee = _canonical_assignee(assignee)
+    executor_kind = str(executor_kind or "").strip()
+    if executor_kind not in {"hermes", "codex-repair"}:
+        raise ValueError("executor_kind must be 'hermes' or 'codex-repair'")
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -2635,9 +2663,10 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, project_id, tenant, idempotency_key,
+                        executor_kind,
                         max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2654,6 +2683,7 @@ def create_task(
                         project_id,
                         tenant,
                         idempotency_key,
+                        executor_kind,
                         int(max_runtime_seconds) if max_runtime_seconds is not None else None,
                         json.dumps(skills_list) if skills_list is not None else None,
                         int(max_retries) if max_retries is not None else None,
@@ -2676,6 +2706,7 @@ def create_task(
                         "status": task_status,
                         "parents": list(parents),
                         "tenant": tenant,
+                        "executor_kind": executor_kind,
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
@@ -3487,6 +3518,7 @@ def claim_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    expected_executor_kind: Optional[str] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -3496,7 +3528,19 @@ def claim_task(
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+    if expected_executor_kind is not None and expected_executor_kind not in {
+        "hermes",
+        "codex-repair",
+    }:
+        raise ValueError("invalid expected executor kind")
     with write_txn(conn):
+        if expected_executor_kind is not None:
+            owner = conn.execute(
+                "SELECT executor_kind FROM tasks WHERE id = ? AND status = 'ready'",
+                (task_id,),
+            ).fetchone()
+            if owner is None or owner["executor_kind"] != expected_executor_kind:
+                return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -3542,8 +3586,14 @@ def claim_task(
                 """,
                 (now, int(stale["current_run_id"])),
             )
+        executor_clause = (
+            " AND executor_kind = ?" if expected_executor_kind is not None else ""
+        )
+        params: tuple[Any, ...] = (lock, expires, now, task_id)
+        if expected_executor_kind is not None:
+            params += (expected_executor_kind,)
         cur = conn.execute(
-            """
+            f"""
             UPDATE tasks
                SET status        = 'running',
                    claim_lock    = ?,
@@ -3552,8 +3602,9 @@ def claim_task(
              WHERE id = ?
                AND status = 'ready'
                AND claim_lock IS NULL
+               {executor_clause}
             """,
-            (lock, expires, now, task_id),
+            params,
         )
         if cur.rowcount != 1:
             return None
@@ -7396,6 +7447,7 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = 'ready' AND assignee IS NOT NULL "
+        "  AND executor_kind = 'hermes' "
         "    AND claim_lock IS NULL"
     ).fetchall()
     if not rows:
@@ -7422,6 +7474,7 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = 'review' AND assignee IS NOT NULL "
+        "  AND executor_kind = 'hermes' "
         "    AND claim_lock IS NULL"
     ).fetchall()
     if not rows:
@@ -7584,13 +7637,15 @@ def _dispatch_once_locked(
     if max_spawn is not None:
         running_count = int(
             conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+                "SELECT COUNT(*) FROM tasks "
+                "WHERE status = 'running' AND executor_kind = 'hermes'"
             ).fetchone()[0]
         )
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
+        "  AND executor_kind = 'hermes' "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
     # Honour kanban.max_in_progress: if the board already has enough running
@@ -7599,7 +7654,8 @@ def _dispatch_once_locked(
     # pile up and time out.
     if max_in_progress is not None and ready_rows:
         in_progress = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+            "SELECT COUNT(*) FROM tasks "
+            "WHERE status = 'running' AND executor_kind = 'hermes'"
         ).fetchone()[0]
         if in_progress >= max_in_progress:
             return result
@@ -7625,6 +7681,7 @@ def _dispatch_once_locked(
         for prow in conn.execute(
             "SELECT assignee, COUNT(*) AS n FROM tasks "
             "WHERE status = 'running' AND assignee IS NOT NULL "
+            "  AND executor_kind = 'hermes' "
             "GROUP BY assignee"
         ):
             _per_profile_running[prow["assignee"]] = int(prow["n"])
@@ -7759,7 +7816,12 @@ def _dispatch_once_locked(
                     _per_profile_running.get(row_assignee, 0) + 1
                 )
             continue
-        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        claimed = claim_task(
+            conn,
+            row["id"],
+            ttl_seconds=ttl_seconds,
+            expected_executor_kind="hermes",
+        )
         if claimed is None:
             continue
         try:
@@ -7833,6 +7895,7 @@ def _dispatch_once_locked(
     review_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
+        "  AND executor_kind = 'hermes' "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
     for row in review_rows:

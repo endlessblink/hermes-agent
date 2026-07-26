@@ -39,6 +39,10 @@ describe('isSessionGoneError', () => {
   it('is true for 404 / session-not-found, false otherwise', () => {
     expect(isSessionGoneError(new Error('Request failed 404'))).toBe(true)
     expect(isSessionGoneError(new Error('Session not found'))).toBe(true)
+    expect(isSessionGoneError({ error: { code: 4007, message: 'session not found' } })).toBe(true)
+    expect(isSessionGoneError(new Error('Error invoking remote method \'session.resume\': Error: {"error":{"code":4007,"message":"session not found"}}'))).toBe(
+      true
+    )
     expect(isSessionGoneError(new Error('ECONNREFUSED'))).toBe(false)
     expect(isSessionGoneError(null)).toBe(false)
   })

@@ -5,6 +5,7 @@ import type { ChatMessage } from '@/lib/chat-messages'
 import { preserveLocalAssistantErrors } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { setMutableRef } from '@/lib/mutable-ref'
+import { notify } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import {
   $busy,
@@ -22,9 +23,11 @@ import {
   setTurnStartedAt,
   setYoloActive
 } from '@/store/session'
-import { publishSessionState } from '@/store/session-states'
+import { $sessionTiles, publishSessionState } from '@/store/session-states'
 
 import type { ClientSessionState } from '../../types'
+
+import { finalizeInterruptedMessages } from './use-prompt-actions/rewind'
 
 // Shallow per-message identity check. When a flush carries no transcript
 // changes, `preserveLocalAssistantErrors` returns the same message objects in
@@ -65,6 +68,13 @@ function syncRuntimeMetadataToView(state: ClientSessionState) {
   setCurrentFastMode(state.fast ?? false)
   setYoloActive(state.yolo ?? false)
   setCurrentPersonality(state.personality ?? '')
+}
+
+function ownerProfileForStoredSession(storedSessionId: string): string {
+  return (
+    $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)?.profile ??
+    $activeGatewayProfile.get()
+  )
 }
 
 export function useSessionStateCache({
@@ -110,7 +120,7 @@ export function useSessionStateCache({
           runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
 
           if (existing.busy) {
-            setSessionWorking(storedSessionId, true, $activeGatewayProfile.get())
+            setSessionWorking(storedSessionId, true, ownerProfileForStoredSession(storedSessionId))
           }
         }
 
@@ -262,13 +272,34 @@ export function useSessionStateCache({
       updater: (state: ClientSessionState) => ClientSessionState,
       storedSessionId?: string | null
     ) => {
-      const previous = ensureSessionState(sessionId, storedSessionId)
+      const resolvedStoredSessionId =
+        storedSessionId === undefined && sessionId === activeSessionIdRef.current
+          ? selectedStoredSessionIdRef.current
+          : storedSessionId
+
+      const previous = ensureSessionState(sessionId, resolvedStoredSessionId)
       const next = updater({ ...previous, messages: previous.messages })
       sessionStateByRuntimeIdRef.current.set(sessionId, next)
       // Mirror into the reactive multi-session store — session tiles (and any
       // other non-primary surface) subscribe per runtime id there instead of
       // through the single active $messages view.
       publishSessionState(sessionId, next)
+
+      // Add the destination's live memberships before removing any previous
+      // ones. During working -> needs-input the gateway pool subscribes to both
+      // atoms independently; removing `working` first creates a one-notification
+      // gap where the profile looks idle and its secondary socket is pruned.
+      if (next.needsInput) {
+        setSessionAttention(next.storedSessionId, true)
+      }
+
+      if (next.busy) {
+        setSessionWorking(
+          next.storedSessionId,
+          true,
+          next.storedSessionId ? ownerProfileForStoredSession(next.storedSessionId) : $activeGatewayProfile.get()
+        )
+      }
 
       if (previous.storedSessionId !== next.storedSessionId) {
         setSessionWorking(previous.storedSessionId, false, null, { markReplyReady: false })
@@ -280,8 +311,13 @@ export function useSessionStateCache({
         setSessionAttention(previous.storedSessionId, false)
       }
 
-      setSessionWorking(next.storedSessionId, next.busy, next.busy ? $activeGatewayProfile.get() : undefined)
-      setSessionAttention(next.storedSessionId, next.needsInput)
+      if (!next.busy) {
+        setSessionWorking(next.storedSessionId, false)
+      }
+
+      if (!next.needsInput) {
+        setSessionAttention(next.storedSessionId, false)
+      }
 
       // Every state update is effectively a "still alive" heartbeat for
       // streaming events. The session-store watchdog uses this to keep the
@@ -310,27 +346,62 @@ export function useSessionStateCache({
     return runtimeState?.storedSessionId === storedSessionId ? runtimeId : null
   }, [])
 
-  // When the store watchdog force-clears a stuck session (8 min of stream
+  // When the store watchdog force-clears a stuck session (75s of stream
   // silence — a hung or looping turn that never delivered its terminal event),
   // also drop that session's busy/awaiting flags here. Clearing the sidebar dot
   // alone leaves the composer wedged on "Thinking"/Stop; updateSessionState
   // re-syncs `$busy` when the healed session is the one on screen.
   useEffect(
     () =>
-      onSessionWatchdogClear(storedSessionId => {
+      onSessionWatchdogClear((storedSessionId, reason) => {
         const runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
         const state = runtimeId ? sessionStateByRuntimeIdRef.current.get(runtimeId) : undefined
 
-        if (!runtimeId || !state?.busy) {
+        if (!runtimeId || !state) {
           return
         }
 
-        updateSessionState(runtimeId, current => ({
-          ...current,
-          awaitingResponse: false,
-          busy: false,
-          needsInput: false
-        }))
+        const error =
+          reason === 'backend_exit'
+            ? 'Hermes restarted before this answer finished. No task or calendar change was confirmed; retry the last request.'
+            : 'Hermes stopped waiting for an answer because the turn went silent. No task or calendar change was confirmed; retry the last request.'
+
+        notify({
+          durationMs: 0,
+          id: `session-recovery-${storedSessionId}`,
+          kind: 'error',
+          message: error,
+          title: reason === 'backend_exit' ? 'Hermes restarted' : 'Hermes stopped waiting'
+        })
+
+        updateSessionState(runtimeId, current => {
+          const settledMessages = finalizeInterruptedMessages(current.messages, current.streamId)
+
+          const messages =
+            settledMessages.at(-1)?.error === error
+              ? settledMessages
+              : [
+                  ...settledMessages,
+                  {
+                    id: `local-session-recovery-${reason}-${Date.now()}`,
+                    role: 'assistant' as const,
+                    parts: [],
+                    error,
+                    pending: false
+                  }
+                ]
+
+          return {
+            ...current,
+            messages,
+            awaitingResponse: false,
+            busy: false,
+            needsInput: false,
+            streamId: null,
+            pendingBranchGroup: null,
+            turnStartedAt: null
+          }
+        })
       }),
     [updateSessionState]
   )

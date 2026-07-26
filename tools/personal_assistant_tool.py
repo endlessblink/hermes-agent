@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from agent.personal_assistant_state import (
     PersonalAssistantStateStore,
     StateVersionConflict,
     _apply_operation,
+    _interview_planning_date,
+    interview_question_order,
     public_state,
 )
+from agent.personal_assistant_calendar_gate import build_calendar_preflight_receipt
 from tools.registry import registry, tool_error
 
 
@@ -77,7 +83,127 @@ def _handle_get_state(args: dict, **kwargs) -> str:
         store = _store()
         service = _service(store)
         state = service.get() if service is not None else store.read()
-        return _result({"state": public_state(state)})
+        public = public_state(state)
+        if args.get("mode") != "full":
+            public = {
+                key: public.get(key)
+                for key in (
+                    "version", "focus", "capacity", "outcomes", "commitments",
+                    "blockers", "pendingApprovals", "planningInterview",
+                    "taskSourceManifest",
+                )
+                if key in public
+            }
+        return _result({"state": public, "mode": args.get("mode") or "compact"})
+    except Exception as exc:
+        return _error(exc)
+
+
+def _handle_calendar_preflight(args: dict, **kwargs) -> str:
+    """Read complete Calendar coverage and persist its typed freshness receipt."""
+
+    try:
+        receipt = build_calendar_preflight_receipt(
+            start_date=str(args.get("startDate") or ""),
+            end_date=str(args.get("endDate") or ""),
+            timezone_name=str(args.get("timezone") or "Asia/Jerusalem"),
+        )
+        store = _store()
+
+        def remember(state: dict[str, Any]) -> None:
+            state["calendar_preflight_receipt"] = receipt
+
+        store.update(remember)
+        return _result({"receipt": receipt})
+    except Exception as exc:
+        return _error(exc)
+
+
+def _handle_interview_start(args: dict, **kwargs) -> str:
+    """Start the durable cross-client planning interview after source discovery."""
+    try:
+        store = _store()
+        requested_interview_id = str(args.get("interviewId") or "").strip()
+        active = store.get_planning_interview()
+        request_id = str(args.get("requestId") or "").strip()
+        planning_date = str(args.get("planningDate") or "").strip()
+        mode = str(args.get("mode") or "daily-grounding").strip()
+        local_today = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
+        try:
+            parsed_planning_date = date.fromisoformat(planning_date) if planning_date else local_today
+        except ValueError:
+            parsed_planning_date = local_today
+        future_day = mode == "daily-grounding" and parsed_planning_date > local_today
+        is_exact_replay = bool(
+            active
+            and active.get("interviewId") == requested_interview_id
+            and any(
+                receipt.get("requestId") == request_id
+                for receipt in active.get("requestReceipts") or []
+            )
+        )
+        if (
+            active is not None
+            and not is_exact_replay
+            and (
+                (not planning_date or _interview_planning_date(active) == planning_date)
+                and str(active.get("mode") or "task-review") == mode
+                and (not future_day or interview_question_order(active) == ("availability",))
+            )
+        ):
+            incoming_snapshot = args.get("sourceSnapshot")
+            snapshot_refreshed = False
+            if (
+                isinstance(incoming_snapshot, dict)
+                and incoming_snapshot
+                and incoming_snapshot != active.get("sourceSnapshot")
+            ):
+                refreshed = store.patch_planning_interview(
+                    interview_id=str(active.get("interviewId") or ""),
+                    expected_revision=int(active.get("interviewRevision") or 0),
+                    request_id=request_id,
+                    operations=[
+                        {
+                            "op": "refresh-source-snapshot",
+                            "sourceSnapshot": incoming_snapshot,
+                        }
+                    ],
+                )
+                active = refreshed["interview"]
+                snapshot_refreshed = True
+            return _result(
+                {
+                    "interview": active,
+                    "resumed": True,
+                    "sourceSnapshotRefreshed": snapshot_refreshed,
+                    "requestedInterviewId": requested_interview_id,
+                }
+            )
+        result = store.patch_planning_interview(
+            interview_id=requested_interview_id,
+            expected_revision=0,
+            request_id=request_id,
+            operations=[
+                {
+                    "op": "start",
+                    "sourceSnapshot": args.get("sourceSnapshot") or {},
+                    "tasks": (
+                        [
+                            {
+                                "taskId": "day-context",
+                                "title": "תכנון מחר" if future_day else "תכנון שאר היום",
+                            }
+                        ]
+                        if mode == "daily-grounding"
+                        else args.get("tasks")
+                    ),
+                    "planningDate": planning_date or None,
+                    **({"questionOrder": ["availability"]} if future_day else {}),
+                    "mode": mode,
+                }
+            ],
+        )
+        return _result(result)
     except Exception as exc:
         return _error(exc)
 
@@ -87,6 +213,35 @@ def _proposal_id(section: str, title: str, evidence: str, source: str) -> str:
         [section, title, evidence, source], ensure_ascii=False, separators=(",", ":")
     )
     return "capture-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
+
+
+_CAPTURE_TITLE_STOPWORDS = {
+    "a", "as", "block", "is", "task", "the",
+    "המשימה", "מתוכננת", "כבלוק", "של",
+}
+
+
+def _capture_title_tokens(title: object) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[\w+]+", str(title or "").casefold())
+        if token not in _CAPTURE_TITLE_STOPWORDS
+    }
+
+
+def _equivalent_capture_proposal(existing: object, proposed: dict[str, Any]) -> bool:
+    if not isinstance(existing, dict) or existing.get("section") != proposed["section"]:
+        return False
+    existing_title = str(existing.get("title") or "")
+    proposed_title = proposed["title"]
+    if re.findall(r"\d+(?:[.:]\d+)?", existing_title) != re.findall(
+        r"\d+(?:[.:]\d+)?", proposed_title
+    ):
+        return False
+    existing_tokens = _capture_title_tokens(existing_title)
+    proposed_tokens = _capture_title_tokens(proposed_title)
+    union = existing_tokens | proposed_tokens
+    return bool(union) and len(existing_tokens & proposed_tokens) / len(union) >= 0.7
 
 
 def _handle_propose_capture(args: dict, **kwargs) -> str:
@@ -109,17 +264,22 @@ def _handle_propose_capture(args: dict, **kwargs) -> str:
     }
     try:
         store = _store()
-        existing = next(
-            (
-                item
-                for item in store.read().get("captureProposals", [])
-                if isinstance(item, dict) and item.get("id") == proposal_id
-            ),
-            None,
-        )
-        if existing is not None:
+        current_state = store.read()
+        equivalent_proposals = [
+            item
+            for item in current_state.get("captureProposals", [])
+            if isinstance(item, dict)
+            and (
+                item.get("id") == proposal_id
+                or _equivalent_capture_proposal(item, proposal)
+            )
+        ]
+        if len(equivalent_proposals) == 1:
             return _result(
-                {"proposal": existing, "stateVersion": store.read().get("version", 0)}
+                {
+                    "proposal": equivalent_proposals[0],
+                    "stateVersion": current_state.get("version", 0),
+                }
             )
         captured = proposal
 
@@ -130,12 +290,27 @@ def _handle_propose_capture(args: dict, **kwargs) -> str:
                 (
                     item
                     for item in proposals
-                    if isinstance(item, dict) and item.get("id") == proposal_id
+                    if isinstance(item, dict)
+                    and (
+                        item.get("id") == proposal_id
+                        or _equivalent_capture_proposal(item, proposal)
+                    )
                 ),
                 None,
             )
             if existing is not None:
                 captured = dict(existing)
+                kept_id = existing.get("id")
+                proposals[:] = [
+                    item
+                    for item in proposals
+                    if item is existing
+                    or not (
+                        isinstance(item, dict)
+                        and item.get("id") != kept_id
+                        and _equivalent_capture_proposal(item, proposal)
+                    )
+                ]
                 return
             proposals.append(proposal)
 
@@ -381,21 +556,121 @@ def _handle_reconcile_inventory(args: dict, **kwargs) -> str:
     )
 
 
+def _stable_safety_scope_fingerprint(value: Any) -> str:
+    fingerprint = str(value or "")
+    return re.sub(
+        r"(?P<prefix>(?:^|\|)calendar:)(?P<date>\d{4}-\d{2}-\d{2})T[^|]+",
+        r"\g<prefix>\g<date>",
+        fingerprint,
+    )
+
+
 def _handle_safety_review(args: dict, **kwargs) -> str:
     """Persist the protected scope and proof that the current review covered it."""
 
     try:
         store = _store()
+        state = store.read()
+        configured_source_names = {
+            str(source.get("id") or "").strip()
+            for source in state.get("task_source_manifest") or []
+            if isinstance(source, dict) and str(source.get("id") or "").strip()
+        }
+        submitted_source_names = {
+            str(source.get("id") or "").strip()
+            for source in args.get("sources") or []
+            if isinstance(source, dict) and str(source.get("id") or "").strip()
+        }
+        missing_source_names = sorted(configured_source_names - submitted_source_names)
+        if missing_source_names:
+            raise ValueError(
+                "coverage sources must use the exact configured source names: "
+                f"{', '.join(missing_source_names)}; do not invent aliases"
+            )
+        protected_items = [
+            dict(item) if isinstance(item, dict) else item
+            for item in args.get("protectedItems") or []
+        ]
+        default_next_review = (
+            datetime.now(ZoneInfo("Asia/Jerusalem")).date() + timedelta(days=1)
+        ).isoformat()
+        context_item_ids = []
+        for item in protected_items:
+            if (
+                isinstance(item, dict)
+                and item.get("disposition") == "needs_context"
+                and item.get("missingFields")
+            ):
+                item.setdefault("nextReviewAt", default_next_review)
+                item_id = str(item.get("id") or "").strip()
+                if item_id:
+                    context_item_ids.append(item_id)
+        reviewed_item_ids = list(args.get("reviewedItemIds") or [])
+        risk_item_ids = list(args.get("riskItemIds") or [])
+        unresolved_item_ids = list(
+            dict.fromkeys([*(args.get("unresolvedItemIds") or []), *context_item_ids])
+        )
+        reused_prior_review = False
+        if args.get("reusePriorReview") is True:
+            current_sources = sorted(
+                (
+                    str(source.get("id") or "").strip(),
+                    str(source.get("status") or "").strip(),
+                    source.get("revision"),
+                )
+                for source in args.get("sources") or []
+                if isinstance(source, dict)
+            )
+            for prior in reversed(state.get("coverage_receipts") or []):
+                if not isinstance(prior, dict) or prior.get("complete") is not True:
+                    continue
+                prior_sources = sorted(
+                    (
+                        str(source.get("id") or "").strip(),
+                        str(source.get("status") or "").strip(),
+                        source.get("revision"),
+                    )
+                    for source in prior.get("sources") or []
+                    if isinstance(source, dict)
+                )
+                if (
+                    str(prior.get("cadence") or "") == str(args.get("cadence") or "")
+                    and _stable_safety_scope_fingerprint(prior.get("scopeFingerprint"))
+                    == _stable_safety_scope_fingerprint(args.get("scopeFingerprint"))
+                    and prior_sources == current_sources
+                    and all(status == "fresh" for _, status, _ in current_sources)
+                ):
+                    reviewed_item_ids = list(
+                        dict.fromkeys(
+                            [*(prior.get("reviewedItemIds") or []), *reviewed_item_ids]
+                        )
+                    )
+                    risk_item_ids = list(
+                        dict.fromkeys([*(prior.get("riskItemIds") or []), *risk_item_ids])
+                    )
+                    unresolved_item_ids = list(
+                        dict.fromkeys(
+                            [*(prior.get("unresolvedItemIds") or []), *unresolved_item_ids]
+                        )
+                    )
+                    reused_prior_review = True
+                    break
         state, receipt = store.record_safety_review(
-            protected_items=args.get("protectedItems"),
+            protected_items=protected_items,
             cadence=str(args.get("cadence") or ""),
             scope_fingerprint=str(args.get("scopeFingerprint") or ""),
             sources=args.get("sources"),
-            reviewed_item_ids=args.get("reviewedItemIds"),
-            risk_item_ids=args.get("riskItemIds"),
-            unresolved_item_ids=args.get("unresolvedItemIds"),
+            reviewed_item_ids=reviewed_item_ids,
+            risk_item_ids=risk_item_ids,
+            unresolved_item_ids=unresolved_item_ids,
         )
-        return _result({"receipt": receipt, "stateVersion": state["version"]})
+        return _result(
+            {
+                "receipt": receipt,
+                "reusedPriorReview": reused_prior_review,
+                "stateVersion": state["version"],
+            }
+        )
     except Exception as exc:
         return _error(exc)
 
@@ -403,7 +678,83 @@ def _handle_safety_review(args: dict, **kwargs) -> str:
 GET_STATE_SCHEMA = {
     "name": "personal_assistant_get_state",
     "description": "Read the persistent office-work assistant's current working picture and pending decisions.",
-    "parameters": {"type": "object", "properties": {}, "required": []},
+    "parameters": {
+        "type": "object",
+        "properties": {"mode": {"type": "string", "enum": ["compact", "full"]}},
+        "required": [],
+    },
+}
+
+CALENDAR_PREFLIGHT_SCHEMA = {
+    "name": "personal_assistant_calendar_preflight",
+    "description": (
+        "Mandatory first step before Personal Assistant planning. Read every accessible "
+        "Google Calendar, including paginated calendars and events, for an exact local-date range."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "startDate": {
+                "type": "string",
+                "format": "date",
+                "description": "First local date to check, inclusive (YYYY-MM-DD).",
+            },
+            "endDate": {
+                "type": "string",
+                "format": "date",
+                "description": (
+                    "First local date after the range, exclusive (YYYY-MM-DD). "
+                    "For one day, use the following date; an equal date is normalized to one day."
+                ),
+            },
+            "timezone": {
+                "type": "string",
+                "default": "Asia/Jerusalem",
+                "description": "IANA timezone for the exact planning range.",
+            },
+        },
+        "required": ["startDate", "endDate"],
+        "additionalProperties": False,
+    },
+}
+
+INTERVIEW_START_SCHEMA = {
+    "name": "personal_assistant_interview_start",
+    "description": (
+        "Start one durable same-day grounding interview before source discovery, or an explicit task review. "
+        "The default daily-grounding mode asks only about today's energy, stopping time, commitments, and location. "
+        "Call this before presenting the first task-profile-review card. If a matching interview "
+        "is already active, this resumes it instead of starting a competing workflow. "
+        "Desktop and Telegram then commit every answer to this same versioned interview."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "interviewId": {"type": "string", "minLength": 1, "maxLength": 300},
+            "requestId": {"type": "string", "minLength": 1, "maxLength": 300},
+            "planningDate": {"type": "string", "format": "date"},
+            "mode": {
+                "type": "string",
+                "enum": ["daily-grounding", "task-review"],
+                "default": "daily-grounding",
+            },
+            "sourceSnapshot": {"type": "object"},
+            "tasks": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "taskId": {"type": "string", "minLength": 1, "maxLength": 300},
+                        "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    },
+                    "required": ["taskId", "title"],
+                },
+            },
+        },
+        "required": ["interviewId", "requestId", "planningDate", "sourceSnapshot", "tasks"],
+    },
 }
 
 RECONCILE_INVENTORY_SCHEMA = {
@@ -421,6 +772,10 @@ RECONCILE_INVENTORY_SCHEMA = {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 20,
+                "description": (
+                    "Coverage sources. For every configured task source, copy its exact id from "
+                    "taskSourceManifest in personal_assistant_get_state; never invent an alias."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {
@@ -468,10 +823,23 @@ SAFETY_REVIEW_SCHEMA = {
         "properties": {
             "cadence": {"type": "string", "enum": ["daily", "weekly"]},
             "scopeFingerprint": {"type": "string", "minLength": 1, "maxLength": 500},
+            "reusePriorReview": {
+                "type": "boolean",
+                "description": (
+                    "Set true on repeated planning turns. Hermes reuses the prior exact protected-item "
+                    "review only when cadence, scope fingerprint, every source revision, and fresh status "
+                    "match exactly; any source change fails closed and requires current exact item reads."
+                ),
+            },
             "sources": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 20,
+                "description": (
+                    "Include every configured source and copy each id exactly from "
+                    "taskSourceManifest returned by personal_assistant_get_state. "
+                    "Never invent, shorten, or alias a source id."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {
@@ -512,8 +880,20 @@ SAFETY_REVIEW_SCHEMA = {
                             "type": "array", "maxItems": 64, "items": {"type": "string"}
                         },
                         "deferralReason": {"type": ["string", "null"], "maxLength": 2000},
-                        "deadline": {"type": ["string", "null"]},
-                        "nextReviewAt": {"type": ["string", "null"]},
+                        "deadline": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "ISO timestamp with timezone, or YYYY-MM-DD task date. Never send a datetime "
+                                "without Z or a numeric UTC offset. Prefer YYYY-MM-DD when no time is needed."
+                            ),
+                        },
+                        "nextReviewAt": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "ISO timestamp with timezone, or YYYY-MM-DD local review date. Never send a datetime "
+                                "without Z or a numeric UTC offset. Prefer YYYY-MM-DD when no time is needed."
+                            ),
+                        },
                         "sourceRevision": {"type": ["string", "null"], "maxLength": 300},
                         "verifiedAt": {"type": ["string", "null"]},
                     },
@@ -655,6 +1035,16 @@ def _handle_suggestion_rule_save(args: dict[str, Any], **_kwargs: Any) -> str:
 
 for _name, _schema, _handler in (
     ("personal_assistant_get_state", GET_STATE_SCHEMA, _handle_get_state),
+    (
+        "personal_assistant_calendar_preflight",
+        CALENDAR_PREFLIGHT_SCHEMA,
+        _handle_calendar_preflight,
+    ),
+    (
+        "personal_assistant_interview_start",
+        INTERVIEW_START_SCHEMA,
+        _handle_interview_start,
+    ),
     (
         "personal_assistant_reconcile_inventory",
         RECONCILE_INVENTORY_SCHEMA,

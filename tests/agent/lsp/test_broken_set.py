@@ -163,7 +163,7 @@ def test_mark_broken_handles_missing_server_silently(tmp_path):
 
 def test_mark_broken_handles_no_workspace_silently(tmp_path):
     """File outside any git worktree → no workspace → no key to add."""
-    src = tmp_path / "orphan.py"
+    src = Path("/dev/shm") / "hermes-lsp-orphan.py"
     src.write_text("")
     svc = LSPService(
         enabled=True,

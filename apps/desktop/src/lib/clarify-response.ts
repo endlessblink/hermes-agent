@@ -13,7 +13,8 @@ export async function respondToClarifyRequest({
   gateway,
   onBeforeSend,
   onError,
-  request
+  request,
+  requestGateway
 }: {
   allowEmpty?: boolean
   answer: string
@@ -22,6 +23,7 @@ export async function respondToClarifyRequest({
   onBeforeSend?: () => void
   onError?: (error: unknown) => void
   request: ClarifyRequest | null | undefined
+  requestGateway?: <T>(method: string, params: Record<string, unknown>) => Promise<T>
 }): Promise<boolean | 'stale'> {
   const trimmed = answer.trim()
 
@@ -35,7 +37,7 @@ export async function respondToClarifyRequest({
     return false
   }
 
-  if (!gateway) {
+  if (!requestGateway && !gateway) {
     notifyError(new Error(copy.gatewayDisconnected), copy.sendFailed)
 
     return false
@@ -44,12 +46,13 @@ export async function respondToClarifyRequest({
   onBeforeSend?.()
 
   try {
-    await gateway.request<{ ok?: boolean }>('clarify.respond', {
+    const send = requestGateway ?? gateway!.request.bind(gateway)
+
+    await send<{ ok?: boolean }>('clarify.respond', {
       request_id: request.requestId,
       answer: trimmed
     })
     triggerHaptic('submit')
-    clearClarifyRequest(request.requestId, request.sessionId)
 
     return true
   } catch (error) {
@@ -61,7 +64,7 @@ export async function respondToClarifyRequest({
     // anything while a form is on screen" trap. Drop the stale request so
     // the composer returns to normal routing; the caller re-sends the text.
     if (/no pending answer request/i.test(message)) {
-      clearClarifyRequest(request.requestId, request.sessionId)
+      clearClarifyRequest(request.requestId)
       onError?.(error)
 
       return 'stale'

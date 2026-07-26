@@ -142,6 +142,31 @@ class TestClarifyToolChoicesValidation:
         assert received == [["אותה אפשרות"]]
         assert result["choices_offered"] == ["אותה אפשרות"]
 
+    def test_personal_assistant_rejects_open_ended_questions(self):
+        result = json.loads(
+            clarify_tool(
+                "What should we do?",
+                callback=lambda _question, _choices: "ignored",
+                personal_assistant_mode=True,
+            )
+        )
+
+        assert "error" in result
+        assert "2-4 distinct choices" in result["error"]
+
+    def test_personal_assistant_rejects_choices_that_deduplicate_below_two(self):
+        result = json.loads(
+            clarify_tool(
+                "Pick one",
+                choices=["same", "same"],
+                callback=lambda _question, _choices: "ignored",
+                personal_assistant_mode=True,
+            )
+        )
+
+        assert "error" in result
+        assert "2-4 distinct choices" in result["error"]
+
     def test_canonically_equivalent_unicode_choices_preserve_first_spelling(self):
         choices, removed = normalize_choices(
             ["  Café option ", "Cafe\u0301 option", "אפשרות אחרת"]

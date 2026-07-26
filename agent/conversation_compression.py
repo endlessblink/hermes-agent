@@ -137,6 +137,22 @@ def _compress_messages(
             )
             return prepared
 
+        prepared = _prepare_bounded_local_compaction(
+            agent,
+            messages,
+            prompt_tokens=approx_tokens,
+        )
+        if prepared is not None:
+            _adopt_prepared_checkpoint(compressor, prepared)
+            logger.info(
+                "context compression using bounded local checkpoint: "
+                "session=%s messages=%d->%d",
+                agent.session_id,
+                len(messages),
+                len(prepared),
+            )
+            return prepared
+
     try:
         return compressor.compress(
             messages,
@@ -169,6 +185,46 @@ def _adopt_prepared_checkpoint(compressor: Any, prepared: list) -> None:
         compressor.compression_count += 1
     except (AttributeError, TypeError):
         pass
+
+
+def _prepare_bounded_local_compaction(
+    agent: Any,
+    messages: list,
+    *,
+    prompt_tokens: Optional[int],
+) -> Optional[list]:
+    """Create the same deterministic checkpoint locally without network I/O."""
+    if not bool(
+        getattr(agent, "compression_background_checkpoint_enabled", False)
+    ):
+        return None
+    if getattr(agent, "api_mode", None) == "codex_app_server":
+        return None
+    compressor = getattr(agent, "context_compressor", None)
+    if compressor is None:
+        return None
+    worker = copy.copy(compressor)
+    worker._session_db = None
+    worker._session_id = ""
+    worker.quiet_mode = True
+    worker.summary_mode = "drop"
+    try:
+        prepared = worker.compress(
+            messages,
+            current_tokens=prompt_tokens,
+            force=True,
+        )
+    except Exception:
+        logger.warning("bounded local compaction failed", exc_info=True)
+        return None
+    if (
+        getattr(worker, "_last_compress_aborted", False)
+        or getattr(worker, "_last_summary_fallback_used", False)
+        or getattr(worker, "_last_summary_error", None)
+        or prepared == messages
+    ):
+        return None
+    return prepared
 
 
 def schedule_background_compaction_checkpoint(agent: Any, messages: list) -> bool:
@@ -247,22 +303,17 @@ def schedule_background_compaction_checkpoint(agent: Any, messages: list) -> boo
     def _prepare(snapshot: list) -> Optional[list]:
         # The worker receives an immutable snapshot and an isolated compressor.
         # It must never rewrite session state before the foreground version fence.
-        worker = copy.copy(compressor)
-        worker._session_db = None
-        worker._session_id = ""
-        worker.quiet_mode = True
-        prepared = worker.compress(
+        # A checkpoint is speculative work. Never spend a second model request
+        # on it: slow auxiliary summaries have taken minutes and can overlap the
+        # hard-threshold foreground compaction, leaving Desktop apparently
+        # frozen on "Summarizing thread". The deterministic drop-mode handoff
+        # is bounded local work, while the protected recent tail and durable
+        # session history retain the exact current state.
+        return _prepare_bounded_local_compaction(
+            agent,
             snapshot,
-            current_tokens=prompt_tokens,
-            force=True,
+            prompt_tokens=prompt_tokens,
         )
-        if (
-            getattr(worker, "_last_compress_aborted", False)
-            or getattr(worker, "_last_summary_fallback_used", False)
-            or getattr(worker, "_last_summary_error", None)
-        ):
-            return None
-        return prepared if prepared != snapshot else None
 
     scheduled = schedule_live_compaction_checkpoint(
         store=store,
@@ -1036,6 +1087,24 @@ def compress_context(
                 len(messages),
                 len(prepared_checkpoint),
             )
+
+        if prepared_checkpoint is None:
+            prepared_checkpoint = _prepare_bounded_local_compaction(
+                agent,
+                messages,
+                prompt_tokens=approx_tokens,
+            )
+            if prepared_checkpoint is not None:
+                _adopt_prepared_checkpoint(
+                    agent.context_compressor, prepared_checkpoint
+                )
+                logger.info(
+                    "context compression applying bounded local checkpoint: "
+                    "session=%s messages=%d->%d",
+                    agent.session_id,
+                    len(messages),
+                    len(prepared_checkpoint),
+                )
 
     # A healthy prepared checkpoint is already strategy-fenced and does not
     # need either the breaker gate or the synchronous provider feasibility

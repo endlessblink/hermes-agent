@@ -2402,6 +2402,40 @@ class TestExecuteToolCalls:
         assert messages[0]["role"] == "tool"
         assert "search result" in messages[0]["content"]
 
+    @pytest.mark.parametrize(
+        "dispatch_method",
+        ["_execute_tool_calls_sequential", "_execute_tool_calls_concurrent"],
+    )
+    def test_personal_assistant_cannot_patch_durable_note_without_approval(
+        self, agent, dispatch_method
+    ):
+        agent.personal_assistant_mode = True
+        tc = _mock_tool_call(
+            name="patch",
+            arguments=json.dumps(
+                {
+                    "mode": "replace",
+                    "path": (
+                        "/vault/MAIN VULT/_System/Hermes Knowledge Graph/"
+                        "Office Work Personal Assistant.md"
+                    ),
+                    "old_string": "source_version: 9",
+                    "new_string": "source_version: 10",
+                }
+            ),
+            call_id="pa-write-1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+
+        with patch("run_agent.handle_function_call", return_value="mutated") as dispatch:
+            getattr(agent, dispatch_method)(mock_msg, messages, "task-1")
+
+        dispatch.assert_not_called()
+        assert len(messages) == 1
+        assert "personal_assistant_propose_capture" in messages[0]["content"]
+        assert "approval" in messages[0]["content"].lower()
+
     def test_sequential_memory_remove_notifies_provider_with_tool_result(self, agent):
         old_text = "stale preference entry"
         tc = _mock_tool_call(

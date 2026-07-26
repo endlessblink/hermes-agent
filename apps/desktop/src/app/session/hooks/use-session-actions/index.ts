@@ -23,7 +23,9 @@ import {
   $newChatWorkspaceTarget,
   $sessions,
   $yoloActive,
+  clearRememberedProfileSessionId,
   clearSessionReplyReady,
+  getRememberedSessionId,
   type NewChatWorkspaceTarget,
   sessionPinId,
   setActiveSessionId,
@@ -38,6 +40,7 @@ import {
   setIntroSeed,
   setMessages,
   setNewChatWorkspaceTarget,
+  setRememberedSessionId,
   setResumeExhaustedSessionId,
   setResumeFailedSessionId,
   setSelectedStoredSessionId,
@@ -480,7 +483,22 @@ export function useSessionActions({
       // gateway call (no-op when it's already on that profile / single-profile).
       // resolveStoredSession finds the row by id (cheap), so an uncached pasted
       // id loads as fast as a sidebar click instead of hanging on a list scan.
-      const storedForProfile = await resolveStoredSession(storedSessionId)
+      let storedForProfile: SessionInfo | undefined
+
+      try {
+        storedForProfile = await resolveStoredSession(storedSessionId)
+      } catch {
+        // Startup can race authoritative profile hydration. Keep the routed id
+        // intact and let use-route-resume's bounded backoff retry after profile
+        // discovery recovers; probing the active DB twice and declaring the
+        // cross-profile session gone would permanently discard a valid route.
+        if (isCurrentResume()) {
+          setResumeFailedSessionId(storedSessionId)
+        }
+
+        return
+      }
+
       const sessionProfile = storedForProfile?.profile
 
       clearSessionReplyReadyMarkers(storedSessionId, storedForProfile)
@@ -822,6 +840,11 @@ export function useSessionActions({
             return
           }
 
+          if (getRememberedSessionId() === storedSessionId) {
+            setRememberedSessionId(null)
+          }
+
+          clearRememberedProfileSessionId(storedSessionId)
           startFreshSessionDraft(true)
 
           return

@@ -13,6 +13,7 @@ import faulthandler
 import inspect
 import json
 import logging
+import math
 import os
 import html as _html
 import re
@@ -29,6 +30,12 @@ _HERMES_UI_FENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _HEBREW_TEXT_RE = re.compile(r"[\u0590-\u05ff]")
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TASK_TABLE_RESERVED_KEYS = {"__proto__", "actions", "cells", "constructor", "id", "prototype", "title"}
+_TASK_TABLE_ROW_KEYS = {
+    "actions", "cells", "confidence", "context", "dueDate", "energy", "externality",
+    "id", "nextStep", "priority", "time", "timeSize", "title", "urgency",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,6 +74,191 @@ def _telegram_display_line(value: object) -> str:
     if text and _HEBREW_TEXT_RE.search(text):
         return f"\u200f{text}"
     return text
+
+
+def _normalize_task_table_artifact(artifact: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Validate Telegram task tables against the Desktop-safe wire contract."""
+    allowed_artifact_keys = {"columns", "description", "direction", "id", "rows", "title", "type"}
+    if any(key not in allowed_artifact_keys for key in artifact):
+        return None
+
+    def clean_text(value: object, limit: int, *, required: bool = False) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        cleaned = value.replace("\0", "").strip()
+        if len(cleaned) > limit or (required and not cleaned):
+            return None
+        return cleaned
+
+    normalized: dict[str, Any] = {"type": "task-table"}
+    for key, limit in (("id", 120), ("title", 160), ("description", 1200)):
+        value = artifact.get(key)
+        if value is None:
+            continue
+        cleaned = clean_text(value, limit)
+        if cleaned is None:
+            return None
+        if cleaned:
+            normalized[key] = cleaned
+    direction = artifact.get("direction")
+    if direction is not None:
+        if not isinstance(direction, str) or direction not in {"auto", "ltr", "rtl"}:
+            return None
+        normalized["direction"] = direction
+
+    raw_columns = artifact.get("columns")
+    if not isinstance(raw_columns, list) or not raw_columns:
+        return None
+    columns: list[object] = []
+    declared_keys: set[str] = set()
+    for raw_column in raw_columns:
+        if isinstance(raw_column, str):
+            key = clean_text(raw_column, 120, required=True)
+            column: object = key
+        elif isinstance(raw_column, dict) and set(raw_column) <= {"key", "label"}:
+            key = clean_text(raw_column.get("key"), 120, required=True)
+            raw_label = raw_column.get("label")
+            label = None if raw_label is None else clean_text(raw_label, 800)
+            if raw_label is not None and label is None:
+                return None
+            column = {"key": key, **({"label": label} if label else {})}
+        else:
+            return None
+        if not key or key in _TASK_TABLE_RESERVED_KEYS or key in declared_keys:
+            return None
+        declared_keys.add(key)
+        columns.append(column)
+    if "task" not in declared_keys:
+        columns.insert(0, "task")
+        declared_keys.add("task")
+    if len(columns) > 12:
+        return None
+    normalized["columns"] = columns
+
+    def visible_record(value: object) -> Optional[dict[str, str | int | float | bool | None]]:
+        if not isinstance(value, dict) or len(value) > 12:
+            return None
+        result: dict[str, str | int | float | bool | None] = {}
+        for key, cell_value in value.items():
+            if not isinstance(key, str) or len(key) > 120:
+                return None
+            if isinstance(cell_value, str):
+                cleaned = clean_text(cell_value, 1000)
+                if cleaned is None:
+                    return None
+                result[key] = cleaned
+            elif cell_value is None or isinstance(cell_value, (bool, int, float)):
+                if isinstance(cell_value, float) and not math.isfinite(cell_value):
+                    return None
+                result[key] = cell_value
+            else:
+                return None
+        return result
+
+    def actions(value: object) -> Optional[list[dict[str, str]]]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or len(value) > 3:
+            return None
+        result: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        for raw_action in value:
+            if not isinstance(raw_action, dict):
+                return None
+            action_id = clean_text(raw_action.get("id"), 120, required=True)
+            label = clean_text(raw_action.get("label"), 80, required=True)
+            submit_text = clean_text(raw_action.get("submitText"), 1600, required=True)
+            raw_copy_text = raw_action.get("copyText")
+            copy_text = None if raw_copy_text is None else clean_text(raw_copy_text, 1200)
+            if not action_id or not label or not submit_text or action_id in seen_ids:
+                return None
+            if raw_copy_text is not None and copy_text is None:
+                return None
+            seen_ids.add(action_id)
+            result.append({
+                "id": action_id,
+                "label": label,
+                "submitText": submit_text,
+                **({"copyText": copy_text} if copy_text else {}),
+            })
+        return result
+
+    raw_rows = artifact.get("rows")
+    if not isinstance(raw_rows, list) or not 1 <= len(raw_rows) <= 100:
+        return None
+    rows: list[dict[str, Any]] = []
+    seen_row_ids: set[str] = set()
+    enum_fields = {
+        "confidence": {"low", "medium", "high"},
+        "energy": {"low", "medium", "high", "unknown"},
+        "externality": {"internal", "external", "waiting", "unknown"},
+        "timeSize": {"tiny", "small", "medium", "large", "unknown"},
+        "urgency": {"low", "medium", "high", "unknown"},
+    }
+    remaining_action_slots = 8
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, dict):
+            return None
+        if any(key not in _TASK_TABLE_ROW_KEYS and key not in declared_keys for key in raw_row):
+            return None
+        row_id = clean_text(raw_row.get("id"), 120, required=True)
+        title = clean_text(raw_row.get("title"), 800, required=True)
+        if not row_id or not title or row_id in seen_row_ids:
+            return None
+        seen_row_ids.add(row_id)
+        row: dict[str, Any] = {"id": row_id, "title": title}
+
+        due_date = raw_row.get("dueDate")
+        if due_date is not None:
+            due_date = clean_text(due_date, 120)
+            if due_date is None or (due_date and not _DATE_ONLY_RE.fullmatch(due_date)):
+                return None
+            row["dueDate"] = due_date or None
+        priority = raw_row.get("priority")
+        if "priority" in raw_row:
+            if priority is not None and (not isinstance(priority, str) or priority not in {"low", "medium", "high"}):
+                return None
+            row["priority"] = priority
+        for key, limit in (("time", 80), ("context", 280), ("nextStep", 280)):
+            value = raw_row.get(key)
+            if value is not None:
+                cleaned = clean_text(value, limit)
+                if cleaned is None:
+                    return None
+                if cleaned:
+                    row[key] = cleaned
+        for key, allowed in enum_fields.items():
+            value = raw_row.get(key)
+            if value is not None:
+                if not isinstance(value, str) or value not in allowed:
+                    return None
+                row[key] = value
+        parsed_actions = actions(raw_row.get("actions"))
+        if parsed_actions is None:
+            return None
+        parsed_actions = parsed_actions[:remaining_action_slots]
+        remaining_action_slots -= len(parsed_actions)
+        if parsed_actions:
+            row["actions"] = parsed_actions
+
+        raw_cells = raw_row.get("cells")
+        cells = {} if raw_cells is None else visible_record(raw_cells)
+        if cells is None:
+            return None
+        if any(key == "task" or key not in declared_keys or key in raw_row for key in cells):
+            return None
+        legacy_values = {
+            key: value for key, value in raw_row.items()
+            if key in declared_keys and key not in _TASK_TABLE_ROW_KEYS
+        }
+        legacy_cells = visible_record(legacy_values)
+        if legacy_cells is None or any(key in cells for key in legacy_cells):
+            return None
+        cells.update(legacy_cells)
+        row["cells"] = cells
+        rows.append(row)
+    normalized["rows"] = rows
+    return normalized
 
 
 def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermesUiControls]:
@@ -152,6 +344,23 @@ def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermes
         if len(fields) > 1:
             lines.append(text("השיבו בשורה נפרדת לכל שדה: שם השדה: תשובה" if rtl else "Reply on a separate line for each field: field: answer"))
             controls = TelegramHermesUiControls(kind="mixed-form")
+
+    elif artifact_type == "task-profile-review":
+        progress = artifact.get("progress") if isinstance(artifact.get("progress"), dict) else {}
+        if progress.get("current") is not None and progress.get("total") is not None:
+            lines.append(text(f"{progress['current']}/{progress['total']}"))
+        for item in artifact.get("summary", []):
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("field") or "").strip()
+            value = str(item.get("value") or "").strip()
+            if label:
+                marker = "⚠️ " if item.get("uncertain") else ""
+                bullet(f"{marker}{label}: {value}" if value else f"{marker}{label}")
+        question = artifact.get("question") if isinstance(artifact.get("question"), dict) else {}
+        heading(question.get("label"))
+        if question.get("description"):
+            lines.append(text(question["description"]))
 
     elif artifact_type in {"checklist", "questionnaire"}:
         raw_items = artifact.get("items")
@@ -245,12 +454,48 @@ def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermes
                     bullet(value)
 
     elif artifact_type == "task-table":
+        metadata_keys = {
+            "confidence",
+            "context",
+            "dueDate",
+            "energy",
+            "externality",
+            "nextStep",
+            "priority",
+            "task",
+            "timeSize",
+            "urgency",
+        }
         for index, row in enumerate(artifact.get("rows", []), 1):
             if isinstance(row, dict):
                 bullet(row.get("title"), f"{index}.")
                 meta = details(row, ("dueDate", "priority", "context", "timeSize", "energy", "urgency", "externality", "nextStep", "confidence"))
                 if meta:
                     lines.append(f"  {text(meta)}")
+                cells = row.get("cells") if isinstance(row.get("cells"), dict) else {}
+                for column in artifact.get("columns", []):
+                    if isinstance(column, str):
+                        key = label = column.strip()
+                    elif isinstance(column, dict):
+                        raw_key = column.get("key")
+                        raw_label = column.get("label")
+                        if not isinstance(raw_key, str) or not isinstance(raw_label, (str, type(None))):
+                            continue
+                        key = raw_key.strip()
+                        label = str(raw_label or key).strip()
+                    else:
+                        continue
+                    has_cell = key in cells
+                    if not key or key == "task" or (key in metadata_keys and not has_cell):
+                        continue
+                    value = cells.get(key) if has_cell else row.get(key)
+                    if value is None:
+                        value = "לא ידוע" if rtl else "Unknown"
+                    elif isinstance(value, bool):
+                        value = ("כן" if value else "לא") if rtl else ("Yes" if value else "No")
+                    elif not isinstance(value, (str, int, float)) or value == "":
+                        continue
+                    lines.append(f"  {text(f'{label}: {value}')}")
 
     elif artifact_type == "mini-kanban":
         for lane in artifact.get("lanes", []):
@@ -361,7 +606,12 @@ def _artifact_lines(artifact: dict[str, Any]) -> tuple[list[str], TelegramHermes
             if key != "actions" and isinstance(child, (dict, list)):
                 collect_actions(child)
 
-    collect_actions(artifact, top_level=True)
+    if artifact_type == "task-table":
+        for row in artifact.get("rows", []):
+            if isinstance(row, dict):
+                collect_actions({"actions": row.get("actions")})
+    else:
+        collect_actions(artifact, top_level=True)
     for label in action_labels:
         if not any(label in line for line in lines):
             bullet(label, "↳")
@@ -392,6 +642,10 @@ def _render_hermes_ui_payload_for_telegram(content: str) -> tuple[str, TelegramH
             return "⚠️ This interactive item could not be rendered. Ask Hermes to resend it."
         if not isinstance(artifact, dict):
             return "⚠️ This interactive item could not be rendered. Ask Hermes to resend it."
+        if artifact.get("type") == "task-table":
+            artifact = _normalize_task_table_artifact(artifact)
+            if artifact is None:
+                return "⚠️ This interactive item could not be rendered. Ask Hermes to resend it."
 
         nonlocal interaction
         lines, controls = _artifact_lines(artifact)
@@ -443,6 +697,26 @@ def _telegram_ui_markup_from_state(state: dict[str, Any]):
         for row in keyboard_rows(state)
     ]
     return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _telegram_ui_text_from_state(state: dict[str, Any]) -> str:
+    """Render the latest durable projection, including unsaved local edits."""
+    artifact = state.get("artifact") if isinstance(state.get("artifact"), dict) else {}
+    if artifact.get("type") == "task-profile-review" and state.get("field_edits"):
+        artifact = dict(artifact)
+        summary = []
+        for raw_item in artifact.get("summary", []):
+            if not isinstance(raw_item, dict):
+                continue
+            item = dict(raw_item)
+            field = str(item.get("field") or "")
+            if field in state["field_edits"]:
+                item["value"] = state["field_edits"][field]
+                item["uncertain"] = False
+            summary.append(item)
+        artifact["summary"] = summary
+    lines, _ = _artifact_lines(artifact)
+    return "\n".join(lines).strip()
 
 
 def _redact_telegram_error_text(error: object) -> str:
@@ -1299,11 +1573,22 @@ class TelegramAdapter(BasePlatformAdapter):
         # penalties, hanging final delivery). Dedup here so a saturated preview
         # goes quiet until finalize. Bounded: entries are dropped on finalize.
         self._last_overflow_preview: Dict[tuple, str] = {}
+        # Injected by the owning gateway/service. Task-profile-review cards are
+        # projections: this callback must durably validate and commit the RPC
+        # payload before the model receives a receipt continuation.
+        self._hermes_ui_commit_callback: Optional[Callable[[dict[str, Any]], Any]] = None
         # Background task that runs post-connect housekeeping (command-menu
         # registration + DM-topic setup) off the connect path so a slow Bot
         # API call (e.g. a set_my_commands stall for certain tokens) cannot
         # blow the gateway's connect timeout (#46298).
         self._post_connect_task: Optional[asyncio.Task] = None
+
+    def set_hermes_ui_commit_callback(
+        self,
+        callback: Optional[Callable[[dict[str, Any]], Any]],
+    ) -> None:
+        """Inject the durable task-profile-review commit boundary."""
+        self._hermes_ui_commit_callback = callback
 
     def _mark_connected(self) -> None:
         self._drop_delayed_deliveries = False
@@ -4862,6 +5147,17 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
+        hermes_ui_markup = None
+        hermes_ui_token: Optional[str] = None
+        if finalize and "hermes-ui" in str(content or "").lower():
+            content, controls = _render_hermes_ui_payload_for_telegram(content)
+            hermes_ui_markup, hermes_ui_token = _telegram_form_reply_markup(
+                controls,
+                chat_id=str(chat_id),
+                thread_id=self._metadata_thread_id(metadata),
+                profile=str((metadata or {}).get("profile") or "") or None,
+            )
+
         split_marker = str(self.config.extra.get("message_split_marker", "") or "")
         if split_marker and split_marker in content:
             if finalize:
@@ -4883,7 +5179,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # table that exceeds the MarkdownV2 limit must not be split into legacy
         # chunks.  Falls back to the legacy edit path (overflow split included)
         # on capability/permanent rejection.
-        if finalize and self._rich_eligible(content):
+        if finalize and hermes_ui_markup is None and self._rich_eligible(content):
             rich_result = await self._try_edit_rich(
                 chat_id, message_id, content, metadata=metadata,
             )
@@ -4942,6 +5238,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     message_id=int(message_id),
                     text=formatted,
                     parse_mode=ParseMode.MARKDOWN_V2,
+                    **({"reply_markup": hermes_ui_markup} if hermes_ui_markup is not None else {}),
                 )
             except Exception as fmt_err:
                 # "Message is not modified" is a no-op, not an error
@@ -4959,7 +5256,12 @@ class TelegramAdapter(BasePlatformAdapter):
                     chat_id=normalize_telegram_chat_id(chat_id),
                     message_id=int(message_id),
                     text=_plain,
+                    **({"reply_markup": hermes_ui_markup} if hermes_ui_markup is not None else {}),
                 )
+            if hermes_ui_token:
+                from plugins.platforms.telegram.hermes_ui import bind_message
+
+                bind_message(hermes_ui_token, message_id)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             err_str = str(e).lower()
@@ -6424,7 +6726,9 @@ class TelegramAdapter(BasePlatformAdapter):
             load_interaction,
             mark_dispatched,
             parse_callback,
+            refresh_interaction,
             reopen_submission,
+            resume_interaction,
         )
 
         parsed = parse_callback(data)
@@ -6457,6 +6761,17 @@ class TelegramAdapter(BasePlatformAdapter):
             or (state.get("user_id") and str(state["user_id"]) != caller_id)
         ):
             await query.answer(text="This control belongs to another conversation.", show_alert=True)
+            return
+
+        if state.get("status") == "expired":
+            state = resume_interaction(token)
+            await query.answer(text="Card refreshed — your draft was preserved.")
+            rendered = self.format_message(_telegram_ui_text_from_state(state))
+            await query.edit_message_text(
+                text=rendered,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=_telegram_ui_markup_from_state(state),
+            )
             return
 
         if not state.get("user_id"):
@@ -6511,6 +6826,83 @@ class TelegramAdapter(BasePlatformAdapter):
                     pass
                 raise
             return
+        if result.outcome == "commit":
+            commit_callback = getattr(self, "_hermes_ui_commit_callback", None)
+            if not callable(commit_callback):
+                reopened = reopen_submission(token)
+                await query.edit_message_reply_markup(
+                    reply_markup=_telegram_ui_markup_from_state(reopened)
+                )
+                await self._bot.send_message(
+                    chat_id=normalize_telegram_chat_id(str(message.chat_id)),
+                    text="This review cannot be saved right now. Your choices are still here.",
+                    reply_to_message_id=message.message_id,
+                )
+                return
+            try:
+                commit_result = commit_callback(dict(result.commit_payload or {}))
+                if inspect.isawaitable(commit_result):
+                    commit_result = await commit_result
+            except Exception as exc:
+                latest = getattr(exc, "latest", None)
+                if isinstance(latest, dict):
+                    latest_artifact = latest.get("artifact") if isinstance(latest.get("artifact"), dict) else latest
+                    refreshed = refresh_interaction(token, latest_artifact)
+                    await query.edit_message_text(
+                        text=self.format_message(_telegram_ui_text_from_state(refreshed)),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=_telegram_ui_markup_from_state(refreshed),
+                    )
+                    return
+                reopened = reopen_submission(token)
+                try:
+                    await query.edit_message_reply_markup(
+                        reply_markup=_telegram_ui_markup_from_state(reopened)
+                    )
+                except Exception:
+                    pass
+                raise
+
+            commit_result = commit_result if isinstance(commit_result, dict) else {}
+            conflict = commit_result.get("conflict")
+            latest = commit_result.get("latest")
+            if isinstance(conflict, dict) and not isinstance(latest, dict):
+                latest = conflict.get("latest")
+            if conflict or isinstance(latest, dict):
+                latest = latest if isinstance(latest, dict) else {}
+                latest_artifact = latest.get("artifact") if isinstance(latest.get("artifact"), dict) else latest
+                if latest_artifact:
+                    refreshed = refresh_interaction(token, latest_artifact)
+                else:
+                    refreshed = reopen_submission(token)
+                await query.edit_message_text(
+                    text=self.format_message(_telegram_ui_text_from_state(refreshed)),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=_telegram_ui_markup_from_state(refreshed),
+                )
+                return
+
+            mark_dispatched(token)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            receipt_continuation = (
+                "Hermes task profile review commit receipt:\n"
+                + json.dumps(
+                    {
+                        "interview": commit_result.get("interview"),
+                        "stateVersion": commit_result.get("stateVersion"),
+                        "duplicate": bool(commit_result.get("duplicate")),
+                        "receipt": commit_result.get("receipt"),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\nContinue from this committed receipt. Do not repeat the write."
+            )
+            await self._dispatch_hermes_ui_payload(query, result.state, receipt_continuation)
+            return
         if result.outcome == "copy":
             await self._bot.send_message(
                 chat_id=normalize_telegram_chat_id(str(message.chat_id)),
@@ -6523,9 +6915,16 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if result.outcome in {"stale", "resolved"}:
             try:
-                await query.edit_message_reply_markup(
-                    reply_markup=_telegram_ui_markup_from_state(result.state)
-                )
+                if result.state.get("artifact_type") == "task-profile-review":
+                    await query.edit_message_text(
+                        text=self.format_message(_telegram_ui_text_from_state(result.state)),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=_telegram_ui_markup_from_state(result.state),
+                    )
+                else:
+                    await query.edit_message_reply_markup(
+                        reply_markup=_telegram_ui_markup_from_state(result.state)
+                    )
             except Exception:
                 pass
             return

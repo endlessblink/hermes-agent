@@ -2,6 +2,7 @@ import { atom } from 'nanostores'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { AssistantState } from './personal-assistant'
+import { $activeSessionId } from './session'
 
 const request = vi.fn()
 const foregroundRequest = vi.fn()
@@ -13,9 +14,12 @@ vi.mock('@/store/gateway', () => ({ $gateway, gatewayForProfile }))
 const {
   $personalAssistantState,
   acknowledgePersonalAssistantRead,
+  continuePersonalAssistantInterview,
+  fetchPersonalAssistantDayPlan,
   hydratePersonalAssistantStateWhenReady,
   openPersonalAssistantHome,
   patchPersonalAssistantState,
+  respondToPersonalAssistantInterview,
   refreshPersonalAssistantState,
   startPersonalAssistant
 } = await import('./personal-assistant')
@@ -26,6 +30,7 @@ beforeEach(() => {
   gatewayForProfile.mockClear()
   gatewayForProfile.mockResolvedValue({ request })
   $gateway.set({ request: foregroundRequest })
+  $activeSessionId.set(null)
   $personalAssistantState.set(null)
 })
 
@@ -110,6 +115,27 @@ describe('startPersonalAssistant', () => {
     expect(request).toHaveBeenCalledWith('personal_assistant.state.get', { profile: 'office-work' })
   })
 
+  it('reads the FlowState day plan through the owner profile', async () => {
+    const plan = {
+      blocks: [{ id: 'block-1', taskId: 'task-1', title: 'Draft plan', startTime: '09:00', durationMinutes: 45 }],
+      capturedAt: '2026-07-20T08:00:00Z',
+      complete: true,
+      date: '2026-07-20',
+      fresh: true,
+      source: 'flowstate'
+    }
+
+    request.mockResolvedValue(plan)
+
+    await expect(fetchPersonalAssistantDayPlan('2026-07-20')).resolves.toEqual(plan)
+
+    expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
+    expect(request).toHaveBeenCalledWith('personal_assistant.day_plan', {
+      date: '2026-07-20',
+      profile: 'office-work'
+    })
+  })
+
   it('acknowledges read state through the owner and stores the returned snapshot', async () => {
     const state = {
       schemaVersion: 1 as const,
@@ -161,6 +187,88 @@ describe('startPersonalAssistant', () => {
       profile: 'office-work'
     })
     expect($personalAssistantState.get()?.version).toBe(5)
+  })
+
+  it('commits an interview answer through the dedicated response endpoint', async () => {
+    const current = { schemaVersion: 1 as const, version: 4 } as unknown as AssistantState
+    $personalAssistantState.set(current)
+    request.mockResolvedValue({ duplicate: false, interview: { revision: 9 }, receipt: {}, stateVersion: 5 })
+
+    await respondToPersonalAssistantInterview({
+      expectedRevision: 8,
+      interviewId: 'weekly-1',
+      questionId: 'urgency',
+      requestId: 'request-1',
+      response: { selectedValues: ['high'] },
+      taskId: 'pet-results'
+    })
+
+    expect(request).toHaveBeenCalledWith('personal_assistant.interview.respond', {
+      expectedRevision: 8,
+      interviewId: 'weekly-1',
+      profile: 'office-work',
+      questionId: 'urgency',
+      requestId: 'request-1',
+      response: { selectedValues: ['high'] },
+      taskId: 'pet-results'
+    })
+    expect($personalAssistantState.get()?.version).toBe(5)
+  })
+
+  it('continues an interview through the canonical owner runtime instead of the active composer', async () => {
+    const state = {
+      schemaVersion: 1 as const,
+      version: 5,
+      sessionId: 'assistant-home'
+    } as unknown as AssistantState
+
+    request
+      .mockResolvedValueOnce({
+        canonical_session_id: 'assistant-home',
+        session_id: 'assistant-runtime',
+        state,
+        status: 'ready'
+      })
+      .mockResolvedValueOnce({ status: 'streaming' })
+
+    await continuePersonalAssistantInterview('Continue committed interview receipt.')
+
+    expect(request).toHaveBeenNthCalledWith(1, 'personal_assistant.home', { profile: 'office-work' })
+    expect(request).toHaveBeenNthCalledWith(2, 'prompt.submit', {
+      reject_if_busy: true,
+      session_id: 'assistant-runtime',
+      text: 'Continue committed interview receipt.'
+    })
+    expect(foregroundRequest).not.toHaveBeenCalled()
+  })
+
+  it('continues a pinned interview in the exact runtime that owns the visible card', async () => {
+    request.mockResolvedValueOnce({ status: 'streaming' })
+
+    await continuePersonalAssistantInterview('Continue committed interview receipt.', 'visible-assistant-runtime')
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request).toHaveBeenCalledWith('prompt.submit', {
+      reject_if_busy: true,
+      session_id: 'visible-assistant-runtime',
+      text: 'Continue committed interview receipt.'
+    })
+    expect(foregroundRequest).not.toHaveBeenCalled()
+  })
+
+  it('continues a main-chat interview in the active visible runtime', async () => {
+    $activeSessionId.set('active-assistant-runtime')
+    request.mockResolvedValueOnce({ status: 'streaming' })
+
+    await continuePersonalAssistantInterview('Continue committed interview receipt.')
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request).toHaveBeenCalledWith('prompt.submit', {
+      reject_if_busy: true,
+      session_id: 'active-assistant-runtime',
+      text: 'Continue committed interview receipt.'
+    })
+    expect(foregroundRequest).not.toHaveBeenCalled()
   })
 
   it('uses the same assistant entry point for scheduled starts', async () => {

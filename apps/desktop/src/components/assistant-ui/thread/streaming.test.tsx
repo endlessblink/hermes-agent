@@ -4,7 +4,9 @@ import { useEffect, useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
-import { setActiveSessionId } from '@/store/session'
+import { $personalAssistantState, type AssistantState } from '@/store/personal-assistant'
+import { $selectedProfileScope } from '@/store/profile'
+import { setActiveSessionId, setSelectedStoredSessionId } from '@/store/session'
 
 import { Thread } from '.'
 
@@ -246,6 +248,36 @@ function assistantImageMessage(running = false): ThreadMessage {
   } as ThreadMessage
 }
 
+function assistantCodeToolMessage(toolName: 'execute_code' | 'terminal' = 'execute_code'): ThreadMessage {
+  return {
+    id: 'assistant-code-tool-1',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool-call',
+        toolCallId: 'code-1',
+        toolName,
+        args: toolName === 'terminal' ? { command: "printf 'private planning details'" } : { code: "print('private planning details')" },
+        argsText: JSON.stringify(
+          toolName === 'terminal'
+            ? { command: "printf 'private planning details'" }
+            : { code: "print('private planning details')" }
+        ),
+        result: { stdout: 'private planning details' }
+      }
+    ],
+    status: { type: 'complete', reason: 'stop' },
+    createdAt,
+    metadata: {
+      unstable_state: null,
+      unstable_annotations: [],
+      unstable_data: [],
+      steps: [],
+      custom: {}
+    }
+  } as ThreadMessage
+}
+
 function StreamingHarness() {
   const [messages, setMessages] = useState<ThreadMessage[]>([userMessage()])
   const [isRunning, setIsRunning] = useState(true)
@@ -400,7 +432,10 @@ describe('assistant-ui streaming renderer', () => {
   beforeEach(() => {
     resizeObservers.clear()
     clearClarifyRequest()
+    $personalAssistantState.set(null)
+    $selectedProfileScope.set('default')
     setActiveSessionId(null)
+    setSelectedStoredSessionId(null)
   })
 
   it('renders assistant text incrementally before completion', async () => {
@@ -503,6 +538,46 @@ describe('assistant-ui streaming renderer', () => {
     expect(container.querySelector('[data-slot="aui_reasoning-text"]')?.textContent).toBe(
       'The user is asking what this file is.'
     )
+  })
+
+  it('keeps personal-assistant reasoning private while showing calm progress', () => {
+    $personalAssistantState.set({ sessionId: 'older-assistant-home' } as unknown as AssistantState)
+    $selectedProfileScope.set('office-work')
+    setActiveSessionId('runtime-resumed-session')
+    setSelectedStoredSessionId('resumed-stored-session')
+
+    const { container } = render(<RunningReasoningHarness />)
+    const disclosure = container.querySelector('[data-slot="aui_thinking-disclosure"]')
+
+    expect(disclosure).toBeTruthy()
+    expect(disclosure?.textContent).toContain('Thinking')
+    expect(disclosure?.textContent).not.toContain('const answer = 42')
+    expect(disclosure?.querySelector('[data-slot="aui_reasoning-text"]')).toBeNull()
+    expect(disclosure?.querySelector('button')).toBeNull()
+  })
+
+  it('keeps ordinary-session reasoning expandable when personal-assistant state exists', () => {
+    $personalAssistantState.set({ sessionId: 'assistant-home' } as unknown as AssistantState)
+    setActiveSessionId('ordinary-session')
+    setSelectedStoredSessionId('ordinary-session')
+
+    const { container } = render(<ReasoningHarness />)
+    const ui = within(container)
+
+    fireEvent.click(ui.getByRole('button', { name: /thinking/i }))
+    expect(container.querySelector('[data-slot="aui_reasoning-text"]')?.textContent).toContain('The user is asking')
+  })
+
+  it('keeps code-execution details private in the personal-assistant profile', () => {
+    $selectedProfileScope.set('office-work')
+
+    const { container, rerender } = render(<MessageHarness message={assistantCodeToolMessage()} />)
+
+    expect(container.textContent).not.toContain('private planning details')
+    expect(container.textContent).not.toContain('execute_code')
+
+    rerender(<MessageHarness message={assistantCodeToolMessage('terminal')} />)
+    expect(container.textContent).not.toContain('private planning details')
   })
 
   it('shows that a running reasoning turn is waiting for the user instead of thinking', () => {

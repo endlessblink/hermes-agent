@@ -79,4 +79,24 @@ describe('useMessageStream compaction lifecycle', () => {
 
     expect($compactingSessions.get()).toEqual({ [OTHER_SID]: true })
   })
+
+  it('clears compaction when the backend reports completion', async () => {
+    await mountStream()
+    setSessionCompacting(OTHER_SID, true)
+
+    emit('status.update', { kind: 'compacting' })
+    emit('status.update', { kind: 'compression_complete' })
+
+    expect($compactingSessions.get()).toEqual({ [OTHER_SID]: true })
+  })
+
+  it('reconciles stale compaction state from session info after reconnect', async () => {
+    await mountStream()
+    setSessionCompacting(OTHER_SID, true)
+
+    emit('status.update', { kind: 'compacting' })
+    emit('session.info', { compacting: false, running: true })
+
+    expect($compactingSessions.get()).toEqual({ [OTHER_SID]: true })
+  })
 })

@@ -242,6 +242,15 @@ class TestBoardCRUD:
         assert again["description"] == "desc"
         assert again["icon"] == "📦"
 
+    def test_repair_only_dispatcher_mode_round_trips(self, fresh_home):
+        meta = kb.create_board(
+            "hermes-repairs",
+            dispatcher_mode="repair-only",
+        )
+
+        assert meta["dispatcher_mode"] == "repair-only"
+        assert kb.read_board_metadata("hermes-repairs")["dispatcher_mode"] == "repair-only"
+
     def test_remove_archive(self, fresh_home):
         kb.create_board("toremove")
         res = kb.remove_board("toremove")

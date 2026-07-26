@@ -179,6 +179,28 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_deterministic_local_turn_skips_unneeded_history_and_recall_work(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("sess-1", source="cli")
+    agent = _FakeAgent()
+    agent._session_db = db
+    agent._todo_store.has_items = lambda: False
+    agent._hydrate_todo_store = MagicMock()
+
+    with patch(
+        "agent.conversation_recall.build_archived_conversation_context"
+    ) as archived_recall:
+        ctx = _build(
+            agent,
+            conversation_history=[{"role": "user", "content": "older turn"}],
+            deterministic_local_turn=True,
+        )
+
+    agent._hydrate_todo_store.assert_not_called()
+    archived_recall.assert_not_called()
+    assert ctx.working_state_context == ""
+
+
 def test_applies_agent_side_effects():
     agent = _FakeAgent()
     _build(agent)

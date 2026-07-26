@@ -109,6 +109,107 @@ async def test_bridge_delivers_monitor_event_to_telegram_home(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bridge_corrects_stale_home_topic_to_office_work_route(tmp_path):
+    enqueue_deadline_risk(tmp_path)
+    adapter = RecordingTelegramAdapter()
+    config, router = configured_gateway(adapter)
+    config.multiplex_profiles = True
+    config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="-1004230590253",
+        thread_id="306",
+        name="Personal assistant",
+    )
+    config.profile_routes = {
+        "telegram": {
+            "topics": {
+                "-1004230590253": {
+                    "306": "default",
+                    "695": "office-work",
+                }
+            },
+            "default": "default",
+        }
+    }
+    bridge = PersonalAssistantTelegramMonitorBridge(tmp_path, config, router)
+
+    assert await bridge.deliver_once(now=NOW + timedelta(minutes=16)) is True
+
+    chat_id, _content, metadata = adapter.sent[0]
+    assert chat_id == "-1004230590253"
+    assert metadata["thread_id"] == "695"
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_home_topic_already_routed_to_office_work(tmp_path):
+    enqueue_deadline_risk(tmp_path)
+    adapter = RecordingTelegramAdapter()
+    config, router = configured_gateway(adapter)
+    config.multiplex_profiles = True
+    config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="-1004230590253",
+        thread_id="695",
+        name="Personal assistant",
+    )
+    config.profile_routes = {
+        "telegram": {
+            "topics": {"-1004230590253": {"695": "office-work"}},
+            "default": "default",
+        }
+    }
+    bridge = PersonalAssistantTelegramMonitorBridge(tmp_path, config, router)
+
+    assert await bridge.deliver_once(now=NOW + timedelta(minutes=16)) is True
+    assert adapter.sent[0][2]["thread_id"] == "695"
+
+
+@pytest.mark.asyncio
+async def test_bridge_fails_closed_without_multiplex_profile_routes(tmp_path):
+    enqueue_deadline_risk(tmp_path)
+    adapter = RecordingTelegramAdapter()
+    config, router = configured_gateway(adapter)
+    config.multiplex_profiles = True
+    config.profile_routes = {}
+    bridge = PersonalAssistantTelegramMonitorBridge(tmp_path, config, router)
+
+    assert await bridge.deliver_once(now=NOW + timedelta(minutes=16)) is False
+    assert adapter.sent == []
+    assert queued_event(tmp_path)["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_bridge_fails_closed_when_office_work_topic_is_ambiguous(tmp_path):
+    enqueue_deadline_risk(tmp_path)
+    adapter = RecordingTelegramAdapter()
+    config, router = configured_gateway(adapter)
+    config.multiplex_profiles = True
+    config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="-1004230590253",
+        thread_id="306",
+        name="Personal assistant",
+    )
+    config.profile_routes = {
+        "telegram": {
+            "topics": {
+                "-1004230590253": {
+                    "306": "default",
+                    "695": "office-work",
+                    "696": "office-work",
+                }
+            },
+            "default": "default",
+        }
+    }
+    bridge = PersonalAssistantTelegramMonitorBridge(tmp_path, config, router)
+
+    assert await bridge.deliver_once(now=NOW + timedelta(minutes=16)) is False
+    assert adapter.sent == []
+    assert queued_event(tmp_path)["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_bridge_settles_only_after_visible_delivery_success(tmp_path):
     enqueue_deadline_risk(tmp_path)
     adapter = RecordingTelegramAdapter([SendResult(success=True)])

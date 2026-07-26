@@ -594,6 +594,8 @@ export const ja = defineLocale({
       justNowSuffix: ' · たった今',
       automaticUpdates: '自動更新',
       automaticUpdatesDesc: 'Hermes はバックグラウンドで自動的に更新を確認し、利用可能になったら通知します。',
+      quitHermes: 'Hermes を終了',
+      quitHermesDesc: 'Hermes とバックグラウンドサービスを完全に停止します。',
       branchCommit: (branch, commit) => `ブランチ ${branch} · コミット ${commit}`,
       never: '未確認',
       justNow: 'たった今',

@@ -95,6 +95,7 @@ declare global {
       setTranslucency?: (payload: { intensity: number }) => void
       setPreviewShortcutActive?: (active: boolean) => void
       openExternal: (url: string) => Promise<void>
+      quit: () => Promise<{ quitting: true }>
       openPreviewInBrowser?: (url: string) => Promise<void>
       fetchLinkTitle: (url: string) => Promise<string>
       sanitizeWorkspaceCwd: (cwd?: null | string) => Promise<{ cwd: string; sanitized: boolean }>
@@ -817,5 +818,7 @@ export interface HermesSelectPathsOptions {
 
 export interface BackendExit {
   code: number | null
+  pooled?: boolean
+  profile?: string
   signal: string | null
 }

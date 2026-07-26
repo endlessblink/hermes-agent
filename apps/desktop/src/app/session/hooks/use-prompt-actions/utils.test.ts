@@ -46,6 +46,9 @@ describe('inlineErrorMessage', () => {
 describe('session error classifiers', () => {
   it('detects not-found and busy errors', () => {
     expect(isSessionNotFoundError(new Error('Session not found'))).toBe(true)
+    expect(
+      isSessionNotFoundError(new Error("Error invoking remote method 'session.resume': Error: {\"error\":{\"code\":4007,\"message\":\"session not found\"}}"))
+    ).toBe(true)
     expect(isSessionBusyError(new Error('session busy'))).toBe(true)
     expect(isSessionNotFoundError(new Error('other'))).toBe(false)
     expect(isSessionBusyError(new Error('other'))).toBe(false)

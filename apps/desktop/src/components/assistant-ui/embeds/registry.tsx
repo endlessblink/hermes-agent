@@ -30,13 +30,18 @@ interface RichCodeBlockProps extends RichFenceProps {
 // artifact — a reasonless retry regenerates the same invalid payload and
 // loops forever (the resend button used to be an infinite loop for any
 // deterministic schema mistake).
-function hermesUiRetryPrompt(reason?: string): string {
+function hermesUiRetryPrompt(reason?: string, artifactType?: string): string {
   const why = reason ? ` Validator error: ${reason}.` : ''
 
-  return `The interactive form could not be rendered.${why} Resend it as one complete valid hermes-ui artifact — the fence body must be pure JSON using only supported keys, with no surrounding explanation — and wait for my response.`
+  const taskTableContract =
+    artifactType === 'task-table'
+      ? ' For a task-table, define columns as {"key":"semanticKey","label":"Visible label"} objects and put each row’s matching values in its "cells" object; cell values must be string, number, boolean, or null scalars, and every row needs id and title.'
+      : ''
+
+  return `The interactive form could not be rendered.${why}${taskTableContract} Resend it as one complete valid hermes-ui artifact — the fence body must be pure JSON using only supported keys, with no surrounding explanation — and wait for my response.`
 }
 
-function InvalidHermesUiNotice({ reason }: { reason?: string }) {
+function InvalidHermesUiNotice({ artifactType, reason }: { artifactType?: string; reason?: string }) {
   return (
     <div className="my-3 rounded-xl border border-amber-500/35 bg-amber-500/8 px-3 py-3 text-sm" role="alert">
       <div className="font-medium text-foreground">Interactive form could not be shown</div>
@@ -45,7 +50,7 @@ function InvalidHermesUiNotice({ reason }: { reason?: string }) {
       </div>
       <button
         className="mt-3 rounded-lg border border-border bg-background px-3 py-1.5 font-medium text-foreground hover:bg-muted"
-        onClick={() => requestComposerSubmit(hermesUiRetryPrompt(reason), { target: 'main' })}
+        onClick={() => requestComposerSubmit(hermesUiRetryPrompt(reason, artifactType), { target: 'main' })}
         type="button"
       >
         Ask Hermes to resend
@@ -82,7 +87,29 @@ export function RichCodeBlock({ code, fallback, language, streaming }: RichCodeB
         )
       }
 
-      return <InvalidHermesUiNotice reason={parsed.error} />
+      let artifactType: string | undefined
+
+      try {
+        const candidate = JSON.parse(code)
+        artifactType =
+          candidate && typeof candidate === 'object' && typeof candidate.type === 'string' ? candidate.type : undefined
+      } catch {
+        artifactType = undefined
+      }
+
+      return <InvalidHermesUiNotice artifactType={artifactType} reason={parsed.error} />
+    }
+
+    if (streaming && parsed.artifact.type === 'task-profile-review') {
+      return (
+        <div
+          aria-live="polite"
+          className="my-3 rounded-xl border border-border/80 bg-muted/25 px-3 py-2 text-sm text-muted-foreground"
+          role="status"
+        >
+          Preparing interactive task review…
+        </div>
+      )
     }
   }
 

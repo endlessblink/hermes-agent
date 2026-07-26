@@ -13,9 +13,6 @@ const isTransientLookupError = (error: unknown): boolean =>
   error instanceof Error && /(useClientLookup|tapClient(Lookup|Resource)).*out of bounds/.test(error.message)
 
 interface Props {
-  // Changes whenever the message list mutates; remounting clears the caught
-  // error so the next consistent render recovers silently.
-  resetKey: string
   children: ReactNode
 }
 
@@ -24,12 +21,6 @@ export class MessageRenderBoundary extends Component<Props, { error: Error | nul
 
   static getDerivedStateFromError(error: Error) {
     return { error }
-  }
-
-  componentDidUpdate(prev: Props) {
-    if (this.state.error && prev.resetKey !== this.props.resetKey) {
-      this.setState({ error: null })
-    }
   }
 
   render() {

@@ -1,9 +1,151 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
+
+
+def test_day_plan_returns_only_sorted_flowstate_blocks_for_requested_date(monkeypatch):
+    import tui_gateway.server as server
+
+    monkeypatch.setattr(server, "_personal_assistant_state_params", lambda rid, params: (object(), None))
+
+    def request(method, path, **kwargs):
+        assert method == "GET"
+        if path == "/api/tasks/inventory?limit=100":
+            return {
+                "capturedAt": "2026-07-20T08:00:00Z",
+                "complete": True,
+                "fresh": True,
+                "items": [
+                    {"id": "task-a", "title": "Late block", "priority": "high"},
+                    {"id": "task-b", "title": "Early block", "priority": None},
+                ],
+            }
+        if path == "/api/tasks/task-a/instances":
+            return {
+                "instances": [
+                    {"id": "instance-a", "scheduledDate": "2026-07-20", "scheduledTime": "14:30", "duration": 45},
+                    {"id": "instance-old", "scheduledDate": "2026-07-19", "scheduledTime": "09:00", "duration": 30},
+                ]
+            }
+        if path == "/api/tasks/task-b/instances":
+            return {
+                "instances": [
+                    {"id": "instance-b", "scheduledDate": "2026-07-20", "scheduledTime": "09:15", "duration": 60}
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr("tools.flowstate_tool._request", request)
+
+    response = server._methods["personal_assistant.day_plan"](
+        "r1", {"date": "2026-07-20", "profile": "office-work"}
+    )
+
+    assert response["result"]["date"] == "2026-07-20"
+    assert response["result"]["fresh"] is True
+    assert [block["id"] for block in response["result"]["blocks"]] == ["instance-b", "instance-a"]
+    assert response["result"]["blocks"][0]["title"] == "Early block"
+
+
+def test_day_plan_rejects_incomplete_flowstate_inventory(monkeypatch):
+    import tui_gateway.server as server
+
+    monkeypatch.setattr(server, "_personal_assistant_state_params", lambda rid, params: (object(), None))
+    monkeypatch.setattr(
+        "tools.flowstate_tool._request",
+        lambda *args, **kwargs: {"complete": False, "fresh": True, "items": []},
+    )
+
+    response = server._methods["personal_assistant.day_plan"](
+        "r1", {"date": "2026-07-20", "profile": "office-work"}
+    )
+
+    assert response["error"]["code"] == 5031
 
 
 def _stub_context(monkeypatch, server):
     monkeypatch.setattr(server, "_personal_assistant_runtime_context", lambda: {})
     monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+
+
+def test_personal_assistant_state_exposes_watchdog_proof_without_paths(
+    monkeypatch, tmp_path
+):
+    import json
+    from datetime import datetime, timezone
+
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    profile_home = tmp_path / "profiles" / "office-work"
+    store = PersonalAssistantStateStore(profile_home)
+    store.read()
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    (logs / "live-watchdog-status.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "startedAt": "2026-07-21T07:00:00+00:00",
+                "heartbeatAt": datetime.now(timezone.utc).isoformat(),
+                "watchedSources": 12,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (logs / "live-watchdog-alerts.latest.json").write_text(
+        json.dumps(
+            {
+                "event": "tool_failure",
+                "severity": "error",
+                "ts": "2026-07-21T07:01:00+00:00",
+                "tool": "personal_assistant_interview_start",
+                "message": "Hermes tool call failed and was sent for repair",
+            }
+        ),
+        encoding="utf-8",
+    )
+    repair_dir = tmp_path / "state" / "improvement-supervisor-global"
+    repair_dir.mkdir(parents=True)
+    (repair_dir / "repair-lifecycle.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "taskId": "repair-123",
+                "status": "candidate_ready",
+                "updatedAt": "2026-07-21T09:00:00Z",
+                "outcomeCode": "verification_passed",
+                "privatePath": "/never/expose/this",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        server, "_personal_assistant_state_params", lambda rid, params: (store, None)
+    )
+    monkeypatch.setattr(server, "_personal_assistant_service", lambda profile: None)
+    monkeypatch.setattr(
+        server, "_personal_assistant_profile_home", lambda profile: profile_home
+    )
+
+    state = server._methods["personal_assistant.state.get"](
+        "r1", {"profile": "office-work"}
+    )["result"]["state"]
+
+    assert state["watchdog"] == {
+        "state": "active",
+        "heartbeatAt": state["watchdog"]["heartbeatAt"],
+        "startedAt": "2026-07-21T07:00:00+00:00",
+        "watchedSources": 12,
+        "latestEvent": "tool_failure",
+        "latestAt": "2026-07-21T07:01:00+00:00",
+        "latestSeverity": "error",
+        "latestTool": "personal_assistant_interview_start",
+        "repairStatus": "candidate_ready",
+        "repairTaskId": "repair-123",
+        "repairUpdatedAt": "2026-07-21T09:00:00Z",
+        "repairOutcomeCode": "verification_passed",
+    }
+    assert str(tmp_path) not in json.dumps(state["watchdog"])
 
 
 def test_owner_home_resolution_fails_closed_from_another_profile(monkeypatch, tmp_path):
@@ -158,6 +300,21 @@ def test_personal_assistant_prompt_sets_a_fast_foreground_contract():
     assert "requested deliverable exists" in prompt
 
 
+def test_personal_assistant_prompt_supersedes_stale_three_timeline_instructions():
+    import tui_gateway.server as server
+
+    prompt = server._personal_assistant_prompt(
+        "manual",
+        "תן לי 3 אפשרויות מעשיות לשאר היום",
+        {},
+    )
+
+    assert "supersedes older conversation instructions" in prompt
+    assert "one compact task-table" in prompt
+    assert "do not return three timelines" in prompt
+    assert "Do not call terminal to discover the current time" in prompt
+
+
 def test_personal_assistant_runtime_policy_caps_only_its_agent():
     import tui_gateway.server as server
 
@@ -188,6 +345,160 @@ def test_personal_assistant_runtime_policy_caps_only_its_agent():
 
     assert ordinary.max_iterations == 60
     assert not hasattr(ordinary, "_tool_result_budget_override")
+
+
+def test_personal_assistant_runtime_policy_sets_explicit_mode_and_store(monkeypatch):
+    import tui_gateway.server as server
+
+    store = object()
+    monkeypatch.setattr(server, "_personal_assistant_store", lambda _profile: store)
+    agent = SimpleNamespace(max_iterations=60, ephemeral_system_prompt="")
+    session = {"agent": agent, "profile": "office-work"}
+
+    server._apply_personal_assistant_runtime_policy(session)
+
+    assert agent.personal_assistant_mode is True
+    assert agent.personal_assistant_state_store is store
+
+
+def test_personal_assistant_runtime_policy_refreshes_task_sources_when_resuming_old_session(
+    monkeypatch,
+):
+    import tui_gateway.server as server
+
+    recorded = []
+
+    class Store:
+        def set_task_source_manifest(self, sources):
+            recorded.append(sources)
+
+    monkeypatch.setattr(server, "_personal_assistant_store", lambda _profile: Store())
+    monkeypatch.setattr(
+        server,
+        "_personal_assistant_runtime_context",
+        lambda: {
+            "task_sources": [
+                {"id": "alpha", "inventoryTool": "alpha_inventory", "available": True},
+                {"id": "beta", "inventoryTool": "beta_inventory", "available": False},
+            ]
+        },
+    )
+    agent = SimpleNamespace(max_iterations=60, ephemeral_system_prompt="")
+
+    server._apply_personal_assistant_runtime_policy({"agent": agent, "profile": "office-work"})
+
+    assert recorded == [
+        [
+            {"id": "alpha", "inventoryTool": "alpha_inventory", "available": True},
+            {"id": "beta", "inventoryTool": "beta_inventory", "available": False},
+        ]
+    ]
+
+
+def test_prompt_boundary_restores_canonical_personal_assistant_mode(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+
+    agent = SimpleNamespace(personal_assistant_mode=False)
+    session = {
+        "agent": agent,
+        "session_key": "compressed-tip",
+    }
+    applied = []
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "default")
+    monkeypatch.setattr(
+        server,
+        "_is_canonical_personal_assistant_session",
+        lambda session_id, profile, db=None: (
+            session_id == "compressed-tip"
+            and profile == "office-work"
+            and db == "profile-db"
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_session_db",
+        lambda _session: nullcontext("profile-db"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_apply_personal_assistant_runtime_policy",
+        lambda restored: applied.append(restored),
+    )
+
+    assert server._restore_personal_assistant_policy_at_prompt_boundary(session) is True
+    assert applied == [session]
+
+
+def test_personal_assistant_interview_respond_commits_and_returns_conflicts(
+    monkeypatch, tmp_path
+):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    started = store.patch_planning_interview(
+        interview_id="planning-1",
+        expected_revision=0,
+        request_id="start-1",
+        operations=[
+            {
+                "op": "start",
+                "sourceSnapshot": {},
+                "tasks": [{"taskId": "pet-results", "title": "Check PET results"}],
+            }
+        ],
+    )
+    positioned = store.patch_planning_interview(
+        interview_id="planning-1",
+        expected_revision=started["interview"]["interviewRevision"],
+        request_id="cursor-1",
+        operations=[
+            {
+                "op": "set-cursor",
+                "taskId": "pet-results",
+                "questionId": "urgency",
+            }
+        ],
+    )
+
+    response = server._methods["personal_assistant.interview.respond"](
+        "r1",
+        {
+            "profile": "office-work",
+            "interviewId": "planning-1",
+            "expectedRevision": positioned["interview"]["interviewRevision"],
+            "taskId": "pet-results",
+            "questionId": "urgency",
+            "requestId": "answer-1",
+            "response": {"selectedValues": ["high"], "action": "answer"},
+        },
+    )
+
+    assert response["result"]["interview"]["tasks"][0]["profile"]["urgency"] == "high"
+    assert response["result"]["interview"]["cursor"]["questionId"] == "importance"
+    assert response["result"]["receipt"]["requestId"] == "answer-1"
+    assert response["result"]["nextArtifact"]["type"] == "task-profile-review"
+    assert response["result"]["nextArtifact"]["question"]["id"] == "importance"
+
+    conflict = server._methods["personal_assistant.interview.respond"](
+        "r2",
+        {
+            "profile": "office-work",
+            "interviewId": "planning-1",
+            "expectedRevision": positioned["interview"]["interviewRevision"],
+            "taskId": "pet-results",
+            "questionId": "urgency",
+            "requestId": "answer-stale",
+            "response": {"selectedValues": ["low"], "action": "answer"},
+        },
+    )
+
+    assert conflict["error"]["code"] == 4093
+    assert conflict["error"]["data"]["code"] == "interview_version_conflict"
+    assert conflict["error"]["data"]["latest"]["interviewRevision"] == response["result"]["interview"]["interviewRevision"]
 
 
 def test_explicit_create_marks_personal_assistant_for_deferred_policy(monkeypatch, tmp_path):
@@ -255,6 +566,68 @@ def test_explicit_cold_resume_marks_personal_assistant_for_deferred_policy(
     finally:
         with server._sessions_lock:
             server._sessions.pop(sid, None)
+
+
+def test_cold_resume_rotates_a_stale_canonical_personal_assistant(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    stale = "20260713_213221_969ef9"
+    continuation = "20260722_011526_b09a2b"
+
+    class FakeDb:
+        def get_session(self, session_id):
+            return {"id": session_id, "title": "Personal assistant", "created_at": 1.0}
+
+        def get_session_by_title(self, title):
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            return continuation if session_id == stale else session_id
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.set_canonical_session(stale)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: None)
+    monkeypatch.setattr(server, "_current_profile_name", lambda: "office-work")
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(server, "_get_db", lambda: FakeDb())
+    monkeypatch.setattr(
+        server,
+        "_personal_assistant_canonical_is_stale",
+        lambda canonical: canonical == stale,
+    )
+    creates = []
+    monkeypatch.setitem(
+        server._methods,
+        "session.create",
+        lambda rid, params: creates.append(params)
+        or server._ok(
+            rid,
+            {
+                "session_id": "fresh-live",
+                "stored_session_id": "20260722_030000_fresh1",
+                "message_count": 0,
+                "messages": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
+
+    response = server._methods["session.resume"](
+        "r1",
+        {
+            "session_id": continuation,
+            "source": "desktop",
+            "personal_assistant": True,
+        },
+    )
+
+    assert len(creates) == 1
+    assert creates[0]["personal_assistant"] is True
+    assert response["result"]["session_id"] == "fresh-live"
+    assert response["result"]["session_key"] == "20260722_030000_fresh1"
+    assert response["result"]["rotated_from"] == continuation
+    assert store.read()["canonical_session_id"] == "20260722_030000_fresh1"
 
 
 def test_canonical_cold_resume_restores_personal_assistant_policy_without_ui_flag(
@@ -605,6 +978,164 @@ def test_home_returns_live_and_canonical_session_ids(monkeypatch, tmp_path):
     assert applied == ["assistant-live"]
 
 
+def test_home_keeps_an_empty_canonical_session_instead_of_creating_another(
+    monkeypatch, tmp_path
+):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    PersonalAssistantStateStore(tmp_path).set_canonical_session("assistant-home")
+    resumes = []
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: resumes.append(params)
+        or server._ok(
+            rid,
+            {
+                "message_count": 0,
+                "session_id": "assistant-live",
+                "session_key": "assistant-home",
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "session.create",
+        lambda rid, params: (_ for _ in ()).throw(
+            AssertionError("an empty canonical home must not be replaced")
+        ),
+    )
+    monkeypatch.setattr(
+        server, "_apply_personal_assistant_runtime_policy_for_session", lambda sid: None
+    )
+
+    response = server._methods["personal_assistant.home"]("r1", {})
+
+    assert response["result"]["canonical_session_id"] == "assistant-home"
+    assert response["result"]["session_id"] == "assistant-live"
+    assert [call["session_id"] for call in resumes] == ["assistant-home"]
+
+
+def test_home_rotates_a_prior_day_canonical_conversation(monkeypatch, tmp_path):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    store.set_canonical_session("20260721_235959_old001")
+    store.patch_planning_interview(
+        interview_id="stale-plan",
+        expected_revision=0,
+        request_id="start-stale-plan",
+        operations=[
+            {
+                "op": "start",
+                "planningDate": "2026-07-21",
+                "sourceSnapshot": {"localDate": "2026-07-21"},
+                "tasks": [{"taskId": "task-a", "title": "Old question"}],
+            }
+        ],
+    )
+    resumes = []
+    creates = []
+    monkeypatch.setattr(
+        server,
+        "_personal_assistant_canonical_is_stale",
+        lambda canonical: True,
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: resumes.append(params)
+        or server._ok(rid, {"session_id": "stale-live"}),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "session.create",
+        lambda rid, params: creates.append(params)
+        or server._ok(
+            rid,
+            {"session_id": "fresh-live", "stored_session_id": "20260722_020000_new001"},
+        ),
+    )
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
+    monkeypatch.setattr(
+        server,
+        "_apply_personal_assistant_runtime_policy_for_session",
+        lambda sid: None,
+    )
+
+    response = server._methods["personal_assistant.home"]("r1", {})
+
+    assert resumes == []
+    assert len(creates) == 1
+    assert response["result"]["session_id"] == "fresh-live"
+    assert response["result"]["canonical_session_id"] == "20260722_020000_new001"
+    rotated_state = store.read()
+    assert rotated_state["canonical_session_id"] == "20260722_020000_new001"
+    assert rotated_state["planning_interview"] is None
+    assert rotated_state["planning_interview_archive"][-1]["status"] == "expired"
+
+
+def test_home_rotates_same_day_conversation_when_it_contained_an_expired_interview(
+    monkeypatch, tmp_path
+):
+    import tui_gateway.server as server
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    _stub_context(monkeypatch, server)
+    monkeypatch.setattr(server, "_profile_home", lambda profile: tmp_path)
+    store = PersonalAssistantStateStore(tmp_path)
+    store.set_canonical_session("20260722_020000_current")
+    store.patch_planning_interview(
+        interview_id="stale-plan",
+        expected_revision=0,
+        request_id="start-stale-plan",
+        operations=[
+            {
+                "op": "start",
+                "planningDate": "2026-07-20",
+                "sourceSnapshot": {"localDate": "2026-07-20"},
+                "tasks": [{"taskId": "task-a", "title": "Old question"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        server, "_personal_assistant_canonical_is_stale", lambda canonical: False
+    )
+    resumes = []
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: resumes.append(params)
+        or server._ok(rid, {"session_id": "stale-live"}),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "session.create",
+        lambda rid, params: server._ok(
+            rid,
+            {"session_id": "fresh-live", "stored_session_id": "20260722_040000_clean"},
+        ),
+    )
+    monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
+    monkeypatch.setattr(
+        server,
+        "_apply_personal_assistant_runtime_policy_for_session",
+        lambda sid: None,
+    )
+
+    response = server._methods["personal_assistant.home"]("r1", {})
+
+    assert resumes == []
+    assert response["result"]["canonical_session_id"] == "20260722_040000_clean"
+    assert store.read()["planning_interview"] is None
+
+
 def test_home_preserves_unread_activity_until_the_transcript_is_read(monkeypatch, tmp_path):
     import tui_gateway.server as server
     from agent.personal_assistant_state import PersonalAssistantStateStore
@@ -722,7 +1253,7 @@ def test_state_rpc_uses_camel_case_contract_and_returns_conflict_snapshot(monkey
             ],
         },
     )["result"]["state"]
-    assert changed["schemaVersion"] == 1
+    assert changed["schemaVersion"] == 2
     assert changed["outcomes"][0]["id"] == "o1"
     assert changed["capacity"]["summary"] == "4h"
 

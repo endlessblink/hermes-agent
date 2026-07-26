@@ -6,6 +6,7 @@ export {
   type GatewayRequestId,
   type JsonRpcFrame,
   JsonRpcGatewayClient,
+  JsonRpcGatewayError,
   type WebSocketLike
 } from './json-rpc-gateway'
 export {

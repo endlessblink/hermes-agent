@@ -692,6 +692,8 @@ export const zh: Translations = {
       justNowSuffix: ' · 刚刚',
       automaticUpdates: '自动更新',
       automaticUpdatesDesc: 'Hermes 会在后台自动检查更新，并在有可用更新时通知你。',
+      quitHermes: '退出 Hermes',
+      quitHermesDesc: '完全停止 Hermes 及其后台服务。',
       branchCommit: (branch, commit) => `分支 ${branch} · 提交 ${commit}`,
       never: '从未',
       justNow: '刚刚',

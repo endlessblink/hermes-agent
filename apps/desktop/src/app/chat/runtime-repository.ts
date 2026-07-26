@@ -4,6 +4,10 @@ import { useMemo, useRef } from 'react'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { coalesceToolOnlyAssistants, createToolMergeCache, toRuntimeMessage } from '@/lib/chat-runtime'
 
+export function visibleMessagesForRuntime(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter(message => !message.hidden)
+}
+
 /**
  * ChatMessage[] -> assistant-ui message repository, with a WeakMap identity
  * cache so unchanged messages convert once (and a tool-merge cache that folds
@@ -20,7 +24,7 @@ export function useRuntimeMessageRepository(messages: ChatMessage[]): ExportedMe
     let visibleParentId: string | null = null
     let headId: string | null = null
 
-    for (const message of coalesceToolOnlyAssistants(messages, toolMergeCacheRef.current)) {
+    for (const message of coalesceToolOnlyAssistants(visibleMessagesForRuntime(messages), toolMergeCacheRef.current)) {
       let parentId = visibleParentId
 
       if (message.role === 'assistant' && message.branchGroupId) {

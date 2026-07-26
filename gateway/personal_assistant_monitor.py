@@ -12,7 +12,7 @@ import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from agent.personal_assistant_monitor import (
     defer_candidate_event,
@@ -22,11 +22,86 @@ from agent.personal_assistant_monitor import (
     retry_candidate_event,
     settle_candidate_event,
 )
-from gateway.config import GatewayConfig, Platform
+from gateway.config import GatewayConfig, HomeChannel, Platform
 from gateway.delivery import DeliveryRouter, DeliveryTarget
 
 
 logger = logging.getLogger(__name__)
+
+
+def _route_value(mapping: Any, key: str) -> Any:
+    if not isinstance(mapping, Mapping):
+        return None
+    if key in mapping:
+        return mapping[key]
+    return next(
+        (value for candidate, value in mapping.items() if str(candidate) == key),
+        None,
+    )
+
+
+def _office_work_target(
+    config: GatewayConfig,
+    home: HomeChannel,
+) -> DeliveryTarget | None:
+    chat_id = str(home.chat_id)
+    thread_id = str(home.thread_id) if home.thread_id else None
+    target = DeliveryTarget(
+        platform=Platform.TELEGRAM,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        is_explicit=True,
+    )
+    if not config.multiplex_profiles:
+        return target
+
+    all_routes = config.profile_routes
+    telegram_routes = _route_value(all_routes, Platform.TELEGRAM.value)
+    if not isinstance(telegram_routes, Mapping) or not telegram_routes:
+        logger.error(
+            "Personal-assistant Telegram delivery requires office-work profile routes"
+        )
+        return None
+
+    topic_map = _route_value(telegram_routes.get("topics"), chat_id)
+    if thread_id is not None:
+        routed_profile = _route_value(topic_map, thread_id)
+    else:
+        routed_profile = _route_value(telegram_routes.get("chats"), chat_id)
+    if routed_profile == "office-work":
+        return target
+
+    office_topics = sorted(
+        {
+            str(candidate_thread)
+            for candidate_thread, profile in (
+                topic_map.items() if isinstance(topic_map, Mapping) else ()
+            )
+            if profile == "office-work"
+        }
+    )
+    if len(office_topics) != 1:
+        logger.error(
+            "Personal-assistant Telegram target is not uniquely routed to office-work "
+            "(chat=%s, configured_thread=%s, candidate_count=%s)",
+            chat_id,
+            thread_id,
+            len(office_topics),
+        )
+        return None
+
+    corrected_thread = office_topics[0]
+    logger.warning(
+        "Corrected stale personal-assistant Telegram topic %s to office-work topic %s",
+        thread_id,
+        corrected_thread,
+    )
+    return DeliveryTarget(
+        platform=Platform.TELEGRAM,
+        chat_id=chat_id,
+        thread_id=corrected_thread,
+        is_explicit=True,
+    )
 
 
 def _format_event(event: dict[str, Any]) -> str:
@@ -78,12 +153,7 @@ class PersonalAssistantTelegramMonitorBridge:
         home = self.config.get_home_channel(Platform.TELEGRAM)
         if home is None or not home.chat_id:
             return None
-        return DeliveryTarget(
-            platform=Platform.TELEGRAM,
-            chat_id=str(home.chat_id),
-            thread_id=str(home.thread_id) if home.thread_id else None,
-            is_explicit=True,
-        )
+        return _office_work_target(self.config, home)
 
     async def deliver_once(self, *, now: datetime | None = None) -> bool:
         target = self._target()

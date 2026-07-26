@@ -411,6 +411,8 @@ export interface Translations {
       justNowSuffix: string
       automaticUpdates: string
       automaticUpdatesDesc: string
+      quitHermes: string
+      quitHermesDesc: string
       branchCommit: (branch: string, commit: string) => string
       never: string
       justNow: string

@@ -7,6 +7,7 @@ import {
   clampForDisplay,
   countDiffLineStats,
   inlineDiffFromResult,
+  isToolFailureRecovered,
   MAX_TOOL_RENDER_CHARS,
   type ToolPart
 } from './fallback-model'
@@ -74,6 +75,33 @@ describe('buildToolView terminal exit-code status', () => {
     expect(buildToolView(part({ isError: true, result: { output: 'x' }, toolName: 'terminal' }), '').status).toBe(
       'error'
     )
+  })
+})
+
+describe('same-turn tool recovery', () => {
+  const failed = part({
+    isError: true,
+    result: { error: 'temporary failure' },
+    toolCallId: 'call_failed',
+    toolName: 'personal_assistant_calendar_preflight'
+  })
+
+  it('marks an earlier failure recovered after the same tool succeeds', () => {
+    const succeeded = part({
+      result: { ok: true },
+      toolCallId: 'call_succeeded',
+      toolName: failed.toolName
+    })
+
+    expect(isToolFailureRecovered([failed, succeeded], failed)).toBe(true)
+    expect(buildToolView(failed, '', true).status).toBe('warning')
+  })
+
+  it('does not recover a failure from another tool or an unfinished retry', () => {
+    const other = part({ result: { ok: true }, toolCallId: 'call_other', toolName: 'flowstate_list_tasks' })
+    const pending = part({ result: undefined, toolCallId: 'call_pending', toolName: failed.toolName })
+
+    expect(isToolFailureRecovered([failed, other, pending], failed)).toBe(false)
   })
 })
 

@@ -103,6 +103,12 @@ class TestResolveToolset:
             "flowstate_subtask_batch",
         }
 
+    def test_flowstate_toolset_exposes_task_start(self):
+        assert "flowstate_start_timer" in resolve_toolset("flowstate")
+
+    def test_flowstate_toolset_exposes_task_stop(self):
+        assert "flowstate_stop_timer" in resolve_toolset("flowstate")
+
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):
         reg = ToolRegistry()
         reg.register(

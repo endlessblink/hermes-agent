@@ -60,7 +60,14 @@ export function createClientSessionState(
   }
 }
 
-export function sessionTitle(session: SessionInfo): string {
+export function sessionTitle(session: SessionInfo, personalAssistantSessionId?: null | string): string {
+  if (
+    personalAssistantSessionId &&
+    (session.id === personalAssistantSessionId || session._lineage_root_id === personalAssistantSessionId)
+  ) {
+    return 'Personal assistant'
+  }
+
   return session.title?.trim() || session.preview?.trim() || 'Untitled session'
 }
 

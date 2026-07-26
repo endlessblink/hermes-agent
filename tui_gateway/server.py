@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -17,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
+from zoneinfo import ZoneInfo
 
 from hermes_constants import (
     get_hermes_home,
@@ -1171,6 +1173,31 @@ def _emit_diagnostic_event(
     _emit("diagnostic.event", sid, payload)
 
 
+def _emit_tool_iteration_exhausted_diagnostic(sid: str, result: dict) -> None:
+    if not isinstance(result, dict) or result.get("tool_iteration_exhausted") is not True:
+        return
+
+    def bounded_count(value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        try:
+            return max(0, min(1000, int(value)))
+        except (TypeError, ValueError):
+            return 0
+
+    _emit_diagnostic_event(
+        sid,
+        component="turn",
+        event="tool_iteration_exhausted",
+        message="Hermes exhausted the tool iteration budget",
+        severity="error",
+        details={
+            "iteration_count": bounded_count(result.get("tool_iteration_count")),
+            "iteration_limit": bounded_count(result.get("tool_iteration_limit")),
+        },
+    )
+
+
 _compute_host_supervisor = None
 _compute_host_supervisor_lock = threading.Lock()
 
@@ -1675,6 +1702,28 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 pass
 
             _wire_callbacks(sid)
+            # Cold resume may sanitize a dangling tool tail after the last
+            # checkpoint was written. Rebuild coverage immediately so the first
+            # user turn cannot cross the hard threshold before prewarming runs.
+            try:
+                from agent.conversation_compression import (
+                    schedule_background_compaction_checkpoint,
+                )
+
+                history_lock = current.get("history_lock")
+                if history_lock is not None:
+                    with history_lock:
+                        checkpoint_history = list(current.get("history") or [])
+                else:
+                    checkpoint_history = list(current.get("history") or [])
+                schedule_background_compaction_checkpoint(
+                    agent, checkpoint_history
+                )
+            except Exception:
+                logger.debug(
+                    "cold-resume checkpoint scheduling failed",
+                    exc_info=True,
+                )
             # Surface the self-improvement review's "💾 …" summary as an event
             # the TUI/desktop render in-transcript, honoring
             # display.memory_notifications. _init_session wires this for the
@@ -3851,7 +3900,9 @@ _PERSONAL_ASSISTANT_TRIGGERS = {
     "review",
 }
 _PERSONAL_ASSISTANT_OWNER_PROFILE = "office-work"
-_PERSONAL_ASSISTANT_MAX_ITERATIONS = 6
+# Still bounded for responsiveness, with headroom for preview/apply and
+# desktop verification after the six-round timer-start failure.
+_PERSONAL_ASSISTANT_MAX_ITERATIONS = 12
 _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY = """Personal Assistant responsiveness policy:
 - Return a useful visible response quickly; do not silently finish a broad audit first.
 - Use at most one focused batch of exact, relevant read-only tools by default.
@@ -3873,6 +3924,24 @@ def _apply_personal_assistant_runtime_policy(session: dict) -> None:
     agent = session.get("agent")
     if agent is None:
         return
+    agent.personal_assistant_mode = True
+    try:
+        agent.personal_assistant_state_store = _personal_assistant_store(
+            _PERSONAL_ASSISTANT_OWNER_PROFILE
+        )
+        set_task_sources = getattr(
+            agent.personal_assistant_state_store, "set_task_source_manifest", None
+        )
+        if callable(set_task_sources):
+            runtime_task_sources = _personal_assistant_runtime_context().get("task_sources")
+            if isinstance(runtime_task_sources, list) and runtime_task_sources:
+                set_task_sources(runtime_task_sources)
+    except (FileNotFoundError, OSError, ValueError):
+        logger.warning(
+            "Personal Assistant state store is unavailable for the Desktop session",
+            exc_info=True,
+        )
+        agent.personal_assistant_state_store = None
     try:
         configured = int(getattr(agent, "max_iterations", _PERSONAL_ASSISTANT_MAX_ITERATIONS))
     except (TypeError, ValueError):
@@ -3905,6 +3974,33 @@ def _apply_personal_assistant_runtime_policy_for_session(session_id: str) -> Non
         _apply_personal_assistant_runtime_policy(session)
 
 
+def _result_used_personal_assistant_tool(result: Any) -> bool:
+    """Recognize assistant work after a restored session lost its runtime flag."""
+
+    if not isinstance(result, dict):
+        return False
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("name") or "").startswith("personal_assistant_"):
+            return True
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if isinstance(function, dict) and str(function.get("name") or "").startswith(
+                "personal_assistant_"
+            ):
+                return True
+    return False
+
+
 def _personal_assistant_profile_home(profile: str) -> Path:
     """Resolve assistant ownership without falling back into another profile."""
     from hermes_constants import get_hermes_home
@@ -3921,6 +4017,19 @@ def _personal_assistant_store(profile: str):
     from agent.personal_assistant_state import PersonalAssistantStateStore
 
     return PersonalAssistantStateStore(_personal_assistant_profile_home(profile))
+
+
+def _personal_assistant_canonical_is_stale(canonical_session_id: str) -> bool:
+    """Keep one planning conversation per Jerusalem day; durable state lives elsewhere."""
+
+    match = re.match(r"^(\d{8})_", str(canonical_session_id or ""))
+    if match is None:
+        return False
+    try:
+        session_day = datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return False
+    return session_day < datetime.now(ZoneInfo("Asia/Jerusalem")).date()
 
 
 def _is_canonical_personal_assistant_session(
@@ -3950,6 +4059,35 @@ def _is_canonical_personal_assistant_session(
         return False
 
 
+def _restore_personal_assistant_policy_at_prompt_boundary(session: dict) -> bool:
+    """Rehydrate the canonical assistant before any model or compression work."""
+
+    agent = session.get("agent")
+    if agent is None:
+        return False
+    if session.get("personal_assistant") and bool(
+        getattr(agent, "personal_assistant_mode", False)
+    ):
+        return True
+
+    canonical = bool(session.get("personal_assistant"))
+    if not canonical:
+        try:
+            owner_profile = _PERSONAL_ASSISTANT_OWNER_PROFILE
+            with _session_db(session) as db:
+                canonical = _is_canonical_personal_assistant_session(
+                    str(session.get("session_key") or ""),
+                    owner_profile,
+                    db,
+                )
+        except (FileNotFoundError, OSError, ValueError):
+            return False
+
+    if canonical:
+        _apply_personal_assistant_runtime_policy(session)
+    return canonical
+
+
 def _personal_assistant_service(profile: str):
     """Build the Obsidian-backed service when the profile has vault config."""
     from agent.personal_assistant_obsidian import PersonalAssistantObsidianAdapter
@@ -3976,6 +4114,78 @@ def _personal_assistant_state_params(rid, params: dict):
         return None, _err(rid, 4007, str(exc))
 
 
+def _read_bounded_status_json(path: Path) -> dict:
+    try:
+        if path.stat().st_size > 64 * 1024:
+            return {}
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _personal_assistant_watchdog_status(profile: str) -> dict:
+    profile_home = _personal_assistant_profile_home(profile)
+    root_home = (
+        profile_home.parent.parent
+        if profile_home.parent.name == "profiles"
+        else profile_home
+    )
+    heartbeat = _read_bounded_status_json(
+        root_home / "logs" / "live-watchdog-status.json"
+    )
+    latest = _read_bounded_status_json(
+        root_home / "logs" / "live-watchdog-alerts.latest.json"
+    )
+    repair_lifecycle = _read_bounded_status_json(
+        root_home
+        / "state"
+        / "improvement-supervisor-global"
+        / "repair-lifecycle.json"
+    )
+
+    heartbeat_at = str(heartbeat.get("heartbeatAt") or "")
+    try:
+        observed = datetime.fromisoformat(heartbeat_at.replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - observed).total_seconds())
+    except ValueError:
+        age_seconds = float("inf")
+
+    repair_task_id = _watchdog_safe_token(repair_lifecycle.get("taskId"), limit=80)
+    repair_status = _watchdog_safe_token(repair_lifecycle.get("status"), limit=24)
+    if repair_status not in {
+        "queued",
+        "running",
+        "verifying",
+        "candidate_ready",
+        "failed",
+        "timed_out",
+        "cancelled",
+    } or not repair_task_id:
+        repair_status = "none"
+        repair_task_id = ""
+    repair_updated_at = str(repair_lifecycle.get("updatedAt") or "")[:40]
+    repair_outcome_code = _watchdog_safe_token(
+        repair_lifecycle.get("outcomeCode"), limit=80
+    )
+    return {
+        "state": "active" if age_seconds <= 30 else "stale" if heartbeat_at else "unavailable",
+        "heartbeatAt": heartbeat_at or None,
+        "startedAt": str(heartbeat.get("startedAt") or "") or None,
+        "watchedSources": max(0, min(1000, int(heartbeat.get("watchedSources") or 0))),
+        "latestEvent": _watchdog_safe_token(latest.get("event"), limit=120) or None,
+        "latestAt": str(latest.get("ts") or "")[:100] or None,
+        "latestSeverity": _watchdog_safe_token(latest.get("severity"), limit=20) or None,
+        "latestTool": _watchdog_safe_token(latest.get("tool"), limit=80) or None,
+        "repairStatus": repair_status,
+        "repairTaskId": repair_task_id or None,
+        "repairUpdatedAt": repair_updated_at or None,
+        "repairOutcomeCode": repair_outcome_code or None,
+    }
+
+
 @method("personal_assistant.state.get")
 def _(rid, params: dict) -> dict:
     store, error = _personal_assistant_state_params(rid, params)
@@ -3987,7 +4197,96 @@ def _(rid, params: dict) -> dict:
     except ValueError as exc:
         return _err(rid, 4092, str(exc))
     from agent.personal_assistant_state import public_state
-    return _ok(rid, {"state": public_state(state)})
+    result = public_state(state)
+    result["watchdog"] = _personal_assistant_watchdog_status(
+        _PERSONAL_ASSISTANT_OWNER_PROFILE
+    )
+    return _ok(rid, {"state": result})
+
+
+@method("personal_assistant.day_plan")
+def _(rid, params: dict) -> dict:
+    """Return today's authenticated FlowState work blocks without exposing auth."""
+    from urllib.parse import quote
+    from tools.flowstate_tool import _request as flowstate_request
+
+    _, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    requested_date = str(params.get("date") or "").strip()
+    try:
+        if datetime.strptime(requested_date, "%Y-%m-%d").strftime("%Y-%m-%d") != requested_date:
+            raise ValueError
+    except ValueError:
+        return _err(rid, 4000, "date must be YYYY-MM-DD")
+
+    try:
+        inventory = flowstate_request(
+            "GET", "/api/tasks/inventory?limit=100", allow_stale_cache=False
+        )
+    except Exception:
+        logger.warning("FlowState day plan inventory read failed", exc_info=True)
+        return _err(rid, 5030, "FlowState day plan is unavailable")
+    if inventory.get("fresh") is not True or inventory.get("complete") is not True:
+        return _err(rid, 5031, "FlowState day plan inventory is incomplete")
+
+    tasks = [task for task in inventory.get("items") or [] if isinstance(task, dict) and task.get("id")]
+
+    def read_instances(task):
+        task_id = str(task["id"])
+        payload = flowstate_request(
+            "GET",
+            f"/api/tasks/{quote(task_id, safe='')}/instances",
+            allow_stale_cache=False,
+        )
+        return task, payload.get("instances") or []
+
+    blocks = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(tasks)))) as pool:
+            results = pool.map(read_instances, tasks)
+            for task, instances in results:
+                for instance in instances:
+                    if not isinstance(instance, dict) or instance.get("scheduledDate") != requested_date:
+                        continue
+                    start_time = str(instance.get("scheduledTime") or "")
+                    try:
+                        if datetime.strptime(start_time, "%H:%M").strftime("%H:%M") != start_time:
+                            continue
+                    except ValueError:
+                        continue
+                    duration = instance.get("duration")
+                    duration_minutes = (
+                        int(duration)
+                        if isinstance(duration, (int, float)) and 1 <= int(duration) <= 1440
+                        else None
+                    )
+                    blocks.append(
+                        {
+                            "id": str(instance.get("id") or f"{task['id']}:{requested_date}:{start_time}"),
+                            "taskId": str(task["id"]),
+                            "title": str(task.get("title") or "Untitled task"),
+                            "startTime": start_time,
+                            "durationMinutes": duration_minutes,
+                            "priority": task.get("priority"),
+                        }
+                    )
+    except Exception:
+        logger.warning("FlowState day plan instance read failed", exc_info=True)
+        return _err(rid, 5032, "FlowState work blocks could not be read completely")
+
+    blocks.sort(key=lambda block: (block["startTime"], block["title"], block["id"]))
+    return _ok(
+        rid,
+        {
+            "source": "flowstate",
+            "date": requested_date,
+            "capturedAt": inventory.get("capturedAt"),
+            "fresh": True,
+            "complete": True,
+            "blocks": blocks,
+        },
+    )
 
 
 @method("personal_assistant.read")
@@ -4049,6 +4348,35 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"state": public_state(state)})
 
 
+@method("personal_assistant.interview.respond")
+def _(rid, params: dict) -> dict:
+    """Commit one versioned interview response before model continuation."""
+
+    from agent.personal_assistant_interview import PlanningInterviewController
+    from agent.personal_assistant_state import InterviewRevisionConflict
+
+    store, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    try:
+        result = PlanningInterviewController(store).respond(params)
+    except InterviewRevisionConflict as exc:
+        response = _err(rid, 4093, str(exc))
+        response["error"]["data"] = {
+            "code": "interview_version_conflict",
+            "interviewId": exc.interview_id,
+            "currentRevision": exc.current_revision,
+            "latest": exc.latest,
+        }
+        return response
+    except ValueError as exc:
+        return _err(rid, 4000, str(exc))
+    from agent.personal_assistant_output_gate import build_safe_interview_artifact
+
+    result["nextArtifact"] = build_safe_interview_artifact(result.get("interview"))
+    return _ok(rid, result)
+
+
 @method("personal_assistant.home")
 def _(rid, params: dict) -> dict:
     """Open or create the canonical assistant home without starting an episode."""
@@ -4056,9 +4384,18 @@ def _(rid, params: dict) -> dict:
     if error:
         return error
     with _personal_assistant_start_lock:
-        canonical = str(store.read().get("canonical_session_id") or "")
+        state_before_expiry = store.read()
+        state_after_expiry = store.expire_planning_interview_before(
+            datetime.now(ZoneInfo("Asia/Jerusalem")).date().isoformat()
+        )
+        interview_expired = bool(
+            isinstance(state_before_expiry.get("planning_interview"), dict)
+            and state_after_expiry.get("planning_interview") is None
+        )
+        canonical = str(state_after_expiry.get("canonical_session_id") or "")
+        if interview_expired or _personal_assistant_canonical_is_stale(canonical):
+            canonical = ""
         session_id = ""
-        canonical_empty = False
         if canonical:
             resumed = _methods["session.resume"](
                 rid,
@@ -4072,10 +4409,9 @@ def _(rid, params: dict) -> dict:
             if "error" not in resumed:
                 resumed_result = resumed.get("result") or {}
                 session_id = str(resumed_result.get("session_id") or "")
-                canonical_empty = int(resumed_result.get("message_count") or 0) == 0
             elif (resumed.get("error") or {}).get("code") != 4007:
                 return resumed
-        if canonical and (not session_id or canonical_empty):
+        if canonical and not session_id:
             recovered = _methods["session.resume"](
                 rid,
                 {
@@ -4141,23 +4477,89 @@ def _(rid, params: dict) -> dict:
         )
 
 
+def _configured_personal_assistant_task_sources(profile_home: Path) -> list[dict[str, Any]]:
+    """Load the profile-owned task-source manifest without naming user tasks."""
+
+    import yaml
+
+    configured: Any = None
+    config_path = profile_home / "config.yaml"
+    if config_path.exists():
+        try:
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError("config.yaml contains invalid YAML") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("config.yaml must contain an object")
+        assistant_config = raw.get("personal_assistant") or {}
+        if not isinstance(assistant_config, dict):
+            raise ValueError("personal_assistant config must contain an object")
+        configured = assistant_config.get("task_sources")
+
+    if configured is None:
+        configured = [
+            {"id": "flowstate", "inventory_tool": "flowstate_list_tasks"},
+        ]
+    if not isinstance(configured, list) or not configured or len(configured) > 20:
+        raise ValueError("personal_assistant.task_sources must contain 1-20 sources")
+
+    sources: list[dict[str, Any]] = []
+    source_ids: set[str] = set()
+    for raw_source in configured:
+        if not isinstance(raw_source, dict):
+            raise ValueError("each personal assistant task source must be an object")
+        source_id = str(raw_source.get("id") or "").strip()
+        inventory_tool = str(raw_source.get("inventory_tool") or "").strip()
+        if not source_id or len(source_id) > 200:
+            raise ValueError("each personal assistant task source requires a bounded id")
+        if not inventory_tool or len(inventory_tool) > 200:
+            raise ValueError(
+                f"personal assistant task source {source_id} requires inventory_tool"
+            )
+        if source_id in source_ids:
+            raise ValueError(f"duplicate personal assistant task source: {source_id}")
+        source_ids.add(source_id)
+        sources.append({"id": source_id, "inventoryTool": inventory_tool})
+    return sources
+
+
 def _personal_assistant_runtime_context() -> dict[str, Any]:
-    """Describe registered FlowState tools without delaying session startup."""
+    """Describe planning sources and registered tools without delaying startup."""
     from agent.personal_assistant_context import build_personal_assistant_runtime_context
     from tools import flowstate_tool  # noqa: F401 - registers the FlowState toolset
     from tools.registry import registry
 
+    profile_home = _personal_assistant_profile_home(_PERSONAL_ASSISTANT_OWNER_PROFILE)
     registered = registry.get_all_tool_names()
+    task_sources = _configured_personal_assistant_task_sources(profile_home)
+    configured_inventory_tools = {
+        source["inventoryTool"] for source in task_sources
+    }
+    available_inventory_tools = {
+        str(definition.get("function", {}).get("name") or "")
+        for definition in registry.get_definitions(
+            configured_inventory_tools,
+            quiet=True,
+        )
+    }
     # Registry availability checks use the connector's bounded one-second health
     # probe. Avoid fetching assistant context here: its normal request may wait up
     # to ten seconds and the assistant can read it through its registered tool.
     available = bool(
         registry.get_definitions({"flowstate_get_assistant_context"}, quiet=True)
     )
-    return build_personal_assistant_runtime_context(
+    context = build_personal_assistant_runtime_context(
         registered_tool_names=registered,
         flowstate_available=available,
     )
+    context["task_sources"] = [
+        {
+            **source,
+            "available": source["inventoryTool"] in available_inventory_tools,
+        }
+        for source in task_sources
+    ]
+    return context
 
 
 _PERSONAL_ASSISTANT_MONITOR_BATCH_LIMIT = 8
@@ -4294,8 +4696,9 @@ def _finish_personal_assistant_daily_delivery(
     *,
     status: str,
     has_visible_response: bool,
+    response: Any = None,
 ) -> None:
-    """Complete a daily claim only after its persisted turn has a visible result."""
+    """Complete a daily claim only after its persisted turn delivered a plan."""
 
     delivery = session.pop("personal_assistant_daily_delivery", None)
     if not isinstance(delivery, dict):
@@ -4305,17 +4708,71 @@ def _finish_personal_assistant_daily_delivery(
         complete_daily_planning_trigger,
     )
     from agent.personal_assistant_state import PersonalAssistantStateStore
+    from agent.personal_assistant_output_gate import (
+        contains_personal_assistant_plan,
+        extract_personal_assistant_recommendations,
+    )
+    from agent.suggestion_gate import record_recommendations
 
     profile_home = Path(str(delivery.get("profile_home") or ""))
     claim = delivery.get("claim")
-    completed = status == "complete" and has_visible_response
+    store = PersonalAssistantStateStore(profile_home)
+    state = store.read()
+    latest_coverage = (state.get("coverage_receipts") or [None])[-1]
+    expected_task_source_ids = {
+        str(source_id)
+        for source_id in (delivery.get("expected_task_source_ids") or [])
+        if str(source_id)
+    }
+    covered_task_source_ids = {
+        str(source.get("id") or "")
+        for source in (
+            latest_coverage.get("sources")
+            if isinstance(latest_coverage, dict)
+            else []
+        )
+        if isinstance(source, dict) and str(source.get("id") or "")
+    }
+    source_manifest_complete = (
+        not expected_task_source_ids
+        or expected_task_source_ids.issubset(covered_task_source_ids)
+    )
+    fresh_complete_coverage = (
+        isinstance(latest_coverage, dict)
+        and latest_coverage.get("cadence") == "daily"
+        and latest_coverage.get("complete") is True
+        and latest_coverage.get("id")
+        != delivery.get("prior_coverage_receipt_id")
+        and source_manifest_complete
+    )
+    recommendations = extract_personal_assistant_recommendations(response)
+    completed = (
+        status == "complete"
+        and has_visible_response
+        and contains_personal_assistant_plan(response)
+        and bool(recommendations)
+        and fresh_complete_coverage
+    )
+    if completed:
+        try:
+            recorded = record_recommendations(
+                profile_home / "state" / "personal-assistant",
+                recommendations,
+            )
+            completed = recorded == len(recommendations)
+        except Exception:
+            logger.warning(
+                "Personal assistant recommendation history could not be recorded",
+                exc_info=True,
+            )
+            completed = False
     if completed:
         completed = complete_daily_planning_trigger(profile_home, claim)
-    else:
+    if not completed:
         abandon_daily_planning_trigger(profile_home, claim)
     episode_id = str(delivery.get("episode_id") or "")
     if episode_id:
-        PersonalAssistantStateStore(profile_home).mark_episode_status(
+        store.mark_episode_status(
             episode_id,
             "completed" if completed else "failed",
         )
@@ -4582,6 +5039,13 @@ def _personal_assistant_prompt(
         "Act as my personal assistant for this session. "
         f"The session was started by a {trigger} trigger.\n\n"
         f"My request or current intent:\n{intent}\n\n"
+        "This current interaction contract supersedes older conversation instructions. "
+        "For three practical remaining-day options, return one compact task-table with "
+        "exactly three ranked real-task directions; do not return three timelines unless "
+        "I explicitly ask to compare full schedules. Each option must let me plan the "
+        "remaining day around it or request a different alternative, without forcing an "
+        "immediate start. Do not call terminal to discover the current time; use the live "
+        "local time already supplied above.\n\n"
         "Available runtime facts (data, not a prescribed workflow):\n"
         f"{json.dumps(runtime_context, ensure_ascii=False, sort_keys=True)}\n\n"
         "Return a useful visible response quickly. Use one focused batch of exact, "
@@ -4593,8 +5057,11 @@ def _personal_assistant_prompt(
         "or prior sessions unless I explicitly ask about implementation, stored context, "
         "or past conversations. Offer broader research as a separate next step instead "
         "of silently completing it before replying.\n\n"
-        "Use the live FlowState capabilities available to you to inspect relevant "
-        "tasks, projects, priorities, dates, schedules, and subtasks before making "
+        "Before making recommendations, read every task source listed in runtime "
+        "facts through its inventory tool and keep unavailable or incomplete sources "
+        "visible as blockers; never silently omit one. Use the live FlowState "
+        "capabilities available to inspect relevant tasks, projects, priorities, "
+        "dates, schedules, and subtasks before making "
         "recommendations. Infer the kind of help needed from my intent and current "
         "context: this may be planning, triage, task breakdown, decision support, "
         "replanning, review, follow-up, or another useful assistant action. Ask for "
@@ -4662,10 +5129,18 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                 if event_id != event["id"] or not lease_id or len(lease_id) > 160:
                     return _err(rid, 4000, "monitor delivery identity is invalid")
                 monitor_delivery.append({"id": event_id, "lease_id": lease_id})
-    runtime_context = _personal_assistant_runtime_context()
+    try:
+        runtime_context = _personal_assistant_runtime_context()
+    except (OSError, ValueError) as exc:
+        if claim is not None:
+            abandon_daily_planning_trigger(profile_home, claim)
+        return _err(rid, 4000, f"invalid personal assistant task sources: {exc}")
     if monitor_events:
         runtime_context["monitor_events"] = monitor_events
     store = _personal_assistant_store(profile)
+    runtime_task_sources = runtime_context.get("task_sources")
+    if isinstance(runtime_task_sources, list) and runtime_task_sources:
+        store.set_task_source_manifest(runtime_task_sources)
 
     with _personal_assistant_start_lock:
         state = store.read()
@@ -4801,6 +5276,12 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                     "profile_home": str(profile_home),
                     "episode_id": str(episode.get("episode_id") or "") or None,
                     "claim": claim,
+                    "prior_coverage_receipt_id": (
+                        ((state.get("coverage_receipts") or [None])[-1] or {}).get("id")
+                    ),
+                    "expected_task_source_ids": [
+                        source["id"] for source in runtime_context["task_sources"]
+                    ],
                 }
 
         submitted = _methods["prompt.submit"](
@@ -4937,6 +5418,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "branch": _git_branch_for_cwd(cwd),
         "personality": str(personality or ""),
         "running": bool((session or {}).get("running")),
+        "compacting": bool((session or {}).get("compression_started_at")),
         "title": _session_live_title(session or {}, session_key) if session_key else "",
         "desktop_contract": DESKTOP_BACKEND_CONTRACT,
         "version": "",
@@ -5157,6 +5639,11 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
     if session is not None:
+        if (
+            not session.get("personal_assistant")
+            and str(name or "").startswith("personal_assistant_")
+        ):
+            _apply_personal_assistant_runtime_policy(session)
         try:
             from agent.display import capture_local_edit_snapshot
 
@@ -6528,6 +7015,16 @@ def _coerce_message_text(content: Any) -> str:
     return str(content)
 
 
+_LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST = (
+    "You've reached the maximum number of tool-calling iterations allowed. "
+    "Please provide a final response summarizing what you've found and accomplished so far, "
+    "without calling any more tools."
+)
+_LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST_JSON = json.dumps(
+    _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST
+)
+
+
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
@@ -6539,6 +7036,11 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if role not in {"user", "assistant", "tool", "system"}:
             continue
         content_text = _coerce_message_text(m.get("content"))
+        if role == "user" and content_text in {
+            _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST,
+            _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST_JSON,
+        }:
+            continue
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 fn = tc.get("function", {})
@@ -6848,6 +7350,23 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any) -> None:
     session["queued_prompt"] = {"text": text, "transport": transport}
 
 
+_NEW_PERSONAL_ASSISTANT_REQUEST_RE = re.compile(
+    r"^\s*(?:"
+    r"תכנ(?:ן|ני|נו)|סמ(?:ן|ני|נו)|שנ(?:ה|י|ו)|עדכ(?:ן|ני|נו)|"
+    r"תתחיל|התחל|תעצור|עצור|תפסיק|הפסק|תבדוק|בדוק|"
+    r"תן\s+לי|הצג|מה\s+(?:כדאי|לעשות)|"
+    r"plan\b|replan\b|start\b|stop\b|update\b|mark\b|show\b|what\s+should\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_new_personal_assistant_request(text: Any) -> bool:
+    return isinstance(text, str) and bool(
+        _NEW_PERSONAL_ASSISTANT_REQUEST_RE.search(text.strip())
+    )
+
+
 def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any) -> dict:
     """Apply the ``display.busy_input_mode`` policy to a prompt that lands while
     a turn is in flight, instead of rejecting it with ``session busy``.
@@ -6874,6 +7393,25 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any)
     ).strip().lower()
     recover_lost_clarify = session.get("personal_assistant") or agent_platform == "desktop"
     if recover_lost_clarify and isinstance(text, str) and text.strip():
+        if session.get("personal_assistant") and _looks_like_new_personal_assistant_request(text):
+            stale_request_id = ""
+            with _prompt_lock:
+                for request_id, (owner_sid, event) in list(_pending.items()):
+                    pending = _pending_prompt_payloads.get(request_id)
+                    if owner_sid != sid or not pending or pending[0] != "clarify.request":
+                        continue
+                    _answers[request_id] = ""
+                    event.set()
+                    stale_request_id = request_id
+                    break
+            if stale_request_id:
+                try:
+                    _enqueue_prompt(session, text, transport)
+                except Exception as exc:
+                    logger.warning("could not durably replace stale clarify: %s", exc)
+                    return _err(rid, 5009, "could not durably queue prompt")
+                session["last_active"] = time.time()
+                return _ok(rid, {"status": "queued_after_stale_clarify"})
         with _prompt_lock:
             for request_id, (owner_sid, event) in list(_pending.items()):
                 pending = _pending_prompt_payloads.get(request_id)
@@ -7587,6 +8125,55 @@ def _(rid, params: dict) -> dict:
     personal_assistant = is_truthy_value(
         params.get("personal_assistant", False)
     ) or canonical_personal_assistant
+    stale_anchor = target
+    if canonical_personal_assistant:
+        try:
+            stored_anchor = str(
+                _personal_assistant_store(_PERSONAL_ASSISTANT_OWNER_PROFILE)
+                .read()
+                .get("canonical_session_id")
+                or ""
+            )
+            if stored_anchor:
+                stale_anchor = stored_anchor
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+    if personal_assistant and _personal_assistant_canonical_is_stale(stale_anchor):
+        assistant_store = _personal_assistant_store(
+            _PERSONAL_ASSISTANT_OWNER_PROFILE
+        )
+        assistant_store.expire_planning_interview_before(
+            datetime.now(ZoneInfo("Asia/Jerusalem")).date().isoformat()
+        )
+        create_params = dict(params)
+        create_params.pop("session_id", None)
+        create_params.update(
+            {
+                "profile": _PERSONAL_ASSISTANT_OWNER_PROFILE,
+                "source": str(params.get("source") or "desktop"),
+                "title": "Personal assistant",
+                "personal_assistant": True,
+            }
+        )
+        created = _methods["session.create"](rid, create_params)
+        if "error" in created:
+            return created
+        created_result = created.get("result") or {}
+        fresh_live_id = str(created_result.get("session_id") or "")
+        fresh_canonical = str(
+            created_result.get("stored_session_id") or fresh_live_id
+        )
+        if not fresh_live_id or not fresh_canonical:
+            return _err(rid, 5000, "fresh personal assistant session creation failed")
+        assistant_store.set_canonical_session(fresh_canonical)
+        with _sessions_lock:
+            fresh_session = _sessions.get(fresh_live_id)
+        if fresh_session is not None:
+            _ensure_session_db_row(fresh_session)
+        created_result["session_key"] = fresh_canonical
+        created_result["resumed"] = fresh_canonical
+        created_result["rotated_from"] = target
+        return created
     claim_recoverable_turn = is_truthy_value(
         params.get("claim_recoverable_turn", False)
     )
@@ -11139,15 +11726,14 @@ def _compression_watchdog_timeout_seconds() -> float:
 
 
 def _turn_idle_watchdog_timeout_seconds() -> float:
-    # Active tools and approval waits are protected below. Long-context Codex
-    # turns can also spend several minutes reasoning after a tool result while
-    # the provider stream remains healthy, so this outer fail-safe must be much
-    # more generous than the provider-level stale watchdog.
-    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "600")
+    # Trusted provider/agent activity, active tools, compression, and user waits
+    # are protected below. If none of those clocks moves for thirty seconds,
+    # Desktop is visibly frozen and waiting ten minutes only compounds the loss.
+    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "30")
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 600.0
+        return 30.0
 
 
 _TURN_WAIT_EVENTS = frozenset(
@@ -11160,6 +11746,87 @@ _TURN_WAIT_EVENTS = frozenset(
         "input.request",
     }
 )
+
+
+def _watchdog_safe_token(value: Any, *, limit: int = 80) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return "".join(
+        character
+        for character in str(value).strip()
+        if character.isalnum() or character in "._:/-"
+    )[:limit]
+
+
+def _watchdog_tool_error_category(payload: dict[str, Any]) -> str:
+    """Classify a tool result without copying its args/output into the ledger."""
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        error_type = str(result.get("error_type") or "").strip().lower()
+        if error_type.startswith("calendar_preflight_"):
+            return "policy_blocked"
+        raw_error = result.get("error")
+        status_failed = str(result.get("status") or "").lower() in {
+            "error", "failed", "failure",
+        }
+        if not raw_error and (status_failed or result.get("ok") is False):
+            raw_error = result.get("output") or result.get("message") or "unknown"
+    elif isinstance(result, str) and (
+        result.lstrip().lower().startswith("error") or '"error"' in result.lower()
+    ):
+        raw_error = result
+    else:
+        raw_error = payload.get("error")
+    if not raw_error:
+        return ""
+    searchable = str(raw_error).lower()
+    if any(
+        token in searchable
+        for token in ("cannot import name", "has no attribute", "no module named")
+    ):
+        return "tool_routing"
+    if any(
+        token in searchable
+        for token in (
+            "background delivery is not available",
+            "occluded, unfocused renderer",
+            "window is not visible",
+        )
+    ):
+        return "ui_unavailable"
+    if any(
+        token in searchable
+        for token in ("permission denied", "operation not permitted")
+    ):
+        return "filesystem_permission"
+    if searchable.startswith("blocked:") or any(
+        token in searchable
+        for token in ("requires user approval", "requires approval", "denied by user")
+    ):
+        return "policy_blocked"
+    if "planning interview" in searchable and "already active" in searchable:
+        return "workflow_conflict"
+    if "revision conflict" in searchable or "version conflict" in searchable:
+        return "concurrency"
+    if any(
+        token in searchable
+        for token in ("jsondecodeerror", "json decode", "json parsing", "parse json")
+    ):
+        return "serialization"
+    if any(token in searchable for token in ("validation", "invalid", "schema")):
+        return "validation"
+    if any(token in searchable for token in ("timeout", "timed out", "deadline")):
+        return "timeout"
+    if any(token in searchable for token in ("connection", "connreset", "broken pipe")):
+        return "connection"
+    if any(token in searchable for token in ("unauthorized", "forbidden", "401", "403")):
+        return "authentication"
+    if "not found" in searchable:
+        return "not_found"
+    if any(token in searchable for token in ("cancel", "interrupt", "abort")):
+        return "cancelled"
+    return "unknown"
 
 
 def _record_turn_watchdog_event(
@@ -11216,6 +11883,23 @@ def _record_turn_watchdog_event(
             value = payload.get(key)
             if value is not None:
                 safe_payload[key] = value
+        if event.startswith("tool."):
+            name = _watchdog_safe_token(payload.get("name"))
+            if name:
+                safe_payload["name"] = name
+            duration = payload.get("duration_s")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                safe_payload["duration_s"] = round(max(0.0, min(float(duration), 86400.0)), 3)
+            tool_error = _watchdog_tool_error_category(payload)
+            safe_payload["status"] = (
+                "error"
+                if tool_error or event == "tool.error"
+                else "started"
+                if event == "tool.start"
+                else "complete"
+            )
+            if tool_error:
+                safe_payload["error"] = tool_error
         details = payload.get("details")
         if isinstance(details, dict):
             safe_payload["details"] = {
@@ -11229,11 +11913,21 @@ def _record_turn_watchdog_event(
                     "mode",
                     "error_type",
                     "error",
+                    "iteration_count",
+                    "iteration_limit",
                 )
                 if details.get(key) is not None
             }
 
     producer_pid = os.getpid()
+    runtime_build_id = _watchdog_safe_token(
+        os.environ.get("HERMES_RUNTIME_BUILD_ID"), limit=80
+    )
+    source_manifest_digest = str(
+        os.environ.get("HERMES_RUNTIME_SOURCE_MANIFEST_DIGEST") or ""
+    ).lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", source_manifest_digest):
+        source_manifest_digest = ""
     row = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "monotonic": round(now, 3),
@@ -11252,6 +11946,8 @@ def _record_turn_watchdog_event(
         "compression_started_at": session.get("compression_started_at"),
         "personal_assistant": bool(session.get("personal_assistant")),
         "payload": safe_payload,
+        "runtime_build_id": runtime_build_id,
+        "source_manifest_digest": source_manifest_digest,
     }
     try:
         os.makedirs(os.path.dirname(_TURN_WATCHDOG_LOG), exist_ok=True)
@@ -11626,6 +12322,7 @@ def _run_prompt_submit(
     *,
     durable_marker_required: bool = False,
 ) -> None:
+    _restore_personal_assistant_policy_at_prompt_boundary(session)
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -11915,12 +12612,32 @@ def _run_prompt_submit(
                     result.get("failed") or result.get("partial")
                 ):
                     raw = f"Error: {result.get('error')}"
+                if (
+                    status == "complete"
+                    and not str(raw or "").strip()
+                    and not session.get("personal_assistant")
+                    and _result_used_personal_assistant_tool(result)
+                ):
+                    _apply_personal_assistant_runtime_policy(session)
+                if (
+                    status == "complete"
+                    and not str(raw or "").strip()
+                    and session.get("personal_assistant")
+                ):
+                    from agent.conversation_loop import (
+                        _build_personal_assistant_empty_response_recovery,
+                    )
+
+                    raw = _build_personal_assistant_empty_response_recovery(agent) or raw
                 if status == "complete" and not str(raw or "").strip():
                     raw = (
                         "Hermes finished without producing a visible answer. "
                         "The turn was saved; retry the last request."
                     )
                     status = "error"
+                if result.get("tool_iteration_exhausted") is True:
+                    status = "error"
+                    _emit_tool_iteration_exhausted_diagnostic(sid, result)
                 lr = result.get("last_reasoning")
                 if isinstance(lr, str) and lr.strip():
                     last_reasoning = lr.strip()
@@ -11991,6 +12708,7 @@ def _run_prompt_submit(
                         session,
                         status=status,
                         has_visible_response=isinstance(raw, str) and bool(raw.strip()),
+                        response=raw,
                     )
                 except Exception:
                     logger.warning(
@@ -16452,6 +17170,14 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
 
     worker = session.get("slash_worker")
+    worker_poll = getattr(getattr(worker, "proc", None), "poll", None)
+    if worker is not None and callable(worker_poll) and worker_poll() is not None:
+        try:
+            worker.close()
+        except Exception:
+            pass
+        session["slash_worker"] = None
+        worker = None
     if not worker:
         try:
             worker = _SlashWorker(

@@ -4,7 +4,7 @@ import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboarding } from '@/store/onboarding'
-import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
+import { $activeGatewayProfile, $profiles, normalizeProfileKey, refreshProfiles } from '@/store/profile'
 import {
   $currentCwd,
   $sessions,
@@ -259,24 +259,39 @@ export async function resolveStoredSession(storedSessionId: string): Promise<Ses
   // carries its owning `profile`, which routes the resume to the right backend.
   const activeKey = normalizeProfileKey($activeGatewayProfile.get())
 
-  const otherProfiles = $profiles
-    .get()
-    .map(profile => normalizeProfileKey(profile.name))
-    .filter(key => key !== activeKey)
+  const probeProfiles = async (profiles: ReadonlyArray<{ name: string }>): Promise<SessionInfo | undefined> => {
+    const otherProfiles = profiles.map(profile => normalizeProfileKey(profile.name)).filter(key => key !== activeKey)
 
-  for (const profile of otherProfiles) {
-    try {
-      const session = await getSession(storedSessionId, profile)
+    for (const profile of otherProfiles) {
+      try {
+        const session = await getSession(storedSessionId, profile)
 
-      upsertResolvedSession(session, storedSessionId)
+        upsertResolvedSession(session, storedSessionId)
 
-      return session
-    } catch {
-      // Not on this profile; try the next.
+        return session
+      } catch {
+        // Not on this profile; try the next.
+      }
     }
+
+    return undefined
   }
 
-  return undefined
+  const cachedOwner = await probeProfiles($profiles.get())
+
+  if (cachedOwner) {
+    return cachedOwner
+  }
+
+  // The route restore can run as soon as the gateway opens, before background
+  // profile/session hydration has finished. Refresh the authoritative profile
+  // list before treating cached ownership misses as a genuinely gone session;
+  // otherwise a valid cold cross-profile route is resumed against the wrong DB
+  // and its two 404s are misclassified as terminal. Let hydration failures
+  // propagate so the caller keeps the route in its bounded retry path.
+  const profiles = await refreshProfiles()
+
+  return probeProfiles(profiles)
 }
 
 type SessionRuntimeStatePatch = Partial<
@@ -368,12 +383,63 @@ export function applyStoredSessionPreviewRuntimeInfo(stored: { model?: null | st
   setCurrentPersonality('')
 }
 
+function isSessionGoneCodeCandidate(value: unknown): boolean {
+  if (typeof value === 'number') {
+    return value === 4007
+  }
+
+  if (typeof value === 'string') {
+    const text = value.trim()
+    const remoteErrorPrefix = text.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1]
+
+    if (remoteErrorPrefix) {
+      return isSessionGoneCodeCandidate(remoteErrorPrefix)
+    }
+
+    if (text.includes('404') || /session not found/i.test(text)) {
+      return true
+    }
+
+    if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
+      try {
+        return isSessionGoneCodeCandidate(JSON.parse(text))
+      } catch {
+        // no-op
+      }
+    }
+
+    return false
+  }
+
+  if (Array.isArray(value)) {
+    return value.some(entry => isSessionGoneCodeCandidate(entry))
+  }
+
+  if (value instanceof Error) {
+    return isSessionGoneCodeCandidate(value.message)
+  }
+
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+
+    if ('code' in record && isSessionGoneCodeCandidate(record.code)) {
+      return true
+    }
+
+    for (const nested of Object.values(record)) {
+      if (isSessionGoneCodeCandidate(nested)) {
+        return true
+      }
+    }
+  }
+
+  return false
+}
+
 // A "session genuinely doesn't exist" failure (deleted, or an id from a wiped /
 // rotated backend) — the REST transcript 404s with `Session not found`. Distinct
 // from a transient/wedged backend (ECONNREFUSED, timeout), which must still
 // retry rather than discard the id.
 export function isSessionGoneError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err ?? '')
-
-  return message.includes('404') || /session not found/i.test(message)
+  return isSessionGoneCodeCandidate(err)
 }

@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 import fcntl
+import hashlib
 import json
 import math
 from pathlib import Path
 import re
 from typing import Any, Callable
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from utils import atomic_json_write
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CONTEXT_LEDGER_LIMIT = 128
 MONITOR_EVENT_BATCH_LIMIT = 32
 MONITOR_EVENT_BYTES_LIMIT = 16_384
@@ -38,6 +40,36 @@ _PROTECTED_DISPOSITIONS = {
 }
 _SOURCE_COVERAGE_STATUSES = {"fresh", "partial", "stale", "unavailable"}
 COVERAGE_RECEIPT_LIMIT = 32
+INTERVIEW_SCHEMA_VERSION = 1
+INTERVIEW_TASK_LIMIT = 500
+INTERVIEW_RECEIPT_LIMIT = 64
+INTERVIEW_ARCHIVE_LIMIT = 32
+INTERVIEW_REQUIRED_PROFILE_FIELDS = (
+    "urgency", "importance", "outcome", "dependencies", "effort", "energy",
+    "timing", "risks", "doneEnough",
+)
+DAILY_GROUNDING_FIELDS = (
+    "energy", "workBoundary", "hardCommitments", "location",
+)
+FUTURE_DAY_GROUNDING_FIELDS = ("availability",)
+_INTERVIEW_PROFILE_FIELDS = {
+    "urgency", "importance", "outcome", "dependencies", "effort", "energy",
+    "timing", "risks", "doneEnough", "notes", "context", "confidence",
+    "evidence", "constraints", "workBoundary", "hardCommitments", "location",
+    "availability",
+}
+
+
+def interview_question_order(interview: dict[str, Any]) -> tuple[str, ...]:
+    if interview.get("mode") != "daily-grounding":
+        return INTERVIEW_REQUIRED_PROFILE_FIELDS
+    configured = interview.get("questionOrder")
+    if isinstance(configured, list) and configured:
+        allowed = set(DAILY_GROUNDING_FIELDS) | set(FUTURE_DAY_GROUNDING_FIELDS)
+        values = tuple(str(value) for value in configured)
+        if len(values) == len(set(values)) and all(value in allowed for value in values):
+            return values
+    return DAILY_GROUNDING_FIELDS
 
 
 def _bounded_identifier(value: Any, label: str, *, limit: int = 160) -> str:
@@ -55,6 +87,23 @@ def _iso_timestamp(value: Any, label: str) -> str:
     if parsed.tzinfo is None:
         raise ValueError(f"monitor {label} must include a timezone")
     return value
+
+
+def _planning_timestamp(value: Any, label: str) -> str:
+    """Accept task-app date fields without turning them into a retry loop."""
+
+    bounded = _bounded_identifier(value, label, limit=80)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", bounded):
+        try:
+            local_date = date.fromisoformat(bounded)
+        except ValueError as exc:
+            raise ValueError(f"monitor {label} must be an ISO date or timestamp") from exc
+        return datetime.combine(
+            local_date,
+            time.min,
+            tzinfo=ZoneInfo("Asia/Jerusalem"),
+        ).isoformat()
+    return _iso_timestamp(bounded, label)
 
 
 def _safe_monitor_json(value: Any, *, depth: int = 0) -> Any:
@@ -297,9 +346,13 @@ def _validate_protected_item(raw: Any) -> dict[str, Any]:
     disposition = item["disposition"]
     if disposition not in _PROTECTED_DISPOSITIONS:
         raise ValueError("protected item disposition is invalid")
-    for field in ("deadline", "nextReviewAt", "verifiedAt"):
+    for field in ("deadline", "nextReviewAt"):
         if item[field] is not None:
-            item[field] = _iso_timestamp(item[field], f"protected item {field}")
+            item[field] = _planning_timestamp(item[field], f"protected item {field}")
+    if item["verifiedAt"] is not None:
+        item["verifiedAt"] = _iso_timestamp(
+            item["verifiedAt"], "protected item verifiedAt"
+        )
     if disposition == "actionable" and not item["nextAction"]:
         raise ValueError("actionable protected item requires a next action")
     if disposition == "waiting" and (
@@ -334,6 +387,47 @@ def _safe_protected_items(raw: Any) -> list[dict[str, Any]]:
         seen.add(item["id"])
         safe.append(item)
     return safe
+
+
+def _context_review_is_safely_deferred(
+    item: dict[str, Any], *, now: datetime
+) -> bool:
+    """Return whether a protected item is intentionally due after this review."""
+
+    if item.get("disposition") not in {"deferred", "needs_context"}:
+        return False
+    next_review_at = item.get("nextReviewAt")
+    if not isinstance(next_review_at, str):
+        return False
+    try:
+        review_at = datetime.fromisoformat(next_review_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return review_at > now
+
+
+def _validate_task_source_manifest(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list) or not raw or len(raw) > 20:
+        raise ValueError("task source manifest must contain 1-20 sources")
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in raw:
+        if not isinstance(value, dict):
+            raise ValueError("task source manifest entries must be objects")
+        source_id = _bounded_identifier(value.get("id"), "task source id", limit=200)
+        inventory_tool = _bounded_identifier(
+            value.get("inventoryTool"), "task source inventory tool", limit=200
+        )
+        available = value.get("available")
+        if not isinstance(available, bool):
+            raise ValueError("task source availability must be a boolean")
+        if source_id in seen:
+            raise ValueError(f"duplicate task source: {source_id}")
+        seen.add(source_id)
+        sources.append(
+            {"id": source_id, "inventoryTool": inventory_tool, "available": available}
+        )
+    return sources
 
 
 def _build_coverage_receipt(
@@ -429,6 +523,7 @@ def _default() -> dict[str, Any]:
         "context_ledger": [],
         "protected_items": [],
         "coverage_receipts": [],
+        "task_source_manifest": [],
         "pending_approvals": [],
         "pending_proposals": [],
         "sync_status": {"status": "unknown", "updated_at": None, "detail": None},
@@ -447,7 +542,314 @@ def _default() -> dict[str, Any]:
         "updated_at": None,
         "idempotency_keys": [],
         "durableSource": {"kind": "obsidian", "version": 0, "hash": None},
+        "planning_interview": None,
+        "planning_interview_archive": [],
+        "calendar_preflight_receipt": None,
+        "pending_timer_action": None,
     }
+
+
+def _migrate_state(raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize supported stored schemas without hiding future data."""
+
+    version = raw.get("schema_version", 1)
+    if version == 1:
+        migrated = copy.deepcopy(raw)
+        migrated["schema_version"] = 2
+        migrated.setdefault("planning_interview", None)
+        migrated.setdefault("planning_interview_archive", [])
+        migrated.setdefault("calendar_preflight_receipt", None)
+        migrated.setdefault("pending_timer_action", None)
+        return migrated
+    if version == SCHEMA_VERSION:
+        migrated = copy.deepcopy(raw)
+        migrated.setdefault("calendar_preflight_receipt", None)
+        migrated.setdefault("pending_timer_action", None)
+        return migrated
+    if isinstance(version, int) and not isinstance(version, bool) and version > SCHEMA_VERSION:
+        raise ValueError(f"future personal assistant state schema is unsupported: {version}")
+    raise ValueError(f"unsupported personal assistant state schema: {version}")
+
+
+def _interview_digest(operations: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        operations, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _interview_planning_date(interview: dict[str, Any] | None) -> str:
+    """Return the explicit or legacy snapshot date that scopes an interview."""
+
+    if not isinstance(interview, dict):
+        return ""
+    planning_date = str(interview.get("planningDate") or "").strip()
+    if planning_date:
+        return planning_date
+    source_snapshot = interview.get("sourceSnapshot")
+    if isinstance(source_snapshot, dict):
+        return str(source_snapshot.get("localDate") or "").strip()
+    return ""
+
+
+def _validate_interview_tasks(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list) or not raw or len(raw) > INTERVIEW_TASK_LIMIT:
+        raise ValueError(
+            f"planning interview tasks must contain 1-{INTERVIEW_TASK_LIMIT} items"
+        )
+    tasks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in raw:
+        if not isinstance(value, dict):
+            raise ValueError("planning interview task must be an object")
+        task_id = _bounded_identifier(value.get("taskId"), "interview task id", limit=300)
+        if task_id in seen:
+            raise ValueError(f"duplicate planning interview task: {task_id}")
+        seen.add(task_id)
+        task = {
+            "taskId": task_id,
+            "title": _bounded_identifier(
+                value.get("title"), "interview task title", limit=1_000
+            ),
+            "profile": copy.deepcopy(value.get("profile") or {}),
+            "breakdown": copy.deepcopy(value.get("breakdown") or []),
+            "confirmed": bool(value.get("confirmed", False)),
+            "deferred": bool(value.get("deferred", False)),
+        }
+        if not isinstance(task["profile"], dict) or not isinstance(task["breakdown"], list):
+            raise ValueError("planning interview task profile and breakdown are invalid")
+        tasks.append(task)
+    return tasks
+
+
+def _new_planning_interview(
+    interview_id: str, operation: dict[str, Any], request_id: str, digest: str
+) -> dict[str, Any]:
+    tasks = _validate_interview_tasks(operation.get("tasks"))
+    source_snapshot = operation.get("sourceSnapshot") or {}
+    if not isinstance(source_snapshot, dict):
+        raise ValueError("planning interview source snapshot must be an object")
+    now = datetime.now(timezone.utc).isoformat()
+    mode = str(operation.get("mode") or "task-review").strip()
+    if mode not in {"task-review", "daily-grounding"}:
+        raise ValueError("planning interview mode is invalid")
+    question_order = (
+        tuple(operation.get("questionOrder") or DAILY_GROUNDING_FIELDS)
+        if mode == "daily-grounding"
+        else INTERVIEW_REQUIRED_PROFILE_FIELDS
+    )
+    allowed_questions = set(DAILY_GROUNDING_FIELDS) | set(FUTURE_DAY_GROUNDING_FIELDS)
+    if mode == "daily-grounding" and (
+        not question_order
+        or len(question_order) != len(set(question_order))
+        or any(question not in allowed_questions for question in question_order)
+    ):
+        raise ValueError("planning interview question order is invalid")
+    question_id = question_order[0] if mode == "daily-grounding" else "urgency"
+    return {
+        "schemaVersion": INTERVIEW_SCHEMA_VERSION,
+        "interviewId": interview_id,
+        "interviewRevision": 1,
+        "status": "active",
+        "mode": mode,
+        "planningDate": operation.get("planningDate"),
+        "questionOrder": list(question_order),
+        "sourceSnapshot": copy.deepcopy(source_snapshot),
+        "tasks": tasks,
+        "cursor": {"taskId": tasks[0]["taskId"], "questionId": question_id},
+        "readinessApproved": False,
+        "plan": None,
+        "createdAt": now,
+        "updatedAt": now,
+        "pausedAt": None,
+        "completedAt": None,
+        "requestReceipts": [
+            {"requestId": request_id, "digest": digest, "interviewRevision": 1}
+        ],
+    }
+
+
+def _interview_task(interview: dict[str, Any], task_id: Any) -> dict[str, Any]:
+    safe_id = _bounded_identifier(task_id, "interview task id", limit=300)
+    task = next(
+        (value for value in interview.get("tasks") or [] if value.get("taskId") == safe_id),
+        None,
+    )
+    if task is None:
+        raise ValueError(f"planning interview task not found: {safe_id}")
+    return task
+
+
+def _safe_interview_profile_edits(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("planning interview field edits must be a non-empty object")
+    unknown = sorted(set(raw) - _INTERVIEW_PROFILE_FIELDS)
+    if unknown:
+        raise ValueError(f"unsupported planning interview profile field: {unknown[0]}")
+    try:
+        encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("planning interview field edits must be JSON-safe") from exc
+    if len(encoded.encode("utf-8")) > 16_384:
+        raise ValueError("planning interview field edits are too large")
+    return copy.deepcopy(raw)
+
+
+def _next_interview_task_id(interview: dict[str, Any], after_task_id: str) -> str | None:
+    tasks = interview.get("tasks") or []
+    start = next(
+        (index for index, task in enumerate(tasks) if task.get("taskId") == after_task_id),
+        -1,
+    )
+    candidates = tasks[start + 1 :] + tasks[: start + 1]
+    next_task = next(
+        (
+            task
+            for task in candidates
+            if not task.get("confirmed") and not task.get("deferred")
+        ),
+        None,
+    )
+    return next_task.get("taskId") if next_task else None
+
+
+def _apply_interview_operation(interview: dict[str, Any], operation: dict[str, Any]) -> None:
+    op = str(operation.get("op") or "").strip()
+    now = datetime.now(timezone.utc).isoformat()
+    if op == "pause":
+        if interview.get("status") != "active":
+            raise ValueError("only an active planning interview can be paused")
+        interview["status"] = "paused"
+        interview["pausedAt"] = now
+        return
+    if op == "resume":
+        if interview.get("status") != "paused":
+            raise ValueError("only a paused planning interview can be resumed")
+        interview["status"] = "active"
+        interview["pausedAt"] = None
+        return
+    if op == "refresh-source-snapshot":
+        source_snapshot = operation.get("sourceSnapshot")
+        if not isinstance(source_snapshot, dict) or not source_snapshot:
+            raise ValueError("planning interview source snapshot must be a non-empty object")
+        interview["sourceSnapshot"] = copy.deepcopy(source_snapshot)
+        return
+    if op == "cancel":
+        if interview.get("status") not in {"active", "paused"}:
+            raise ValueError("only an active or paused planning interview can be canceled")
+        interview["status"] = "canceled"
+        interview["completedAt"] = now
+        return
+    if interview.get("status") != "active":
+        raise ValueError("planning interview task operations require an active interview")
+    if op == "patch-task":
+        task = _interview_task(interview, operation.get("taskId"))
+        task["profile"].update(
+            _safe_interview_profile_edits(operation.get("fieldEdits"))
+        )
+        if "breakdown" in operation:
+            breakdown = operation.get("breakdown")
+            if not isinstance(breakdown, list) or len(breakdown) > 32:
+                raise ValueError("planning interview task breakdown is invalid")
+            task["breakdown"] = [
+                _bounded_identifier(step, "interview breakdown step", limit=2_000)
+                for step in breakdown
+            ]
+        return
+    if op == "add-task":
+        if len(interview.get("tasks") or []) >= INTERVIEW_TASK_LIMIT:
+            raise ValueError("planning interview has too many tasks")
+        task = _validate_interview_tasks([operation.get("task")])[0]
+        if any(
+            existing.get("taskId") == task["taskId"]
+            for existing in interview.get("tasks") or []
+        ):
+            raise ValueError(f"duplicate planning interview task: {task['taskId']}")
+        interview["tasks"].append(task)
+        interview["readinessApproved"] = False
+        return
+    if op == "defer-task":
+        task = _interview_task(interview, operation.get("taskId"))
+        reason = _bounded_identifier(
+            operation.get("reason"), "interview deferral reason", limit=2_000
+        )
+        task["deferred"] = True
+        task["confirmed"] = False
+        task["profile"]["deferralReason"] = reason
+        next_task_id = _next_interview_task_id(interview, task["taskId"])
+        interview["cursor"] = {
+            "taskId": next_task_id,
+            "questionId": "urgency" if next_task_id else None,
+        }
+        return
+    if op == "set-cursor":
+        task = _interview_task(interview, operation.get("taskId"))
+        question_id = operation.get("questionId")
+        if question_id is not None:
+            question_id = _bounded_identifier(
+                question_id, "interview question id", limit=300
+            )
+        interview["cursor"] = {
+            "taskId": task["taskId"],
+            "questionId": question_id,
+        }
+        return
+    if op == "confirm-task":
+        task = _interview_task(interview, operation.get("taskId"))
+        profile = task.get("profile") or {}
+        required_fields = interview_question_order(interview)
+        missing = [
+            field
+            for field in required_fields
+            if field not in profile
+            or profile[field] is None
+            or (isinstance(profile[field], str) and not profile[field].strip())
+        ]
+        if missing:
+            raise ValueError(
+                "planning interview task profile is incomplete: " + ", ".join(missing)
+            )
+        task["confirmed"] = True
+        task["deferred"] = False
+        next_task_id = _next_interview_task_id(interview, task["taskId"])
+        interview["cursor"] = {
+            "taskId": next_task_id,
+            "questionId": (
+                interview_question_order(interview)[0]
+                if next_task_id and interview.get("mode") == "daily-grounding"
+                else "urgency" if next_task_id else None
+            ),
+        }
+        return
+    if op == "approve-readiness":
+        incomplete = [
+            task.get("taskId")
+            for task in interview.get("tasks") or []
+            if not task.get("confirmed") and not task.get("deferred")
+        ]
+        if incomplete:
+            raise ValueError(
+                "every planning interview task must be confirmed or deferred"
+            )
+        interview["readinessApproved"] = True
+        return
+    if op == "record-plan":
+        if not interview.get("readinessApproved"):
+            raise ValueError("planning interview requires readiness approval before a plan")
+        plan = operation.get("plan")
+        if not isinstance(plan, dict) or not plan:
+            raise ValueError("planning interview plan must be a non-empty object")
+        try:
+            encoded = json.dumps(plan, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("planning interview plan must be JSON-safe") from exc
+        if len(encoded.encode("utf-8")) > 131_072:
+            raise ValueError("planning interview plan is too large")
+        interview["plan"] = copy.deepcopy(plan)
+        interview["status"] = "completed"
+        interview["completedAt"] = now
+        return
+    raise ValueError(f"unsupported planning interview operation: {op}")
 
 
 class PersonalAssistantStateStore:
@@ -460,15 +862,21 @@ class PersonalAssistantStateStore:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             return _default()
+        if not isinstance(raw, dict):
+            return _default()
         state = _default()
-        if isinstance(raw, dict):
-            state.update(raw)
-        state["schema_version"] = SCHEMA_VERSION
+        state.update(_migrate_state(raw))
         state["context_ledger"] = _safe_context_ledger(state.get("context_ledger"))
         state["protected_items"] = _safe_protected_items(state.get("protected_items"))
         if not isinstance(state.get("coverage_receipts"), list):
             state["coverage_receipts"] = []
         state["coverage_receipts"] = state["coverage_receipts"][-COVERAGE_RECEIPT_LIMIT:]
+        try:
+            state["task_source_manifest"] = _validate_task_source_manifest(
+                state.get("task_source_manifest")
+            )
+        except ValueError:
+            state["task_source_manifest"] = []
         return state
 
     def read(self) -> dict[str, Any]:
@@ -488,6 +896,178 @@ class PersonalAssistantStateStore:
 
     def set_canonical_session(self, session_id: str | None) -> dict[str, Any]:
         return self.update(lambda state: state.__setitem__("canonical_session_id", session_id))
+
+    def set_task_source_manifest(self, sources: list[dict[str, Any]]) -> dict[str, Any]:
+        manifest = _validate_task_source_manifest(sources)
+        return self.update(
+            lambda state: state.__setitem__("task_source_manifest", copy.deepcopy(manifest))
+        )
+
+    def get_planning_interview(self) -> dict[str, Any] | None:
+        return copy.deepcopy(self._read().get("planning_interview"))
+
+    def get_pending_timer_action(self) -> dict[str, Any] | None:
+        pending = self._read().get("pending_timer_action")
+        return copy.deepcopy(pending) if isinstance(pending, dict) else None
+
+    def set_pending_timer_action(
+        self, pending: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        value = copy.deepcopy(pending) if isinstance(pending, dict) else None
+        return self.update(
+            lambda state: state.__setitem__("pending_timer_action", value)
+        )
+
+    def expire_planning_interview_before(self, planning_date: str) -> dict[str, Any]:
+        """Archive an unfinished interview whose planning day has already passed."""
+
+        cutoff = date.fromisoformat(str(planning_date or ""))
+
+        def is_stale(current: Any) -> bool:
+            if not isinstance(current, dict) or current.get("status") not in {
+                "active",
+                "paused",
+            }:
+                return False
+            try:
+                current_date = _interview_planning_date(current)
+                return bool(current_date and date.fromisoformat(current_date) < cutoff)
+            except ValueError:
+                return False
+
+        snapshot = self._read()
+        if not is_stale(snapshot.get("planning_interview")):
+            return copy.deepcopy(snapshot)
+
+        def mutate(state: dict[str, Any]) -> None:
+            current = state.get("planning_interview")
+            if not is_stale(current):
+                return
+            archived = copy.deepcopy(current)
+            archived["status"] = "expired"
+            archived["expiredAt"] = datetime.now(timezone.utc).isoformat()
+            archive = state.setdefault("planning_interview_archive", [])
+            archive.append(archived)
+            del archive[:-INTERVIEW_ARCHIVE_LIMIT]
+            state["planning_interview"] = None
+
+        return self.update(mutate)
+
+    def patch_planning_interview(
+        self,
+        *,
+        interview_id: str,
+        expected_revision: int,
+        request_id: str,
+        operations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        interview_id = _bounded_identifier(
+            interview_id, "interview id", limit=300
+        )
+        request_id = _bounded_identifier(request_id, "interview request id", limit=300)
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
+            raise ValueError("planning interview expected revision must be an integer")
+        if not isinstance(operations, list) or not operations:
+            raise ValueError("planning interview operations must be a non-empty list")
+        digest = _interview_digest(operations)
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            state = self._read()
+            current = state.get("planning_interview")
+            current_planning_date = _interview_planning_date(current)
+            if (
+                current is not None
+                and len(operations) == 1
+                and operations[0].get("op") == "start"
+                and (
+                    (
+                        operations[0].get("planningDate")
+                        and current_planning_date
+                        and operations[0]["planningDate"] != current_planning_date
+                    )
+                    or str(operations[0].get("mode") or "task-review")
+                    != str(current.get("mode") or "task-review")
+                    or (
+                        operations[0].get("questionOrder")
+                        and list(operations[0]["questionOrder"])
+                        != list(interview_question_order(current))
+                    )
+                )
+            ):
+                archived = copy.deepcopy(current)
+                archived["status"] = "superseded"
+                archived["supersededAt"] = datetime.now(timezone.utc).isoformat()
+                archive = state.setdefault("planning_interview_archive", [])
+                archive.append(archived)
+                del archive[:-INTERVIEW_ARCHIVE_LIMIT]
+                current = None
+            if current is not None:
+                if current.get("interviewId") != interview_id:
+                    raise ValueError("a different planning interview is already active")
+                receipt = next(
+                    (
+                        value
+                        for value in current.get("requestReceipts") or []
+                        if value.get("requestId") == request_id
+                    ),
+                    None,
+                )
+                if receipt is not None:
+                    if receipt.get("digest") != digest:
+                        raise ValueError(
+                            "planning interview request id was reused with a different payload"
+                        )
+                    return {
+                        "interview": copy.deepcopy(current),
+                        "stateVersion": int(
+                            receipt.get("stateVersion") or state.get("version") or 0
+                        ),
+                        "duplicate": True,
+                        "receipt": copy.deepcopy(receipt),
+                    }
+                current_revision = int(current.get("interviewRevision") or 0)
+                if expected_revision != current_revision:
+                    raise InterviewRevisionConflict(
+                        interview_id, current_revision, current
+                    )
+                interview = copy.deepcopy(current)
+                for operation in operations:
+                    if operation.get("op") == "start":
+                        raise ValueError("a planning interview is already active")
+                    _apply_interview_operation(interview, operation)
+                interview["interviewRevision"] = current_revision + 1
+                interview["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                receipts = interview.setdefault("requestReceipts", [])
+                receipts.append(
+                    {
+                        "requestId": request_id,
+                        "digest": digest,
+                        "interviewRevision": interview["interviewRevision"],
+                    }
+                )
+                del receipts[:-INTERVIEW_RECEIPT_LIMIT]
+            else:
+                if expected_revision != 0:
+                    raise InterviewRevisionConflict(interview_id, 0, None)
+                if len(operations) != 1 or operations[0].get("op") != "start":
+                    raise ValueError("planning interview must begin with start")
+                interview = _new_planning_interview(
+                    interview_id, operations[0], request_id, digest
+                )
+            state["planning_interview"] = interview
+            state["revision"] = int(state.get("revision") or 0) + 1
+            state["version"] = state["revision"]
+            interview["requestReceipts"][-1]["stateVersion"] = state["version"]
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            atomic_json_write(self.path, state, indent=2, mode=0o600)
+            return {
+                "interview": copy.deepcopy(interview),
+                "stateVersion": state["version"],
+                "duplicate": False,
+                "receipt": copy.deepcopy(interview["requestReceipts"][-1]),
+            }
 
     def upsert_protected_item(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Persist a protected project or commitment only with a safe disposition."""
@@ -558,6 +1138,15 @@ class PersonalAssistantStateStore:
         if not isinstance(protected_items, list) or len(protected_items) > 500:
             raise ValueError("protectedItems must be a list of at most 500 items")
         validated = [_validate_protected_item(item) for item in protected_items]
+        submitted_reviewed = _bounded_string_list(
+            reviewed_item_ids, "reviewed protected item id", limit=500
+        )
+        submitted_risks = _bounded_string_list(
+            risk_item_ids, "risk protected item id", limit=500
+        )
+        submitted_unresolved = _bounded_string_list(
+            unresolved_item_ids, "unresolved protected item id", limit=500
+        )
         submitted_ids = [item["id"] for item in validated]
         if len(submitted_ids) != len(set(submitted_ids)):
             raise ValueError("protectedItems contains duplicate ids")
@@ -569,19 +1158,42 @@ class PersonalAssistantStateStore:
             for item in validated:
                 by_id[item["id"]] = copy.deepcopy(item)
             merged = list(by_id.values())
+            now = datetime.now(timezone.utc)
+            retired_ids = {
+                item["id"]
+                for item in merged
+                if item["disposition"] in {"completed", "cancelled"}
+            }
+            effective_unresolved = [
+                item_id
+                for item_id in submitted_unresolved
+                if item_id not in retired_ids
+                and (
+                    item_id not in by_id
+                or not _context_review_is_safely_deferred(by_id[item_id], now=now)
+                )
+            ]
             active_ids = [
                 item["id"]
                 for item in merged
                 if item["disposition"] not in {"completed", "cancelled"}
+                and (
+                    item["id"] in submitted_ids
+                    or not _context_review_is_safely_deferred(item, now=now)
+                )
             ]
             receipt, _ = _build_coverage_receipt(
                 cadence=cadence,
                 scope_fingerprint=scope_fingerprint,
                 sources=sources,
                 expected_item_ids=active_ids,
-                reviewed_item_ids=reviewed_item_ids,
-                risk_item_ids=risk_item_ids,
-                unresolved_item_ids=unresolved_item_ids,
+                reviewed_item_ids=[
+                    item_id for item_id in submitted_reviewed if item_id not in retired_ids
+                ],
+                risk_item_ids=[
+                    item_id for item_id in submitted_risks if item_id not in retired_ids
+                ],
+                unresolved_item_ids=effective_unresolved,
             )
             state["protected_items"] = merged
             receipts = state.setdefault("coverage_receipts", [])
@@ -837,6 +1449,22 @@ class StateVersionConflict(ValueError):
         self.current_version = current_version
 
 
+class InterviewRevisionConflict(ValueError):
+    def __init__(
+        self,
+        interview_id: str,
+        current_revision: int,
+        latest: dict[str, Any] | None,
+    ):
+        super().__init__(
+            "planning interview revision conflict; "
+            f"current revision is {current_revision}"
+        )
+        self.interview_id = interview_id
+        self.current_revision = current_revision
+        self.latest = copy.deepcopy(latest)
+
+
 def _apply_operation(
     state: dict[str, Any], operation: dict[str, Any], editable: set[str]
 ) -> None:
@@ -908,5 +1536,8 @@ def public_state(state: dict[str, Any]) -> dict[str, Any]:
         "latestCoverageReceipt": copy.deepcopy(
             (state.get("coverage_receipts") or [None])[-1]
         ),
+        "taskSourceManifest": copy.deepcopy(state.get("task_source_manifest") or []),
         "source": copy.deepcopy(state.get("durableSource") or {"kind": "obsidian", "version": 0, "hash": None}),
+        "planningInterview": copy.deepcopy(state.get("planning_interview")),
+        "calendarPreflightReceipt": copy.deepcopy(state.get("calendar_preflight_receipt")),
     }

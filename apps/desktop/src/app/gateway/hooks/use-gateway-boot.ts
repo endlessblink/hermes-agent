@@ -30,17 +30,22 @@ import { $activeGatewayProfile, normalizeProfileKey, touchActiveGatewayBackend }
 import {
   $activeSessionId,
   $attentionSessionIds,
+  $awaitingResponse,
+  $busy,
   $connection,
   $currentCwd,
+  $selectedStoredSessionId,
   $sessions,
   $workingSessionIds,
+  clearWorkingSessionsForProfile,
   ensureDefaultWorkspaceCwd,
+  forceClearSessionAfterBackendExit,
   setConnection,
   setCurrentBranch,
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
-import { resetTileRuntimeBindings } from '@/store/session-states'
+import { $sessionStates, $sessionTiles, resetTileRuntimeBindings } from '@/store/session-states'
 import type { RpcEvent } from '@/types/hermes'
 
 // After this many consecutive failed reconnects (≈45s with the 1→15s backoff)
@@ -172,7 +177,7 @@ export function useGatewayBoot({
         reconnectAttempt = 0
         // A respawned backend re-mints (recycles) runtime ids, so any tile's
         // bound runtime id is now stale — drop them so each tile re-resumes.
-        resetTileRuntimeBindings()
+        resetTileRuntimeBindings($activeGatewayProfile.get())
         // Resync state that may have moved on the backend while we were asleep.
         await callbacksRef.current.refreshHermesConfig().catch(() => undefined)
         await callbacksRef.current.refreshSessions().catch(() => undefined)
@@ -353,7 +358,10 @@ export function useGatewayBoot({
     callbacksRef.current.onGatewayReady(gateway)
     setPrimaryGateway(gateway, normalizeProfileKey($activeGatewayProfile.get()))
     // Secondary (background-profile) sockets funnel into the same handler.
-    configureGatewayRegistry({ onEvent: event => callbacksRef.current.handleGatewayEvent(event) })
+    configureGatewayRegistry({
+      onEvent: event => callbacksRef.current.handleGatewayEvent(event),
+      onProfileReopened: resetTileRuntimeBindings
+    })
 
     const offState = gateway.onState(st => {
       // Mirror to the composer only while the primary is the active profile —
@@ -453,7 +461,62 @@ export function useGatewayBoot({
       }
     })
 
-    const offExit = desktop.onBackendExit(() => {
+    const offExit = desktop.onBackendExit(payload => {
+      const exitedProfile = payload.profile ?? sourceProfile
+      const interruptedSessionIds = new Set(clearWorkingSessionsForProfile(exitedProfile))
+      const sessionStates = $sessionStates.get()
+
+      for (const tile of $sessionTiles.get()) {
+        const tileProfile = tile.profile ?? $activeGatewayProfile.get()
+        const state = tile.runtimeId ? sessionStates[tile.runtimeId] : undefined
+
+        if (
+          normalizeProfileKey(tileProfile) === normalizeProfileKey(exitedProfile) &&
+          (state?.busy || state?.awaitingResponse) &&
+          !interruptedSessionIds.has(tile.storedSessionId)
+        ) {
+          forceClearSessionAfterBackendExit(tile.storedSessionId)
+          interruptedSessionIds.add(tile.storedSessionId)
+        }
+      }
+
+      const activeRuntimeId = $activeSessionId.get()
+      const activeState = activeRuntimeId ? sessionStates[activeRuntimeId] : undefined
+      const activeStoredSessionId = activeState?.storedSessionId
+
+      if (
+        normalizeProfileKey($activeGatewayProfile.get()) === normalizeProfileKey(exitedProfile) &&
+        activeStoredSessionId &&
+        (activeState.busy || activeState.awaitingResponse) &&
+        !interruptedSessionIds.has(activeStoredSessionId)
+      ) {
+        forceClearSessionAfterBackendExit(activeStoredSessionId)
+        interruptedSessionIds.add(activeStoredSessionId)
+      }
+
+      const selectedStoredSessionId = $selectedStoredSessionId.get()
+
+      if (
+        normalizeProfileKey($activeGatewayProfile.get()) === normalizeProfileKey(exitedProfile) &&
+        selectedStoredSessionId &&
+        ($busy.get() || $awaitingResponse.get()) &&
+        !interruptedSessionIds.has(selectedStoredSessionId)
+      ) {
+        forceClearSessionAfterBackendExit(selectedStoredSessionId)
+        interruptedSessionIds.add(selectedStoredSessionId)
+      }
+
+      for (const storedSessionId of interruptedSessionIds) {
+        notify({
+          durationMs: 0,
+          id: `session-recovery-${storedSessionId}`,
+          kind: 'error',
+          message:
+            'Hermes restarted before this answer finished. No task or calendar change was confirmed; retry the last request.',
+          title: 'Hermes restarted'
+        })
+      }
+
       if ($gatewaySwitching.get()) {
         return
       }

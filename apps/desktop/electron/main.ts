@@ -28,6 +28,7 @@ import {
 } from 'electron'
 import nodePty from 'node-pty'
 
+import { createQuitMenuItem } from './app-quit'
 import { stopBackendChild as stopBackendChildImpl } from './backend-child'
 import { dashboardFallbackArgs, shouldUseActiveRuntime, sourceDeclaresServe } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
@@ -105,6 +106,7 @@ import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle 
 import { ensureMainWindow } from './main-window-lifecycle'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
+import { resolveRuntimeSourceIdentity, runtimeSourceRootCandidates } from './runtime-source-identity'
 import {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
@@ -128,6 +130,7 @@ import {
 } from './update-relaunch'
 import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL } from './update-remote'
 import { fetchMarketplaceThemes, searchMarketplaceThemes } from './vscode-marketplace'
+import { startHermesWatchdogService } from './watchdog-service'
 import {
   computeWindowOptions,
   debounce,
@@ -245,6 +248,9 @@ app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
+const LOCAL_PACKAGED_SOURCE_ROOT = IS_PACKAGED
+  ? runtimeSourceRootCandidates(process.execPath).find(candidate => isHermesSourceRoot(candidate)) || null
+  : null
 
 // Build-time install stamp -- the git ref this .exe was built against.
 //
@@ -854,18 +860,17 @@ let softRehomeInProgress = false
 // backends spawned lazily when a session belongs to a different profile. A user
 // with no named profiles never populates this map, so their experience is
 // byte-for-byte the single-backend behavior.
-const backendPool = new Map() // profile -> { process, port, token, connectionPromise, lastActiveAt }
-// Keep the pool light: cap concurrent profile backends (LRU eviction) and reap
-// idle ones. A user idles at exactly the primary backend; pool backends only
-// exist while a non-primary profile is actively being chatted through.
+const backendPool = new Map() // profile -> { process, port, token, connectionPromise, lastActiveAt, intentionalStop }
+// Keep the pool light with renderer-owned profile pruning plus bounded LRU
+// eviction. Do not reap by elapsed wall-clock time: a missed renderer lease
+// during restart, reconnect, suspend, or scheduling delay cannot prove that a
+// backend is idle and may otherwise kill an active turn mid-response.
 const POOL_MAX_BACKENDS = Math.max(1, Number(process.env.HERMES_DESKTOP_POOL_MAX) || 3)
-const POOL_IDLE_MS = Math.max(60_000, Number(process.env.HERMES_DESKTOP_POOL_IDLE_MS) || 10 * 60_000)
 // A backend touched within this window has a live renderer socket (the keepalive
 // pings every 60s for every open profile). LRU eviction must spare these — a
 // concurrent multi-profile session keeps several backends "fresh" at once, and
 // killing one to honor the soft cap would abort a running agent.
 const POOL_KEEPALIVE_FRESH_MS = 90_000
-let poolIdleReaper = null
 // Auto-reload budget for renderer crashes. A deterministic startup crash would
 // otherwise loop forever (reload → crash → reload), pinning CPU and spamming
 // logs. Allow a few reloads per rolling window, then stop and leave the dead
@@ -2100,6 +2105,7 @@ const schedulePersistWindowState = debounce(persistWindowState, 250)
 function resolveUpdateRoot() {
   const candidates = [
     process.env.HERMES_DESKTOP_HERMES_ROOT && path.resolve(process.env.HERMES_DESKTOP_HERMES_ROOT),
+    LOCAL_PACKAGED_SOURCE_ROOT,
     !IS_PACKAGED && isHermesSourceRoot(SOURCE_REPO_ROOT) ? SOURCE_REPO_ROOT : null,
     isHermesSourceRoot(ACTIVE_HERMES_ROOT) ? ACTIVE_HERMES_ROOT : null
   ].filter(Boolean)
@@ -3423,18 +3429,20 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
   const legacyVenvPython = getVenvPython(legacyVenvRoot)
   const command = IS_WINDOWS && fileExists(legacyVenvPython) ? legacyVenvPython : python
   const venvRoot = inferVenvRootForPython(root, command)
+  const backendEnv = buildDesktopBackendEnv({
+    desktopParentPid: process.pid,
+    hermesHome: HERMES_HOME,
+    pythonPathEntries: [root, ...getVenvSitePackagesEntries(venvRoot)],
+    venvRoot
+  })
+  const sourceIdentity = resolveRuntimeSourceIdentity({ command, root, env: backendEnv })
 
   return {
     kind: 'python',
     label,
     command,
     args: ['-m', 'hermes_cli.main', ...backendArgs],
-    env: buildDesktopBackendEnv({
-      desktopParentPid: process.pid,
-      hermesHome: HERMES_HOME,
-      pythonPathEntries: [root, ...getVenvSitePackagesEntries(venvRoot)],
-      venvRoot
-    }),
+    env: { ...backendEnv, ...(sourceIdentity || {}) },
     root,
     bootstrap: Boolean(options.bootstrap),
     shell: false
@@ -3448,18 +3456,22 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
 function createActiveBackend(backendArgs) {
   const venvPython = getVenvPython(VENV_ROOT)
   const command = fileExists(venvPython) ? venvPython : findSystemPython()
+  const backendEnv = buildDesktopBackendEnv({
+    desktopParentPid: process.pid,
+    hermesHome: HERMES_HOME,
+    pythonPathEntries: [ACTIVE_HERMES_ROOT, ...getVenvSitePackagesEntries(VENV_ROOT)],
+    venvRoot: VENV_ROOT
+  })
+  const sourceIdentity = command
+    ? resolveRuntimeSourceIdentity({ command, root: ACTIVE_HERMES_ROOT, env: backendEnv })
+    : null
 
   return {
     kind: 'python',
     label: `Hermes at ${ACTIVE_HERMES_ROOT}`,
     command,
     args: ['-m', 'hermes_cli.main', ...backendArgs],
-    env: buildDesktopBackendEnv({
-      desktopParentPid: process.pid,
-      hermesHome: HERMES_HOME,
-      pythonPathEntries: [ACTIVE_HERMES_ROOT, ...getVenvSitePackagesEntries(VENV_ROOT)],
-      venvRoot: VENV_ROOT
-    }),
+    env: { ...backendEnv, ...(sourceIdentity || {}) },
     root: ACTIVE_HERMES_ROOT,
     bootstrap: true,
     shell: false
@@ -3473,6 +3485,23 @@ function resolveHermesBackend(backendArgs) {
 
   if (overrideRoot && isHermesSourceRoot(overrideRoot)) {
     const backend = createPythonBackend(overrideRoot, `Hermes source at ${overrideRoot}`, backendArgs)
+
+    if (backend) {
+      return backend
+    }
+  }
+
+  // A locally packed Desktop build may be relaunched directly by Electron or
+  // the desktop shell, bypassing the wrapper that supplied the source override.
+  // Recover the enclosing checkout from process.execPath so restarts keep using
+  // the same code that produced the package instead of silently falling back to
+  // a stale ~/.hermes/hermes-agent install.
+  if (LOCAL_PACKAGED_SOURCE_ROOT) {
+    const backend = createPythonBackend(
+      LOCAL_PACKAGED_SOURCE_ROOT,
+      `Hermes source at ${LOCAL_PACKAGED_SOURCE_ROOT}`,
+      backendArgs
+    )
 
     if (backend) {
       return backend
@@ -4828,7 +4857,7 @@ function buildApplicationMenu() {
             click: () => sendClosePreviewRequested(),
             label: 'Close'
           }
-        : { role: 'quit' }
+        : createQuitMenuItem(() => app.quit())
     ]
   })
   template.push({
@@ -6668,7 +6697,15 @@ async function ensureBackend(profile) {
 
   evictLruPoolBackends(POOL_MAX_BACKENDS - 1)
 
-  const entry = { process: null, port: null, token: null, connectionPromise: null, lastActiveAt: Date.now() }
+  const entry = {
+    process: null,
+    port: null,
+    token: null,
+    connectionPromise: null,
+    lastActiveAt: Date.now(),
+    intentionalStop: false
+  }
+
   entry.connectionPromise = spawnPoolBackend(key, entry).catch(error => {
     rememberLog(`Hermes backend for profile "${key}" startup failed: ${error.message}`)
     recordDiagnosticEvent({
@@ -6683,7 +6720,6 @@ async function ensureBackend(profile) {
     throw error
   })
   backendPool.set(key, entry)
-  startPoolIdleReaper()
 
   return entry.connectionPromise
 }
@@ -6730,32 +6766,6 @@ function evictLruPoolBackends(keep) {
     rememberLog(`Evicting idle profile backend "${profile}" (LRU cap ${POOL_MAX_BACKENDS})`)
     stopPoolBackend(profile)
     removable -= 1
-  }
-}
-
-function startPoolIdleReaper() {
-  if (poolIdleReaper) {
-    return
-  }
-
-  poolIdleReaper = setInterval(() => {
-    const now = Date.now()
-
-    for (const [profile, entry] of [...backendPool.entries()]) {
-      if (now - (entry.lastActiveAt || 0) > POOL_IDLE_MS) {
-        rememberLog(`Reaping idle profile backend "${profile}" (idle > ${Math.round(POOL_IDLE_MS / 1000)}s)`)
-        stopPoolBackend(profile)
-      }
-    }
-
-    if (backendPool.size === 0 && poolIdleReaper) {
-      clearInterval(poolIdleReaper)
-      poolIdleReaper = null
-    }
-  }, 60_000)
-
-  if (typeof poolIdleReaper.unref === 'function') {
-    poolIdleReaper.unref()
   }
 }
 
@@ -6864,6 +6874,10 @@ async function spawnPoolBackend(profile, entry) {
     })
     backendPool.delete(profile)
 
+    if (ready && !entry.intentionalStop) {
+      sendBackendExit({ code, signal, profile, pooled: true })
+    }
+
     if (!ready) {
       rejectStart?.(
         new Error(`Hermes backend for profile "${profile}" exited before it became ready (${signal || code}).`)
@@ -6913,6 +6927,7 @@ function stopPoolBackend(profile) {
   }
 
   backendPool.delete(profile)
+  entry.intentionalStop = true
   stopBackendChild(entry.process)
 }
 
@@ -6924,6 +6939,7 @@ async function teardownPoolBackendAndWait(profile) {
   }
 
   backendPool.delete(profile)
+  entry.intentionalStop = true
 
   stopBackendChild(entry.process)
 
@@ -8538,6 +8554,11 @@ ipcMain.handle('hermes:openExternal', (_event, url) => {
   }
 })
 
+ipcMain.handle('hermes:quit', () => {
+  setImmediate(() => app.quit())
+  return { quitting: true }
+})
+
 ipcMain.handle('hermes:openPreviewInBrowser', async (_event, url) => {
   if (!(await openPreviewInBrowser(url))) {
     throw new Error('Invalid preview URL')
@@ -8578,7 +8599,6 @@ ipcMain.handle('hermes:setting:defaultProjectDir:pick', async () => {
     properties: ['openDirectory', 'createDirectory'],
     defaultPath: readDefaultProjectDir() || app.getPath('home')
   })
-
   if (result.canceled || result.filePaths.length === 0) {
     return { canceled: true, dir: null }
   }
@@ -9494,6 +9514,8 @@ app.on('open-url', (event, url) => {
 })
 
 app.whenReady().then(() => {
+  startHermesWatchdogService()
+
   if (IS_MAC) {
     Menu.setApplicationMenu(buildApplicationMenu())
   } else {

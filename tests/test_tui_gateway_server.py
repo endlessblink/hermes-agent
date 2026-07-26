@@ -426,6 +426,61 @@ def test_slash_exec_compress_flag_on_applies_host_control_mirror(monkeypatch):
     assert server._session_info(None, session)["model"] == "host-model"
 
 
+def test_slash_exec_replaces_worker_that_exited_before_command(monkeypatch):
+    created = []
+
+    class _DeadProcess:
+        @staticmethod
+        def poll():
+            return 9
+
+    class _DeadWorker:
+        proc = _DeadProcess()
+
+        def close(self):
+            return None
+
+        def run(self, _command):
+            raise AssertionError("dead worker must not receive a new command")
+
+    class _FreshWorker:
+        def __init__(self, session_key, model, profile_home=None):
+            created.append((session_key, model, profile_home))
+
+        def run(self, command):
+            assert command == "not-a-built-in"
+            return "recovered"
+
+        def close(self):
+            return None
+
+    class _Agent:
+        model = "test-model"
+
+    session = _session(agent=_Agent())
+    session["session_key"] = "durable-session"
+    session["profile_home"] = "/tmp/profile"
+    session["slash_worker"] = _DeadWorker()
+    server._sessions["sid"] = session
+    monkeypatch.setattr(server, "_SlashWorker", _FreshWorker)
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"command": "not-a-built-in", "session_id": "sid"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert "result" in response, response
+    assert response["result"]["output"] == "recovered"
+    assert created == [("durable-session", "test-model", "/tmp/profile")]
+    assert isinstance(session["slash_worker"], _FreshWorker)
+
+
 def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
     class _ImmediateThread:
         def __init__(self, target=None, daemon=None, **_kwargs):
@@ -6315,6 +6370,19 @@ def test_session_info_includes_session_title(monkeypatch):
     assert info["title"] == "Dashboard title"
 
 
+def test_session_info_reports_authoritative_compaction_state(monkeypatch):
+    agent = types.SimpleNamespace(tools=[], model="test/model", provider="openai-codex")
+
+    active = server._session_info(
+        agent,
+        {"session_key": "session-key", "compression_started_at": 123.0},
+    )
+    idle = server._session_info(agent, {"session_key": "session-key"})
+
+    assert active["compacting"] is True
+    assert idle["compacting"] is False
+
+
 def test_session_info_includes_install_warning_for_pip(monkeypatch):
     """pip installs surface install_warning; git installs don't (issue: pip/brew deprecation)."""
     monkeypatch.setattr("hermes_cli.config.detect_install_method", lambda: "pip")
@@ -8012,6 +8080,53 @@ def test_prompt_submit_surfaces_backend_error_as_visible_text(monkeypatch):
     assert "kimi-k2.6" in payload.get("text", "")
 
 
+def test_prompt_submit_surfaces_iteration_exhaustion_as_error_diagnostic(monkeypatch):
+    class _Agent:
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": "bounded partial summary",
+                "messages": [],
+                "tool_iteration_exhausted": True,
+                "tool_iteration_count": 60,
+                "tool_iteration_limit": 60,
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "private prompt"},
+        }
+    )
+
+    diagnostic = [
+        event
+        for event in emitted
+        if event[0] == "diagnostic.event"
+        and event[2].get("event") == "tool_iteration_exhausted"
+    ]
+    complete = [event for event in emitted if event[0] == "message.complete"]
+    assert diagnostic
+    assert diagnostic[-1][2]["details"] == {
+        "iteration_count": 60,
+        "iteration_limit": 60,
+    }
+    assert complete[-1][2]["status"] == "error"
+
+
 def test_prompt_submit_marks_compression_exhausted_message_complete(monkeypatch):
     """A context-overflow terminal failure must carry a machine-readable flag
     so desktop can recover with a continuation instead of pattern-matching text."""
@@ -8115,10 +8230,10 @@ def test_compression_watchdog_bad_env_falls_back_to_aux_budget(monkeypatch):
 def test_turn_idle_watchdog_default_automatically_unblocks_chat(monkeypatch):
     monkeypatch.delenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", raising=False)
 
-    # Long-context Codex turns can spend several minutes reasoning after a
-    # tool result while the provider stream stays healthy, so this outer
-    # fail-safe is much more generous than the provider-level stale watchdog.
-    assert server._turn_idle_watchdog_timeout_seconds() == 600.0
+    # Agent/provider activity protects legitimate long reasoning. Thirty
+    # seconds with neither visible progress nor trusted agent activity is a
+    # user-visible frozen turn and must not remain stuck for ten minutes.
+    assert server._turn_idle_watchdog_timeout_seconds() == 30.0
 
 
 def test_turn_idle_watchdog_env_override(monkeypatch):
@@ -8130,7 +8245,7 @@ def test_turn_idle_watchdog_env_override(monkeypatch):
 def test_turn_idle_watchdog_bad_env_uses_default(monkeypatch):
     monkeypatch.setenv("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "bad")
 
-    assert server._turn_idle_watchdog_timeout_seconds() == 600.0
+    assert server._turn_idle_watchdog_timeout_seconds() == 30.0
 
 
 def test_compression_completion_restarts_turn_idle_budget(monkeypatch):
@@ -8384,6 +8499,28 @@ def test_turn_watchdog_ledger_records_turn_and_producer_identity(monkeypatch, tm
     assert row["producer_start_ticks"] == 987
 
 
+def test_turn_watchdog_ledger_records_fixed_runtime_source_identity(monkeypatch, tmp_path):
+    session = _session(running=True)
+    server._sessions["sid"] = session
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    monkeypatch.setenv("HERMES_RUNTIME_BUILD_ID", "source-abc123-def456")
+    monkeypatch.setenv("HERMES_RUNTIME_SOURCE_MANIFEST_DIGEST", "a" * 64)
+    monkeypatch.setenv("HERMES_RUNTIME_SOURCE_ROOT", "/private/source/root")
+
+    try:
+        server._emit("message.start", "sid")
+    finally:
+        server._sessions.pop("sid", None)
+
+    row = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["runtime_build_id"] == "source-abc123-def456"
+    assert row["source_manifest_digest"] == "a" * 64
+    assert "source_root" not in row
+    assert "/private/source/root" not in json.dumps(row)
+
+
 def test_blocking_prompt_records_wait_and_explicit_resume(monkeypatch, tmp_path):
     session = _session(running=True)
     session["watchdog_turn_id"] = "turn-wait"
@@ -8435,6 +8572,131 @@ def test_turn_watchdog_ledger_preserves_safe_error_details(monkeypatch, tmp_path
         "error_type": "RuntimeError",
         "error": "session not found",
     }
+
+
+def test_iteration_exhaustion_writes_fixed_privacy_safe_diagnostic(
+    monkeypatch, tmp_path
+):
+    session = _session(running=True)
+    server._sessions["sid"] = session
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+
+    try:
+        server._emit_tool_iteration_exhausted_diagnostic(
+            "sid",
+            {
+                "tool_iteration_exhausted": True,
+                "tool_iteration_count": 60,
+                "tool_iteration_limit": 60,
+                "final_response": (
+                    "You've reached the maximum number of tool-calling iterations "
+                    "allowed. Private prompt and args must not survive."
+                ),
+                "messages": [{"role": "user", "content": "private prompt"}],
+            },
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    row = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["event"] == "diagnostic.event"
+    assert row["payload"] == {
+        "component": "turn",
+        "event": "tool_iteration_exhausted",
+        "message": "Hermes exhausted the tool iteration budget",
+        "details": {"iteration_count": 60, "iteration_limit": 60},
+    }
+    serialized = json.dumps(row)
+    assert "Private prompt" not in serialized
+    assert "tool-calling iterations allowed" not in serialized
+
+
+def test_turn_watchdog_ledger_classifies_tool_failure_without_persisting_private_tool_data(
+    monkeypatch, tmp_path
+):
+    session = _session(running=True)
+    server._sessions["sid"] = session
+    ledger = tmp_path / "turn-watchdog.jsonl"
+    monkeypatch.setattr(server, "_TURN_WATCHDOG_LOG", str(ledger))
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+
+    try:
+        server._emit(
+            "tool.complete",
+            "sid",
+            {
+                "name": "run",
+                "duration_s": 0.25,
+                "args": {"code": "private medical context"},
+                "result": {
+                    "error": "ValidationError while processing private medical context"
+                },
+            },
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    row = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["payload"] == {
+        "duration_s": 0.25,
+        "error": "validation",
+        "name": "run",
+        "status": "error",
+    }
+    serialized = json.dumps(row)
+    assert "private medical context" not in serialized
+    assert "code" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("result", "category"),
+    [
+        (
+            {"status": "error", "output": "cannot import name flowstate_list_tasks_r"},
+            "tool_routing",
+        ),
+        (
+            {"status": "error", "output": "a different planning interview is already active"},
+            "workflow_conflict",
+        ),
+        (
+            {"status": "error", "output": "planning interview revision conflict"},
+            "concurrency",
+        ),
+        (
+            {"status": "error", "output": "JSONDecodeError while handling private content"},
+            "serialization",
+        ),
+        (
+            {"error": "Permission denied while searching an unreadable descendant"},
+            "filesystem_permission",
+        ),
+        (
+            {"error": "BLOCKED: execute_code requires user approval"},
+            "policy_blocked",
+        ),
+        (
+            {
+                "error": "A complete fresh Calendar check is required before planning data can be read.",
+                "error_type": "calendar_preflight_required",
+            },
+            "policy_blocked",
+        ),
+        (
+            {
+                "ok": False,
+                "message": "Background delivery is not available: Chromium/Electron does not accept pointer input addressed to an occluded, unfocused renderer",
+            },
+            "ui_unavailable",
+        ),
+    ],
+)
+def test_turn_watchdog_classifies_structured_tool_errors(result, category):
+    payload = {"name": "execute_code", "result": result}
+
+    assert server._watchdog_tool_error_category(payload) == category
 
 
 def test_missing_prompt_session_writes_safe_rpc_watchdog_row(monkeypatch, tmp_path):
@@ -8514,6 +8776,178 @@ def test_prompt_submit_preserves_empty_response_without_error(monkeypatch):
 
 
 # ── active live TUI sessions ─────────────────────────────────────────
+
+
+def test_prompt_submit_recovers_empty_personal_assistant_tool_turn(monkeypatch):
+    """Personal Assistant tool use restores runtime mode before empty completion."""
+
+    class _Store:
+        def get_planning_interview(self):
+            return {
+                "interviewId": "planning-1",
+                "status": "active",
+                "readinessApproved": False,
+                "cursor": {
+                    "taskId": "day-context",
+                    "questionId": "availability",
+                },
+                "tasks": [
+                    {
+                        "taskId": "day-context",
+                        "title": "תכנון שאר היום",
+                        "profile": {},
+                    }
+                ],
+            }
+
+    class _Agent:
+        personal_assistant_mode = False
+        personal_assistant_state_store = None
+
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": None,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-preflight",
+                                "type": "function",
+                                "function": {
+                                    "name": "personal_assistant_calendar_preflight",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "name": "personal_assistant_calendar_preflight",
+                        "tool_call_id": "call-preflight",
+                        "content": '{"result":{"receipt":{"complete":true}}}',
+                    },
+                ],
+                "api_calls": 1,
+                "completed": True,
+            }
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent, personal_assistant=False)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        server,
+        "_apply_personal_assistant_runtime_policy",
+        lambda session: (
+            session.__setitem__("personal_assistant", True),
+            setattr(agent, "personal_assistant_mode", True),
+            setattr(agent, "personal_assistant_state_store", _Store()),
+        ),
+    )
+
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "תכנן לי את שאר היום"},
+        }
+    )
+
+    payload = [event for event in emitted if event[0] == "message.complete"][-1][2]
+    assert server._sessions["sid"]["personal_assistant"] is True
+    assert payload["status"] == "complete"
+    assert "ההתקדמות בראיון נשמרה" in payload["text"]
+    assert "without producing a visible answer" not in payload["text"]
+
+
+def test_prompt_submit_rehydrates_personal_assistant_before_empty_recovery(monkeypatch):
+    """A canonical manager session must never fall through to the generic retry toast."""
+
+    class _Store:
+        def get_planning_interview(self):
+            return None
+
+    class _Agent:
+        personal_assistant_mode = False
+        personal_assistant_state_store = None
+
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            return {
+                "final_response": None,
+                "messages": [],
+                "api_calls": 0,
+                "completed": True,
+            }
+
+    agent = _Agent()
+    server._sessions["sid"] = _session(agent=agent, personal_assistant=True)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(
+        server,
+        "_apply_personal_assistant_runtime_policy",
+        lambda session: (
+            setattr(agent, "personal_assistant_mode", True),
+            setattr(agent, "personal_assistant_state_store", _Store()),
+        ),
+    )
+
+    emitted: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload=None: emitted.append((event, sid, payload or {})),
+    )
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+
+    server.handle_request(
+        {
+            "id": "1",
+            "method": "prompt.submit",
+            "params": {"session_id": "sid", "text": "תכנן לי את שאר היום"},
+        }
+    )
+
+    payload = [event for event in emitted if event[0] == "message.complete"][-1][2]
+    assert agent.personal_assistant_mode is True
+    assert payload["status"] == "complete"
+    assert "לא התקבלה תשובה מהמודל" in payload["text"]
+    assert "without producing a visible answer" not in payload["text"]
+
+
+def test_personal_assistant_tool_start_restores_lost_runtime_mode(monkeypatch):
+    session = _session(personal_assistant=False)
+    server._sessions["sid"] = session
+    applied = []
+    monkeypatch.setattr(
+        server,
+        "_apply_personal_assistant_runtime_policy",
+        lambda current: applied.append(current)
+        or current.__setitem__("personal_assistant", True),
+    )
+
+    server._on_tool_start(
+        "sid",
+        "call-preflight",
+        "personal_assistant_calendar_preflight",
+        {},
+    )
+
+    assert applied == [session]
+    assert session["personal_assistant"] is True
 
 
 def test_session_active_list_reports_live_sessions(monkeypatch):
@@ -10737,6 +11171,7 @@ def test_start_agent_build_passes_session_model_override(monkeypatch):
     no global config, no build-then-switch.
     """
     captured = {}
+    checkpoint_calls = []
 
     class FakeWorker:
         def __init__(self, *_a, **_k):
@@ -10760,6 +11195,10 @@ def test_start_agent_build_passes_session_model_override(monkeypatch):
     monkeypatch.setattr(server, "_start_notification_poller", lambda *a, **k: None)
     monkeypatch.setattr(server, "_notify_session_boundary", lambda *a, **k: None)
     monkeypatch.setattr(server, "_probe_config_health", lambda *_a: None)
+    monkeypatch.setattr(
+        "agent.conversation_compression.schedule_background_compaction_checkpoint",
+        lambda agent, messages: checkpoint_calls.append((agent, messages)) or True,
+    )
 
     sid = "build-sid"
     override = {"model": "claude-sonnet-4.6", "provider": "anthropic"}
@@ -10772,6 +11211,8 @@ def test_start_agent_build_passes_session_model_override(monkeypatch):
         "model_override": override,
         "create_reasoning_override": reasoning,
         "create_service_tier_override": "priority",
+        "history": [{"role": "user", "content": "restored turn"}],
+        "history_lock": threading.RLock(),
     }
     server._sessions[sid] = session
     try:
@@ -10781,6 +11222,7 @@ def test_start_agent_build_passes_session_model_override(monkeypatch):
         assert captured.get("reasoning_config_override") == reasoning
         assert captured.get("service_tier_override") == "priority"
         assert session["agent"].model == "claude-sonnet-4.6"
+        assert checkpoint_calls == [(session["agent"], session["history"])]
     finally:
         server._sessions.clear()
 
