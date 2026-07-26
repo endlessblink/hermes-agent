@@ -1,6 +1,6 @@
 'use client'
 
-import { type CSSProperties, type ReactNode, useId, useMemo, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useId, useMemo, useState } from 'react'
 
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import { useComposerScope } from '@/app/chat/composer/scope'
@@ -37,7 +37,11 @@ import {
 } from '@/lib/hermes-ui-artifacts'
 import { readKey, writeKey } from '@/lib/storage'
 import { cn } from '@/lib/utils'
-import { continuePersonalAssistantInterview, respondToPersonalAssistantInterview } from '@/store/personal-assistant'
+import {
+  continuePersonalAssistantInterview,
+  fetchCurrentPersonalAssistantInterview,
+  respondToPersonalAssistantInterview
+} from '@/store/personal-assistant'
 
 import type { RichFenceProps } from './types'
 
@@ -1932,13 +1936,52 @@ function TaskProfileReviewCardStep({
   const [editingProfile, setEditingProfile] = useState(false)
   const [profileExpanded, setProfileExpanded] = useState(false)
   const [expectedRevision, setExpectedRevision] = useState(artifact.revision)
-  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'stale' | 'error'>('idle')
+  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'stale' | 'error' | 'ended'>('idle')
   const [pendingContinuation, setPendingContinuation] = useState<string | null>(null)
   const question = artifact.question
   const isDailyGrounding = artifact.task.id === 'day-context'
   const visibleProfileFields =
     editingProfile || profileExpanded ? artifact.profileFields : artifact.profileFields.slice(0, 6)
   const remainingProfileFields = artifact.profileFields.length - visibleProfileFields.length
+
+  // A card lives in the transcript forever, but the interview behind it does not.
+  // Reopening the assistant replays an old snapshot, so reconcile with the live
+  // question on mount instead of showing buttons that answer nothing.
+  useEffect(() => {
+    let cancelled = false
+
+    void (async () => {
+      try {
+        const live = await fetchCurrentPersonalAssistantInterview()
+
+        if (cancelled) {
+          return
+        }
+        const liveId = live.interview?.interviewId
+        if (!live.interview || liveId !== artifact.interviewId) {
+          setStatus('ended')
+
+          return
+        }
+        const liveArtifact = live.nextArtifact as HermesUiTaskProfileReviewArtifact | null
+        if (!liveArtifact) {
+          setStatus('ended')
+
+          return
+        }
+        if (liveArtifact.question.id !== question.id || liveArtifact.revision !== artifact.revision) {
+          onNextArtifact(liveArtifact)
+        }
+      } catch {
+        // Offline or an older backend: leave the rendered card as-is.
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artifact.interviewId, artifact.revision, question.id])
 
   const toggleOption = (value: string) => {
     if (isDailyGrounding && question.type === 'single-choice') {
@@ -2049,6 +2092,7 @@ function TaskProfileReviewCardStep({
         dailyConfirm: 'שמירה והמשך',
         custom: question.customAnswerLabel || 'תשובה אחרת',
         edit: 'עריכת פרופיל המשימה',
+        ended: 'התכנון הזה כבר הסתיים. אפשר להתחיל תכנון חדש בשיחה.',
         error: 'התשובה לא נשמרה. אפשר לנסות שוב.',
         pause: 'השהיה',
         revisit: 'חזרה למשימה קודמת',
@@ -2061,6 +2105,7 @@ function TaskProfileReviewCardStep({
         dailyConfirm: 'Save and continue',
         custom: question.customAnswerLabel || 'Custom answer',
         edit: 'Edit task profile',
+        ended: 'This planning session has already ended. Start a new one in the conversation.',
         error: 'Your answer was not saved. You can try again.',
         pause: 'Pause',
         revisit: 'Revisit an earlier task',
@@ -2198,6 +2243,7 @@ function TaskProfileReviewCardStep({
         </fieldset>
 
         {status === 'stale' && <p className="text-[0.7rem] text-amber-600">{labels.stale}</p>}
+        {status === 'ended' && <p className="text-[0.7rem] text-muted-foreground">{labels.ended}</p>}
         {status === 'error' && <p className="text-[0.7rem] text-destructive">{labels.error}</p>}
         {isDailyGrounding && status === 'saved' && (
           <p aria-live="polite" className="text-[0.72rem] font-medium text-emerald-600">
@@ -2240,6 +2286,7 @@ function TaskProfileReviewCardStep({
           disabled={
             status === 'saving' ||
             status === 'saved' ||
+            status === 'ended' ||
             (question.required && selectedValues.length === 0 && !customAnswer.trim())
           }
           onClick={() => void commit('answer')}

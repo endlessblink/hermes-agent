@@ -21,6 +21,13 @@ import type {
 
 const requestComposerSubmit = vi.fn()
 const continuePersonalAssistantInterview = vi.fn()
+// Default: the live-state probe is unavailable, so cards render exactly as before.
+// Tests that care about replayed cards override this per case.
+const fetchCurrentPersonalAssistantInterview = vi.fn<
+  () => Promise<{ interview: { interviewId?: unknown; interviewRevision?: unknown } | null; nextArtifact: unknown }>
+>(async () => {
+  throw new Error('live interview probe unavailable')
+})
 const respondToPersonalAssistantInterview = vi.fn()
 
 vi.mock('@/app/chat/composer/focus', () => ({
@@ -30,6 +37,7 @@ vi.mock('@/app/chat/composer/focus', () => ({
 vi.mock('@/store/personal-assistant', () => ({
   continuePersonalAssistantInterview: (text: string, runtimeSessionId?: string) =>
     continuePersonalAssistantInterview(text, runtimeSessionId),
+  fetchCurrentPersonalAssistantInterview: () => fetchCurrentPersonalAssistantInterview(),
   respondToPersonalAssistantInterview: (params: unknown) => respondToPersonalAssistantInterview(params)
 }))
 
@@ -163,6 +171,8 @@ beforeEach(() => {
   requestComposerSubmit.mockClear()
   continuePersonalAssistantInterview.mockReset()
   continuePersonalAssistantInterview.mockResolvedValue(undefined)
+  fetchCurrentPersonalAssistantInterview.mockReset()
+  fetchCurrentPersonalAssistantInterview.mockRejectedValue(new Error('live interview probe unavailable'))
   respondToPersonalAssistantInterview.mockReset()
 })
 
@@ -1002,7 +1012,7 @@ describe('Planning interview primitives', () => {
     fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
 
     await waitFor(() => expect(respondToPersonalAssistantInterview).toHaveBeenCalledTimes(1))
-    expect(screen.getByText('כמה המשימה חשובה?')).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('כמה המשימה חשובה?')).toBeTruthy())
     expect(screen.getByText('3 / 8')).toBeTruthy()
     expect(continuePersonalAssistantInterview).not.toHaveBeenCalled()
     expect(respondToPersonalAssistantInterview).toHaveBeenCalledWith(
@@ -1149,6 +1159,30 @@ describe('Planning interview primitives', () => {
       expect.stringContaining('after committed answer'),
       undefined
     )
+  })
+
+  it('retires a replayed card whose planning session is already over', async () => {
+    fetchCurrentPersonalAssistantInterview.mockResolvedValue({ interview: null, nextArtifact: null })
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    await waitFor(() => expect(screen.getByText(/התכנון הזה כבר הסתיים/)).toBeTruthy())
+    expect(screen.getByRole('button', { name: 'אישור והמשך' })).toHaveProperty('disabled', true)
+  })
+
+  it('catches a replayed card up to the question the interview actually reached', async () => {
+    fetchCurrentPersonalAssistantInterview.mockResolvedValue({
+      interview: { interviewId: taskProfileReview.interviewId, interviewRevision: 12 },
+      nextArtifact: {
+        ...taskProfileReview,
+        progress: { current: 4, total: 8 },
+        question: { ...taskProfileReview.question, id: 'effort', label: 'כמה מאמץ זה דורש?' },
+        revision: 12
+      }
+    })
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    await waitFor(() => expect(screen.getByText('כמה מאמץ זה דורש?')).toBeTruthy())
+    expect(screen.getByText('4 / 8')).toBeTruthy()
   })
 
   it('advances to the next question when another writer bumped the interview mid-answer', async () => {

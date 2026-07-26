@@ -320,6 +320,15 @@ export async function respondToPersonalAssistantInterview(
   return result
 }
 
+export async function fetchCurrentPersonalAssistantInterview(): Promise<{
+  interview: { interviewId?: unknown; interviewRevision?: unknown } | null
+  nextArtifact: unknown
+}> {
+  return (await ownerGateway()).request('personal_assistant.interview.current', {
+    profile: PERSONAL_ASSISTANT_OWNER_PROFILE
+  })
+}
+
 export async function continuePersonalAssistantInterview(text: string, runtimeSessionId?: string): Promise<void> {
   const gateway = await ownerGateway()
   const activeRuntimeSessionId = runtimeSessionId || $activeSessionId.get()

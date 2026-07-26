@@ -4468,6 +4468,30 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, result)
 
 
+@method("personal_assistant.interview.current")
+def _(rid, params: dict) -> dict:
+    """Return the live interview question so a replayed card can catch up.
+
+    A card rendered into the transcript is a snapshot. Reopening the assistant
+    replays it verbatim, so without this the user sees a question they already
+    answered and every button on it is dead.
+    """
+
+    from agent.personal_assistant_output_gate import build_safe_interview_artifact
+
+    store, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    interview = store.get_planning_interview()
+    return _ok(
+        rid,
+        {
+            "interview": interview,
+            "nextArtifact": build_safe_interview_artifact(interview),
+        },
+    )
+
+
 @method("personal_assistant.home")
 def _(rid, params: dict) -> dict:
     """Open or create the canonical assistant home without starting an episode."""
