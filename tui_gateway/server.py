@@ -4446,12 +4446,18 @@ def _(rid, params: dict) -> dict:
     try:
         result = PlanningInterviewController(store).respond(params)
     except InterviewRevisionConflict as exc:
+        from agent.personal_assistant_output_gate import build_safe_interview_artifact
+
         response = _err(rid, 4093, str(exc))
         response["error"]["data"] = {
             "code": "interview_version_conflict",
             "interviewId": exc.interview_id,
             "currentRevision": exc.current_revision,
             "latest": exc.latest,
+            # Anything may bump the interview between render and answer. Hand the
+            # card its current question back so it advances instead of stalling on
+            # a model continuation that may never redraw it.
+            "nextArtifact": build_safe_interview_artifact(exc.latest),
         }
         return response
     except ValueError as exc:

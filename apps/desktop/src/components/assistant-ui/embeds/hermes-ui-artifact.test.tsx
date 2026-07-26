@@ -573,11 +573,7 @@ describe('ChecklistArtifactCard', () => {
     render(
       <MarkdownTextContent
         isRunning
-        text={[
-          'אני מכין את התוכנית.',
-          '```hermes-ui',
-          '{"type":"day-timeline","title":"מחר","items":['
-        ].join('\n')}
+        text={['אני מכין את התוכנית.', '```hermes-ui', '{"type":"day-timeline","title":"מחר","items":['].join('\n')}
       />
     )
 
@@ -1153,6 +1149,41 @@ describe('Planning interview primitives', () => {
       expect.stringContaining('after committed answer'),
       undefined
     )
+  })
+
+  it('advances to the next question when another writer bumped the interview mid-answer', async () => {
+    respondToPersonalAssistantInterview.mockRejectedValueOnce(
+      Object.assign(new Error('Personal Assistant interview version conflict'), {
+        code: 4093,
+        data: {
+          code: 'interview_version_conflict',
+          latest: {
+            interviewRevision: 9,
+            tasks: [{ taskId: 'pet-results', profile: { urgency: 'high' } }]
+          },
+          nextArtifact: {
+            ...taskProfileReview,
+            progress: { current: 3, total: 8 },
+            question: {
+              ...taskProfileReview.question,
+              id: 'importance',
+              label: 'כמה המשימה חשובה?'
+            },
+            revision: 9
+          }
+        }
+      })
+    )
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    fireEvent.click(screen.getByLabelText('גבוהה'))
+    fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
+
+    await waitFor(() => expect(screen.getByText('כמה המשימה חשובה?')).toBeTruthy())
+    expect(screen.getByText('3 / 8')).toBeTruthy()
+    expect(continuePersonalAssistantInterview).not.toHaveBeenCalled()
+    expect(screen.queryByText('להמשיך מהתשובה שנשמרה')).toBeNull()
+    expect(screen.queryByText('נשמר להיום')).toBeNull()
   })
 
   it('keeps a complete task review card disabled until streaming finishes', async () => {

@@ -1853,6 +1853,7 @@ type InterviewConflict = {
     revision?: unknown
     tasks?: Array<{ profile?: Record<string, unknown>; taskId?: unknown }>
   }
+  nextArtifact?: HermesUiTaskProfileReviewArtifact
 }
 
 function interviewConflict(error: unknown): InterviewConflict {
@@ -1861,7 +1862,8 @@ function interviewConflict(error: unknown): InterviewConflict {
   return {
     code: data.code ?? top.code,
     currentRevision: data.currentRevision ?? top.currentRevision,
-    latest: data.latest ?? top.latest
+    latest: data.latest ?? top.latest,
+    nextArtifact: data.nextArtifact ?? top.nextArtifact
   }
 }
 
@@ -1884,7 +1886,9 @@ function savedAnswerMatches(
   }
   if (
     response.fieldEdits &&
-    !Object.entries(response.fieldEdits).every(([field, value]) => stableJson(savedProfile[field]) === stableJson(value))
+    !Object.entries(response.fieldEdits).every(
+      ([field, value]) => stableJson(savedProfile[field]) === stableJson(value)
+    )
   ) {
     return false
   }
@@ -1950,8 +1954,8 @@ function TaskProfileReviewCardStep({
     )
   }
 
-  const commit = async (action: 'answer' | 'back' | 'pause') => {
-    if (status === 'saving' || status === 'saved') {
+  const commit = async (action: 'answer' | 'back' | 'pause', revisionOverride?: number) => {
+    if (revisionOverride === undefined && (status === 'saving' || status === 'saved')) {
       return
     }
 
@@ -1959,6 +1963,7 @@ function TaskProfileReviewCardStep({
       return
     }
 
+    const revision = revisionOverride ?? expectedRevision
     const response = {
       action,
       ...(action === 'answer' && selectedValues.length ? { selectedValues } : {}),
@@ -1968,11 +1973,11 @@ function TaskProfileReviewCardStep({
     setStatus('saving')
     try {
       const result = await respondToPersonalAssistantInterview({
-        expectedRevision,
+        expectedRevision: revision,
         interviewId: artifact.interviewId,
         questionId: question.id,
         requestId: stableInterviewRequestId({
-          expectedRevision,
+          expectedRevision: revision,
           interviewId: artifact.interviewId,
           questionId: question.id,
           response,
@@ -2005,11 +2010,20 @@ function TaskProfileReviewCardStep({
             ? conflict.currentRevision
             : typeof conflict.latest?.interviewRevision === 'number'
               ? conflict.latest.interviewRevision
-            : typeof conflict.latest?.revision === 'number'
-              ? conflict.latest.revision
-              : expectedRevision
+              : typeof conflict.latest?.revision === 'number'
+                ? conflict.latest.revision
+                : expectedRevision
         setExpectedRevision(latestRevision)
         if (savedAnswerMatches(conflict, artifact, response)) {
+          // The answer is durable. Anything may have bumped the interview between
+          // render and save (a refreshed calendar snapshot does it routinely), so
+          // move to the server's current question instead of parking the card and
+          // waiting for a model turn that may never redraw it.
+          if (conflict.nextArtifact) {
+            onNextArtifact(conflict.nextArtifact)
+
+            return
+          }
           const receipt = conflict.latest?.requestReceipts?.at(-1) ?? { interviewRevision: latestRevision }
           const continuation =
             `Continue personal-assistant interview ${artifact.interviewId} after committed ${action}; ` +
@@ -2031,27 +2045,27 @@ function TaskProfileReviewCardStep({
 
   const labels = isRtl
     ? {
-         confirm: 'אישור והמשך',
-         dailyConfirm: 'שמירה והמשך',
+        confirm: 'אישור והמשך',
+        dailyConfirm: 'שמירה והמשך',
         custom: question.customAnswerLabel || 'תשובה אחרת',
         edit: 'עריכת פרופיל המשימה',
         error: 'התשובה לא נשמרה. אפשר לנסות שוב.',
         pause: 'השהיה',
-         revisit: 'חזרה למשימה קודמת',
-         savedToday: 'נשמר להיום',
-         continueSaved: 'להמשיך מהתשובה שנשמרה',
+        revisit: 'חזרה למשימה קודמת',
+        savedToday: 'נשמר להיום',
+        continueSaved: 'להמשיך מהתשובה שנשמרה',
         stale: 'הכרטיס התעדכן במקום אחר. הטיוטה שלך נשמרה; בדוק ואשר שוב.'
       }
     : {
-         confirm: 'Confirm and continue',
-         dailyConfirm: 'Save and continue',
+        confirm: 'Confirm and continue',
+        dailyConfirm: 'Save and continue',
         custom: question.customAnswerLabel || 'Custom answer',
         edit: 'Edit task profile',
         error: 'Your answer was not saved. You can try again.',
         pause: 'Pause',
-         revisit: 'Revisit an earlier task',
-         savedToday: 'Saved for today',
-         continueSaved: 'Continue from the saved answer',
+        revisit: 'Revisit an earlier task',
+        savedToday: 'Saved for today',
+        continueSaved: 'Continue from the saved answer',
         stale: 'This card changed elsewhere. Your draft is preserved; review and confirm again.'
       }
 
@@ -2892,7 +2906,9 @@ export function DayTimelineCard({ artifact }: { artifact: HermesUiDayTimelineArt
                 {block.endTime ? `-${block.endTime}` : ''}
               </span>
             )
-            const label = <span className="min-w-0 flex-1 text-[0.78rem] font-semibold wrap-anywhere">{block.label}</span>
+            const label = (
+              <span className="min-w-0 flex-1 text-[0.78rem] font-semibold wrap-anywhere">{block.label}</span>
+            )
 
             return (
               <div className="px-2.5 py-2" key={block.id}>
@@ -3086,16 +3102,16 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
                 <div className="rounded-md border border-border/45 px-2 py-1.5" key={String(label)}>
                   <div className="text-[0.66rem] font-medium text-muted-foreground">{String(label)}</div>
                   <div className="mt-1 space-y-0.5 text-[0.7rem]">
-                    {record && Object.keys(record).length ? (
-                      Object.entries(record)
-                        .filter(([, value]) => isKnownValue(value))
-                        .map(([key, value]) => (
-                        <div className="flex justify-between gap-2" key={key}>
-                          <span className="text-muted-foreground">{key}</span>
-                          <span className="text-foreground tabular-nums">{valueLabel(value, isRtl)}</span>
-                        </div>
-                        ))
-                    ) : null}
+                    {record && Object.keys(record).length
+                      ? Object.entries(record)
+                          .filter(([, value]) => isKnownValue(value))
+                          .map(([key, value]) => (
+                            <div className="flex justify-between gap-2" key={key}>
+                              <span className="text-muted-foreground">{key}</span>
+                              <span className="text-foreground tabular-nums">{valueLabel(value, isRtl)}</span>
+                            </div>
+                          ))
+                      : null}
                   </div>
                 </div>
               ))}
@@ -3131,17 +3147,17 @@ export function UrgencyEnergyMatrixCard({ artifact }: { artifact: HermesUiUrgenc
                     {cell?.label || `${artifact.yAxis}: ${y} · ${artifact.xAxis}: ${x}`}
                   </div>
                   <div className="mt-1 space-y-1">
-                    {cell?.tasks.length ? (
-                      cell.tasks.map(task => (
-                        <div className="rounded border border-border/45 px-1.5 py-1 text-[0.68rem]" key={task.id}>
-                          <div className="font-medium text-foreground wrap-anywhere">{task.title}</div>
-                          {task.priority ? (
-                            <div className="text-muted-foreground">{priorityText(task.priority, isRtl)}</div>
-                          ) : null}
-                          <PlanningActionButtons actions={task.actions} isRtl={isRtl} />
-                        </div>
-                      ))
-                    ) : null}
+                    {cell?.tasks.length
+                      ? cell.tasks.map(task => (
+                          <div className="rounded border border-border/45 px-1.5 py-1 text-[0.68rem]" key={task.id}>
+                            <div className="font-medium text-foreground wrap-anywhere">{task.title}</div>
+                            {task.priority ? (
+                              <div className="text-muted-foreground">{priorityText(task.priority, isRtl)}</div>
+                            ) : null}
+                            <PlanningActionButtons actions={task.actions} isRtl={isRtl} />
+                          </div>
+                        ))
+                      : null}
                   </div>
                 </div>
               )

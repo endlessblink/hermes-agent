@@ -107,6 +107,30 @@ def _handle_calendar_preflight(args: dict, **kwargs) -> str:
         return _error(exc)
 
 
+def _snapshot_without_capture_metadata(snapshot: Any) -> Any:
+    """Drop timestamps that change on every re-read but carry no planning meaning."""
+    if not isinstance(snapshot, dict):
+        return snapshot
+    stripped = {
+        key: _snapshot_without_capture_metadata(value)
+        for key, value in snapshot.items()
+        if key not in {"capturedAt", "captured_at", "fetchedAt", "generatedAt"}
+    }
+    return stripped
+
+
+def _snapshot_materially_changed(current: Any, incoming: Any) -> bool:
+    """Only a real content change is worth a new interview revision.
+
+    Re-running the calendar preflight always produces a fresh capture timestamp.
+    Persisting that bumps the interview version underneath a card the user is
+    still answering, which turns their next answer into a version conflict.
+    """
+    return _snapshot_without_capture_metadata(
+        current
+    ) != _snapshot_without_capture_metadata(incoming)
+
+
 def _handle_interview_start(args: dict, **kwargs) -> str:
     """Start the durable cross-client planning interview after source discovery."""
     try:
@@ -144,7 +168,9 @@ def _handle_interview_start(args: dict, **kwargs) -> str:
             if (
                 isinstance(incoming_snapshot, dict)
                 and incoming_snapshot
-                and incoming_snapshot != active.get("sourceSnapshot")
+                and _snapshot_materially_changed(
+                    active.get("sourceSnapshot"), incoming_snapshot
+                )
             ):
                 refreshed = store.patch_planning_interview(
                     interview_id=str(active.get("interviewId") or ""),
