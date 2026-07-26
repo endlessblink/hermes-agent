@@ -52,6 +52,8 @@ export interface HermesUiFormOption {
 }
 
 export interface HermesUiFormField {
+  allowCustomAnswer?: boolean
+  customAnswerLabel?: string
   id: string
   label: string
   type: HermesUiFormFieldType
@@ -316,6 +318,7 @@ export interface HermesUiMiniKanbanArtifact {
   id?: string
   title?: string
   description?: string
+  actions?: HermesUiChecklistAction[]
   lanes: HermesUiMiniKanbanLane[]
 }
 
@@ -364,6 +367,7 @@ export interface HermesUiWeekPlannerArtifact {
   id?: string
   title?: string
   description?: string
+  actions?: HermesUiChecklistAction[]
   weekStart: string
   currentDate?: string
   days: HermesUiWeekPlannerDay[]
@@ -533,7 +537,7 @@ const MAX_CONTEXT_ITEMS = 6
 const MAX_TASK_TABLE_COLUMNS = 8
 const MAX_TASK_TABLE_ROWS = 7
 const MIN_TASK_TABLE_ROWS = 3
-const MAX_MINI_KANBAN_LANES = 5
+const MAX_MINI_KANBAN_LANES = 8
 const MAX_MINI_KANBAN_TASKS = 8
 const MAX_TIMELINE_BLOCKS = 12
 const WEEK_PLANNER_DAYS = 7
@@ -549,6 +553,8 @@ const MAX_FORM_FIELDS = 12
 const MAX_FORM_OPTIONS = 12
 const SAFE_FORM_KEYS = new Set(['description', 'direction', 'fields', 'id', 'submitLabel', 'title', 'type'])
 const SAFE_FORM_FIELD_KEYS = new Set([
+  'allowCustomAnswer',
+  'customAnswerLabel',
   'default',
   'description',
   'id',
@@ -610,7 +616,7 @@ const SAFE_TASK_TABLE_ROW_KEYS = new Set([
   'urgency'
 ])
 
-const SAFE_MINI_KANBAN_KEYS = new Set(['description', 'direction', 'id', 'lanes', 'title', 'type'])
+const SAFE_MINI_KANBAN_KEYS = new Set(['actions', 'description', 'direction', 'id', 'lanes', 'title', 'type'])
 const SAFE_MINI_KANBAN_LANE_KEYS = new Set(['description', 'id', 'tasks', 'title'])
 const SAFE_MINI_KANBAN_TASK_KEYS = new Set(['actions', 'confidence', 'dueDate', 'id', 'note', 'priority', 'title'])
 const SAFE_DAY_TIMELINE_KEYS = new Set([
@@ -638,6 +644,7 @@ const SAFE_DAY_TIMELINE_BLOCK_KEYS = new Set([
   'taskId'
 ])
 const SAFE_WEEK_PLANNER_KEYS = new Set([
+  'actions',
   'currentDate',
   'days',
   'description',
@@ -997,6 +1004,30 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
       return { error: `fields[${index}].required must be a boolean`, ok: false }
     }
 
+    if (raw.allowCustomAnswer !== undefined && typeof raw.allowCustomAnswer !== 'boolean') {
+      return { error: `fields[${index}].allowCustomAnswer must be a boolean`, ok: false }
+    }
+
+    const isChoiceField = raw.type === 'single-choice' || raw.type === 'multi-choice'
+
+    if (raw.allowCustomAnswer !== undefined && !isChoiceField) {
+      return { error: `fields[${index}].allowCustomAnswer is only valid for choice fields`, ok: false }
+    }
+
+    const customAnswerLabel = optionalText(
+      raw.customAnswerLabel,
+      MAX_LABEL_LENGTH,
+      `fields[${index}].customAnswerLabel`
+    )
+
+    if (customAnswerLabel && typeof customAnswerLabel !== 'string') {
+      return customAnswerLabel
+    }
+
+    if (raw.customAnswerLabel !== undefined && (!isChoiceField || raw.allowCustomAnswer !== true)) {
+      return { error: `fields[${index}].customAnswerLabel requires allowCustomAnswer on a choice field`, ok: false }
+    }
+
     const description = optionalText(raw.description, MAX_ITEM_DESCRIPTION_LENGTH, `fields[${index}].description`)
 
     if (description && typeof description !== 'string') {
@@ -1112,6 +1143,8 @@ function parseFormArtifact(parsed: Record<string, unknown>): HermesUiArtifactPar
     }
 
     fields.push({
+      ...(raw.allowCustomAnswer === true ? { allowCustomAnswer: true } : {}),
+      ...(customAnswerLabel ? { customAnswerLabel } : {}),
       ...(defaultValue !== undefined ? { defaultValue } : {}),
       description,
       id,
@@ -2611,7 +2644,13 @@ function parseMiniKanbanArtifact(parsed: Record<string, unknown>): HermesUiArtif
     lanes.push({ description: laneDescription, id: laneId, tasks, title: laneTitle })
   }
 
-  return { artifact: { ...base.fields, lanes, type: 'mini-kanban' }, ok: true }
+  const actions = parseSubmitActions(parsed.actions, 'actions')
+
+  if (isParseFailure(actions)) {
+    return actions
+  }
+
+  return { artifact: { ...base.fields, actions, lanes, type: 'mini-kanban' }, ok: true }
 }
 
 function parseDayTimelineArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
@@ -2908,8 +2947,14 @@ function parseWeekPlannerArtifact(parsed: Record<string, unknown>): HermesUiArti
     days.push({ blocks, date, id, label })
   }
 
+  const actions = parseSubmitActions(parsed.actions, 'actions')
+
+  if (isParseFailure(actions)) {
+    return actions
+  }
+
   return {
-    artifact: { ...base.fields, currentDate, days, type: 'week-planner', weekStart },
+    artifact: { ...base.fields, actions, currentDate, days, type: 'week-planner', weekStart },
     ok: true
   }
 }

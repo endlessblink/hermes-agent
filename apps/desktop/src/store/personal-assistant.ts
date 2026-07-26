@@ -11,6 +11,11 @@ interface PersonalAssistantStartResult {
   status: string
 }
 
+export interface PersonalAssistantDestination {
+  canonicalSessionId: string
+  runtimeSessionId: string
+}
+
 export interface AssistantStateItem {
   id: string
   title?: string
@@ -20,6 +25,20 @@ export interface AssistantStateItem {
 
 export interface AssistantPendingItem extends AssistantStateItem {
   status?: string
+}
+
+export interface AssistantCoverageReceipt {
+  id: string
+  cadence: 'daily' | 'weekly'
+  expectedItemIds: string[]
+  reviewedItemIds: string[]
+  missingItemIds: string[]
+  riskItemIds: string[]
+  unresolvedItemIds: string[]
+  blockingReasons: string[]
+  complete: boolean
+  allClear: boolean
+  createdAt: string
 }
 
 export interface AssistantState {
@@ -42,12 +61,15 @@ export interface AssistantState {
   }
   unreadCount: number
   episodes: AssistantStateItem[]
+  protectedItems?: AssistantStateItem[]
+  latestCoverageReceipt?: AssistantCoverageReceipt | null
 }
 
 export type AssistantStateSection =
   | 'blockers'
   | 'capacity'
   | 'commitments'
+  | 'captureProposals'
   | 'deferred'
   | 'focus'
   | 'outcomes'
@@ -80,7 +102,10 @@ function storePersonalAssistantState(state: AssistantState): AssistantState {
   }
 
   $personalAssistantState.set(state)
-  $personalAssistantPendingCount.set((state.pendingApprovals?.length ?? 0) + (state.captureProposals?.length ?? 0))
+  $personalAssistantPendingCount.set(
+    (state.pendingApprovals?.filter(item => !item.status || item.status === 'pending').length ?? 0) +
+      (state.captureProposals?.filter(item => !item.status || item.status === 'pending').length ?? 0)
+  )
 
   return state
 }
@@ -123,7 +148,7 @@ export async function startPersonalAssistant(trigger: PersonalAssistantTrigger):
   return { sessionId, status }
 }
 
-export async function openPersonalAssistantHome(): Promise<string> {
+export async function openPersonalAssistantHome(): Promise<PersonalAssistantDestination> {
   const response = await (
     await ownerGateway()
   ).request<{
@@ -141,7 +166,10 @@ export async function openPersonalAssistantHome(): Promise<string> {
 
   storePersonalAssistantState(response.state)
 
-  return destinationSessionId
+  return {
+    canonicalSessionId: destinationSessionId,
+    runtimeSessionId: response.session_id
+  }
 }
 
 export async function refreshPersonalAssistantState(): Promise<AssistantState> {

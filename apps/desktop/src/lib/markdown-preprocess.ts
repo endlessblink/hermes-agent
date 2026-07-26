@@ -22,6 +22,11 @@ const LOCAL_PREVIEW_URL_RE = /(^|\s)https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0
 const LOCAL_PREVIEW_ONLY_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?\/?$/i
 const URL_ONLY_LINE_RE = /^\s*https?:\/\/\S+\s*$/i
 const CITATION_MARKER_RE = /(?<=[\p{L}\p{N})\].,!?:;"'”’])\[(?:\d+(?:\s*,\s*\d+)*)\](?!\()/gu
+const BARE_HERMES_UI_RE = /(^|\n)([ \t]*)hermes-ui[ \t]+(\{[\s\S]*)$/i
+
+function normalizeBareHermesUiArtifact(text: string): string {
+  return text.replace(BARE_HERMES_UI_RE, '$1$2```hermes-ui\n$3\n$2```')
+}
 
 /**
  * Returns true when `body` contains a line that's exactly `marker` (modulo
@@ -314,7 +319,7 @@ function normalizeFenceBlocks(text: string): string {
 
 export function preprocessMarkdown(text: string): string {
   const cleaned = text.replace(REASONING_BLOCK_RE, '').replace(PREVIEW_MARKER_RE, '')
-  const scrubbed = scrubBacktickNoise(cleaned)
+  const scrubbed = scrubBacktickNoise(normalizeBareHermesUiArtifact(cleaned))
   const normalizedFences = normalizeFenceBlocks(scrubbed)
   const strippedEmptyFences = stripEmptyFenceBlocks(normalizedFences)
 

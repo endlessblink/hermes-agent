@@ -85,6 +85,34 @@ describe('PersonalAssistantSituation', () => {
     expect(screen.getByText('fresh')).toBeTruthy()
   })
 
+  it('shows whether the protected safety sweep is complete and actionable', () => {
+    $personalAssistantState.set({
+      ...baseState,
+      protectedItems: [
+        { id: 'flowstate:health', title: 'Arrange the required blood test', disposition: 'actionable' }
+      ],
+      latestCoverageReceipt: {
+        id: 'receipt-1',
+        cadence: 'daily',
+        expectedItemIds: ['flowstate:health'],
+        reviewedItemIds: ['flowstate:health'],
+        missingItemIds: [],
+        riskItemIds: ['flowstate:health'],
+        unresolvedItemIds: [],
+        blockingReasons: [],
+        complete: true,
+        allClear: false,
+        createdAt: '2026-07-19T09:00:00Z'
+      }
+    })
+
+    render(<PersonalAssistantSituation />)
+    expandSituation()
+
+    expect(screen.getByText('1 protected item checked')).toBeTruthy()
+    expect(screen.getByText('1 needs attention')).toBeTruthy()
+  })
+
   it('uses unread activity for the header badge without treating pending proposals as unread', async () => {
     const proposals = [
       { id: 'proposal-1', title: 'First proposal' },
@@ -111,6 +139,54 @@ describe('PersonalAssistantSituation', () => {
       expect(screen.getByRole('button', { name: /Situation/ }).textContent).toBe('Situationfresh')
       expect(screen.queryByLabelText(/unread personal assistant updates/i)).toBeNull()
     })
+  })
+
+  it('lets the user edit, accept, or reject learned context proposals', async () => {
+    const proposal = {
+      id: 'proposal-1',
+      title: 'Keep weekly plans compact',
+      section: 'preferences',
+      status: 'pending'
+    }
+    $personalAssistantState.set({ ...baseState, captureProposals: [proposal], unreadCount: 0 })
+
+    render(<PersonalAssistantSituation />)
+    expandSituation()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Keep weekly plans compact' }))
+    fireEvent.change(screen.getByDisplayValue('Keep weekly plans compact'), {
+      target: { value: 'Discuss the week before drafting it' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Accept learned preference' }))
+
+    await waitFor(() =>
+      expect(patchPersonalAssistantState).toHaveBeenCalledWith([
+        {
+          id: 'proposal-1',
+          op: 'upsert',
+          section: 'preferences',
+          value: expect.objectContaining({ title: 'Discuss the week before drafting it' })
+        },
+        {
+          id: 'proposal-1',
+          op: 'upsert',
+          section: 'captureProposals',
+          value: expect.objectContaining({ status: 'accepted' })
+        }
+      ])
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reject learned preference' }))
+    await waitFor(() =>
+      expect(patchPersonalAssistantState).toHaveBeenCalledWith([
+        {
+          id: 'proposal-1',
+          op: 'upsert',
+          section: 'captureProposals',
+          value: expect.objectContaining({ status: 'rejected' })
+        }
+      ])
+    )
   })
 
   it('acknowledges unread activity when the open assistant is visible at the bottom', async () => {

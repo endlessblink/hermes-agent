@@ -72,12 +72,127 @@ class _ConnectorHttpError(RuntimeError):
 def test_first_check_establishes_baseline_without_emitting(tmp_path):
     result = run_monitor_check(
         tmp_path,
-        {"tasks": [{"id": "t1", "title": "Prepare", "priority": "high"}]},
+        {"tasks": [{"id": "t1", "title": "Prepare", "priority": "medium"}]},
         now=NOW,
     )
 
     assert result == {"status": "checked", "candidate_count": 0}
     assert lease_candidate_event(tmp_path, "gateway", now=NOW) is None
+
+
+def test_real_flowstate_pressure_keys_are_preserved_and_overdue_increase_emits(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        {
+            "taskPressure": {
+                "todayCount": 2,
+                "overdueCount": 0,
+                "noDateCount": 4,
+                "highPriorityOpenCount": 1,
+            }
+        },
+        now=NOW,
+    )
+
+    result = run_monitor_check(
+        tmp_path,
+        {
+            "taskPressure": {
+                "todayCount": 3,
+                "overdueCount": 1,
+                "noDateCount": 4,
+                "highPriorityOpenCount": 1,
+            }
+        },
+        now=NOW + timedelta(minutes=15),
+    )
+
+    assert result == {"status": "checked", "candidate_count": 1}
+    event = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+    assert event is not None
+    assert event["kind"] == "deadline_risk"
+    assert event["evidence"] == {"overdue": 1}
+
+    state = json.loads(
+        (tmp_path / "state" / "personal-assistant-monitor" / "state.json").read_text()
+    )
+    assert state["snapshot"]["taskPressure"] == {
+        "todayCount": 3,
+        "overdueCount": 1,
+        "noDateCount": 4,
+        "highPriorityOpenCount": 1,
+    }
+
+
+def test_static_high_priority_task_is_surfaced_once_when_baseline_is_created(tmp_path):
+    context = {
+        "taskPressure": {
+            "todayCount": 0,
+            "overdueCount": 0,
+            "noDateCount": 1,
+            "highPriorityOpenCount": 1,
+        },
+        "tasks": [
+            {
+                "id": "protected-health-task",
+                "title": "Arrange required blood test",
+                "priority": "high",
+                "status": "todo",
+            }
+        ],
+    }
+
+    first = run_monitor_check(tmp_path, context, now=NOW)
+    repeated = run_monitor_check(tmp_path, context, now=NOW + timedelta(minutes=15))
+
+    assert first == {"status": "checked", "candidate_count": 1}
+    assert repeated == {"status": "checked", "candidate_count": 0}
+    event = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
+    assert event is not None
+    assert event["kind"] == "changed_high_priority"
+    assert event["subject"] == "task:protected-health-task"
+
+
+def test_new_high_priority_task_is_surfaced_once_without_a_priority_transition(tmp_path):
+    run_monitor_check(
+        tmp_path,
+        {
+            "taskPressure": {
+                "todayCount": 0,
+                "overdueCount": 0,
+                "noDateCount": 0,
+                "highPriorityOpenCount": 0,
+            },
+            "tasks": [],
+        },
+        now=NOW,
+    )
+    changed = {
+        "taskPressure": {
+            "todayCount": 0,
+            "overdueCount": 0,
+            "noDateCount": 1,
+            "highPriorityOpenCount": 1,
+        },
+        "tasks": [
+            {
+                "id": "new-protected-task",
+                "title": "Call the specialist",
+                "priority": "high",
+                "status": "todo",
+            }
+        ],
+    }
+
+    first = run_monitor_check(tmp_path, changed, now=NOW + timedelta(minutes=15))
+    repeated = run_monitor_check(tmp_path, changed, now=NOW + timedelta(minutes=30))
+
+    assert first == {"status": "checked", "candidate_count": 1}
+    assert repeated == {"status": "checked", "candidate_count": 0}
+    event = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=31))
+    assert event is not None
+    assert event["kind"] == "changed_high_priority"
+    assert event["subject"] == "task:new-protected-task"
 
 
 def test_material_changes_emit_deduplicated_restart_safe_candidates(tmp_path):
@@ -93,12 +208,12 @@ def test_material_changes_emit_deduplicated_restart_safe_candidates(tmp_path):
     first = run_monitor_check(tmp_path, changed, now=NOW + timedelta(minutes=15))
     repeated = run_monitor_check(tmp_path, changed, now=NOW + timedelta(minutes=30))
 
-    assert first == {"status": "checked", "candidate_count": 3}
+    assert first == {"status": "checked", "candidate_count": 4}
     assert repeated == {"status": "checked", "candidate_count": 0}
 
 
-def test_high_priority_events_require_an_existing_task_to_transition_into_high(tmp_path):
-    run_monitor_check(
+def test_high_priority_events_cover_static_new_and_promoted_tasks_without_repeating(tmp_path):
+    baseline = run_monitor_check(
         tmp_path,
         {
             "tasks": [
@@ -108,6 +223,11 @@ def test_high_priority_events_require_an_existing_task_to_transition_into_high(t
         },
         now=NOW,
     )
+    assert baseline == {"status": "checked", "candidate_count": 1}
+    standing = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=1))
+    assert standing is not None
+    assert standing["evidence"]["taskId"] == "already-high"
+    assert ack_candidate_event(tmp_path, standing["id"], standing["lease_id"])
 
     result = run_monitor_check(
         tmp_path,
@@ -121,12 +241,16 @@ def test_high_priority_events_require_an_existing_task_to_transition_into_high(t
         now=NOW + timedelta(minutes=15),
     )
 
-    assert result == {"status": "checked", "candidate_count": 1}
-    event = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=16))
-    assert event is not None
-    assert event["kind"] == "changed_high_priority"
-    assert event["evidence"]["taskId"] == "promoted"
-    assert event["subject"] == "task:promoted"
+    assert result == {"status": "checked", "candidate_count": 2}
+    task_ids = set()
+    for minute in (16, 17):
+        event = lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=minute))
+        assert event is not None
+        assert event["kind"] == "changed_high_priority"
+        task_ids.add(event["evidence"]["taskId"])
+        assert ack_candidate_event(tmp_path, event["id"], event["lease_id"])
+    assert task_ids == {"promoted", "new-high"}
+    assert lease_candidate_event(tmp_path, "gateway", now=NOW + timedelta(minutes=18)) is None
 
 
 def test_more_uncategorized_tasks_emit_one_preview_only_organization_candidate(tmp_path):
