@@ -335,6 +335,7 @@ def _build_ready_personal_assistant_plan(
     complete_calendar_first_planning_turn(complete=True)
 
     captured = calendar_first_candidate_records()
+    failed_source_labels: list[str] = []
     for source in configured_sources:
         source_id = str(source.get("id") or "").strip()
         tool_name = str(source.get("inventoryTool") or "").strip()
@@ -365,15 +366,15 @@ def _build_ready_personal_assistant_plan(
                     ),
                     str(payload.get("error") or "")[:300] if isinstance(payload, dict) else "",
                 )
-                source_label = {
-                    "flowstate_list_tasks": "FlowState",
-                    "notion_data_source_list": "Notion",
-                }.get(tool_name, "אחד ממקורות המשימות")
-                return (
-                    f"לא הצלחתי לטעון משימות מ־{source_label}, ולכן לא בניתי תוכנית חלקית. "
-                    "היומן נבדק. אפשר לחבר מחדש את המקור ולנסות שוב, "
-                    "או לבקש במפורש תוכנית רק מהמקורות הזמינים."
+                # Skip this source and keep planning; the caller notes what was
+                # missed. A disconnected task list must not cost the user the day.
+                failed_source_labels.append(
+                    {
+                        "flowstate_list_tasks": "FlowState",
+                        "notion_data_source_list": "Notion",
+                    }.get(tool_name, source_id or "אחד ממקורות המשימות")
                 )
+                break
             if tool_name != "notion_data_source_list":
                 break
             query = payload.get("query")
@@ -382,10 +383,7 @@ def _build_ready_personal_assistant_plan(
                     "Deterministic Notion inventory had an invalid query envelope keys=%s",
                     sorted(payload),
                 )
-                return (
-                    "לא הצלחתי לבדוק את כל מקורות המשימות, ולכן לא בניתי תוכנית חלקית. "
-                    "נסה שוב בעוד רגע."
-                )
+                break
             combined_notion_results.extend(
                 item for item in query["results"] if isinstance(item, dict)
             )
@@ -403,31 +401,32 @@ def _build_ready_personal_assistant_plan(
                 break
             cursor = str(query.get("next_cursor") or "").strip()
             if not cursor:
-                return (
-                    "לא הצלחתי להשלים את בדיקת כל המשימות, ולכן לא בניתי תוכנית חלקית. "
-                    "נסה שוב בעוד רגע."
-                )
+                break
             args["start_cursor"] = cursor
-        else:
-            return (
-                "בדיקת מקור המשימות לא הסתיימה, ולכן לא בניתי תוכנית חלקית. "
-                "נסה שוב בעוד רגע."
-            )
         captured = calendar_first_candidate_records()
 
     expected_source_ids = {
         str(source.get("id") or "").strip() for source in configured_sources
     }
     candidates_by_source = calendar_first_candidate_records()
-    if not expected_source_ids.issubset(candidates_by_source):
+    # An unreachable task list is not a reason to throw away a day the user just
+    # answered four questions to plan. Build from what did verify and say plainly
+    # what was skipped, rather than dead-ending the whole flow.
+    missing_source_ids = sorted(expected_source_ids - set(candidates_by_source))
+    if missing_source_ids:
         logger.warning(
             "Deterministic planning inventory incomplete expected=%s captured=%s",
             sorted(expected_source_ids),
             sorted(candidates_by_source),
         )
+    if not candidates_by_source:
+        # Nothing at all came back, so there is genuinely nothing to plan from.
+        # Name what failed and offer the next move instead of a bare apology.
+        failed = ", ".join(failed_source_labels) or "מקורות המשימות"
+
         return (
-            "לא הצלחתי לאמת את כל מקורות המשימות, ולכן לא בניתי תוכנית חלקית. "
-            "נסה שוב בעוד רגע."
+            f"לא הצלחתי לטעון משימות מ־{failed}. היומן נבדק ותשובות התכנון נשמרו. "
+            "אפשר לחבר מחדש את המקור ולנסות שוב, או לומר לי מה לשים ביום ואבנה סביב זה."
         )
 
     try:
@@ -466,6 +465,13 @@ def _build_ready_personal_assistant_plan(
         "excluded_task_titles": excluded_task_titles,
         "user_message": "",
     }
+    def _with_skipped_source_note(plan: Optional[str]) -> Optional[str]:
+        if not plan or not missing_source_ids:
+            return plan
+        names = ", ".join(missing_source_ids)
+
+        return f"{plan}\n\nהערה: לא הצלחתי לקרוא מ־{names}, אז התוכנית בנויה מהמקורות שכן נבדקו."
+
     draft = build_grounded_plan_fallback(
         task_details=task_details,
         **plan_kwargs,
@@ -476,10 +482,13 @@ def _build_ready_personal_assistant_plan(
         task_details,
     )
     if hydrated_details == task_details:
-        return draft
-    return build_grounded_plan_fallback(
-        task_details=hydrated_details,
-        **plan_kwargs,
+        return _with_skipped_source_note(draft)
+
+    return _with_skipped_source_note(
+        build_grounded_plan_fallback(
+            task_details=hydrated_details,
+            **plan_kwargs,
+        )
     )
 
 

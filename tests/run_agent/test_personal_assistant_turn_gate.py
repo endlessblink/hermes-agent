@@ -755,8 +755,8 @@ def test_ready_interview_names_failed_source_and_offers_safe_next_step(agent):
     assert response is not None
     assert "FlowState" in response
     assert "היומן נבדק" in response
-    assert "לא בניתי תוכנית חלקית" in response
-    assert "לבקש במפורש תוכנית רק מהמקורות הזמינים" in response
+    assert "לחבר מחדש את המקור" in response
+    assert "ואבנה סביב זה" in response
     assert "נסה שוב בעוד רגע" not in response
 
 
