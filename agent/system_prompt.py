@@ -33,6 +33,7 @@ from agent.prompt_builder import (
     DESKTOP_QUESTIONNAIRE_GUIDANCE,
     TELEGRAM_INTERACTIVE_GUIDANCE,
     FLOWSTATE_TOOL_USE_GUIDANCE,
+    FLOWSTATE_TIMED_TASK_GUIDANCE,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
@@ -40,10 +41,12 @@ from agent.prompt_builder import (
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     PERSONAL_ASSISTANT_GUIDANCE,
+    PERSONAL_ASSISTANT_RECEIPT_GUIDANCE,
     PLATFORM_HINTS,
     SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE,
     STEER_CHANNEL_NOTE,
+    TASK_TABLE_GUIDANCE,
     TASK_COMPLETION_GUIDANCE,
     TELEGRAM_RICH_MESSAGES_HINT,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
@@ -258,7 +261,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(SKILLS_GUIDANCE)
     if any(name.startswith("flowstate_") for name in agent.valid_tool_names):
         tool_guidance.append(FLOWSTATE_TOOL_USE_GUIDANCE)
-    if any(name.startswith("personal_assistant_") for name in agent.valid_tool_names):
+    if {
+        "flowstate_create_task",
+        "flowstate_create_work_block",
+    }.issubset(agent.valid_tool_names):
+        tool_guidance.append(FLOWSTATE_TIMED_TASK_GUIDANCE)
+    if bool(getattr(agent, "personal_assistant_mode", False)) or any(
+        name.startswith("personal_assistant_") for name in agent.valid_tool_names
+    ):
         tool_guidance.append(PERSONAL_ASSISTANT_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
@@ -289,9 +299,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     platform_key = (agent.platform or "").lower().strip()
     _truthy = {"1", "true", "yes"}
     if platform_key == "desktop" or (os.getenv("HERMES_DESKTOP") or "").strip().lower() in _truthy:
-        stable_parts.append(DESKTOP_QUESTIONNAIRE_GUIDANCE)
+        stable_parts.extend([
+            DESKTOP_QUESTIONNAIRE_GUIDANCE,
+            TASK_TABLE_GUIDANCE,
+            PERSONAL_ASSISTANT_RECEIPT_GUIDANCE,
+        ])
     elif platform_key == "telegram":
-        stable_parts.append(TELEGRAM_INTERACTIVE_GUIDANCE)
+        stable_parts.extend([
+            TELEGRAM_INTERACTIVE_GUIDANCE,
+            TASK_TABLE_GUIDANCE,
+            PERSONAL_ASSISTANT_RECEIPT_GUIDANCE,
+        ])
 
     nous_subscription_prompt = _r.build_nous_subscription_prompt(agent.valid_tool_names)
     if nous_subscription_prompt:

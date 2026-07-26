@@ -21,10 +21,27 @@ def test_state_store_is_durable_profile_scoped_and_atomic(tmp_path):
         )
 
     reloaded = PersonalAssistantStateStore(tmp_path).read()
-    assert reloaded["schema_version"] == 1
+    assert reloaded["schema_version"] == 2
     assert reloaded["canonical_session_id"] == "assistant-home"
     assert reloaded["working_picture"]["current_focus"] == "ship"
     assert len(reloaded["episode_summaries"]) == 12
+
+
+def test_task_source_manifest_is_durable_and_accepts_arbitrary_sources(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.set_task_source_manifest(
+        [
+            {"id": "alpha", "inventoryTool": "alpha_inventory", "available": True},
+            {"id": "beta", "inventoryTool": "beta_inventory", "available": False},
+        ]
+    )
+
+    assert PersonalAssistantStateStore(tmp_path).read()["task_source_manifest"] == [
+        {"id": "alpha", "inventoryTool": "alpha_inventory", "available": True},
+        {"id": "beta", "inventoryTool": "beta_inventory", "available": False},
+    ]
 
 
 def test_state_patch_archive_and_forget_episode(tmp_path):
@@ -307,6 +324,30 @@ def test_protected_items_preserve_missing_context_as_a_visible_risk(tmp_path):
     assert state["protected_items"][0]["missingFields"] == ["deadline", "stakeholder"]
 
 
+def test_protected_items_normalize_date_only_planning_fields_to_local_time(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    state = store.upsert_protected_item(
+        {
+            "id": "flowstate:dated-task",
+            "source": "flowstate",
+            "sourceId": "dated-task",
+            "kind": "commitment",
+            "title": "Dated task",
+            "consequence": "Could be missed",
+            "disposition": "deferred",
+            "deferralReason": "Not for the current work block",
+            "deadline": "2026-07-24",
+            "nextReviewAt": "2026-07-22",
+        }
+    )
+
+    item = state["protected_items"][0]
+    assert item["deadline"] == "2026-07-24T00:00:00+03:00"
+    assert item["nextReviewAt"] == "2026-07-22T00:00:00+03:00"
+
+
 def test_coverage_receipt_cannot_claim_all_clear_for_partial_or_unreviewed_scope(tmp_path):
     from agent.personal_assistant_state import PersonalAssistantStateStore
 
@@ -376,3 +417,166 @@ def test_complete_coverage_receipt_stays_non_clear_while_a_risk_needs_attention(
     assert receipt["complete"] is True
     assert receipt["allClear"] is False
     assert store.public()["latestCoverageReceipt"]["cadence"] == "weekly"
+
+
+def test_safety_review_does_not_block_today_on_context_already_deferred_to_a_future_review(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    protected_item = {
+        "id": "notion:landing-page",
+        "source": "Notion",
+        "sourceId": "notion-work",
+        "kind": "project",
+        "title": "Prepare the landing page",
+        "consequence": "The launch may slip",
+        "disposition": "needs_context",
+        "nextAction": "Confirm whether the page is still needed",
+        "missingFields": ["still required", "duration"],
+        "nextReviewAt": "2099-01-02T09:00:00+02:00",
+    }
+
+    _state, receipt = store.record_safety_review(
+        protected_items=[protected_item],
+        cadence="daily",
+        scope_fingerprint="notion-work:revision-4",
+        sources=[{"id": "notion-work", "status": "fresh", "revision": "4"}],
+        reviewed_item_ids=["notion:landing-page"],
+        risk_item_ids=["notion:landing-page"],
+        unresolved_item_ids=["notion:landing-page"],
+    )
+
+    assert receipt["complete"] is True
+    assert receipt["allClear"] is False
+    assert receipt["unresolvedItemIds"] == []
+    assert receipt["blockingReasons"] == []
+
+
+def test_safety_review_still_blocks_context_whose_review_is_due_now(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    protected_item = {
+        "id": "flowstate:blood-pressure",
+        "source": "FlowState",
+        "sourceId": "flowstate",
+        "kind": "commitment",
+        "title": "Start evening blood-pressure readings",
+        "consequence": "The reading sequence cannot start",
+        "disposition": "needs_context",
+        "nextAction": "Choose a start date",
+        "missingFields": ["start date"],
+        "nextReviewAt": "2020-01-02T09:00:00+02:00",
+    }
+
+    _state, receipt = store.record_safety_review(
+        protected_items=[protected_item],
+        cadence="daily",
+        scope_fingerprint="flowstate:revision-5",
+        sources=[{"id": "flowstate", "status": "fresh", "revision": "5"}],
+        reviewed_item_ids=["flowstate:blood-pressure"],
+        risk_item_ids=["flowstate:blood-pressure"],
+        unresolved_item_ids=["flowstate:blood-pressure"],
+    )
+
+    assert receipt["complete"] is False
+    assert receipt["unresolvedItemIds"] == ["flowstate:blood-pressure"]
+
+
+def test_safety_review_does_not_require_future_deferred_items_in_each_daily_receipt(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    for item in (
+        {
+            "id": "calendar:tomorrow",
+            "source": "Google Calendar",
+            "sourceId": "calendar",
+            "kind": "commitment",
+            "title": "Tomorrow's meeting",
+            "consequence": "Commitment outside today's range",
+            "disposition": "deferred",
+            "deferralReason": "Outside today's range",
+            "nextReviewAt": "2099-01-02T09:00:00+02:00",
+        },
+        {
+            "id": "calendar:needs-context-tomorrow",
+            "source": "Google Calendar",
+            "sourceId": "calendar",
+            "kind": "commitment",
+            "title": "Tomorrow's calendar item",
+            "consequence": "Details are not needed today",
+            "disposition": "needs_context",
+            "missingFields": ["purpose"],
+            "nextReviewAt": "2099-01-02T09:00:00+02:00",
+        },
+    ):
+        store.upsert_protected_item(item)
+
+    current = {
+        "id": "flowstate:today",
+        "source": "FlowState",
+        "sourceId": "flowstate",
+        "kind": "commitment",
+        "title": "Today's task",
+        "consequence": "Due today",
+        "disposition": "actionable",
+        "nextAction": "Do the next step",
+    }
+    _state, receipt = store.record_safety_review(
+        protected_items=[current],
+        cadence="daily",
+        scope_fingerprint="today|flowstate:5|calendar:today",
+        sources=[{"id": "flowstate", "status": "fresh", "revision": "5"}],
+        reviewed_item_ids=["flowstate:today"],
+        risk_item_ids=["flowstate:today"],
+        unresolved_item_ids=[],
+    )
+
+    assert receipt["expectedItemIds"] == ["flowstate:today"]
+    assert receipt["missingItemIds"] == []
+    assert receipt["complete"] is True
+
+
+def test_safety_review_retires_verified_completed_items_without_scope_contradiction(tmp_path):
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    store = PersonalAssistantStateStore(tmp_path)
+    store.upsert_protected_item(
+        {
+            "id": "flowstate:finished-course",
+            "source": "flowstate",
+            "sourceId": "finished-course",
+            "kind": "project",
+            "title": "Prepare the course outline",
+            "consequence": "The course cannot move forward",
+            "disposition": "actionable",
+            "nextAction": "Draft the outline",
+        }
+    )
+
+    _state, receipt = store.record_safety_review(
+        protected_items=[
+            {
+                "id": "flowstate:finished-course",
+                "source": "flowstate",
+                "sourceId": "finished-course",
+                "kind": "project",
+                "title": "Prepare the course outline",
+                "consequence": "The course cannot move forward",
+                "disposition": "completed",
+                "verifiedAt": "2026-07-22T15:06:29+00:00",
+            }
+        ],
+        cadence="daily",
+        scope_fingerprint="flowstate:revision-454",
+        sources=[{"id": "flowstate", "status": "fresh", "revision": "454"}],
+        reviewed_item_ids=["flowstate:finished-course"],
+        risk_item_ids=["flowstate:finished-course"],
+        unresolved_item_ids=[],
+    )
+
+    assert receipt["expectedItemIds"] == []
+    assert receipt["reviewedItemIds"] == []
+    assert receipt["riskItemIds"] == []
+    assert receipt["complete"] is True

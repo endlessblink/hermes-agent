@@ -14,7 +14,11 @@ import { resolveGatewayEventSessionId } from '@/lib/gateway-events'
 import { triggerHaptic } from '@/lib/haptics'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
-import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
+import {
+  clearClarifyRequest,
+  clearClarifyRequestAliasesForSession,
+  setClarifyRequest
+} from '@/store/clarify'
 import { setSessionCompacting } from '@/store/compaction'
 import { refreshBackgroundProcesses } from '@/store/composer-status'
 import { $gateway } from '@/store/gateway'
@@ -159,6 +163,14 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       if (event.type === 'gateway.ready') {
         return
       } else if (event.type === 'session.info') {
+        if (sessionId && typeof payload?.compacting === 'boolean') {
+          setSessionCompacting(sessionId, payload.compacting)
+
+          if (!payload.compacting) {
+            compactedTurnRef.current.delete(sessionId)
+          }
+        }
+
         // Apply session-scoped fields when the event targets the active
         // session, OR when it's a global broadcast and we have no session.
         const apply = explicitSid ? isActiveEvent : !activeSessionIdRef.current
@@ -384,6 +396,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // session so a background turn finishing can't wipe the active chat's
         // prompt, and vice versa.
         clearAllPrompts(sessionId)
+        clearClarifyRequestAliasesForSession(sessionId)
         clearClarifyRequest(undefined, sessionId)
         // Turn ended without a final `todo` update — drop a still-unfinished
         // list so "Tasks N/M" doesn't stay pinned above the composer with the
@@ -542,6 +555,8 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           // even though the backend is still waiting on the user.
           if (payload?.name === 'clarify') {
             updateSessionState(sessionId, state => (state.needsInput ? { ...state, needsInput: false } : state))
+            clearClarifyRequestAliasesForSession(sessionId)
+            clearClarifyRequest(undefined, sessionId)
           }
 
           // terminal/process tool calls are the only things that spawn or reap
@@ -594,7 +609,8 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             requestId,
             question,
             choices: Array.isArray(payload?.choices) ? payload!.choices!.filter(c => typeof c === 'string') : null,
-            sessionId: sessionId ?? null
+            sessionId: sessionId ?? null,
+            profile: event.profile
           })
 
           // The transcript only renders the active session, so a background
@@ -740,6 +756,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         if (sessionId && payload?.kind === 'compacting') {
           setSessionCompacting(sessionId, true)
           compactedTurnRef.current.add(sessionId)
+        } else if (sessionId && payload?.kind === 'compression_complete') {
+          setSessionCompacting(sessionId, false)
+          compactedTurnRef.current.delete(sessionId)
         } else if (sessionId && payload?.kind === 'process') {
           // The gateway's notification poller announces background process
           // completions / watch matches here — re-sync the status stack.
@@ -786,6 +805,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // the failed turn (same intent as the message.complete clear).
         if (sessionId) {
           clearAllPrompts(sessionId)
+          clearClarifyRequestAliasesForSession(sessionId)
           clearClarifyRequest(undefined, sessionId)
           clearActiveSessionTodos(sessionId)
           setSessionCompacting(sessionId, false)

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextJerusalemNine, startDailyAssistantScheduler } from './daily-assistant-scheduler'
 
 afterEach(() => {
+  localStorage.clear()
   vi.useRealTimers()
 })
 
@@ -36,6 +37,29 @@ describe('daily assistant scheduler', () => {
 
     expect(launch).toHaveBeenCalledWith('office-work', 'scheduled')
     stop()
+  })
+
+  it('runs catch-up only once per Jerusalem day across profile changes and restarts', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-12T10:00:00.000Z'))
+    const profile = atom('default')
+    const launch = vi.fn(async () => undefined)
+    const stopFirst = startDailyAssistantScheduler(profile, launch)
+
+    profile.set('office-work')
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledTimes(1))
+    profile.set('default')
+    profile.set('office-work')
+    await Promise.resolve()
+
+    expect(launch).toHaveBeenCalledTimes(1)
+    stopFirst()
+
+    const stopAfterRestart = startDailyAssistantScheduler(profile, launch)
+    await Promise.resolve()
+
+    expect(launch).toHaveBeenCalledTimes(1)
+    stopAfterRestart()
   })
 
   it('computes Jerusalem nine across standard and daylight time', () => {

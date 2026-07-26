@@ -16,8 +16,9 @@
 
 import { useStore } from '@nanostores/react'
 import { atom, computed } from 'nanostores'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { activeRuntimeSessionRow, activeRuntimeSessionStatus } from '@/app/desktop-controller-utils'
 import { useGatewayRequest } from '@/app/gateway/hooks/use-gateway-request'
 import { blobToDataUrl } from '@/app/session/hooks/use-prompt-actions/utils'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
@@ -30,8 +31,15 @@ import { transcribeAudio } from '@/hermes'
 import { useI18n } from '@/i18n'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { sessionTitle } from '@/lib/chat-runtime'
+import {
+  clearClarifyRequestAliasesForSession,
+  sessionClarifyRequest,
+  setClarifyRequestAliases
+} from '@/store/clarify'
 import { createComposerAttachmentScope } from '@/store/composer'
+import { gatewayForProfile } from '@/store/gateway'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
+import { $personalAssistantState, PERSONAL_ASSISTANT_OWNER_PROFILE } from '@/store/personal-assistant'
 import { sessionAwaitingInput } from '@/store/prompts'
 import {
   $gatewayState,
@@ -94,11 +102,62 @@ function buildTileView(storedSessionId: string): SessionView {
   }
 }
 
+export function latestTranscriptClarifyIsPending(messages: unknown[], question: string): boolean {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex]
+
+    if (!message || typeof message !== 'object') {
+      continue
+    }
+
+    const content = (message as { content?: unknown }).content
+
+    if (!Array.isArray(content)) {
+      continue
+    }
+
+    for (let partIndex = content.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = content[partIndex]
+
+      if (!part || typeof part !== 'object') {
+        continue
+      }
+
+      const row = part as { args?: unknown; result?: unknown; toolName?: unknown; type?: unknown }
+
+      if (row.type !== 'tool-call' || row.toolName !== 'clarify') {
+        continue
+      }
+
+      let args = row.args
+
+      if (typeof args === 'string') {
+        try {
+          args = JSON.parse(args)
+        } catch {
+          args = null
+        }
+      }
+
+      const askedQuestion =
+        args && typeof args === 'object' && typeof (args as { question?: unknown }).question === 'string'
+          ? (args as { question: string }).question
+          : ''
+
+      return row.result === undefined && askedQuestion === question
+    }
+  }
+
+  return true
+}
+
 function TileChat({
+  profile,
   runtimeId,
   storedSessionId,
   view
 }: {
+  profile?: string
   runtimeId: string
   storedSessionId: string
   view: SessionView
@@ -109,25 +168,116 @@ function TileChat({
   // One attachment set + focus key per tile, stable for the tile's lifetime.
   const attachments = useRef(createComposerAttachmentScope()).current
 
+  const tileRequestGateway = useMemo(
+    () =>
+      profile
+        ? async <T,>(
+            method: string,
+            params: Record<string, unknown> = {},
+            timeoutMs?: number,
+            signal?: AbortSignal
+          ) => {
+            const gateway = await gatewayForProfile(profile)
+
+            if (!gateway) {
+              throw new Error(`Hermes gateway is unavailable for ${profile}`)
+            }
+
+            return gateway.request<T>(method, params, timeoutMs, signal)
+          }
+        : requestGateway,
+    [profile, requestGateway]
+  )
+
   const scope = useMemo<ComposerScope>(
     () => ({
+      $clarifyRequest: sessionClarifyRequest(runtimeId),
       $awaitingInput: sessionAwaitingInput(runtimeId),
       attachments,
       popoutAllowed: false,
       readMessages: () => view.$messages.get(),
+      requestGateway: tileRequestGateway,
+      runtimeSessionId: runtimeId,
       target: `tile:${storedSessionId}`
     }),
-    [attachments, runtimeId, storedSessionId, view.$messages]
+    [attachments, runtimeId, storedSessionId, tileRequestGateway, view.$messages]
   )
 
-  const actions = useSessionTileActions({ runtimeId, scope, storedSessionId })
+  useEffect(() => {
+    let cancelled = false
+
+    const restorePendingClarify = async () => {
+      try {
+        const result = await tileRequestGateway<{
+          sessions?: Array<{
+            id?: string
+            pending_prompt?: { choices?: string[]; kind?: string; question?: string; request_id?: string }
+            session_key?: string
+            status?: string
+          }>
+        }>('session.active_list', { current_session_id: runtimeId }, 3_000)
+
+        if (cancelled) {
+          return
+        }
+
+        const row = activeRuntimeSessionRow(result.sessions, runtimeId, storedSessionId)
+        const status = activeRuntimeSessionStatus(result.sessions, runtimeId, storedSessionId)
+        const pending = row?.pending_prompt
+
+        const transcriptStillWaiting = pending?.question
+          ? latestTranscriptClarifyIsPending(view.$messages.get(), pending.question)
+          : false
+
+        if (
+          status === 'waiting' &&
+          transcriptStillWaiting &&
+          pending?.kind === 'clarify' &&
+          pending.request_id &&
+          pending.question
+        ) {
+          setClarifyRequestAliases(
+            {
+              choices: Array.isArray(pending.choices) ? pending.choices : null,
+              profile,
+              question: pending.question,
+              requestId: pending.request_id,
+              sessionId: runtimeId
+            },
+            [runtimeId, storedSessionId, row?.id, row?.session_key]
+          )
+        } else if (!transcriptStillWaiting) {
+          clearClarifyRequestAliasesForSession(runtimeId)
+          clearClarifyRequestAliasesForSession(storedSessionId)
+        }
+      } catch {
+        // The live gateway event remains the primary path; retry after reconnect.
+      }
+    }
+
+    void restorePendingClarify()
+    const interval = window.setInterval(() => void restorePendingClarify(), 5_000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [runtimeId, storedSessionId, tileRequestGateway, view.$messages])
+
+  const actions = useSessionTileActions({
+    profile,
+    requestGateway: tileRequestGateway,
+    runtimeId,
+    scope,
+    storedSessionId
+  })
 
   // The same attach/pick/paste/drop pipeline the primary composer uses,
   // pointed at this tile's chips + session.
   const composer = useComposerActions({
     activeSessionId: runtimeId,
     currentCwd: cwd,
-    requestGateway,
+    requestGateway: tileRequestGateway,
     scope: { add: attachments.add, remove: attachments.remove, target: scope.target }
   })
 
@@ -164,33 +314,42 @@ function TileChat({
   )
 }
 
+export function canAttemptSessionTileResume(profile: string | undefined, foregroundGatewayOpen: boolean): boolean {
+  return Boolean(profile) || foregroundGatewayOpen
+}
+
 export function SessionTilePane({ storedSessionId }: { storedSessionId: string }) {
   const tiles = useStore($sessionTiles)
   const tile = tiles.find(t => t.storedSessionId === storedSessionId)
   const runtimeId = tile?.runtimeId ?? null
   const gatewayOpen = useStore($gatewayState) === 'open'
   const resumingRef = useRef(false)
+  const [delegateRevision, setDelegateRevision] = useState(0)
   const view = useMemo(() => buildTileView(storedSessionId), [storedSessionId])
 
-  // Same gating as the primary's route resume (use-route-resume): never fire
-  // session.resume before the gateway is OPEN. Persisted tiles mount at boot
-  // while it's still connecting — an ungated resume rejected there and
-  // latched every restored tile into the error card.
+  const canAttemptResume = canAttemptSessionTileResume(tile?.profile, gatewayOpen)
+
+  // Primary-profile tiles share the foreground gateway and must wait for it to
+  // open. Profile-owned tiles open their own gateway inside resumeTile; gating
+  // those on unrelated foreground state leaves Personal Assistant at
+  // "Waking up" forever after a profile switch or restart.
   useEffect(() => {
-    if (!gatewayOpen || runtimeId || tile?.error || resumingRef.current) {
+    if (!canAttemptResume || runtimeId || tile?.error || resumingRef.current) {
       return
     }
 
     const delegate = sessionTileDelegate()
 
     if (!delegate) {
-      return
+      const retry = window.setTimeout(() => setDelegateRevision(revision => revision + 1), 100)
+
+      return () => window.clearTimeout(retry)
     }
 
     resumingRef.current = true
 
     delegate
-      .resumeTile(storedSessionId)
+      .resumeTile(storedSessionId, tile?.profile)
       .then(id => patchSessionTile(storedSessionId, { error: undefined, runtimeId: id }))
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
@@ -207,7 +366,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
       .finally(() => {
         resumingRef.current = false
       })
-  }, [gatewayOpen, runtimeId, storedSessionId, tile?.error])
+  }, [canAttemptResume, delegateRevision, runtimeId, storedSessionId, tile?.error, tile?.profile])
 
   // The gateway (re)opening invalidates any latched error — it likely came
   // from a not-yet-open gateway or the previous connection. Clearing it
@@ -244,7 +403,7 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
     )
   }
 
-  return <TileChat runtimeId={runtimeId} storedSessionId={storedSessionId} view={view} />
+  return <TileChat profile={tile?.profile} runtimeId={runtimeId} storedSessionId={storedSessionId} view={view} />
 }
 
 // ---------------------------------------------------------------------------
@@ -253,15 +412,25 @@ export function SessionTilePane({ storedSessionId }: { storedSessionId: string }
 
 function tileTitle(storedSessionId: string): string {
   const stored = $sessions.get().find(s => sessionMatchesStoredId(s, storedSessionId))
+  const tile = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
 
-  return stored ? sessionTitle(stored) : 'Session'
+  if (
+    tile?.profile === PERSONAL_ASSISTANT_OWNER_PROFILE &&
+    storedSessionId === $personalAssistantState.get()?.sessionId
+  ) {
+    return 'Personal assistant'
+  }
+
+  return stored ? sessionTitle(stored, $personalAssistantState.get()?.sessionId) : 'Session'
 }
 
 /** The `@session` link payload for a tile tab drag — id + owning profile + title. */
 function tileDragPayload(storedSessionId: string): SessionDragPayload {
   const stored = $sessions.get().find(s => sessionMatchesStoredId(s, storedSessionId))
 
-  return { id: storedSessionId, profile: stored?.profile ?? '', title: tileTitle(storedSessionId) }
+  const tile = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
+
+  return { id: storedSessionId, profile: tile?.profile ?? stored?.profile ?? '', title: tileTitle(storedSessionId) }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +576,7 @@ export function WorkspaceTabMenu({ children }: { children: React.ReactElement })
  *  `$sessions`). Tiles dock against main on the chosen edge, flex width. */
 export const watchSessionTiles = paneMirror<SessionTile>({
   source: $sessionTiles,
-  also: [$sessions],
+  also: [$sessions, $personalAssistantState],
   key: t => t.storedSessionId,
   prefix: 'session-tile',
   dir: t => t.dir,

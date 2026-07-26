@@ -53,6 +53,7 @@ import {
   inlineDiffFromResult,
   isFileEditTool,
   isPreviewableTarget,
+  isToolFailureRecovered,
   looksRedundant,
   type SearchResultRow,
   selectMessageRunning,
@@ -268,6 +269,26 @@ function ToolEntry({ part }: ToolEntryProps) {
   const statusCopy = t.statusStack
   const messageId = useAuiState(s => s.message.id)
   const messageRunning = useAuiState(selectMessageRunning)
+
+  const recovered = useAuiState(state => {
+    const toolParts: ToolPart[] = []
+
+    for (const candidate of state.message.content) {
+      if (candidate.type === 'tool-call') {
+        toolParts.push({
+          args: candidate.args,
+          isError: candidate.isError,
+          result: candidate.result,
+          toolCallId: candidate.toolCallId,
+          toolName: candidate.toolName,
+          type: 'tool-call'
+        })
+      }
+    }
+
+    return isToolFailureRecovered(toolParts, part)
+  })
+
   const embedded = useContext(ToolEmbedContext)
   const toolViewMode = useStore($toolViewMode)
 
@@ -305,8 +326,8 @@ function ToolEntry({ part }: ToolEntryProps) {
   const view = useMemo(() => {
     const p = !isPending && result === undefined ? { ...stablePart, result: {} } : stablePart
 
-    return buildToolView(p, inlineDiff)
-  }, [inlineDiff, isPending, result, stablePart])
+    return buildToolView(p, inlineDiff, recovered)
+  }, [inlineDiff, isPending, recovered, result, stablePart])
 
   // Surface a previewable artifact (HTML file / localhost URL) as a compact link
   // in the composer status stack rather than a bulky inline card. Uses the same

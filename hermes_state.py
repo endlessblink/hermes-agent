@@ -32,6 +32,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
+_LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST = (
+    "You've reached the maximum number of tool-calling iterations allowed. "
+    "Please provide a final response summarizing what you've found and accomplished so far, "
+    "without calling any more tools."
+)
+
 
 def _compression_holder_process_is_dead(holder: str) -> bool:
     """Return True only when a local lock holder can be proven stale."""
@@ -5093,6 +5099,11 @@ class SessionDB:
             content = self._decode_content(row["content"])
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
                 content = sanitize_context(content).strip()
+            if (
+                row["role"] == "user"
+                and content == _LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST
+            ):
+                continue
             msg = {"role": row["role"], "content": content}
             if row["timestamp"]:
                 msg["timestamp"] = row["timestamp"]

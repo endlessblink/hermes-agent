@@ -181,3 +181,5 @@ def test_prompt_guidance_mandates_audit_coverage_before_summaries():
     guidance = FLOWSTATE_TOOL_USE_GUIDANCE
     assert "flowstate_audit_coverage" in guidance
     assert "safeSummary" in guidance
+    assert "mode=page" in guidance
+    assert "Never substitute a capability audit" in guidance

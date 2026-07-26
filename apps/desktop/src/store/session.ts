@@ -475,12 +475,12 @@ export const setModelPickerOpen = (next: Updater<boolean>) => updateAtom($modelP
 export const setSessionPickerOpen = (next: Updater<boolean>) => updateAtom($sessionPickerOpen, next)
 
 // Watchdog tracking — when does a "working" session count as stuck?
-// Long-running tool calls (LLM inference, long shell commands, web fetches)
-// can take a few minutes legitimately. We allow 8 minutes of complete
-// silence on the stream before clearing the working flag; in practice this
-// catches gateway hangs and dropped streams without false-positive-clearing
-// real long turns.
-const SESSION_WATCHDOG_TIMEOUT_MS = 8 * 60 * 1000
+// Long-running turns remain healthy while gateway events keep arriving. After
+// 75 seconds of complete stream silence, reconcile the visible working state:
+// the backend watchdog already treats a turn as silent after 45 seconds, and
+// this extra delivery grace prevents a dropped terminal event from wedging the
+// composer (and its queued follow-up) for several minutes.
+const SESSION_WATCHDOG_TIMEOUT_MS = 75 * 1000
 const sessionWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 // Notified (with the stored session id) whenever the watchdog force-clears a
@@ -488,13 +488,69 @@ const sessionWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
 // busy/awaiting flags — clearing `$workingSessionIds` alone only removes the
 // sidebar dot, leaving the composer stuck on "Thinking"/Stop for a hung or
 // looping turn that never streamed its terminal event.
-type SessionWatchdogListener = (storedSessionId: string) => void
+export type SessionClearReason = 'backend_exit' | 'stream_silence'
+type SessionWatchdogListener = (storedSessionId: string, reason: SessionClearReason) => void
 const sessionWatchdogListeners = new Set<SessionWatchdogListener>()
 
 export function onSessionWatchdogClear(listener: SessionWatchdogListener): () => void {
   sessionWatchdogListeners.add(listener)
 
   return () => void sessionWatchdogListeners.delete(listener)
+}
+
+function forceClearWorkingSession(sessionId: string, reason: SessionClearReason): boolean {
+  if (!$workingSessionIds.get().includes(sessionId)) {
+    return false
+  }
+
+  setWorkingSessionIds(current => current.filter(id => id !== sessionId))
+  clearSessionWatchdog(sessionId)
+  emitDesktopDiagnostic({
+    component: 'session',
+    event: reason === 'backend_exit' ? 'watchdog.backend-exit-cleared' : 'watchdog.cleared',
+    message:
+      reason === 'backend_exit'
+        ? 'Session was released after its backend exited'
+        : 'Session was cleared after the stream watchdog elapsed',
+    severity: 'warn',
+    details: { sessionId, ...(reason === 'stream_silence' ? { timeoutMs: SESSION_WATCHDOG_TIMEOUT_MS } : {}) }
+  })
+
+  for (const listener of sessionWatchdogListeners) {
+    listener(sessionId, reason)
+  }
+
+  return true
+}
+
+export function clearWorkingSessionsForProfile(profile: string | null | undefined): string[] {
+  const profileKey = normalizeSessionProfileKey(profile)
+  const profiles = $replyReadySessionProfiles.get()
+  const cleared: string[] = []
+
+  for (const sessionId of $workingSessionIds.get()) {
+    if (normalizeSessionProfileKey(profiles[sessionId]) !== profileKey) {
+      continue
+    }
+
+    if (forceClearWorkingSession(sessionId, 'backend_exit')) {
+      cleared.push(sessionId)
+    }
+  }
+
+  return cleared
+}
+
+export function forceClearSessionAfterBackendExit(sessionId: string): void {
+  if (forceClearWorkingSession(sessionId, 'backend_exit')) {
+    return
+  }
+
+  clearSessionWatchdog(sessionId)
+
+  for (const listener of sessionWatchdogListeners) {
+    listener(sessionId, 'backend_exit')
+  }
 }
 
 function armSessionWatchdog(sessionId: string) {
@@ -509,20 +565,7 @@ function armSessionWatchdog(sessionId: string) {
 
     // Re-check the latest state at fire-time. If the user already navigated
     // away or the session genuinely finished, the timer is a no-op.
-    if ($workingSessionIds.get().includes(sessionId)) {
-      setWorkingSessionIds(current => current.filter(id => id !== sessionId))
-      emitDesktopDiagnostic({
-        component: 'session',
-        event: 'watchdog.cleared',
-        message: 'Session was cleared after the stream watchdog elapsed',
-        severity: 'warn',
-        details: { sessionId, timeoutMs: SESSION_WATCHDOG_TIMEOUT_MS }
-      })
-    }
-
-    for (const listener of sessionWatchdogListeners) {
-      listener(sessionId)
-    }
+    forceClearWorkingSession(sessionId, 'stream_silence')
   }, SESSION_WATCHDOG_TIMEOUT_MS)
 
   sessionWatchdogTimers.set(sessionId, timer)

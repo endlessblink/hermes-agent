@@ -31,6 +31,7 @@ class InteractionResult:
     payload: str = ""
     prompt: str = ""
     error: str = ""
+    commit_payload: dict[str, Any] | None = None
 
 
 def _default_root() -> Path:
@@ -166,13 +167,129 @@ def _form_fields(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [field for field in state["artifact"].get("fields", []) if isinstance(field, dict)]
 
 
+def _profile_review_question(state: dict[str, Any]) -> dict[str, Any]:
+    question = state["artifact"].get("question")
+    return question if isinstance(question, dict) else {}
+
+
+def _normalize_profile_review_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    """Translate the shared Desktop contract into Telegram's durable projection."""
+    if artifact.get("type") != "task-profile-review" or "revision" not in artifact:
+        return artifact
+    task = artifact.get("task") if isinstance(artifact.get("task"), dict) else {}
+    question = (
+        artifact.get("question")
+        if isinstance(artifact.get("question"), dict)
+        else {}
+    )
+    normalized = dict(artifact)
+    normalized["interviewRevision"] = artifact.get("revision")
+    normalized["taskId"] = task.get("id")
+    normalized["questionId"] = question.get("id")
+    normalized["title"] = artifact.get("title") or task.get("title")
+    normalized["summary"] = [
+        {
+            "field": field.get("id"),
+            "label": field.get("label"),
+            "value": field.get("value"),
+        }
+        for field in artifact.get("profileFields", [])
+        if isinstance(field, dict)
+    ]
+    return normalized
+
+
+def _profile_review_commit_payload(state: dict[str, Any]) -> dict[str, Any]:
+    artifact = state["artifact"]
+    response = {
+        "selectedValues": list(state.get("selected_values", [])),
+        "customAnswer": state.get("custom_answer"),
+        "fieldEdits": dict(state.get("field_edits", {})),
+        "action": str(state.get("profile_action") or "confirm"),
+    }
+    stable = json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(
+        f"{state['token']}:{artifact.get('interviewId')}:{artifact.get('interviewRevision')}:{stable}".encode()
+    ).hexdigest()[:20]
+    payload = {
+        "interviewId": artifact.get("interviewId"),
+        "expectedRevision": artifact.get("interviewRevision"),
+        "taskId": artifact.get("taskId"),
+        "questionId": artifact.get("questionId"),
+        "response": response,
+        "requestId": f"telegram-profile-review:{digest}",
+    }
+    if state.get("profile"):
+        payload["profile"] = state["profile"]
+    return payload
+
+
 def _refresh_controls(state: dict[str, Any]) -> None:
     state["controls"] = []
     if state.get("status") == "awaiting_text":
-        _append_control(state, "✕ Cancel", "cancel")
+        if state.get("artifact_type") == "task-profile-review":
+            _append_control(state, "⬅️ Back", "profile-back")
+        else:
+            _append_control(state, "✕ Cancel", "cancel")
         return
     artifact = state["artifact"]
     artifact_type = artifact.get("type")
+    if artifact_type == "task-profile-review":
+        question = _profile_review_question(state)
+        question_type = str(question.get("type") or "short-text")
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        selected = set(str(value) for value in state.get("selected_values", []))
+        page = max(0, int(state.get("page", 0)))
+        page_size = 8
+        visible = options[page * page_size:(page + 1) * page_size]
+        if question_type in {"single-choice", "multi-choice"}:
+            for offset, raw_option in enumerate(visible):
+                option_index = page * page_size + offset
+                label, value = _option(raw_option)
+                checked = value in selected
+                icon = "✅" if checked else ("☐" if question_type == "multi-choice" else "○")
+                _append_control(
+                    state,
+                    f"{icon} {label}",
+                    "profile-option",
+                    option_index=option_index,
+                )
+            if page > 0:
+                _append_control(state, "⬅️ Previous", "profile-page", page=page - 1)
+            if (page + 1) * page_size < len(options):
+                _append_control(state, "Next ➡️", "profile-page", page=page + 1)
+        else:
+            current = str(state.get("custom_answer") or "")
+            label = str(question.get("label") or "Answer")
+            _append_control(
+                state,
+                f"✍️ {label}" if not current else f"✍️ {label}: {current}",
+                "request-profile-answer",
+            )
+        if question.get("allowCustomAnswer") is True:
+            custom = str(state.get("custom_answer") or "")
+            custom_label = str(question.get("customAnswerLabel") or "Other answer")
+            _append_control(
+                state,
+                f"✍️ {custom_label}" if not custom else f"✍️ {custom_label}: {custom}",
+                "request-profile-custom",
+            )
+        for summary_index, item in enumerate(artifact.get("summary", [])):
+            if not isinstance(item, dict) or not item.get("field"):
+                continue
+            label = str(item.get("label") or item.get("field"))
+            edited = state.get("field_edits", {}).get(str(item.get("field")))
+            suffix = f": {edited}" if edited not in (None, "") else ""
+            _append_control(
+                state,
+                f"✏️ Edit {label}{suffix}",
+                "edit-profile-field",
+                summary_index=summary_index,
+            )
+        _append_control(state, "✅ Confirm", "confirm-profile-review")
+        _append_control(state, "💬 Discuss", "request-profile-discuss")
+        return
+
     if artifact_type == "form":
         fields = _form_fields(state)
         if not fields:
@@ -286,6 +403,7 @@ def prepare_interaction(
     profile: str | None = None,
     root: Path | str | None = None,
 ) -> dict[str, Any]:
+    artifact = _normalize_profile_review_artifact(artifact)
     state_root = _root(root)
     _cleanup_stale_files(state_root)
     token = secrets.token_urlsafe(12)
@@ -318,6 +436,10 @@ def prepare_interaction(
         "selected_items": [],
         "page": 0,
         "task_decisions": {},
+        "selected_values": [],
+        "custom_answer": None,
+        "field_edits": {},
+        "profile_action": "confirm",
         "controls": [],
         "actions": [],
         "prompt_message_id": None,
@@ -440,6 +562,75 @@ def apply_control(
         control = controls[int(control_index)]
         kind = control.get("kind")
         artifact = state["artifact"]
+
+        if kind == "profile-option":
+            question = _profile_review_question(state)
+            options = question.get("options") if isinstance(question.get("options"), list) else []
+            _, value = _option(options[int(control["option_index"])])
+            selected = list(state.get("selected_values", []))
+            if question.get("type") == "multi-choice":
+                selected = [entry for entry in selected if entry != value] if value in selected else [*selected, value]
+            else:
+                selected = [value]
+                state["custom_answer"] = None
+            state["selected_values"] = selected
+            state["profile_action"] = "confirm"
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+            return InteractionResult("edit", state)
+        if kind == "profile-page":
+            state["page"] = max(0, int(control["page"]))
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+            return InteractionResult("edit", state)
+        if kind in {"request-profile-custom", "request-profile-answer", "request-profile-discuss"}:
+            state["status"] = "awaiting_text"
+            state["free_text_mode"] = kind
+            if kind == "request-profile-discuss":
+                state["profile_action"] = "discuss"
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+            if kind == "request-profile-discuss":
+                prompt = "What would you like to discuss before confirming?"
+            else:
+                question = _profile_review_question(state)
+                prompt = str(
+                    question.get("customAnswerLabel")
+                    if kind == "request-profile-custom"
+                    else question.get("label")
+                    or "Answer"
+                )
+            return InteractionResult("prompt", state, prompt=prompt)
+        if kind == "edit-profile-field":
+            summary_index = int(control["summary_index"])
+            summary = artifact.get("summary") if isinstance(artifact.get("summary"), list) else []
+            item = summary[summary_index]
+            state["status"] = "awaiting_text"
+            state["free_text_mode"] = "profile-field-edit"
+            state["editing_summary_field"] = str(item.get("field"))
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+            return InteractionResult("prompt", state, prompt=str(item.get("label") or item.get("field") or "New value"))
+        if kind == "profile-back":
+            state["status"] = "active"
+            state.pop("free_text_mode", None)
+            state.pop("editing_summary_field", None)
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+            return InteractionResult("edit", state)
+        if kind == "confirm-profile-review":
+            payload = _profile_review_commit_payload(state)
+            state["status"] = "submitting"
+            state["commit_payload"] = payload
+            state["revision"] += 1
+            state["controls"] = []
+            _write(path, state)
+            return InteractionResult("commit", state, commit_payload=payload)
 
         if kind in {"select-option", "toggle-option"}:
             field = _form_fields(state)[int(control["field_index"])]
@@ -601,6 +792,28 @@ def apply_text_reply(token: str, text: str, *, root: Path | str | None = None) -
         state = load_interaction(token, root=root)
         if state.get("status") != "awaiting_text":
             return InteractionResult("stale", state)
+        if state.get("artifact_type") == "task-profile-review":
+            value = str(text or "").strip()
+            if not value:
+                return InteractionResult("error", state, error="This answer cannot be empty")
+            mode = state.get("free_text_mode")
+            if mode == "profile-field-edit":
+                field = str(state.get("editing_summary_field") or "")
+                if not field:
+                    return InteractionResult("error", state, error="This field can no longer be edited")
+                state.setdefault("field_edits", {})[field] = value
+                state.pop("editing_summary_field", None)
+            else:
+                state["custom_answer"] = value
+                if _profile_review_question(state).get("type") == "single-choice":
+                    state["selected_values"] = []
+            state["status"] = "active"
+            state.pop("free_text_mode", None)
+            state["prompt_message_id"] = None
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+            return InteractionResult("edit", state)
         if state.get("artifact_type") != "form":
             payload = f"Regarding Hermes UI {state.get('artifact_type')} {state['artifact'].get('id') or token}:\n{text}"
             return _finish(state, path, payload)
@@ -661,6 +874,47 @@ def reopen_submission(token: str, *, root: Path | str | None = None) -> dict[str
             state["revision"] += 1
             _refresh_controls(state)
             _write(path, state)
+        return state
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def resume_interaction(token: str, *, root: Path | str | None = None) -> dict[str, Any]:
+    """Regenerate controls for an expired card without losing its draft."""
+    handle, path = _locked(token, root)
+    try:
+        state = load_interaction(token, root=root)
+        if state.get("status") == "expired":
+            state["status"] = "active"
+            state["expires_at"] = time.time() + _TTL_SECONDS
+            state["revision"] += 1
+            _refresh_controls(state)
+            _write(path, state)
+        return state
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def refresh_interaction(
+    token: str,
+    artifact: dict[str, Any],
+    *,
+    root: Path | str | None = None,
+) -> dict[str, Any]:
+    """Refresh a stale projection while preserving compatible local draft values."""
+    handle, path = _locked(token, root)
+    try:
+        state = load_interaction(token, root=root)
+        state["artifact"] = artifact
+        state["artifact_type"] = artifact.get("type")
+        state["status"] = "active"
+        state["expires_at"] = time.time() + _TTL_SECONDS
+        state["revision"] += 1
+        state["page"] = 0
+        _refresh_controls(state)
+        _write(path, state)
         return state
     finally:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

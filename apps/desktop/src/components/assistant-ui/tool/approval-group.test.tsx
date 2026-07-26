@@ -382,6 +382,43 @@ describe('flat tool list approval surfacing', () => {
     })
   })
 
+  it('keeps only the newest repeated clarify question interactive', async () => {
+    setClarifyRequest({
+      choices: ['Approve', 'Cancel'],
+      question: 'Start the timer?',
+      requestId: 'clarify-request-repeated',
+      sessionId: 'sess-1'
+    })
+
+    const repeated = {
+      ...groupedPendingClarifyMessage('Start the timer?', ['Approve', 'Cancel']),
+      id: 'assistant-reused-id',
+      content: [
+        {
+          type: 'tool-call',
+          toolCallId: 'clarify-completed',
+          toolName: 'clarify',
+          args: { choices: ['Approve', 'Cancel'], question: 'Start the timer?' },
+          argsText: JSON.stringify({ choices: ['Approve', 'Cancel'], question: 'Start the timer?' }),
+          result: { question: 'Start the timer?', user_response: '' }
+        },
+        {
+          type: 'tool-call',
+          toolCallId: 'clarify-current',
+          toolName: 'clarify',
+          args: { choices: ['Approve', 'Cancel'], question: 'Start the timer?' },
+          argsText: JSON.stringify({ choices: ['Approve', 'Cancel'], question: 'Start the timer?' })
+        }
+      ]
+    } as ThreadMessage
+
+    const { container } = render(<GroupHarness message={repeated} messages={[repeated]} />)
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('[data-slot="clarify-inline"]')).toHaveLength(1)
+    })
+  })
+
   it('selects multiple readable options and submits every selection', async () => {
     const request = vi.fn().mockResolvedValue({ ok: true })
 
@@ -468,9 +505,12 @@ describe('flat tool list approval surfacing', () => {
     expect(screen.getByText('איך תרצה לארגן את המשימה?').getAttribute('dir')).toBe('auto')
     expect(screen.getByText('להוסיף אותה לפרויקט FlowState').getAttribute('dir')).toBe('auto')
     expect(screen.getByText('Keep it in Inbox').getAttribute('dir')).toBe('auto')
+    expect(screen.getByRole('button', { name: 'דלג' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /המשך/ })).toBeTruthy()
+    expect(screen.getByPlaceholderText('תשובה אחרת').getAttribute('dir')).toBe('rtl')
   })
 
-  it('sends an empty clarify answer when Skip is clicked', async () => {
+  it('sends an empty clarify answer and keeps the card until turn completion', async () => {
     const request = vi.fn().mockResolvedValue({ ok: true })
     $gateway.set({ request } as unknown as HermesGateway)
     setClarifyRequest({
@@ -490,7 +530,7 @@ describe('flat tool list approval surfacing', () => {
         request_id: 'clarify-request-skip'
       })
     })
-    expect($clarifyRequest.get()).toBeNull()
+    expect($clarifyRequest.get()?.requestId).toBe('clarify-request-skip')
   })
 
   it('keeps the clarify card visible when sending the answer fails', async () => {

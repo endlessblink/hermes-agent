@@ -85,6 +85,7 @@ def clarify_tool(
     question: str,
     choices: Optional[List[str]] = None,
     callback: Optional[Callable] = None,
+    personal_assistant_mode: bool = False,
 ) -> str:
     """
     Ask the user a question, optionally with multiple-choice options.
@@ -119,6 +120,12 @@ def clarify_tool(
             choices = choices[:MAX_CHOICES]
         if not choices:
             choices = None  # empty list → open-ended
+
+    if personal_assistant_mode and (choices is None or len(choices) < 2):
+        return tool_error(
+            "Personal Assistant questions require 2-4 distinct choices. "
+            "The interface adds an Other option automatically."
+        )
 
     if callback is None:
         return json.dumps(
@@ -214,7 +221,11 @@ registry.register(
     handler=lambda args, **kw: clarify_tool(
         question=args.get("question", ""),
         choices=args.get("choices"),
-        callback=kw.get("callback")),
+        callback=kw.get("callback"),
+        personal_assistant_mode=bool(
+            getattr(kw.get("agent"), "personal_assistant_mode", False)
+            or kw.get("personal_assistant_mode", False)
+        )),
     check_fn=check_clarify_requirements,
     emoji="❓",
 )

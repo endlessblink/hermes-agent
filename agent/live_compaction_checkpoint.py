@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - POSIX
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _flights_lock = threading.Lock()
 _flights: set[str] = set()
 _worker_slots = threading.BoundedSemaphore(1)
@@ -73,6 +73,28 @@ def _messages_digest(messages: list[dict[str, Any]]) -> str:
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _shared_semantic_suffix_length(
+    snapshot: list[dict[str, Any]],
+    prepared: list[dict[str, Any]],
+) -> int:
+    """Return the unchanged protected tail copied through compaction.
+
+    ContextCompressor replaces an old prefix and carries its protected recent
+    tail through verbatim. Replay cleanup is allowed to repair that tail after
+    restart, so checkpoints fence the replaced prefix and splice in the current
+    repaired tail at consumption time.
+    """
+    shared = 0
+    limit = min(len(snapshot), len(prepared))
+    while shared < limit:
+        if _messages_digest([snapshot[-shared - 1]]) != _messages_digest(
+            [prepared[-shared - 1]]
+        ):
+            break
+        shared += 1
+    return shared
 
 
 class LiveCompactionCheckpointStore:
@@ -136,15 +158,23 @@ class LiveCompactionCheckpointStore:
         expected_record_id: Optional[str] = None,
     ) -> bool:
         self.root.mkdir(parents=True, exist_ok=True)
+        shared_suffix_length = _shared_semantic_suffix_length(snapshot, prepared)
+        snapshot_prefix_length = len(snapshot) - shared_suffix_length
+        prepared_prefix_length = len(prepared) - shared_suffix_length
         record = {
             "schema_version": _SCHEMA_VERSION,
             "record_id": uuid.uuid4().hex,
             "session_id": session_id,
-            "snapshot_length": len(snapshot),
-            "snapshot_digest": _messages_digest(snapshot),
+            "snapshot_length": snapshot_prefix_length,
+            "snapshot_digest": _messages_digest(snapshot[:snapshot_prefix_length]),
             "strategy_fingerprint": strategy_fingerprint,
             "snapshot_tokens": max(0, int(snapshot_tokens or 0)),
             "prepared_messages": prepared,
+            "prepared_prefix_length": prepared_prefix_length,
+            "protected_tail_length": shared_suffix_length,
+            "protected_tail_digest": _messages_digest(
+                snapshot[snapshot_prefix_length:]
+            ),
             "created_at": time.time(),
         }
         fd, raw_tmp = tempfile.mkstemp(prefix=".checkpoint-", dir=self.root)
@@ -276,6 +306,8 @@ class LiveCompactionCheckpointStore:
                 return None
             snapshot_length = record.get("snapshot_length")
             prepared = record.get("prepared_messages")
+            prepared_prefix_length = record.get("prepared_prefix_length")
+            protected_tail_length = record.get("protected_tail_length")
             valid_shape = (
                 record.get("schema_version") == _SCHEMA_VERSION
                 and record.get("session_id") == session_id
@@ -283,6 +315,10 @@ class LiveCompactionCheckpointStore:
                 and isinstance(snapshot_length, int)
                 and snapshot_length >= 0
                 and isinstance(prepared, list)
+                and isinstance(prepared_prefix_length, int)
+                and 0 <= prepared_prefix_length <= len(prepared)
+                and isinstance(protected_tail_length, int)
+                and protected_tail_length >= 0
                 and len(messages) >= snapshot_length
             )
             prefix = messages[:snapshot_length] if valid_shape else []
@@ -297,7 +333,17 @@ class LiveCompactionCheckpointStore:
             if not is_current:
                 return None
             assert isinstance(prepared, list)
-            return copy.deepcopy(prepared) + copy.deepcopy(messages[snapshot_length:])
+            tail_end = snapshot_length + protected_tail_length
+            current_tail = messages[snapshot_length:tail_end]
+            if (
+                len(current_tail) == protected_tail_length
+                and _messages_digest(current_tail)
+                == record.get("protected_tail_digest")
+            ):
+                return copy.deepcopy(prepared) + copy.deepcopy(messages[tail_end:])
+            return copy.deepcopy(prepared[:prepared_prefix_length]) + copy.deepcopy(
+                messages[snapshot_length:]
+            )
 
 
 def schedule_live_compaction_checkpoint(
@@ -344,8 +390,15 @@ def schedule_live_compaction_checkpoint(
 
     def _run() -> None:
         started_at = time.monotonic()
+        worker_slot_released = False
         try:
             prepared = prepare(snapshot)
+            # The global slot bounds expensive preparation, not the short
+            # atomic publish. Release it before making the checkpoint visible
+            # so observers never see a completed record while capacity still
+            # appears occupied.
+            _worker_slots.release()
+            worker_slot_released = True
             if prepared and prepared != snapshot:
                 published = store.publish(
                     session_id,
@@ -380,7 +433,8 @@ def schedule_live_compaction_checkpoint(
         finally:
             with _flights_lock:
                 _flights.discard(flight_key)
-            _worker_slots.release()
+            if not worker_slot_released:
+                _worker_slots.release()
 
     threading.Thread(
         target=_run,

@@ -271,6 +271,102 @@ const obsidianPolicyChecklist = {
 }
 
 describe('parseHermesUiArtifact', () => {
+  it('parses one version-bound task profile review question', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        direction: 'rtl',
+        interviewId: 'weekly-1',
+        profileFields: [
+          { id: 'urgency', label: 'דחיפות', value: 'גבוהה' },
+          { id: 'doneEnough', label: 'מה נחשב מספיק', value: 'יש תשובה והצעד הבא ברור' }
+        ],
+        progress: { current: 2, total: 8 },
+        question: {
+          allowCustomAnswer: true,
+          id: 'urgency',
+          label: 'עד כמה זה דחוף השבוע?',
+          options: [
+            { label: 'גבוהה', value: 'high' },
+            { label: 'בינונית', value: 'medium' }
+          ],
+          profileFieldId: 'urgency',
+          type: 'single-choice'
+        },
+        revision: 8,
+        task: { id: 'pet-results', title: 'בדיקת תוצאות PET' },
+        type: 'task-profile-review'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    if (result.ok && result.artifact.type === 'task-profile-review') {
+      expect(result.artifact.interviewId).toBe('weekly-1')
+      expect(result.artifact.question.id).toBe('urgency')
+      expect(result.artifact.progress).toEqual({ current: 2, total: 8 })
+    }
+  })
+
+  it('parses the first profile question before any profile fields are known', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        direction: 'rtl',
+        interviewId: 'evening-plan-2026-07-20-1808',
+        profileFields: [],
+        progress: { current: 1, total: 3 },
+        question: {
+          allowCustomAnswer: true,
+          customAnswerLabel: 'תשובה אחרת',
+          id: 'urgency',
+          label: 'כמה חשוב להתקדם בסילבוס דווקא הערב?',
+          options: [
+            'חשוב: זו תהיה יחידת העבודה המרכזית של הערב',
+            'נחמד אם ייכנס: רק אם נשאר כוח אחרי התאוששות',
+            'לא הערב: עדיף לשמור את האנרגיה למחר'
+          ],
+          profileFieldId: 'urgency',
+          type: 'single-choice'
+        },
+        revision: 1,
+        task: {
+          id: 'notion:39cca7e2-b4d9-809c-af00-e92d8a7c80b9',
+          title: 'להכין מערכי שיעור לקורס ספייסס'
+        },
+        type: 'task-profile-review'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+    expect(result.ok && result.artifact.type === 'task-profile-review' && result.artifact.profileFields).toEqual([])
+  })
+
+  it('keeps large profile summaries bounded without the old twelve-field cutoff', () => {
+    const profileFields = Array.from({ length: 100 }, (_, index) => ({
+      id: `field-${index}`,
+      label: `Field ${index}`,
+      value: `Value ${index}`
+    }))
+    const base = {
+      interviewId: 'large-review',
+      progress: { current: 1, total: 1 },
+      question: {
+        id: 'next',
+        label: 'What next?',
+        profileFieldId: 'next',
+        type: 'short-text'
+      },
+      revision: 1,
+      task: { id: 'task', title: 'Large task' },
+      type: 'task-profile-review'
+    }
+
+    expect(parseHermesUiArtifact(JSON.stringify({ ...base, profileFields })).ok).toBe(true)
+    expect(
+      parseHermesUiArtifact(
+        JSON.stringify({ ...base, profileFields: [...profileFields, { id: 'overflow', label: 'Overflow' }] })
+      ).ok
+    ).toBe(false)
+  })
+
   it('parses a bounded task breakdown with a stable persistence identity', () => {
     const result = parseHermesUiArtifact(
       JSON.stringify({
@@ -864,6 +960,9 @@ describe('parseHermesUiArtifact', () => {
   it('parses a task-table artifact with explicit unknowns', () => {
     const result = parseHermesUiArtifact(
       JSON.stringify({
+        actions: [
+          { id: 'adjust', label: 'Adjust the day', submitText: 'Adjust this day plan around my available time.' }
+        ],
         columns: ['task', 'context', 'timeSize', 'energy', 'urgency', 'nextStep', 'confidence'],
         direction: 'rtl',
         rows: [
@@ -905,6 +1004,37 @@ describe('parseHermesUiArtifact', () => {
 
     expect(result.ok).toBe(true)
     expect(result.ok && result.artifact.type === 'task-table' && result.artifact.rows).toHaveLength(3)
+    expect(result.ok && result.artifact.type === 'task-table' && result.artifact.actions?.[0]?.id).toBe('adjust')
+  })
+
+  it('parses the cross-source inventory table that previously failed in Desktop', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        columns: ['source', 'status', 'due'],
+        direction: 'rtl',
+        rows: Array.from({ length: 19 }, (_, index) => ({
+          due: index === 0 ? '20.7' : 'ללא מועד',
+          id: `inventory-${index}`,
+          source: index % 2 === 0 ? 'FlowState' : 'Notion, noam',
+          status: index === 0 ? 'בוצע היום, התוצאות טרם התקבלו' : 'פתוח',
+          title: `משימה ${index + 1}`
+        })),
+        title: 'הרשימה המלאה שנבחנה לתכנון',
+        type: 'task-table'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+
+    if (result.ok && result.artifact.type === 'task-table') {
+      expect(result.artifact.columns).toEqual(['task', 'source', 'status', 'due'])
+      expect(result.artifact.rows).toHaveLength(19)
+      expect(result.artifact.rows[0].cells).toEqual({
+        due: '20.7',
+        source: 'FlowState',
+        status: 'בוצע היום, התוצאות טרם התקבלו'
+      })
+    }
   })
 
   it('parses a mini-kanban artifact', () => {
@@ -929,6 +1059,10 @@ describe('parseHermesUiArtifact', () => {
   it('parses a day-timeline artifact', () => {
     const result = parseHermesUiArtifact(
       JSON.stringify({
+        actions: [
+          { id: 'choose-plan', label: 'Choose this plan', submitText: 'Use this complete day plan.' },
+          { id: 'adjust-plan', label: 'Adjust this plan', submitText: 'Adjust this complete day plan.' }
+        ],
         blocks: [
           { endTime: '10:25', id: 'b1', kind: 'focus', label: 'טיוטה ללקוח', startTime: '10:00', status: 'candidate' },
           { durationMinutes: 15, id: 'float-1', kind: 'floating', label: 'בדיקה קצרה', status: 'planned' }
@@ -942,6 +1076,45 @@ describe('parseHermesUiArtifact', () => {
 
     expect(result.ok).toBe(true)
     expect(result.ok && result.artifact.type === 'day-timeline' && result.artifact.currentTime).toBe('09:45')
+    expect(result.ok && result.artifact.type === 'day-timeline' && result.artifact.actions).toHaveLength(2)
+  })
+
+  it('parses task-backed recommended blocks emitted by the personal assistant', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        blocks: [
+          {
+            endTime: '19:10',
+            id: 'task-block',
+            kind: 'task',
+            label: 'לבדוק תשובה לגבי דחיית צילום הקרקפת',
+            startTime: '19:00',
+            status: 'recommended',
+            taskId: 'task-123'
+          }
+        ],
+        date: '2026-07-22',
+        type: 'day-timeline'
+      })
+    )
+
+    expect(result.ok).toBe(true)
+  })
+
+  it('parses scheduled tasks and confirmed calendar events in a personal-assistant day plan', () => {
+    const result = parseHermesUiArtifact(
+      JSON.stringify({
+        blocks: [
+          { id: 'task', kind: 'task', label: 'להגיש משרות', status: 'scheduled', taskId: 'task-1' },
+          { id: 'late', kind: 'task', label: 'לבדוק עם לוטם', status: 'overdue', taskId: 'task-2' },
+          { id: 'event', kind: 'calendar', label: 'נפגש עם מוטי', status: 'confirmed', taskId: 'event-1' }
+        ],
+        date: '2026-07-23',
+        type: 'day-timeline'
+      })
+    )
+
+    expect(result.ok).toBe(true)
   })
 
   it('parses a complete RTL week-planner without dropping task detail', () => {
@@ -1084,10 +1257,7 @@ describe('parseHermesUiArtifact', () => {
       parseHermesUiArtifact(
         JSON.stringify({
           columns: ['task'],
-          rows: [
-            { id: 'one', title: 'One' },
-            { id: 'two', title: 'Two' }
-          ],
+          rows: [],
           type: 'task-table'
         })
       ).ok
@@ -1192,20 +1362,56 @@ describe('task-table time column', () => {
     }
   })
 
-  it('names the allowed columns when rejecting an unsupported one', () => {
+  it('accepts model-defined column labels and rejects unsafe nested cells', () => {
     const result = parseHermesUiArtifact(
       JSON.stringify({
-        columns: ['when'],
-        rows: [{ id: 'r1', title: 'x' }],
+        columns: [{ key: 'status', label: 'מצב' }],
+        rows: [{ cells: { status: 'פתוח' }, id: 'r1', title: 'משימה' }],
         type: 'task-table'
       })
     )
 
-    expect(result.ok).toBe(false)
+    expect(result.ok).toBe(true)
+    expect(
+      parseHermesUiArtifact(
+        JSON.stringify({
+          columns: [{ key: 'status', label: 'מצב' }],
+          rows: [{ cells: { status: { nested: 'unsafe' } }, id: 'r1', title: 'משימה' }],
+          type: 'task-table'
+        })
+      ).ok
+    ).toBe(false)
+    expect(
+      parseHermesUiArtifact(
+        JSON.stringify({
+          columns: [{ key: '__proto__', label: 'Unsafe' }],
+          rows: [{ id: 'r1', title: 'Task' }],
+          type: 'task-table'
+        })
+      ).ok
+    ).toBe(false)
+    expect(
+      parseHermesUiArtifact(
+        JSON.stringify({
+          columns: ['task', 'context'],
+          rows: [{ cells: { context: 'new' }, context: 'old', id: 'r1', title: 'Task' }],
+          type: 'task-table'
+        })
+      ).ok
+    ).toBe(false)
+    expect(
+      parseHermesUiArtifact(
+        JSON.stringify({
+          columns: ['task'],
+          rows: [{ cells: { task: 'hidden override' }, id: 'r1', title: 'Task' }],
+          type: 'task-table'
+        })
+      ).ok
+    ).toBe(false)
 
-    if (!result.ok) {
-      expect(result.error).toContain('allowed:')
-      expect(result.error).toContain('time')
+    if (result.ok && result.artifact.type === 'task-table') {
+      expect(result.artifact.columns).toEqual(['task', { key: 'status', label: 'מצב' }])
+      expect(result.artifact.rows[0].cells).toEqual({ status: 'פתוח' })
     }
   })
 

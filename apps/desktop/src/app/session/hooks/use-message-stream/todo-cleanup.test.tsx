@@ -25,6 +25,12 @@ const todo = (id: string, status: TodoItem['status']): TodoItem => ({ content: `
 let handleEvent: ((event: RpcEvent) => void) | null = null
 let stateByRuntimeId: Map<string, ClientSessionState>
 
+let hydrateFromStoredSession: (
+  attempts?: number,
+  storedSessionId?: string | null,
+  runtimeSessionId?: string | null
+) => Promise<void>
+
 let continueFromCompressionExhausted: (
   sessionId: string,
   errorMessage: string
@@ -37,7 +43,7 @@ function Harness() {
 
   const stream = useMessageStream({
     activeSessionIdRef,
-    hydrateFromStoredSession: vi.fn(async () => undefined),
+    hydrateFromStoredSession,
     queryClient: queryClientRef.current,
     continueFromCompressionExhausted,
     refreshHermesConfig: vi.fn(async () => undefined),
@@ -70,6 +76,7 @@ describe('useMessageStream turn-end todo cleanup', () => {
   beforeEach(() => {
     handleEvent = null
     continueFromCompressionExhausted = vi.fn(async () => undefined)
+    hydrateFromStoredSession = vi.fn(async () => undefined)
     stateByRuntimeId = new Map()
     $activeSessionId.set(SID)
     clearSessionTodos(SID)
@@ -118,12 +125,14 @@ describe('useMessageStream turn-end todo cleanup', () => {
     act(() =>
       handleEvent!({
         payload: { choices: ['A', 'B'], question: 'Pick one', request_id: 'clarify-1' },
+        profile: 'office-work',
         session_id: SID,
         type: 'clarify.request'
       })
     )
     expect(stateByRuntimeId.get(SID)?.needsInput).toBe(true)
     expect($clarifyRequest.get()?.requestId).toBe('clarify-1')
+    expect($clarifyRequest.get()?.profile).toBe('office-work')
 
     act(() =>
       handleEvent!({
@@ -163,6 +172,7 @@ describe('useMessageStream turn-end todo cleanup', () => {
     )
 
     expect(stateByRuntimeId.get(SID)?.needsInput).toBe(false)
+    expect($clarifyRequest.get()).toBeNull()
   })
 
   it('settles a running turn when session.info reports the backend is no longer running', async () => {
@@ -202,6 +212,36 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.messages.at(-1)?.pending).toBe(false)
   })
 
+  it('appends an identical assistant answer after a newer user request', async () => {
+    await mountStream()
+    stateByRuntimeId.set(SID, {
+      ...createClientSessionState(),
+      awaitingResponse: true,
+      busy: true,
+      messages: [
+        { id: 'assistant-old', role: 'assistant', parts: [{ type: 'text', text: 'Same useful plan' }] },
+        { id: 'user-new', role: 'user', parts: [{ type: 'text', text: 'Plan my day again' }] }
+      ],
+      sawAssistantPayload: false
+    })
+
+    act(() =>
+      handleEvent!({
+        payload: { status: 'complete', text: 'Same useful plan' },
+        session_id: SID,
+        type: 'message.complete'
+      })
+    )
+
+    const messages = stateByRuntimeId.get(SID)?.messages
+
+    expect(messages).toHaveLength(3)
+    expect(messages?.at(-1)).toMatchObject({
+      role: 'assistant',
+      parts: [{ type: 'text', text: 'Same useful plan' }]
+    })
+  })
+
   it('treats message.complete with error status as a failed turn', async () => {
     await mountStream()
 
@@ -221,6 +261,33 @@ describe('useMessageStream turn-end todo cleanup', () => {
     expect(state?.turnStartedAt).toBeNull()
     expect(state?.messages.at(-1)?.pending).toBe(false)
     expect(state?.messages.at(-1)?.error).toBe('Context length exceeded and cannot compress further.')
+  })
+
+  it('rehydrates the visible runtime when completion arrives on its reminted alias', async () => {
+    const storedSessionId = 'stored-session-1'
+    const remintedRuntimeId = 'runtime-after-reconnect'
+    await mountStream()
+
+    stateByRuntimeId.set(SID, {
+      ...createClientSessionState(storedSessionId),
+      messages: [{ id: 'user-1', role: 'user', parts: [{ type: 'text', text: 'Did you save it?' }] }]
+    })
+    stateByRuntimeId.set(remintedRuntimeId, {
+      ...createClientSessionState(storedSessionId),
+      awaitingResponse: true,
+      busy: true,
+      sawAssistantPayload: true
+    })
+
+    act(() =>
+      handleEvent!({
+        payload: { status: 'complete', text: 'Yes, it is saved.' },
+        session_id: remintedRuntimeId,
+        type: 'message.complete'
+      })
+    )
+
+    expect(hydrateFromStoredSession).toHaveBeenCalledWith(3, storedSessionId, SID)
   })
 
   it('ignores assistant deltas that arrive after a terminal turn event', async () => {

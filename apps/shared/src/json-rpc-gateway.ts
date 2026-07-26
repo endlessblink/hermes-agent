@@ -33,11 +33,23 @@ export type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error
 export type GatewayRequestId = number | string
 
 export interface JsonRpcFrame {
-  error?: { message?: string }
+  error?: { code?: number | string; data?: unknown; message?: string }
   id?: GatewayRequestId | null
   method?: string
   params?: GatewayEvent
   result?: unknown
+}
+
+export class JsonRpcGatewayError extends Error {
+  readonly code?: number | string
+  readonly data?: unknown
+
+  constructor(error: NonNullable<JsonRpcFrame['error']>) {
+    super(error.message || 'Hermes RPC failed')
+    this.name = 'JsonRpcGatewayError'
+    this.code = error.code
+    this.data = error.data
+  }
 }
 
 export type WebSocketLike = WebSocket
@@ -335,7 +347,7 @@ export class JsonRpcGatewayClient {
       this.clearPending(frame.id)
 
       if (frame.error) {
-        call.reject(new Error(frame.error.message || 'Hermes RPC failed'))
+        call.reject(new JsonRpcGatewayError(frame.error))
       } else {
         call.resolve(frame.result)
       }

@@ -1653,6 +1653,41 @@ def test_dispatch_dry_run_does_not_claim(kanban_home, all_assignees_spawnable):
         assert kb.get_task(conn, t2).status == "ready"
 
 
+def test_generic_dispatch_skips_repair_executor_tasks(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="repair incident",
+            assignee="codex-repair",
+            executor_kind="codex-repair",
+        )
+
+        result = kb.dispatch_once(conn, dry_run=True)
+
+        assert result.spawned == []
+        task = kb.get_task(conn, task_id)
+        assert task.status == "ready"
+        assert task.executor_kind == "codex-repair"
+
+
+def test_claim_task_can_require_repair_executor_ownership(kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="repair incident",
+            assignee="codex-repair",
+            executor_kind="codex-repair",
+        )
+
+        assert kb.claim_task(conn, task_id, expected_executor_kind="hermes") is None
+        assert kb.get_task(conn, task_id).status == "ready"
+        assert kb.claim_task(
+            conn, task_id, expected_executor_kind="codex-repair"
+        ).status == "running"
+
+
 def test_dispatch_skips_unassigned(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="floater")

@@ -3,7 +3,10 @@ import type { MutableRefObject } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChatMessage } from '@/lib/chat-messages'
+import { $notifications } from '@/store/notifications'
+import { $activeGatewayProfile } from '@/store/profile'
 import {
+  $attentionSessionIds,
   $currentFastMode,
   $currentModel,
   $currentProvider,
@@ -11,13 +14,17 @@ import {
   $currentServiceTier,
   $messages,
   $turnStartedAt,
+  $workingSessionIds,
+  clearWorkingSessionsForProfile,
   setCurrentFastMode,
   setCurrentModel,
   setCurrentProvider,
   setCurrentReasoningEffort,
   setCurrentServiceTier,
+  setSessionWorking,
   setTurnStartedAt
 } from '@/store/session'
+import { $sessionTiles } from '@/store/session-states'
 
 import { useSessionStateCache } from './use-session-state-cache'
 
@@ -67,6 +74,7 @@ describe('useSessionStateCache — per-session turn timer', () => {
     setCurrentReasoningEffort('')
     setCurrentServiceTier('')
     setCurrentFastMode(false)
+    $sessionTiles.set([])
   })
 
   afterEach(() => {
@@ -113,6 +121,74 @@ describe('useSessionStateCache — per-session turn timer', () => {
     expect($turnStartedAt.get()).toBe(startedAt)
   })
 
+  it('replaces a backend-killed Thinking row with a durable visible failure', () => {
+    let cache!: Cache
+    render(
+      <Harness
+        activeSessionId="fg-runtime"
+        onReady={c => (cache = c)}
+        selectedStoredSessionId="fg-stored"
+      />
+    )
+
+    act(() => {
+      cache.updateSessionState(
+        'fg-runtime',
+        state => ({
+          ...state,
+          busy: true,
+          awaitingResponse: true,
+          messages: [userMessage('user-1', 'תכנן לי את השבוע הבא')]
+        }),
+        'fg-stored'
+      )
+      setSessionWorking('fg-stored', true, 'office-work')
+      clearWorkingSessionsForProfile('office-work')
+    })
+
+    const state = cache.sessionStateByRuntimeIdRef.current.get('fg-runtime')
+
+    expect(state?.busy).toBe(false)
+    expect(state?.awaitingResponse).toBe(false)
+    expect(state?.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      pending: false,
+      error: expect.stringContaining('restarted before this answer finished')
+    })
+  })
+
+  it("attributes a profile-owned tile's running turn to its backend instead of the active workspace", () => {
+    let cache!: Cache
+
+    $activeGatewayProfile.set('default')
+    $sessionTiles.set([
+      { profile: 'office-work', runtimeId: 'tile-runtime', storedSessionId: 'tile-stored' }
+    ])
+    render(<Harness activeSessionId="main-runtime" onReady={c => (cache = c)} selectedStoredSessionId="main-stored" />)
+
+    act(() => {
+      cache.updateSessionState(
+        'tile-runtime',
+        state => ({
+          ...state,
+          awaitingResponse: true,
+          busy: true,
+          messages: [userMessage('user-tile', 'תכנן לי את השבוע הבא')]
+        }),
+        'tile-stored'
+      )
+      const stateBeforeExit = cache.sessionStateByRuntimeIdRef.current.get('tile-runtime')!
+      cache.sessionStateByRuntimeIdRef.current.set('tile-runtime', { ...stateBeforeExit, busy: false })
+      clearWorkingSessionsForProfile('office-work')
+    })
+
+    const state = cache.sessionStateByRuntimeIdRef.current.get('tile-runtime')
+
+    expect(state?.busy).toBe(false)
+    expect(state?.messages.at(-1)?.error).toContain('restarted before this answer finished')
+    expect($notifications.get()[0]?.message).toContain('No task or calendar change was confirmed')
+  })
+
   it('clears the global clock when the focused turn ends', () => {
     let cache!: Cache
     render(<Harness activeSessionId="fg-runtime" onReady={c => (cache = c)} selectedStoredSessionId="fg-stored" />)
@@ -130,6 +206,92 @@ describe('useSessionStateCache — per-session turn timer', () => {
       cache.updateSessionState('fg-runtime', state => ({ ...state, busy: false, turnStartedAt: null }))
     })
     expect($turnStartedAt.get()).toBeNull()
+  })
+
+  it('keeps the session live atomically while a running turn starts waiting for clarification', () => {
+    let cache!: Cache
+    render(<Harness activeSessionId="fg-runtime" onReady={c => (cache = c)} selectedStoredSessionId="fg-stored" />)
+
+    act(() => {
+      cache.updateSessionState(
+        'fg-runtime',
+        state => ({ ...state, busy: true, needsInput: false }),
+        'fg-stored'
+      )
+    })
+
+    const keptSnapshots: boolean[] = []
+
+    const capture = () => {
+      keptSnapshots.push(
+        $workingSessionIds.get().includes('fg-stored') || $attentionSessionIds.get().includes('fg-stored')
+      )
+    }
+
+    const offWorking = $workingSessionIds.listen(capture)
+    const offAttention = $attentionSessionIds.listen(capture)
+
+    act(() => {
+      cache.updateSessionState('fg-runtime', state => ({ ...state, busy: false, needsInput: true }))
+    })
+
+    offWorking()
+    offAttention()
+    expect(keptSnapshots.length).toBeGreaterThan(0)
+    expect(keptSnapshots).not.toContain(false)
+  })
+
+  it('reconciles a focused session that stays busy after 75 seconds of stream silence', () => {
+    vi.useFakeTimers()
+    let cache!: Cache
+    render(<Harness activeSessionId="fg-runtime" onReady={c => (cache = c)} selectedStoredSessionId="fg-stored" />)
+
+    act(() => {
+      cache.updateSessionState(
+        'fg-runtime',
+        state => ({ ...state, awaitingResponse: true, busy: true, needsInput: false }),
+        'fg-stored'
+      )
+    })
+
+    act(() => {
+      vi.advanceTimersByTime(75 * 1000)
+    })
+
+    expect(cache.sessionStateByRuntimeIdRef.current.get('fg-runtime')).toMatchObject({
+      awaitingResponse: false,
+      busy: false,
+      needsInput: false
+    })
+    vi.useRealTimers()
+  })
+
+  it('reconciles a restored focused session even when its runtime event omits the stored id', () => {
+    vi.useFakeTimers()
+    let cache!: Cache
+    render(<Harness activeSessionId="restored-runtime" onReady={c => (cache = c)} selectedStoredSessionId="restored-stored" />)
+
+    act(() => {
+      cache.updateSessionState('restored-runtime', state => ({
+        ...state,
+        awaitingResponse: true,
+        busy: true,
+        needsInput: false
+      }))
+    })
+
+    expect(cache.sessionStateByRuntimeIdRef.current.get('restored-runtime')?.storedSessionId).toBe('restored-stored')
+
+    act(() => {
+      vi.advanceTimersByTime(75 * 1000)
+    })
+
+    expect(cache.sessionStateByRuntimeIdRef.current.get('restored-runtime')).toMatchObject({
+      awaitingResponse: false,
+      busy: false,
+      needsInput: false
+    })
+    vi.useRealTimers()
   })
 
   it('mirrors the focused session model metadata when switching from a cached session', () => {

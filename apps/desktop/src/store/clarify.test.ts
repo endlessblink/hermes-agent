@@ -5,7 +5,9 @@ import {
   $clarifyRequests,
   type ClarifyRequest,
   clearClarifyRequest,
-  setClarifyRequest
+  clearClarifyRequestAliasesForSession,
+  setClarifyRequest,
+  setClarifyRequestAliases
 } from './clarify'
 import { $activeSessionId } from './session'
 
@@ -77,5 +79,31 @@ describe('clarify store', () => {
 
     expect($clarifyRequests.get()['session-a']).toBeUndefined()
     expect($clarifyRequests.get()['session-b']?.requestId).toBe('other')
+  })
+
+  it('restores one pending question across equivalent assistant session identities', () => {
+    setClarifyRequestAliases(clarify(null, 'shared'), [null, 'canonical', 'runtime'])
+
+    for (const activeId of [null, 'canonical', 'runtime']) {
+      $activeSessionId.set(activeId)
+      expect($clarifyRequest.get()?.requestId).toBe('shared')
+    }
+
+    $activeSessionId.set('transient-desktop-id')
+    expect($clarifyRequest.get()?.requestId).toBe('shared')
+
+    clearClarifyRequest('shared')
+    expect($clarifyRequests.get()).toEqual({})
+  })
+
+  it('clears every alias of the request completed by one session', () => {
+    setClarifyRequestAliases(clarify(null, 'shared'), ['canonical', 'runtime'])
+    setClarifyRequest(clarify('other', 'other-request'))
+
+    clearClarifyRequestAliasesForSession('runtime')
+
+    expect($clarifyRequests.get()['canonical']).toBeUndefined()
+    expect($clarifyRequests.get()['runtime']).toBeUndefined()
+    expect($clarifyRequests.get()['other']?.requestId).toBe('other-request')
   })
 })

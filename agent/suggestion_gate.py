@@ -29,10 +29,14 @@ logger = logging.getLogger(__name__)
 RULES_FILENAME = "suggestion_rules.json"
 MOOD_FILENAME = "suggestion_mood.json"
 COUNTER_FILENAME = "suggestion_counter.json"
+RECOMMENDATION_HISTORY_FILENAME = "recommendation_history.json"
 
 DAILY_SUGGESTION_CAP = 2
 MAX_RULES_IN_BLOCK = 10
 MAX_RULE_TEXT = 160
+RECOMMENDATION_HISTORY_DAYS = 7
+RECOMMENDATION_HISTORY_LIMIT = 100
+RECENT_RECOMMENDATIONS_IN_BLOCK = 8
 
 
 def _today(now: Optional[float] = None) -> str:
@@ -179,6 +183,95 @@ def record_suggestion(state_dir: Path, now: Optional[float] = None) -> int:
     return count
 
 
+# ── Delivered recommendation history ───────────────────────────────────────
+
+def recent_recommendations(
+    state_dir: Path,
+    now: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    current = now if now is not None else time.time()
+    cutoff = current - (RECOMMENDATION_HISTORY_DAYS * 86400)
+    history = _read_json(Path(state_dir) / RECOMMENDATION_HISTORY_FILENAME, [])
+    if not isinstance(history, list):
+        return []
+    recent = [
+        item
+        for item in history
+        if isinstance(item, dict)
+        and isinstance(item.get("suggestedAtEpoch"), (int, float))
+        and not isinstance(item.get("suggestedAtEpoch"), bool)
+        and float(item["suggestedAtEpoch"]) >= cutoff
+        and bool(str(item.get("taskId") or "").strip())
+    ]
+    return recent[-RECOMMENDATION_HISTORY_LIMIT:]
+
+
+def record_recommendations(
+    state_dir: Path,
+    recommendations: List[Dict[str, Any]],
+    now: Optional[float] = None,
+    *,
+    count_toward_cap: bool = True,
+) -> int:
+    if not isinstance(recommendations, list):
+        raise ValueError("recommendations must be a list")
+    timestamp = now if now is not None else time.time()
+    history = recent_recommendations(state_dir, now=timestamp)
+    seen: set[str] = set()
+    appended = 0
+    for raw in recommendations[:500]:
+        if not isinstance(raw, dict):
+            continue
+        task_id = _clip(raw.get("taskId"), 500)
+        if not task_id or task_id in seen:
+            continue
+        seen.add(task_id)
+        history.append(
+            {
+                "taskId": task_id,
+                "title": _clip(raw.get("title"), 1_000),
+                "surface": _clip(raw.get("surface"), 80),
+                "suggestedAt": datetime.fromtimestamp(timestamp).isoformat(),
+                "suggestedAtEpoch": timestamp,
+            }
+        )
+        appended += 1
+    if appended:
+        _write_json(
+            Path(state_dir) / RECOMMENDATION_HISTORY_FILENAME,
+            history[-RECOMMENDATION_HISTORY_LIMIT:],
+        )
+        if count_toward_cap:
+            record_suggestion(state_dir, now=timestamp)
+    return appended
+
+
+def record_personal_assistant_output(
+    response: Any,
+    *,
+    state_dir: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> int:
+    """Remember delivered planning tasks without consuming the unsolicited cap."""
+
+    from agent.personal_assistant_output_gate import (
+        extract_personal_assistant_recommendations,
+    )
+
+    target = Path(state_dir) if state_dir is not None else active_profile_state_dir()
+    if target is None:
+        return 0
+    recommendations = extract_personal_assistant_recommendations(response)
+    if not recommendations:
+        return 0
+    return record_recommendations(
+        target,
+        recommendations,
+        now=now,
+        count_toward_cap=False,
+    )
+
+
 # ── The discipline block ────────────────────────────────────────────────────
 
 def build_discipline_block(
@@ -201,6 +294,7 @@ def build_discipline_block(
     stamp = datetime.fromtimestamp(ts).strftime(fmt)
     mood = get_mood(Path(state_dir), now)
     used = suggestions_today(Path(state_dir), now)
+    recent = recent_recommendations(Path(state_dir), now)
     rules = [r for r in load_rules(Path(state_dir)) if r.get("strength") in ("permanent", "provisional")]
     rules = sorted(rules, key=lambda r: (r.get("strength") != "permanent", -int(r.get("hits", 1))))
 
@@ -224,6 +318,14 @@ def build_discipline_block(
             lines.append(f"- {r.get('class')}{reason}")
         if len(rules) > MAX_RULES_IN_BLOCK:
             lines.append(f"- (+{len(rules) - MAX_RULES_IN_BLOCK} more; when unsure, stay silent)")
+    if recent:
+        lines.append(
+            "Recently recommended tasks (avoid repeating unless it is urgent, newly changed, "
+            "or still the clearly best next action):"
+        )
+        for item in recent[-RECENT_RECOMMENDATIONS_IN_BLOCK:]:
+            title = f" — {item['title']}" if item.get("title") else ""
+            lines.append(f"- {item['taskId']}{title}")
     lines.append(
         "Before voicing ANY unsolicited suggestion, silently check: does it fit the "
         "time of day and the user's routine? does it violate a rejected class or "

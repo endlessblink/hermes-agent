@@ -57,9 +57,13 @@ async function actRender(ui: React.ReactElement) {
 
 interface HarnessHandle {
   cancelRun: () => Promise<void>
+  cancelRunRaw: () => Promise<void>
   restoreToMessage: (messageId: string, target?: { text?: string; userOrdinal?: number | null }) => Promise<void>
   steerPrompt: (text: string) => Promise<boolean>
-  submitText: (text: string, options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }) => Promise<boolean>
+  submitText: (
+    text: string,
+    options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean; hidden?: boolean }
+  ) => Promise<boolean>
 }
 
 function Harness({
@@ -68,6 +72,7 @@ function Harness({
   getRoutedStoredSessionId,
   getRuntimeIdForStoredSession,
   getRouteToken,
+  recoverMissingStoredSession,
   onReady,
   onSeedState,
   openMemoryGraph,
@@ -78,13 +83,15 @@ function Harness({
   selectedStoredSessionIdRef: selectedStoredSessionIdRefProp,
   storedSessionId,
   activeSessionId,
-  createBackendSessionForSend
+  createBackendSessionForSend,
+  initialBusy = false
 }: {
   activeSessionIdRef?: MutableRefObject<string | null>
   busyRef?: MutableRefObject<boolean>
   getRoutedStoredSessionId?: () => null | string
   getRuntimeIdForStoredSession?: (storedSessionId: string) => null | string
   getRouteToken?: () => string
+  recoverMissingStoredSession?: (storedSessionId: string) => Promise<null | string>
   onReady: (handle: HarnessHandle) => void
   onSeedState?: (state: Record<string, unknown>) => void
   openMemoryGraph?: () => void
@@ -96,6 +103,7 @@ function Harness({
   storedSessionId?: null | string
   activeSessionId?: null | string
   createBackendSessionForSend?: () => Promise<null | string>
+  initialBusy?: boolean
 }) {
   const activeSessionIdRef: MutableRefObject<string | null> = activeSessionIdRefProp ?? {
     current: activeSessionId === undefined ? RUNTIME_SESSION_ID : activeSessionId
@@ -109,7 +117,7 @@ function Harness({
 
   const stateRef = useRef({
     messages: seedMessages ?? [],
-    busy: false,
+    busy: initialBusy,
     awaitingResponse: false,
     interrupted: true
   } as never)
@@ -123,6 +131,7 @@ function Harness({
     getRoutedStoredSessionId: getRoutedStoredSessionId ?? (() => null),
     getRuntimeIdForStoredSession: getRuntimeIdForStoredSession ?? (() => null),
     getRouteToken: getRouteToken ?? (() => 'token'),
+    recoverMissingStoredSession,
     handleSkinCommand: () => '',
     openMemoryGraph: openMemoryGraph ?? (() => undefined),
     refreshSessions,
@@ -145,6 +154,7 @@ function Harness({
     onReady({
       cancelRun: (...args: Parameters<typeof actions.cancelRun>) =>
         act(async () => actions.cancelRun(...args)) as Promise<void>,
+      cancelRunRaw: actions.cancelRun,
       restoreToMessage: (...args: Parameters<typeof actions.restoreToMessage>) =>
         act(async () => actions.restoreToMessage(...args)) as Promise<void>,
       steerPrompt: (...args: Parameters<typeof actions.steerPrompt>) =>
@@ -509,6 +519,29 @@ describe('usePromptActions submit / queue drain semantics', () => {
       },
       1_800_000
     )
+  })
+
+  it('keeps a hidden continuation prompt out of the optimistic transcript', async () => {
+    const seeds: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => seeds.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('Continue personal-assistant interview planning-today', { hidden: true })
+
+    const seededMessage = seeds
+      .flatMap(state => (Array.isArray(state.messages) ? state.messages : []))
+      .find(message => message && typeof message === 'object' && 'role' in message && message.role === 'user')
+
+    expect(seededMessage).toMatchObject({ hidden: true })
   })
 
   it('a fromQueue drain sends even when busyRef is still true on the settle edge', async () => {
@@ -1085,12 +1118,15 @@ describe('usePromptActions sleep/wake session recovery', () => {
     vi.restoreAllMocks()
   })
 
-  it('resumes the stored session and retries once when prompt.submit reports "session not found"', async () => {
+  it('uses profile-aware stored-session recovery and retries once when prompt.submit reports "session not found"', async () => {
     // After sleep/wake the gateway's in-memory session table is cleared, so the
     // first prompt.submit with the stale runtime id fails. The hook resumes the
     // durable stored id (which survives gateway restarts), gets a fresh live id,
     // and retries the send transparently.
     const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
+    let boundRuntimeId: string | null = RUNTIME_SESSION_ID
     let submitAttempts = 0
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
@@ -1106,19 +1142,28 @@ describe('usePromptActions sleep/wake session recovery', () => {
         return {} as never
       }
 
-      if (method === 'session.resume') {
-        return { session_id: RECOVERED_SESSION_ID } as never
-      }
-
       return {} as never
+    })
+
+    const resumeStoredSession = vi.fn(async (storedSessionId: string) => {
+      expect(storedSessionId).toBe(STORED_SESSION_ID)
+      activeSessionIdRef.current = RECOVERED_SESSION_ID
+      selectedStoredSessionIdRef.current = STORED_SESSION_ID
+      boundRuntimeId = RECOVERED_SESSION_ID
     })
 
     let handle: HarnessHandle | null = null
     await actRender(
       <Harness
+        activeSessionId={RUNTIME_SESSION_ID}
+        activeSessionIdRef={activeSessionIdRef}
+        getRoutedStoredSessionId={() => STORED_SESSION_ID}
+        getRuntimeIdForStoredSession={() => boundRuntimeId}
         onReady={h => (handle = h)}
         refreshSessions={async () => undefined}
         requestGateway={requestGateway}
+        resumeStoredSession={resumeStoredSession}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
         storedSessionId={STORED_SESSION_ID}
       />
     )
@@ -1126,10 +1171,105 @@ describe('usePromptActions sleep/wake session recovery', () => {
     const ok = await handle!.submitText('message after wake')
 
     expect(ok).toBe(true)
-    // First submit (stale id) → session.resume (stored id) → retry submit (fresh id).
-    expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop' })
-    expect(calls[2]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after wake' })
+    // First submit (stale id) → owner-profile resume → retry submit (fresh id).
+    expect(resumeStoredSession).toHaveBeenCalledOnce()
+    expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'prompt.submit'])
+    expect(calls).not.toContainEqual(expect.objectContaining({ method: 'session.resume' }))
+    expect(calls[1]?.params).toEqual({ session_id: RECOVERED_SESSION_ID, text: 'message after wake' })
+  })
+
+  it('reopens a canonical assistant session when ordinary resume cannot restore its missing runtime', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
+    let boundRuntimeId: string | null = RUNTIME_SESSION_ID
+    let submitAttempts = 0
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+      if (method === 'prompt.submit' && submitAttempts++ === 0) {
+        throw new Error('session not found')
+      }
+      return {} as never
+    })
+    const resumeStoredSession = vi.fn(async () => {
+      activeSessionIdRef.current = null
+      boundRuntimeId = null
+    })
+    const recoverMissingStoredSession = vi.fn(async (storedSessionId: string) => {
+      expect(storedSessionId).toBe(STORED_SESSION_ID)
+      activeSessionIdRef.current = RECOVERED_SESSION_ID
+      boundRuntimeId = RECOVERED_SESSION_ID
+      return RECOVERED_SESSION_ID
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={RUNTIME_SESSION_ID}
+        activeSessionIdRef={activeSessionIdRef}
+        getRoutedStoredSessionId={() => STORED_SESSION_ID}
+        getRuntimeIdForStoredSession={() => boundRuntimeId}
+        onReady={h => (handle = h)}
+        recoverMissingStoredSession={recoverMissingStoredSession}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        resumeStoredSession={resumeStoredSession}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(await handle!.submitText('plan my whole day')).toBe(true)
+    expect(resumeStoredSession).toHaveBeenCalledOnce()
+    expect(recoverMissingStoredSession).toHaveBeenCalledOnce()
+    expect(calls.filter(call => call.method === 'prompt.submit')).toEqual([
+      expect.objectContaining({ params: { session_id: RUNTIME_SESSION_ID, text: 'plan my whole day' } }),
+      expect.objectContaining({ params: { session_id: RECOVERED_SESSION_ID, text: 'plan my whole day' } })
+    ])
+  })
+
+  it('keeps the prompt when canonical recovery re-homes the route before the first submit', async () => {
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
+    let routeToken = '/stale-assistant-route'
+    let boundRuntimeId: string | null = null
+    const requestGateway = vi.fn(async () => ({}) as never)
+    const resumeStoredSession = vi.fn()
+    const recoverMissingStoredSession = vi.fn(async () => {
+      activeSessionIdRef.current = RECOVERED_SESSION_ID
+      selectedStoredSessionIdRef.current = STORED_SESSION_ID
+      boundRuntimeId = RECOVERED_SESSION_ID
+      routeToken = `/session/${STORED_SESSION_ID}`
+      return RECOVERED_SESSION_ID
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={null}
+        activeSessionIdRef={activeSessionIdRef}
+        getRoutedStoredSessionId={() => STORED_SESSION_ID}
+        getRouteToken={() => routeToken}
+        getRuntimeIdForStoredSession={() => boundRuntimeId}
+        onReady={h => (handle = h)}
+        recoverMissingStoredSession={recoverMissingStoredSession}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        resumeStoredSession={resumeStoredSession}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(await handle!.submitText('full day plan after restart')).toBe(true)
+    expect(recoverMissingStoredSession).toHaveBeenCalledWith(STORED_SESSION_ID)
+    expect(resumeStoredSession).not.toHaveBeenCalled()
+    expect(requestGateway).toHaveBeenCalledWith(
+      'prompt.submit',
+      { session_id: RECOVERED_SESSION_ID, text: 'full day plan after restart' },
+      1_800_000
+    )
   })
 
   it('resumes the stored session and retries once when session.interrupt reports "session not found"', async () => {
@@ -1201,6 +1341,44 @@ describe('usePromptActions sleep/wake session recovery', () => {
     })
   })
 
+  it('keeps the session busy until interrupt is acknowledged so queued messages cannot drain into the cancel race', async () => {
+    const states: Record<string, unknown>[] = []
+    let acknowledgeInterrupt: (() => void) | undefined
+    const requestGateway = vi.fn(
+      () =>
+        new Promise<Record<string, never>>(resolve => {
+          acknowledgeInterrupt = () => resolve({})
+        }) as never
+    )
+    const busyRef = { current: true }
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        busyRef={busyRef}
+        initialBusy
+        onReady={h => (handle = h)}
+        onSeedState={state => states.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    const cancellation = handle!.cancelRunRaw()
+    await Promise.resolve()
+
+    expect(states.at(-1)).toMatchObject({ busy: true, interrupted: true })
+    expect(busyRef.current).toBe(true)
+
+    await act(async () => {
+      acknowledgeInterrupt!()
+      await cancellation
+    })
+
+    expect(states.at(-1)).toMatchObject({ busy: false, interrupted: true })
+    expect(busyRef.current).toBe(false)
+  })
+
   it('surfaces the original error (no resume) when the failure is not "session not found"', async () => {
     const calls: string[] = []
     const states: Record<string, unknown>[] = []
@@ -1261,12 +1439,15 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(calls).not.toContain('session.resume')
   })
 
-  it('recovers via session.resume when prompt.submit TIMES OUT and a stored session is selected (#55578)', async () => {
+  it('recovers through the owner profile when prompt.submit TIMES OUT and a stored session is selected (#55578)', async () => {
     // A starved gateway loop rejects with "request timed out: prompt.submit".
     // With a stored session selected, that must recover exactly like
     // "session not found" — resume + retry — not surface an error that leaves
     // activeSessionId null and lets the next send mint a new session.
     const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_ID }
+    let boundRuntimeId: string | null = RUNTIME_SESSION_ID
     let submitAttempts = 0
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
@@ -1282,19 +1463,26 @@ describe('usePromptActions sleep/wake session recovery', () => {
         return {} as never
       }
 
-      if (method === 'session.resume') {
-        return { session_id: RECOVERED_SESSION_ID } as never
-      }
-
       return {} as never
+    })
+
+    const resumeStoredSession = vi.fn(async () => {
+      activeSessionIdRef.current = RECOVERED_SESSION_ID
+      boundRuntimeId = RECOVERED_SESSION_ID
     })
 
     let handle: HarnessHandle | null = null
     await actRender(
       <Harness
+        activeSessionId={RUNTIME_SESSION_ID}
+        activeSessionIdRef={activeSessionIdRef}
+        getRoutedStoredSessionId={() => STORED_SESSION_ID}
+        getRuntimeIdForStoredSession={() => boundRuntimeId}
         onReady={h => (handle = h)}
         refreshSessions={async () => undefined}
         requestGateway={requestGateway}
+        resumeStoredSession={resumeStoredSession}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
         storedSessionId={STORED_SESSION_ID}
       />
     )
@@ -1302,9 +1490,9 @@ describe('usePromptActions sleep/wake session recovery', () => {
     const ok = await handle!.submitText('message during starved loop')
 
     expect(ok).toBe(true)
-    expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'session.resume', 'prompt.submit'])
-    expect(calls[1]?.params).toEqual({ session_id: STORED_SESSION_ID, source: 'desktop' })
-    expect(calls[2]?.params).toEqual({
+    expect(resumeStoredSession).toHaveBeenCalledWith(STORED_SESSION_ID)
+    expect(calls.map(c => c.method)).toEqual(['prompt.submit', 'prompt.submit'])
+    expect(calls[1]?.params).toEqual({
       session_id: RECOVERED_SESSION_ID,
       text: 'message during starved loop'
     })
@@ -1348,6 +1536,49 @@ describe('usePromptActions sleep/wake session recovery', () => {
     expect(calls.map(c => c.method)).toEqual(['session.resume', 'prompt.submit'])
     expect(calls[0]?.params).toEqual({ session_id: STORED_SESSION_ID })
     expect(calls[1]?.params).toMatchObject({ session_id: RECOVERED_SESSION_ID })
+  })
+
+  it('uses profile-aware recovery for a visible selected transcript after restart', async () => {
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
+    let boundRuntimeId: string | null = null
+    const createBackendSessionForSend = vi.fn(async () => 'brand-new-session-WRONG')
+    const resumeStoredSession = vi.fn(async (storedSessionId: string) => {
+      expect(storedSessionId).toBe(STORED_SESSION_ID)
+      boundRuntimeId = RECOVERED_SESSION_ID
+      activeSessionIdRef.current = RECOVERED_SESSION_ID
+    })
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.resume') {
+        throw new Error('profile-blind resume reached the default backend')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        activeSessionId={null}
+        activeSessionIdRef={activeSessionIdRef}
+        createBackendSessionForSend={createBackendSessionForSend}
+        getRuntimeIdForStoredSession={() => boundRuntimeId}
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        resumeStoredSession={resumeStoredSession}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    expect(await handle!.submitText('המשך את השיחה הקיימת')).toBe(true)
+    expect(resumeStoredSession).toHaveBeenCalledWith(STORED_SESSION_ID)
+    expect(createBackendSessionForSend).not.toHaveBeenCalled()
+    expect(requestGateway).not.toHaveBeenCalledWith('session.resume', expect.anything())
+    expect(requestGateway).toHaveBeenCalledWith(
+      'prompt.submit',
+      { session_id: RECOVERED_SESSION_ID, text: 'המשך את השיחה הקיימת' },
+      expect.anything()
+    )
   })
 
   it('never replaces a selected stored session when its direct runtime resume fails', async () => {
@@ -1666,6 +1897,8 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     let releaseResume: () => void = () => {}
 
     const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: STORED_SESSION_A }
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: RUNTIME_SESSION_ID }
+    let boundRuntimeId: string | null = RUNTIME_SESSION_ID
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       calls.push({ method, params })
@@ -1678,24 +1911,29 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
         }
       }
 
-      if (method === 'session.resume') {
-        await new Promise<void>(resolve => {
-          releaseResume = resolve
-        })
-        selectedStoredSessionIdRef.current = STORED_SESSION_B
-
-        return { session_id: RUNTIME_SESSION_B } as never
-      }
-
       return {} as never
+    })
+
+    const resumeStoredSession = vi.fn(async () => {
+      await new Promise<void>(resolve => {
+        releaseResume = resolve
+      })
+      selectedStoredSessionIdRef.current = STORED_SESSION_B
+      activeSessionIdRef.current = RUNTIME_SESSION_B
+      boundRuntimeId = RUNTIME_SESSION_B
     })
 
     let handle: HarnessHandle | null = null
     render(
       <Harness
+        activeSessionId={RUNTIME_SESSION_ID}
+        activeSessionIdRef={activeSessionIdRef}
+        getRoutedStoredSessionId={() => STORED_SESSION_A}
+        getRuntimeIdForStoredSession={() => boundRuntimeId}
         onReady={h => (handle = h)}
         refreshSessions={async () => undefined}
         requestGateway={requestGateway}
+        resumeStoredSession={resumeStoredSession}
         selectedStoredSessionIdRef={selectedStoredSessionIdRef}
         storedSessionId={STORED_SESSION_A}
       />
@@ -1703,15 +1941,13 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     await waitFor(() => expect(handle).not.toBeNull())
 
     const submitting = handle!.submitText('message that must not land in session B')
-    await waitFor(() => expect(calls.some(c => c.method === 'session.resume')).toBe(true))
+    await waitFor(() => expect(resumeStoredSession).toHaveBeenCalledWith(STORED_SESSION_A))
     releaseResume()
 
     expect(await submitting).toBe(false)
     expect(submitAttempts).toBe(1)
     expect(calls.filter(c => c.method === 'prompt.submit')).toHaveLength(1)
-    expect(calls.find(c => c.method === 'session.resume')?.params).toMatchObject({
-      session_id: STORED_SESSION_A
-    })
+    expect(calls.filter(c => c.method === 'prompt.submit')).toHaveLength(1)
   })
 
   it('submits the first prompt of a new chat — the create pipeline re-homing selection/route is not user drift', async () => {

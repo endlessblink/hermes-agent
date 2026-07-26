@@ -18,7 +18,7 @@ const lookupError = new Error('useClientLookup: Index 2 out of bounds (length: 2
 describe('MessageRenderBoundary', () => {
   it('renders children when nothing throws', () => {
     render(
-      <MessageRenderBoundary resetKey="a">
+      <MessageRenderBoundary>
         <div>content</div>
       </MessageRenderBoundary>
     )
@@ -30,7 +30,7 @@ describe('MessageRenderBoundary', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
     const { container } = render(
-      <MessageRenderBoundary resetKey="a">
+      <MessageRenderBoundary>
         <Boom error={lookupError} />
       </MessageRenderBoundary>
     )
@@ -39,23 +39,42 @@ describe('MessageRenderBoundary', () => {
     spy.mockRestore()
   })
 
-  it('recovers on the next consistent snapshot when resetKey changes', () => {
+  it('does not revive an errored boundary instance when the snapshot changes', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
-    const { rerender } = render(
-      <MessageRenderBoundary resetKey="a">
+    const { container, rerender } = render(
+      <MessageRenderBoundary>
         <Boom error={lookupError} />
       </MessageRenderBoundary>
     )
 
     rerender(
-      <MessageRenderBoundary resetKey="b">
+      <MessageRenderBoundary>
         <Boom error={null} />
       </MessageRenderBoundary>
     )
 
     rerender(
-      <MessageRenderBoundary resetKey="b">
+      <MessageRenderBoundary>
+        <div>must stay unmounted</div>
+      </MessageRenderBoundary>
+    )
+
+    expect(container.innerHTML).toBe('')
+    spy.mockRestore()
+  })
+
+  it('recovers with a fresh boundary for the next consistent snapshot', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const { rerender } = render(
+      <MessageRenderBoundary key="a">
+        <Boom error={lookupError} />
+      </MessageRenderBoundary>
+    )
+
+    rerender(
+      <MessageRenderBoundary key="b">
         <div>recovered</div>
       </MessageRenderBoundary>
     )
@@ -69,7 +88,7 @@ describe('MessageRenderBoundary', () => {
 
     expect(() =>
       render(
-        <MessageRenderBoundary resetKey="a">
+        <MessageRenderBoundary>
           <Boom error={new Error('genuine render bug')} />
         </MessageRenderBoundary>
       )

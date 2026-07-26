@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
 
-import { ClarifyTool, readClarifyResult } from './clarify-tool'
+import { clarifyRecoveryMessage, clarifyRequestGateway, ClarifyTool, readClarifyResult } from './clarify-tool'
 
 afterEach(() => {
   cleanup()
@@ -75,6 +75,36 @@ describe('readClarifyResult', () => {
       answer: '',
       error: undefined
     })
+  })
+})
+
+describe('clarifyRecoveryMessage', () => {
+  it('continues an interrupted question without asking it again', () => {
+    expect(clarifyRecoveryMessage('לאיזו שעה להזיז?', 'מחר ב־10:45')).toBe(
+      'תשובה לשאלה ״לאיזו שעה להזיז?״: מחר ב־10:45. המשך מאותה נקודה ואל תשאל שוב את אותה שאלה.'
+    )
+  })
+
+  it('turns an empty recovery answer into an explicit skip', () => {
+    expect(clarifyRecoveryMessage('להמשיך?', '')).toContain(': דלג.')
+  })
+})
+
+describe('clarifyRequestGateway', () => {
+  it('routes the answer through the profile that raised the request', async () => {
+    const fallback = vi.fn()
+    const request = vi.fn(async () => ({ ok: true }))
+    const resolveProfileGateway = vi.fn(async () => ({ request }))
+    const send = clarifyRequestGateway('office-work', fallback, resolveProfileGateway as never)
+
+    await send!('clarify.respond', { answer: 'כן', request_id: 'request-1' })
+
+    expect(resolveProfileGateway).toHaveBeenCalledWith('office-work')
+    expect(request).toHaveBeenCalledWith('clarify.respond', {
+      answer: 'כן',
+      request_id: 'request-1'
+    })
+    expect(fallback).not.toHaveBeenCalled()
   })
 })
 

@@ -252,16 +252,44 @@ export interface HermesUiTaskContextArtifact {
   actions?: HermesUiChecklistAction[]
 }
 
-export type HermesUiTaskTableColumn =
-  | 'task'
-  | 'time'
-  | 'context'
-  | 'timeSize'
-  | 'energy'
-  | 'urgency'
-  | 'externality'
-  | 'nextStep'
-  | 'confidence'
+export interface HermesUiTaskProfileField {
+  id: string
+  label: string
+  value?: string | string[]
+}
+
+export interface HermesUiTaskProfileReviewQuestion {
+  allowCustomAnswer?: boolean
+  customAnswerLabel?: string
+  description?: string
+  id: string
+  label: string
+  options?: HermesUiFormOption[]
+  profileFieldId: string
+  required?: boolean
+  type: 'single-choice' | 'multi-choice' | 'short-text' | 'long-text'
+}
+
+export interface HermesUiTaskProfileReviewArtifact {
+  type: 'task-profile-review'
+  direction?: 'auto' | 'ltr' | 'rtl'
+  id?: string
+  title?: string
+  description?: string
+  interviewId: string
+  revision: number
+  task: { id: string; title: string }
+  question: HermesUiTaskProfileReviewQuestion
+  profileFields: HermesUiTaskProfileField[]
+  progress: { current: number; total: number }
+}
+
+export interface HermesUiTaskTableColumnDefinition {
+  key: string
+  label?: string
+}
+
+export type HermesUiTaskTableColumn = string | HermesUiTaskTableColumnDefinition
 
 export type HermesUiTaskSize = 'tiny' | 'small' | 'medium' | 'large' | 'unknown'
 export type HermesUiPlanningLevel = 'low' | 'medium' | 'high' | 'unknown'
@@ -271,6 +299,7 @@ export type HermesUiConfidence = 'low' | 'medium' | 'high'
 export interface HermesUiPlanningTaskRow {
   id: string
   title: string
+  cells?: HermesUiVisibleRecord
   dueDate?: string | null
   priority?: HermesUiTaskPriority
   /** Clock slot for timeline-style day plans, e.g. "15:25" or "18:30-19:15". */
@@ -287,6 +316,7 @@ export interface HermesUiPlanningTaskRow {
 
 export interface HermesUiTaskTableArtifact {
   type: 'task-table'
+  actions?: HermesUiChecklistAction[]
   direction?: 'auto' | 'ltr' | 'rtl'
   id?: string
   title?: string
@@ -322,8 +352,26 @@ export interface HermesUiMiniKanbanArtifact {
   lanes: HermesUiMiniKanbanLane[]
 }
 
-export type HermesUiTimelineBlockKind = 'fixed' | 'focus' | 'short-task' | 'buffer' | 'break' | 'floating'
-export type HermesUiTimelineStatus = 'planned' | 'doing' | 'done' | 'dropped' | 'candidate'
+export type HermesUiTimelineBlockKind =
+  | 'fixed'
+  | 'focus'
+  | 'short-task'
+  | 'task'
+  | 'calendar'
+  | 'buffer'
+  | 'break'
+  | 'floating'
+export type HermesUiTimelineStatus =
+  | 'planned'
+  | 'scheduled'
+  | 'proposed'
+  | 'confirmed'
+  | 'overdue'
+  | 'doing'
+  | 'done'
+  | 'dropped'
+  | 'candidate'
+  | 'recommended'
 
 export interface HermesUiDayTimelineBlock {
   id: string
@@ -341,6 +389,7 @@ export interface HermesUiDayTimelineBlock {
 
 export interface HermesUiDayTimelineArtifact {
   type: 'day-timeline'
+  actions?: HermesUiChecklistAction[]
   direction?: 'auto' | 'ltr' | 'rtl'
   id?: string
   title?: string
@@ -492,6 +541,7 @@ export type HermesUiArtifact =
   | HermesUiPlanningFunnelArtifact
   | HermesUiTaskBreakdownArtifact
   | HermesUiTaskContextArtifact
+  | HermesUiTaskProfileReviewArtifact
   | HermesUiTaskGraphArtifact
   | HermesUiTaskTableArtifact
   | HermesUiTaskTriageArtifact
@@ -534,9 +584,9 @@ const MAX_NEXT_BLOCK_ACTIONS = 3
 const MAX_FUNNEL_STEPS = 6
 const MAX_BREAKDOWN_STEPS = HERMES_UI_TASK_BREAKDOWN_LIMITS.stepCount
 const MAX_CONTEXT_ITEMS = 6
-const MAX_TASK_TABLE_COLUMNS = 8
-const MAX_TASK_TABLE_ROWS = 7
-const MIN_TASK_TABLE_ROWS = 3
+const MAX_TASK_TABLE_COLUMNS = 12
+const MAX_TASK_TABLE_ROWS = MAX_ITEMS
+const MIN_TASK_TABLE_ROWS = 1
 const MAX_MINI_KANBAN_LANES = 8
 const MAX_MINI_KANBAN_TASKS = 8
 const MAX_TIMELINE_BLOCKS = 12
@@ -598,10 +648,11 @@ const SAFE_NEXT_BLOCK_KEYS = new Set([
 
 const SAFE_NEXT_BLOCK_TASK_KEYS = new Set(['dueDate', 'id', 'priority', 'title'])
 const SAFE_NEXT_BLOCK_PREVIEW_KEYS = new Set(['duration', 'scheduledDate', 'scheduledTime'])
-const SAFE_TASK_TABLE_KEYS = new Set(['columns', 'description', 'direction', 'id', 'rows', 'title', 'type'])
+const SAFE_TASK_TABLE_KEYS = new Set(['actions', 'columns', 'description', 'direction', 'id', 'rows', 'title', 'type'])
 
 const SAFE_TASK_TABLE_ROW_KEYS = new Set([
   'actions',
+  'cells',
   'confidence',
   'context',
   'dueDate',
@@ -620,6 +671,7 @@ const SAFE_MINI_KANBAN_KEYS = new Set(['actions', 'description', 'direction', 'i
 const SAFE_MINI_KANBAN_LANE_KEYS = new Set(['description', 'id', 'tasks', 'title'])
 const SAFE_MINI_KANBAN_TASK_KEYS = new Set(['actions', 'confidence', 'dueDate', 'id', 'note', 'priority', 'title'])
 const SAFE_DAY_TIMELINE_KEYS = new Set([
+  'actions',
   'blocks',
   'currentTime',
   'date',
@@ -2359,29 +2411,229 @@ function parseTaskContextArtifact(parsed: Record<string, unknown>): HermesUiArti
   }
 }
 
-function parseTaskTableColumn(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiTaskTableColumn {
-  if (
-    value === 'task' ||
-    value === 'time' ||
-    value === 'context' ||
-    value === 'timeSize' ||
-    value === 'energy' ||
-    value === 'urgency' ||
-    value === 'externality' ||
-    value === 'nextStep' ||
-    value === 'confidence'
-  ) {
-    return value
+function parseTaskProfileReviewArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
+  const allowedKeys = new Set([
+    'description',
+    'direction',
+    'id',
+    'interviewId',
+    'profileFields',
+    'progress',
+    'question',
+    'revision',
+    'task',
+    'title',
+    'type'
+  ])
+  const unsupported = hasUnsupportedKeys(parsed, allowedKeys, 'task-profile-review')
+
+  if (unsupported) {
+    return unsupported
   }
 
-  // Name the allowed set: the model retries on this error verbatim, and a
-  // bare rejection sent it guessing in a loop (observed 2026-07-19).
-  return {
-    error:
-      `${field} is not a supported task-table column ` +
-      '(allowed: task, time, context, timeSize, energy, urgency, externality, nextStep, confidence)',
-    ok: false
+  const base = parseBaseFields(parsed)
+
+  if (!base.ok) {
+    return base
   }
+
+  const interviewId = normalizeText(parsed.interviewId, MAX_ITEM_ID_LENGTH, 'interviewId')
+
+  if (typeof interviewId !== 'string') {
+    return interviewId
+  }
+
+  if (!interviewId) {
+    return { error: 'interviewId is required', ok: false }
+  }
+
+  if (!Number.isSafeInteger(parsed.revision) || (parsed.revision as number) < 0) {
+    return { error: 'revision must be a non-negative integer', ok: false }
+  }
+
+  if (!isRecord(parsed.task)) {
+    return { error: 'task is required', ok: false }
+  }
+
+  const parsedTask = parseTaskLike(parsed.task, 'task')
+
+  if (isParseFailure(parsedTask)) {
+    return parsedTask
+  }
+
+  const task = { id: parsedTask.id, title: parsedTask.title }
+
+  if (!isRecord(parsed.question)) {
+    return { error: 'question is required', ok: false }
+  }
+
+  const profileFieldId = normalizeText(parsed.question.profileFieldId, MAX_ITEM_ID_LENGTH, 'question.profileFieldId')
+
+  if (typeof profileFieldId !== 'string') {
+    return profileFieldId
+  }
+
+  if (!profileFieldId) {
+    return { error: 'question.profileFieldId is required', ok: false }
+  }
+
+  const { profileFieldId: _profileFieldId, ...formQuestion } = parsed.question
+  const questionResult = parseFormArtifact({ fields: [formQuestion], type: 'form' })
+
+  if (!questionResult.ok) {
+    return { error: questionResult.error.replace(/^fields\[0\]/, 'question'), ok: false }
+  }
+
+  const field = questionResult.artifact.type === 'form' ? questionResult.artifact.fields[0] : undefined
+
+  if (!field || !['single-choice', 'multi-choice', 'short-text', 'long-text'].includes(field.type)) {
+    return { error: 'question.type is unsupported', ok: false }
+  }
+
+  const question: HermesUiTaskProfileReviewQuestion = { ...field, profileFieldId } as HermesUiTaskProfileReviewQuestion
+
+  if (!Array.isArray(parsed.profileFields) || parsed.profileFields.length > MAX_ITEMS) {
+    return { error: `profileFields must contain 0-${MAX_ITEMS} fields`, ok: false }
+  }
+
+  const profileFields: HermesUiTaskProfileField[] = []
+  const seenFieldIds = new Set<string>()
+
+  for (const [index, raw] of parsed.profileFields.entries()) {
+    if (!isRecord(raw) || Object.keys(raw).some(key => !['id', 'label', 'value'].includes(key))) {
+      return { error: `profileFields[${index}] is invalid`, ok: false }
+    }
+
+    const id = normalizeText(raw.id, MAX_ITEM_ID_LENGTH, `profileFields[${index}].id`)
+    const label = normalizeText(raw.label, MAX_LABEL_LENGTH, `profileFields[${index}].label`)
+
+    if (typeof id !== 'string') {
+      return id
+    }
+
+    if (typeof label !== 'string') {
+      return label
+    }
+
+    if (!id || !label || seenFieldIds.has(id)) {
+      return { error: `profileFields[${index}] has an invalid id or label`, ok: false }
+    }
+
+    seenFieldIds.add(id)
+    let value: string | string[] | undefined
+
+    if (typeof raw.value === 'string') {
+      const normalized = normalizeText(raw.value, MAX_ITEM_DESCRIPTION_LENGTH, `profileFields[${index}].value`)
+
+      if (typeof normalized !== 'string') {
+        return normalized
+      }
+
+      value = normalized
+    } else if (Array.isArray(raw.value) && raw.value.every(item => typeof item === 'string')) {
+      value = raw.value
+    } else if (raw.value !== undefined) {
+      return { error: `profileFields[${index}].value must be text or text[]`, ok: false }
+    }
+
+    profileFields.push({ id, label, value })
+  }
+
+  if (!isRecord(parsed.progress)) {
+    return { error: 'progress is required', ok: false }
+  }
+
+  const current = parsed.progress.current
+  const total = parsed.progress.total
+
+  if (
+    !Number.isSafeInteger(current) ||
+    !Number.isSafeInteger(total) ||
+    (current as number) < 1 ||
+    (current as number) > (total as number)
+  ) {
+    return { error: 'progress must identify one current task within total', ok: false }
+  }
+
+  return {
+    artifact: {
+      ...base.fields,
+      interviewId,
+      profileFields,
+      progress: { current: current as number, total: total as number },
+      question,
+      revision: parsed.revision as number,
+      task,
+      type: 'task-profile-review'
+    },
+    ok: true
+  }
+}
+
+const RESERVED_TASK_TABLE_COLUMN_KEYS = new Set([
+  '__proto__',
+  'actions',
+  'cells',
+  'constructor',
+  'id',
+  'prototype',
+  'title'
+])
+
+function taskTableColumnKey(column: HermesUiTaskTableColumn): string {
+  return typeof column === 'string' ? column : column.key
+}
+
+function parseTaskTableColumn(value: unknown, field: string): HermesUiArtifactParseFailure | HermesUiTaskTableColumn {
+  if (typeof value === 'string') {
+    const key = normalizeText(value, MAX_ITEM_ID_LENGTH, field)
+
+    if (typeof key !== 'string') {
+      return key
+    }
+
+    if (!key) {
+      return { error: `${field} cannot be empty`, ok: false }
+    }
+
+    if (RESERVED_TASK_TABLE_COLUMN_KEYS.has(key)) {
+      return { error: `${field} uses reserved key: ${key}`, ok: false }
+    }
+
+    return key
+  }
+
+  if (!isRecord(value)) {
+    return { error: `${field} must be a string or column definition`, ok: false }
+  }
+
+  const unsupported = hasUnsupportedKeys(value, new Set(['key', 'label']), field)
+
+  if (unsupported) {
+    return unsupported
+  }
+
+  const key = normalizeText(value.key, MAX_ITEM_ID_LENGTH, `${field}.key`)
+
+  if (typeof key !== 'string') {
+    return key
+  }
+
+  if (!key) {
+    return { error: `${field}.key cannot be empty`, ok: false }
+  }
+
+  if (RESERVED_TASK_TABLE_COLUMN_KEYS.has(key)) {
+    return { error: `${field}.key uses reserved key: ${key}`, ok: false }
+  }
+
+  const label = optionalText(value.label, MAX_LABEL_LENGTH, `${field}.label`)
+
+  if (label && typeof label !== 'string') {
+    return label
+  }
+
+  return { key, label }
 }
 
 function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
@@ -2397,12 +2649,14 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
     return base
   }
 
-  if (!Array.isArray(parsed.columns) || parsed.columns.length === 0) {
-    return { error: 'task-table columns are required', ok: false }
+  const actions = parseSubmitActions(parsed.actions, 'actions')
+
+  if (isParseFailure(actions)) {
+    return actions
   }
 
-  if (parsed.columns.length > MAX_TASK_TABLE_COLUMNS) {
-    return { error: 'task-table has too many columns', ok: false }
+  if (!Array.isArray(parsed.columns) || parsed.columns.length === 0) {
+    return { error: 'task-table columns are required', ok: false }
   }
 
   const seenColumns = new Set<string>()
@@ -2415,24 +2669,27 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
       return column
     }
 
-    if (seenColumns.has(column)) {
-      return { error: `Duplicate column: ${column}`, ok: false }
+    const key = taskTableColumnKey(column)
+
+    if (seenColumns.has(key)) {
+      return { error: `Duplicate column: ${key}`, ok: false }
     }
 
-    seenColumns.add(column)
+    seenColumns.add(key)
     columns.push(column)
   }
 
-  // Timeline plans (a 'time' column) are legitimate at any length — the rest
-  // of an evening can be one or two blocks. The 3-row floor only guards
-  // against degenerate NON-timeline tables.
-  const isTimeline = columns.includes('time')
+  if (!seenColumns.has('task')) {
+    columns.unshift('task')
+    seenColumns.add('task')
+  }
 
-  if (!Array.isArray(parsed.rows) || parsed.rows.length < (isTimeline ? 1 : MIN_TASK_TABLE_ROWS)) {
-    return {
-      error: isTimeline ? 'task-table requires at least 1 row' : 'task-table requires at least 3 rows',
-      ok: false
-    }
+  if (columns.length > MAX_TASK_TABLE_COLUMNS) {
+    return { error: 'task-table has too many columns', ok: false }
+  }
+
+  if (!Array.isArray(parsed.rows) || parsed.rows.length < MIN_TASK_TABLE_ROWS) {
+    return { error: 'task-table requires at least 1 row', ok: false }
   }
 
   if (parsed.rows.length > MAX_TASK_TABLE_ROWS) {
@@ -2447,10 +2704,10 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
       return { error: `rows[${index}] must be an object`, ok: false }
     }
 
-    const unsupportedRow = hasUnsupportedKeys(rawRow, SAFE_TASK_TABLE_ROW_KEYS, `rows[${index}]`)
-
-    if (unsupportedRow) {
-      return unsupportedRow
+    for (const key of Object.keys(rawRow)) {
+      if (!SAFE_TASK_TABLE_ROW_KEYS.has(key) && !seenColumns.has(key)) {
+        return { error: `Unsupported rows[${index}] field: ${key}`, ok: false }
+      }
     }
 
     const row = parseTaskLike(rawRow, `rows[${index}]`)
@@ -2508,8 +2765,49 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
       return actions
     }
 
+    const declaredCells = parseVisibleRecord(rawRow.cells, `rows[${index}].cells`)
+
+    if (isParseFailure(declaredCells)) {
+      return declaredCells
+    }
+
+    const cells: HermesUiVisibleRecord = { ...(declaredCells || {}) }
+
+    for (const key of Object.keys(cells)) {
+      if (key === 'task') {
+        return { error: `rows[${index}].cells.task must use the row title`, ok: false }
+      }
+
+      if (!seenColumns.has(key)) {
+        return { error: `rows[${index}].cells.${key} has no declared column`, ok: false }
+      }
+
+      if (Object.hasOwn(rawRow, key)) {
+        return { error: `rows[${index}] defines ${key} twice`, ok: false }
+      }
+    }
+
+    const legacyCellEntries = Object.entries(rawRow).filter(
+      ([key]) => seenColumns.has(key) && !SAFE_TASK_TABLE_ROW_KEYS.has(key)
+    )
+
+    const legacyCells = parseVisibleRecord(Object.fromEntries(legacyCellEntries), `rows[${index}]`)
+
+    if (isParseFailure(legacyCells)) {
+      return legacyCells
+    }
+
+    for (const [key, value] of Object.entries(legacyCells || {})) {
+      if (Object.hasOwn(cells, key)) {
+        return { error: `rows[${index}] defines ${key} twice`, ok: false }
+      }
+
+      cells[key] = value
+    }
+
     rows.push({
       actions,
+      cells,
       confidence: confidence as HermesUiConfidence | undefined,
       context,
       dueDate,
@@ -2525,7 +2823,7 @@ function parseTaskTableArtifact(parsed: Record<string, unknown>): HermesUiArtifa
     })
   }
 
-  return { artifact: { ...base.fields, columns, rows, type: 'task-table' }, ok: true }
+  return { artifact: { ...base.fields, actions, columns, rows, type: 'task-table' }, ok: true }
 }
 
 function parseMiniKanbanArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
@@ -2678,6 +2976,12 @@ function parseDayTimelineArtifact(parsed: Record<string, unknown>): HermesUiArti
     return currentTime
   }
 
+  const actions = parseSubmitActions(parsed.actions, 'actions')
+
+  if (isParseFailure(actions)) {
+    return actions
+  }
+
   if (!Array.isArray(parsed.blocks) || parsed.blocks.length === 0) {
     return { error: 'day-timeline blocks are required', ok: false }
   }
@@ -2751,6 +3055,8 @@ function parseDayTimelineArtifact(parsed: Record<string, unknown>): HermesUiArti
       kind !== 'fixed' &&
       kind !== 'focus' &&
       kind !== 'short-task' &&
+      kind !== 'task' &&
+      kind !== 'calendar' &&
       kind !== 'buffer' &&
       kind !== 'break' &&
       kind !== 'floating'
@@ -2763,10 +3069,15 @@ function parseDayTimelineArtifact(parsed: Record<string, unknown>): HermesUiArti
     if (
       status !== undefined &&
       status !== 'planned' &&
+      status !== 'scheduled' &&
+      status !== 'proposed' &&
+      status !== 'confirmed' &&
+      status !== 'overdue' &&
       status !== 'doing' &&
       status !== 'done' &&
       status !== 'dropped' &&
-      status !== 'candidate'
+      status !== 'candidate' &&
+      status !== 'recommended'
     ) {
       return { error: `blocks[${index}].status is invalid`, ok: false }
     }
@@ -2809,7 +3120,7 @@ function parseDayTimelineArtifact(parsed: Record<string, unknown>): HermesUiArti
     })
   }
 
-  return { artifact: { ...base.fields, blocks, currentTime, date, type: 'day-timeline' }, ok: true }
+  return { artifact: { ...base.fields, actions, blocks, currentTime, date, type: 'day-timeline' }, ok: true }
 }
 
 function datePlusDays(date: string, offset: number): string {
@@ -3597,6 +3908,10 @@ export function parseHermesUiArtifact(source: string): HermesUiArtifactParseResu
 
   if (parsed.type === 'task-context') {
     return parseTaskContextArtifact(parsed)
+  }
+
+  if (parsed.type === 'task-profile-review') {
+    return parseTaskProfileReviewArtifact(parsed)
   }
 
   if (parsed.type === 'task-table') {

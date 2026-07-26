@@ -3,10 +3,10 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages, type SessionInfo } from '@/hermes'
+import { getProfiles, getSession, getSessionMessages, type SessionInfo } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $personalAssistantState, type AssistantState } from '@/store/personal-assistant'
-import { $activeGatewayProfile, $newChatProfile, $profileScope, $selectedProfileScope } from '@/store/profile'
+import { $activeGatewayProfile, $newChatProfile, $profiles, $profileScope, $selectedProfileScope } from '@/store/profile'
 import { $projectScope, $projectTree, ALL_PROJECTS } from '@/store/projects'
 import {
   $activeSessionId,
@@ -16,10 +16,14 @@ import {
   $replyReadySessionIds,
   $replyReadySessionProfiles,
   $resumeFailedSessionId,
+  getRememberedProfileSessionId,
+  getRememberedSessionId,
   setActiveSessionId,
   setCurrentCwd,
   setMessages,
   setNewChatWorkspaceTarget,
+  setRememberedProfileSessionId,
+  setRememberedSessionId,
   setResumeFailedSessionId,
   setSessions
 } from '@/store/session'
@@ -31,6 +35,8 @@ import { useSessionActions } from './use-session-actions'
 vi.mock('@/hermes', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   deleteSession: vi.fn(),
+  getProfiles: vi.fn(async () => ({ profiles: [] })),
+  getSession: vi.fn(),
   getSessionMessages: vi.fn(),
   listAllProfileSessions: vi.fn(),
   setApiRequestProfile: vi.fn(),
@@ -267,10 +273,16 @@ describe('resumeSession failure recovery', () => {
     setResumeFailedSessionId(null)
     setMessages([])
     setSessions([])
+    setRememberedSessionId(null)
+    setRememberedProfileSessionId('office-work', null)
+    setRememberedProfileSessionId('film-maker', null)
+    $profiles.set([])
     $personalAssistantState.set(null)
     $replyReadySessionIds.set([])
     $replyReadySessionProfiles.set({})
     vi.restoreAllMocks()
+    vi.mocked(getProfiles).mockReset().mockResolvedValue({ profiles: [] })
+    vi.mocked(getSession).mockReset()
   })
 
   async function runResume(
@@ -350,6 +362,90 @@ describe('resumeSession failure recovery', () => {
 
     // resumeSession must resolve (swallow the fallback failure), not reject.
     await expect(runResume(requestGateway)).resolves.toBeUndefined()
+  })
+
+  it('forgets only a prior-run session after both resume paths confirm it is gone', async () => {
+    setRememberedSessionId('stored-1')
+    setRememberedProfileSessionId('office-work', 'stored-1')
+    setRememberedProfileSessionId('film-maker', 'keep-me')
+    vi.mocked(getSession).mockRejectedValue(new Error('404: Session not found'))
+    vi.mocked(getSessionMessages).mockRejectedValue(new Error('404: Session not found'))
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.resume') {
+        throw new Error('session not found')
+      }
+
+      return {} as never
+    })
+
+    await runResume(requestGateway)
+
+    expect(getRememberedSessionId()).toBeNull()
+    expect(getRememberedProfileSessionId('office-work')).toBeNull()
+    expect(getRememberedProfileSessionId('film-maker')).toBe('keep-me')
+  })
+
+  it('hydrates profile ownership before declaring a cold cross-profile restore gone', async () => {
+    $profiles.set([])
+    setSessions([])
+    vi.mocked(getProfiles).mockResolvedValue({
+      profiles: [
+        {
+          has_env: true,
+          is_default: false,
+          model: null,
+          name: 'office-work',
+          path: '/profiles/office-work',
+          provider: null,
+          skill_count: 0
+        }
+      ]
+    })
+    vi.mocked(getSession).mockImplementation(async (_id, profile) => {
+      if (profile === 'office-work') {
+        return storedSession({ id: 'stored-1', profile: 'office-work' })
+      }
+
+      throw new Error('404: Session not found')
+    })
+    vi.mocked(getSessionMessages).mockResolvedValue({ messages: [], session_id: 'stored-1' } as never)
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        return { info: {}, messages: [], resumed: params?.session_id, session_id: 'runtime-1' } as never
+      }
+
+      return {} as never
+    })
+
+    await runResume(requestGateway)
+
+    expect(getProfiles).toHaveBeenCalled()
+    expect(getSession).toHaveBeenCalledWith('stored-1', 'office-work')
+    expect(requestGateway).toHaveBeenCalledWith(
+      'session.resume',
+      expect.objectContaining({ profile: 'office-work', session_id: 'stored-1' })
+    )
+  })
+
+  it('keeps a cold restore retryable when authoritative profile hydration is unavailable', async () => {
+    $profiles.set([])
+    setSessions([])
+    setRememberedSessionId('stored-1')
+    vi.mocked(getProfiles).mockRejectedValue(new Error('profile service unavailable'))
+    vi.mocked(getSession).mockRejectedValue(new Error('404: Session not found'))
+    vi.mocked(getSessionMessages).mockRejectedValue(new Error('404: Session not found'))
+
+    const requestGateway = vi.fn(async () => {
+      throw new Error('session not found')
+    })
+
+    await expect(runResume(requestGateway)).resolves.toBeUndefined()
+
+    expect(getRememberedSessionId()).toBe('stored-1')
+    expect($resumeFailedSessionId.get()).toBe('stored-1')
+    expect(requestGateway).not.toHaveBeenCalled()
   })
 
   it('leaves the failure latch clear when resume succeeds', async () => {

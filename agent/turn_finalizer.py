@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 
@@ -306,6 +307,13 @@ def finalize_turn(
                     exc_info=True,
                 )
 
+    iteration_limit_control_echo = str(final_response or "").strip() == (
+        "You've reached the maximum number of tool-calling iterations allowed. "
+        "Please provide a final response summarizing what you've found and accomplished so far, "
+        "without calling any more tools."
+    )
+    tool_iteration_exhausted = iteration_limit_fallback or iteration_limit_control_echo
+
     # Determine if conversation completed successfully
     normal_text_response = str(_turn_exit_reason).startswith("text_response(")
     completed = (
@@ -329,6 +337,8 @@ def finalize_turn(
     # are surfaced on the result dict via ``cleanup_errors`` rather than
     # killing the turn.
     _cleanup_errors = []
+    _fast_path_timing = str(_turn_exit_reason) == "personal_assistant_interview_fast_path"
+    _timing_started = time.perf_counter()
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
     # list of parts; the trajectory format wants a plain string.
@@ -337,18 +347,24 @@ def finalize_turn(
     except Exception as _save_err:
         _cleanup_errors.append(f"save_trajectory: {_save_err}")
         logger.error("finalize_turn: _save_trajectory failed: %s", _save_err, exc_info=True)
+    if _fast_path_timing:
+        logger.info("Personal Assistant fast finalizer trajectory_ms=%d", (time.perf_counter() - _timing_started) * 1000)
 
     # Clean up VM and browser for this task after conversation completes
+    _timing_started = time.perf_counter()
     try:
         agent._cleanup_task_resources(effective_task_id)
     except Exception as _cleanup_err:
         _cleanup_errors.append(f"cleanup_task_resources: {_cleanup_err}")
         logger.error("finalize_turn: _cleanup_task_resources failed: %s", _cleanup_err, exc_info=True)
+    if _fast_path_timing:
+        logger.info("Personal Assistant fast finalizer cleanup_ms=%d", (time.perf_counter() - _timing_started) * 1000)
 
     # Persist session to both JSON log and SQLite only after private retry
     # scaffolding has been removed. Otherwise a later user "continue" turn
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
+    _timing_started = time.perf_counter()
     try:
         agent._drop_trailing_empty_response_scaffolding(messages)
 
@@ -414,6 +430,8 @@ def finalize_turn(
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
         logger.error("finalize_turn: _persist_session failed: %s", _persist_err, exc_info=True)
+    if _fast_path_timing:
+        logger.info("Personal Assistant fast finalizer persist_ms=%d", (time.perf_counter() - _timing_started) * 1000)
 
     _persisted_visible_response = final_response
 
@@ -649,6 +667,9 @@ def finalize_turn(
         "api_calls": api_call_count,
         "completed": completed,
         "turn_exit_reason": _turn_exit_reason,
+        "tool_iteration_exhausted": tool_iteration_exhausted,
+        "tool_iteration_count": api_call_count if tool_iteration_exhausted else 0,
+        "tool_iteration_limit": agent.max_iterations if tool_iteration_exhausted else 0,
         "failed": failed,
         "partial": False,  # True only when stopped due to invalid tool calls
         "interrupted": interrupted,

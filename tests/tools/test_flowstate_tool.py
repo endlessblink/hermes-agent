@@ -85,6 +85,15 @@ def flowstate_config(monkeypatch):
     fst._invalidate_flowstate_capabilities_cache()
 
 
+def test_runtime_url_override_wins_over_profile_config(monkeypatch):
+    monkeypatch.setenv("HERMES_FLOW_STATE_API_URL_OVERRIDE", "http://127.0.0.1:1/")
+
+    base_url, token = fst._get_config()
+
+    assert base_url == "http://127.0.0.1:1"
+    assert token == "token-123"
+
+
 def test_list_tasks_sends_query_and_bearer_header(monkeypatch):
     seen = {}
     sample = {
@@ -117,6 +126,42 @@ def test_list_open_tasks_uses_complete_inventory_boundary(monkeypatch):
 
     assert result["result"] == payload
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks/inventory?limit=100"
+
+
+def test_list_tasks_exposes_bounded_inventory_pages_for_item_review(monkeypatch):
+    seen = {}
+    payload = _inventory_payload(
+        items=[_inventory_task()],
+        complete=False,
+        page={"limit": 25, "nextCursor": "next-page", "hasMore": True},
+    )
+    payload.pop("total")
+    payload.pop("changeSequence")
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, payload))
+
+    result = json.loads(
+        fst._handle_list_tasks({"status": "open", "mode": "page", "limit": 25, "cursor": "page-one"})
+    )
+
+    assert result["result"] == payload
+    assert seen["url"] == (
+        "http://127.0.0.1:5577/api/tasks/inventory?"
+        "mode=page&limit=25&cursor=page-one"
+    )
+
+
+def test_list_tasks_rejects_cursor_without_page_mode():
+    result = json.loads(fst._handle_list_tasks({"cursor": "page-one"}))
+
+    assert result["error"] == "cursor requires mode=page"
+
+
+def test_list_tasks_schema_exposes_full_and_page_modes():
+    parameters = fst.FLOWSTATE_LIST_TASKS_SCHEMA["parameters"]
+
+    assert parameters["properties"]["mode"]["enum"] == ["full", "page"]
+    assert parameters["properties"]["cursor"]["type"] == "string"
+    assert parameters["properties"]["limit"]["maximum"] == 100
 
 
 def test_search_tasks_uses_encoded_query_and_preserves_exact_results(monkeypatch):
@@ -627,6 +672,7 @@ def test_update_task_defaults_to_preview_and_forwards_exact_contract(monkeypatch
         (_valid_update_args(status="done"), "unsupported"),
         (_valid_update_args(unexpected="value"), "unsupported"),
         (_valid_update_args(patch={"status": "done"}), "status"),
+        (_valid_update_args(patch={"estimatedDuration": 40}), "estimatedduration"),
         (_valid_update_args(patch={"unknown": "value"}), "unknown"),
         (_valid_update_args(patch={}), "at least one"),
     ],
@@ -901,10 +947,34 @@ def test_unavailable_error_mentions_local_api(monkeypatch):
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
+    monkeypatch.setattr(fst.time, "sleep", lambda _seconds: None)
 
     result = json.loads(fst._handle_health({}))
 
     assert "Flow State Local Task API is unavailable" in result["error"]
+
+
+def test_health_retries_a_transient_startup_failure(monkeypatch):
+    responses = iter([urllib.error.URLError("connection refused")] * 15 + [{"ok": True}])
+    monkeypatch.setattr(fst.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        fst,
+        "_request",
+        lambda *_args, **_kwargs: (
+            (_ for _ in ()).throw(value)
+            if isinstance((value := next(responses)), Exception)
+            else value
+        ),
+    )
+    monkeypatch.setattr(
+        fst,
+        "_flowstate_compatibility_report",
+        lambda: {"compatible": True, "blockedTools": []},
+    )
+
+    result = json.loads(fst._handle_health({}))
+
+    assert result["result"]["ok"] is True
 
 
 def test_complete_inventory_never_falls_back_to_a_cached_scope(monkeypatch, tmp_path):
@@ -1036,7 +1106,253 @@ def test_volatile_timer_read_does_not_use_stale_snapshot(monkeypatch, tmp_path):
     result = json.loads(fst._handle_current_timer({}))
 
     assert "error" in result
-    assert "timer-1" not in json.dumps(result)
+
+
+def test_start_timer_previews_canonical_lifecycle(monkeypatch):
+    import tools.flowstate_tool as fst
+
+    calls = []
+    session_id = "00000000-0000-4000-8000-000000000042"
+    normalized = {
+        "contractVersion": "timer-lifecycle-v1",
+        "source": "local-api",
+        "action": "start",
+        "sessionId": session_id,
+        "baseRevision": 0,
+        "payload": {"taskId": "task-42", "duration": 1500, "isBreak": False},
+    }
+
+    def request(method, path, body=None, **kwargs):
+        calls.append((method, path, body, kwargs))
+        return {
+            "ok": True,
+            "result": "preview",
+            "contractVersion": "timer-lifecycle-v1",
+            "operationId": "op-timer-42",
+            "action": "start",
+            "sessionId": session_id,
+            "baseRevision": 0,
+            "requestHash": canonical_json_sha256(normalized),
+            "previewDigest": "a" * 64,
+            "previewExpiresAt": "2026-07-21T22:30:00+03:00",
+            "normalizedPayload": normalized,
+        }
+
+    monkeypatch.setattr(fst, "_request", request)
+    result = json.loads(fst._handle_start_timer({
+        "taskId": "task-42",
+        "sessionId": session_id,
+        "operationId": "op-timer-42",
+    }))
+
+    assert result["result"]["result"] == "preview"
+    assert calls == [
+        ("POST", "/api/timer/lifecycle", {
+            "operationId": "op-timer-42",
+            "sessionId": session_id,
+            "baseRevision": 0,
+            "action": "start",
+            "payload": {"taskId": "task-42", "duration": 1500, "isBreak": False},
+            "preview": True,
+        }, {}),
+    ]
+
+
+def test_start_timer_fails_closed_on_invalid_canonical_preview(monkeypatch):
+    import tools.flowstate_tool as fst
+
+    monkeypatch.setattr(
+        fst,
+        "_request",
+        lambda method, path, body=None, **kwargs: {"ok": True, "result": "preview"},
+    )
+
+    result = json.loads(fst._handle_start_timer({
+        "taskId": "task-42",
+        "sessionId": "00000000-0000-4000-8000-000000000042",
+        "operationId": "op-timer-42",
+    }))
+    assert "error" in result
+    assert "preview could not be verified" in result["error"]
+
+
+def test_start_timer_apply_requires_matching_canonical_task_readback(monkeypatch):
+    import tools.flowstate_tool as fst
+
+    session_id = "00000000-0000-4000-8000-000000000042"
+    updated_at = "2026-07-22T11:30:00Z"
+    request_hash = "b" * 64
+    read_back = {
+        "id": session_id,
+        "canonicalRevision": 1,
+        "canonicalUpdatedAt": updated_at,
+        "taskId": "wrong-task",
+        "isActive": True,
+        "isPaused": False,
+    }
+    monkeypatch.setattr(
+        fst,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "result": "committed",
+            "status": "committed",
+            "requestHash": request_hash,
+            "receipt": {
+                "contractVersion": "timer-lifecycle-v1",
+                "operationId": "op-start-commit",
+                "source": "local-api",
+                "entityType": "timer_session",
+                "action": "start",
+                "entityId": session_id,
+                "requestHash": request_hash,
+                "canonicalRevision": 1,
+                "canonicalUpdatedAt": updated_at,
+                "changeSequence": 10,
+                "committedAt": updated_at,
+                "replayed": False,
+                "readBack": read_back,
+                "readBackHash": canonical_json_sha256(read_back),
+            },
+        },
+    )
+
+    result = json.loads(
+        fst._handle_start_timer(
+            {
+                "taskId": "task-42",
+                "sessionId": session_id,
+                "operationId": "op-start-commit",
+                "preview": False,
+                "previewDigest": "a" * 64,
+                "requestHash": request_hash,
+                "previewExpiresAt": "2026-07-22T12:00:00Z",
+            }
+        )
+    )
+
+    assert "error" in result
+    assert "receipt could not be verified" in result["error"]
+
+
+def test_stop_timer_previews_canonical_lifecycle(monkeypatch):
+    calls = []
+    session_id = "00000000-0000-4000-8000-000000000042"
+    normalized = {
+        "contractVersion": "timer-lifecycle-v1",
+        "source": "local-api",
+        "action": "stop",
+        "sessionId": session_id,
+        "baseRevision": 3,
+        "payload": {},
+    }
+
+    def request(method, path, body=None, **kwargs):
+        calls.append((method, path, body, kwargs))
+        return {
+            "ok": True,
+            "result": "preview",
+            "contractVersion": "timer-lifecycle-v1",
+            "operationId": "op-stop-42",
+            "action": "stop",
+            "sessionId": session_id,
+            "baseRevision": 3,
+            "requestHash": canonical_json_sha256(normalized),
+            "previewDigest": "a" * 64,
+            "previewExpiresAt": "2026-07-21T22:30:00+03:00",
+            "normalizedPayload": normalized,
+        }
+
+    monkeypatch.setattr(fst, "_request", request)
+    result = json.loads(fst._handle_stop_timer({
+        "sessionId": session_id,
+        "operationId": "op-stop-42",
+        "baseRevision": 3,
+    }))
+
+    assert result["result"]["result"] == "preview"
+    assert calls == [
+        ("POST", "/api/timer/lifecycle", {
+            "operationId": "op-stop-42",
+            "sessionId": session_id,
+            "baseRevision": 3,
+            "action": "stop",
+            "payload": {},
+            "preview": True,
+        }, {}),
+    ]
+
+
+def test_stop_timer_fails_closed_on_invalid_canonical_preview(monkeypatch):
+    monkeypatch.setattr(
+        fst,
+        "_request",
+        lambda method, path, body=None, **kwargs: {"ok": True, "result": "preview"},
+    )
+
+    result = json.loads(fst._handle_stop_timer({
+        "sessionId": "00000000-0000-4000-8000-000000000042",
+        "operationId": "op-stop-42",
+        "baseRevision": 3,
+    }))
+    assert "error" in result
+    assert "preview could not be verified" in result["error"]
+
+
+def test_stop_timer_apply_requires_inactive_canonical_readback(monkeypatch):
+    session_id = "00000000-0000-4000-8000-000000000042"
+    updated_at = "2026-07-22T11:45:00Z"
+    request_hash = "d" * 64
+    read_back = {
+        "id": session_id,
+        "canonicalRevision": 4,
+        "canonicalUpdatedAt": updated_at,
+        "isActive": True,
+        "completedAt": updated_at,
+    }
+    monkeypatch.setattr(
+        fst,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "result": "committed",
+            "status": "committed",
+            "requestHash": request_hash,
+            "receipt": {
+                "contractVersion": "timer-lifecycle-v1",
+                "operationId": "op-stop-commit",
+                "source": "local-api",
+                "entityType": "timer_session",
+                "action": "stop",
+                "entityId": session_id,
+                "requestHash": request_hash,
+                "canonicalRevision": 4,
+                "canonicalUpdatedAt": updated_at,
+                "changeSequence": 11,
+                "committedAt": updated_at,
+                "replayed": False,
+                "readBack": read_back,
+                "readBackHash": canonical_json_sha256(read_back),
+            },
+        },
+    )
+
+    result = json.loads(
+        fst._handle_stop_timer(
+            {
+                "sessionId": session_id,
+                "operationId": "op-stop-commit",
+                "baseRevision": 3,
+                "preview": False,
+                "previewDigest": "c" * 64,
+                "requestHash": request_hash,
+                "previewExpiresAt": "2026-07-22T12:00:00Z",
+            }
+        )
+    )
+
+    assert "error" in result
+    assert "receipt could not be verified" in result["error"]
 
 
 def test_availability_allows_running_default_sidecar_without_token(monkeypatch):
@@ -1061,6 +1377,14 @@ def test_availability_hides_missing_default_sidecar_without_token(monkeypatch):
     monkeypatch.setattr(fst.urllib.request, "urlopen", _raise)
 
     assert fst._check_flowstate_available() is False
+
+
+def test_health_tool_remains_dispatchable_while_sidecar_is_starting(monkeypatch):
+    entry = fst.registry.get_entry("flowstate_health")
+    assert entry is not None
+    monkeypatch.setattr(fst, "_check_flowstate_available", lambda: False)
+
+    assert entry.check_fn() is True
 
 
 def _capabilities_manifest(**overrides):
@@ -1128,6 +1452,31 @@ def test_list_task_instances_uses_exact_task_id(monkeypatch):
     assert result["result"]["instances"] == []
     assert seen["method"] == "GET"
     assert seen["url"] == "http://127.0.0.1:5577/api/tasks/task%2Fwith%2Fslash/instances"
+
+
+def test_list_task_instances_exposes_legacy_work_block_revision(monkeypatch):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(
+            {},
+            {
+                "ok": True,
+                "instances": [
+                    {
+                        "id": "instance-1",
+                        "taskId": "task-1",
+                        "duration": 25,
+                        "scheduledDate": "2026-07-24",
+                    }
+                ],
+            },
+        ),
+    )
+
+    result = json.loads(fst._handle_list_task_instances({"id": "task-1"}))
+
+    assert result["result"]["instances"][0]["workBlockRevision"] == 0
 
 
 def test_schedule_task_instance_defaults_to_preview(monkeypatch):

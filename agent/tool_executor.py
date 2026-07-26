@@ -468,6 +468,26 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             except Exception:
                 block_message = None
 
+            if block_message is None and bool(getattr(agent, "personal_assistant_mode", False)):
+                try:
+                    from agent.personal_assistant_calendar_gate import same_day_grounding_gate_message
+
+                    block_message = same_day_grounding_gate_message(function_name)
+                except Exception:
+                    pass
+
+            if block_message is None and bool(getattr(agent, "personal_assistant_mode", False)):
+                try:
+                    from agent.personal_assistant_durable_write_gate import (
+                        durable_personal_assistant_write_gate_message,
+                    )
+
+                    block_message = durable_personal_assistant_write_gate_message(
+                        function_name, function_args
+                    )
+                except Exception:
+                    pass
+
             # Pre-action gate (concurrent path): refuse repo-touching tools on a
             # vague continuation until the project is confirmed. Fail-open.
             if block_message is None:
@@ -1154,6 +1174,30 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                     middleware_trace=list(middleware_trace),
                 )
+            except Exception:
+                pass
+
+        if _block_msg is None and bool(getattr(agent, "personal_assistant_mode", False)):
+            try:
+                from agent.personal_assistant_calendar_gate import same_day_grounding_gate_message
+
+                _block_msg = same_day_grounding_gate_message(function_name)
+                if _block_msg:
+                    _block_error_type = "same_day_grounding_required"
+            except Exception:
+                pass
+
+        if _block_msg is None and bool(getattr(agent, "personal_assistant_mode", False)):
+            try:
+                from agent.personal_assistant_durable_write_gate import (
+                    durable_personal_assistant_write_gate_message,
+                )
+
+                _block_msg = durable_personal_assistant_write_gate_message(
+                    function_name, function_args
+                )
+                if _block_msg:
+                    _block_error_type = "personal_assistant_durable_write_block"
             except Exception:
                 pass
 
@@ -1854,7 +1898,7 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
         _exec_cwd = Path(_active_env.cwd) if _active_env is not None and _active_env.cwd else None
         segments = _plan_tool_batch_segments(assistant_message.tool_calls, execution_cwd=_exec_cwd)
 
-    for kind, calls in segments:
+    for segment_index, (kind, calls) in enumerate(segments):
         segment_message = SimpleNamespace(tool_calls=list(calls))
         if kind == "parallel":
             execute_tool_calls_concurrent(
@@ -1866,6 +1910,26 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
                 agent, segment_message, messages, effective_task_id, api_call_count,
                 finalize=False,
             )
+
+        halt_decision = agent._tool_guardrail_halt_decision
+        if halt_decision is not None:
+            for _, later_calls in segments[segment_index + 1 :]:
+                for skipped_tc in later_calls:
+                    skipped_name = skipped_tc.function.name
+                    messages.append(make_tool_result_message(
+                        skipped_name,
+                        f"[Tool execution skipped — {skipped_name} was not started because "
+                        f"the preceding tool triggered an immediate safety stop "
+                        f"({halt_decision.code}).]",
+                        skipped_tc.id,
+                        effect_disposition="none",
+                    ))
+                    _flush_session_db_after_tool_progress(
+                        agent,
+                        messages,
+                        stage=f"guardrail-skipped tool result {skipped_name}",
+                    )
+            break
 
     # ── Whole-turn finalize (budget + /steer) ─────────────────────────
     total_tools = len(assistant_message.tool_calls)

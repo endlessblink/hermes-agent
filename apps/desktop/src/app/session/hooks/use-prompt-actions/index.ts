@@ -182,6 +182,7 @@ interface PromptActionsOptions {
   getRoutedStoredSessionId: () => null | string
   getRuntimeIdForStoredSession: (storedSessionId: string) => null | string
   getRouteToken: () => string
+  recoverMissingStoredSession?: (storedSessionId: string) => Promise<null | string>
   handleSkinCommand: (arg: string) => string
   openMemoryGraph: () => void
   refreshSessions: () => Promise<void>
@@ -220,6 +221,7 @@ export function usePromptActions({
   getRoutedStoredSessionId,
   getRuntimeIdForStoredSession,
   getRouteToken,
+  recoverMissingStoredSession,
   handleSkinCommand,
   openMemoryGraph,
   refreshSessions,
@@ -414,6 +416,7 @@ export function usePromptActions({
     getRoutedStoredSessionId,
     getRuntimeIdForStoredSession,
     getRouteToken,
+    recoverMissingStoredSession,
     requestGateway,
     resumeStoredSession,
     selectedStoredSessionIdRef,
@@ -679,7 +682,31 @@ export function usePromptActions({
   const cancelRun = useCallback(async () => {
     const sessionId = activeSessionId || activeSessionIdRef.current
 
+    const publishInterruptedState = (busy: boolean, finalizeMessages = false) => {
+      if (!sessionId) {
+        return
+      }
+
+      updateSessionState(sessionId, state => {
+        const streamId = state.streamId
+        const messages = finalizeMessages ? finalizeInterruptedMessages(state.messages, streamId) : state.messages
+
+        return {
+          ...state,
+          messages,
+          busy,
+          awaitingResponse: false,
+          streamId: null,
+          pendingBranchGroup: null,
+          needsInput: false,
+          interrupted: true,
+          turnStartedAt: null
+        }
+      })
+    }
+
     const releaseBusy = () => {
+      publishInterruptedState(false)
       setMutableRef(busyRef, false)
       setBusy(false)
     }
@@ -694,22 +721,11 @@ export function usePromptActions({
       return
     }
 
-    updateSessionState(sessionId, state => {
-      const streamId = state.streamId
-      const messages = finalizeInterruptedMessages(state.messages, streamId)
-
-      return {
-        ...state,
-        messages,
-        busy: false,
-        awaitingResponse: false,
-        streamId: null,
-        pendingBranchGroup: null,
-        needsInput: false,
-        interrupted: true,
-        turnStartedAt: null
-      }
-    })
+    // Keep the session busy until the gateway acknowledges cancellation. Queue
+    // auto-drain keys off this state; publishing idle early lets a queued
+    // prompt race ahead of session.interrupt, which then clears the backend
+    // copy after the renderer has already removed its own entry.
+    publishInterruptedState(true, true)
 
     clearSessionTodos(sessionId)
     clearSessionSubagents(sessionId)

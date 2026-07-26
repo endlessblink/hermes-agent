@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ComposerScopeProvider, MAIN_COMPOSER_SCOPE } from '@/app/chat/composer/scope'
 import { MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import type {
   HermesUiChecklistArtifact,
@@ -13,14 +14,23 @@ import type {
   HermesUiPlanningFunnelArtifact,
   HermesUiTaskBreakdownArtifact,
   HermesUiTaskContextArtifact,
+  HermesUiTaskProfileReviewArtifact,
   HermesUiTaskTableArtifact,
   HermesUiWeekPlannerArtifact
 } from '@/lib/hermes-ui-artifacts'
 
 const requestComposerSubmit = vi.fn()
+const continuePersonalAssistantInterview = vi.fn()
+const respondToPersonalAssistantInterview = vi.fn()
 
 vi.mock('@/app/chat/composer/focus', () => ({
   requestComposerSubmit: (text: string, opts?: unknown) => requestComposerSubmit(text, opts)
+}))
+
+vi.mock('@/store/personal-assistant', () => ({
+  continuePersonalAssistantInterview: (text: string, runtimeSessionId?: string) =>
+    continuePersonalAssistantInterview(text, runtimeSessionId),
+  respondToPersonalAssistantInterview: (params: unknown) => respondToPersonalAssistantInterview(params)
 }))
 
 import {
@@ -36,6 +46,8 @@ import {
   TaskBreakdownCard,
   TaskContextCard,
   TaskGraphCard,
+  TaskProfileReviewCard,
+  stableInterviewRequestId,
   TaskTableCard,
   TaskTriageArtifactCard,
   UrgencyEnergyMatrixCard,
@@ -149,6 +161,9 @@ const planningSessionArtifact: HermesUiFlowStatePlanningSessionArtifact = {
 beforeEach(() => {
   window.localStorage.clear()
   requestComposerSubmit.mockClear()
+  continuePersonalAssistantInterview.mockReset()
+  continuePersonalAssistantInterview.mockResolvedValue(undefined)
+  respondToPersonalAssistantInterview.mockReset()
 })
 
 afterEach(cleanup)
@@ -554,6 +569,24 @@ describe('ChecklistArtifactCard', () => {
     expect(screen.queryByText(/Code\s*·\s*hermes-ui/i)).toBeNull()
   })
 
+  it('hides an unfinished hermes-ui fence after leading prose while streaming', () => {
+    render(
+      <MarkdownTextContent
+        isRunning
+        text={[
+          'אני מכין את התוכנית.',
+          '```hermes-ui',
+          '{"type":"day-timeline","title":"מחר","items":['
+        ].join('\n')}
+      />
+    )
+
+    expect(screen.getByText('אני מכין את התוכנית.')).toBeTruthy()
+    expect(screen.queryByText(/day-timeline/)).toBeNull()
+    expect(screen.queryByText(/hermes-ui/)).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('Preparing interactive form…')
+  })
+
   it('normalizes Streamdown language-* class names before rich fence lookup', async () => {
     render(
       <RichCodeBlock
@@ -703,6 +736,26 @@ describe('ChecklistArtifactCard', () => {
     )
   })
 
+  it('gives Hermes the flexible table contract when a task-table needs recovery', () => {
+    render(
+      <RichCodeBlock
+        code={JSON.stringify({
+          columns: [{ key: 'status', label: 'מצב' }],
+          rows: [{ cells: { status: { nested: 'unsafe' } }, id: 'r1', title: 'משימה' }],
+          type: 'task-table'
+        })}
+        fallback={<pre>fallback code block</pre>}
+        language="hermes-ui"
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ask Hermes to resend' }))
+
+    expect(requestComposerSubmit).toHaveBeenCalledWith(expect.stringMatching(/column.*key.*label.*cells.*scalar/i), {
+      target: 'main'
+    })
+  })
+
   it('hides incomplete hermes-ui JSON while the form is still streaming', () => {
     const { rerender } = render(
       <RichCodeBlock
@@ -785,6 +838,117 @@ describe('Planning interview primitives', () => {
     unknowns: ['מתי הפגישה?', 'האם צריך להתקשר או רק לבדוק?']
   }
 
+  const taskProfileReview: HermesUiTaskProfileReviewArtifact = {
+    direction: 'rtl',
+    interviewId: 'weekly-1',
+    profileFields: [
+      { id: 'urgency', label: 'דחיפות', value: 'בינונית' },
+      { id: 'doneEnough', label: 'מה נחשב מספיק', value: 'יש תשובה והצעד הבא ברור' }
+    ],
+    progress: { current: 2, total: 8 },
+    question: {
+      allowCustomAnswer: true,
+      id: 'urgency',
+      label: 'עד כמה זה דחוף השבוע?',
+      options: [
+        { label: 'גבוהה', value: 'high' },
+        { label: 'בינונית', value: 'medium' }
+      ],
+      profileFieldId: 'urgency',
+      required: true,
+      type: 'single-choice'
+    },
+    revision: 8,
+    task: { id: 'pet-results', title: 'בדיקת תוצאות PET' },
+    type: 'task-profile-review'
+  }
+
+  it('renders the first profile question without an empty profile editor', () => {
+    render(
+      <TaskProfileReviewCard
+        artifact={{
+          ...taskProfileReview,
+          profileFields: [],
+          progress: { current: 1, total: 3 },
+          question: {
+            ...taskProfileReview.question,
+            profileFieldId: 'urgency'
+          }
+        }}
+      />
+    )
+
+    expect(screen.getByText('עד כמה זה דחוף השבוע?')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'עריכת פרופיל המשימה' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'אישור והמשך' })).toBeTruthy()
+  })
+
+  it('renders daily grounding as one calm question and confirms it was saved for today', async () => {
+    respondToPersonalAssistantInterview.mockResolvedValue({
+      duplicate: false,
+      interview: { revision: 2 },
+      receipt: {},
+      stateVersion: 13
+    })
+    render(
+      <TaskProfileReviewCard
+        artifact={{
+          ...taskProfileReview,
+          profileFields: [{ id: 'energy', label: 'אנרגיה כרגע', value: '' }],
+          progress: { current: 1, total: 4 },
+          question: {
+            ...taskProfileReview.question,
+            description: 'כמה אנרגיה יש לך כרגע להמשך היום?',
+            id: 'energy',
+            label: 'אנרגיה כרגע',
+            profileFieldId: 'energy'
+          },
+          task: { id: 'day-context', title: 'תכנון שאר היום' }
+        }}
+      />
+    )
+
+    expect(screen.getByText('כמה אנרגיה יש לך כרגע להמשך היום?')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'עריכת פרופיל המשימה' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'השהיה' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'חזרה למשימה קודמת' })).toBeNull()
+    expect(screen.queryByText('—')).toBeNull()
+    expect(screen.queryByRole('textbox', { name: 'תשובה אחרת' })).toBeNull()
+    expect(screen.getByText('1 / 4').getAttribute('dir')).toBe('ltr')
+
+    fireEvent.click(screen.getByRole('radio', { name: 'תשובה אחרת' }))
+
+    expect(screen.getByRole('textbox', { name: 'תשובה אחרת' })).toBeTruthy()
+
+    fireEvent.click(screen.getByLabelText('גבוהה'))
+    fireEvent.click(screen.getByRole('button', { name: 'שמירה והמשך' }))
+
+    await waitFor(() => expect(screen.getByText('נשמר להיום')).toBeTruthy())
+  })
+
+  it('progressively reveals a large profile summary', () => {
+    render(
+      <TaskProfileReviewCard
+        artifact={{
+          ...taskProfileReview,
+          profileFields: Array.from({ length: 20 }, (_, index) => ({
+            id: `field-${index}`,
+            label: `שדה ${index + 1}`,
+            value: `ערך ${index + 1}`
+          }))
+        }}
+      />
+    )
+
+    expect(screen.getByText('שדה 1')).toBeTruthy()
+    expect(screen.queryByText('שדה 7')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'הצג עוד 14' }))
+
+    expect(screen.getByText('שדה 20')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'הצג פחות' })).toBeTruthy()
+  })
+
   it('renders a compact planning funnel', () => {
     render(<PlanningFunnelCard artifact={planningFunnel} />)
 
@@ -804,6 +968,277 @@ describe('Planning interview primitives', () => {
     fireEvent.click(screen.getByRole('button', { name: 'שאל שאלה אחת' }))
 
     expect(requestComposerSubmit).toHaveBeenCalledWith('תשאל שאלה אחת קצרה על ההקשר של המשימה הזו.', { target: 'main' })
+  })
+
+  it('renders the next committed interview question without a model continuation', async () => {
+    respondToPersonalAssistantInterview.mockResolvedValue({
+      duplicate: false,
+      interview: { revision: 9 },
+      nextArtifact: {
+        ...taskProfileReview,
+        progress: { current: 3, total: 8 },
+        question: {
+          ...taskProfileReview.question,
+          id: 'importance',
+          label: 'כמה המשימה חשובה?',
+          profileFieldId: 'importance'
+        },
+        revision: 9
+      },
+      receipt: {},
+      stateVersion: 12
+    })
+    render(
+      <ComposerScopeProvider
+        value={{
+          ...MAIN_COMPOSER_SCOPE,
+          runtimeSessionId: 'runtime:personal-assistant',
+          target: 'tile:personal-assistant'
+        }}
+      >
+        <TaskProfileReviewCard artifact={taskProfileReview} />
+      </ComposerScopeProvider>
+    )
+
+    expect(screen.getByText('2 / 8')).toBeTruthy()
+    expect(screen.getByText('בדיקת תוצאות PET')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('גבוהה'))
+    fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
+
+    await waitFor(() => expect(respondToPersonalAssistantInterview).toHaveBeenCalledTimes(1))
+    expect(screen.getByText('כמה המשימה חשובה?')).toBeTruthy()
+    expect(screen.getByText('3 / 8')).toBeTruthy()
+    expect(continuePersonalAssistantInterview).not.toHaveBeenCalled()
+    expect(respondToPersonalAssistantInterview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRevision: 8,
+        interviewId: 'weekly-1',
+        questionId: 'urgency',
+        response: { action: 'answer', selectedValues: ['high'] },
+        taskId: 'pet-results'
+      })
+    )
+  })
+
+  it('does not continue when the interview answer was not persisted', async () => {
+    respondToPersonalAssistantInterview.mockRejectedValue(new Error('gateway offline'))
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    fireEvent.click(screen.getByLabelText('גבוהה'))
+    fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
+
+    await waitFor(() => expect(screen.getByText('התשובה לא נשמרה. אפשר לנסות שוב.')).toBeTruthy())
+    expect(continuePersonalAssistantInterview).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('גבוהה')).toHaveProperty('checked', true)
+  })
+
+  it('reuses the same request identity when a saved interview answer is retried', () => {
+    const response = {
+      action: 'answer' as const,
+      fieldEdits: { notes: 'בבית', constraints: ['שקט', 'ללא נסיעות'] },
+      selectedValues: ['home']
+    }
+
+    const first = stableInterviewRequestId({
+      expectedRevision: 4,
+      interviewId: 'planning-2026-07-24',
+      questionId: 'location',
+      response,
+      taskId: 'day-context'
+    })
+    const retried = stableInterviewRequestId({
+      expectedRevision: 4,
+      interviewId: 'planning-2026-07-24',
+      questionId: 'location',
+      response: {
+        ...response,
+        fieldEdits: { constraints: ['שקט', 'ללא נסיעות'], notes: 'בבית' }
+      },
+      taskId: 'day-context'
+    })
+    const changedAnswer = stableInterviewRequestId({
+      expectedRevision: 4,
+      interviewId: 'planning-2026-07-24',
+      questionId: 'location',
+      response: { action: 'answer', selectedValues: ['outside'] },
+      taskId: 'day-context'
+    })
+
+    expect(retried).toBe(first)
+    expect(changedAnswer).not.toBe(first)
+  })
+
+  it('does not claim a saved answer failed when background continuation throws', async () => {
+    respondToPersonalAssistantInterview.mockResolvedValue({
+      duplicate: false,
+      interview: { revision: 9 },
+      receipt: {},
+      stateVersion: 12
+    })
+    continuePersonalAssistantInterview.mockRejectedValueOnce(new Error('continuation unavailable'))
+    render(
+      <TaskProfileReviewCard
+        artifact={{
+          ...taskProfileReview,
+          profileFields: [{ id: 'energy', label: 'אנרגיה', value: '' }],
+          progress: { current: 1, total: 4 },
+          question: {
+            ...taskProfileReview.question,
+            id: 'energy',
+            label: 'כמה אנרגיה יש לך?',
+            options: [{ label: 'נמוכה', value: 'low' }],
+            profileFieldId: 'energy'
+          },
+          task: { id: 'day-context', title: 'תכנון שאר היום' }
+        }}
+      />
+    )
+
+    fireEvent.click(screen.getByLabelText('נמוכה'))
+    fireEvent.click(screen.getByRole('button', { name: 'שמירה והמשך' }))
+
+    await waitFor(() => expect(screen.getByText('נשמר להיום')).toBeTruthy())
+    expect(screen.queryByText('התשובה לא נשמרה. אפשר לנסות שוב.')).toBeNull()
+    expect(respondToPersonalAssistantInterview).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes a stale review revision without discarding the local draft', async () => {
+    respondToPersonalAssistantInterview
+      .mockRejectedValueOnce({ code: 'interview_version_conflict', currentRevision: 10, latest: { revision: 10 } })
+      .mockResolvedValueOnce({ duplicate: false, interview: { revision: 11 }, receipt: {}, stateVersion: 14 })
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    fireEvent.click(screen.getByLabelText('גבוהה'))
+    fireEvent.click(screen.getByRole('button', { name: 'עריכת פרופיל המשימה' }))
+    fireEvent.change(screen.getByLabelText('ערוך מה נחשב מספיק'), { target: { value: 'יש תשובה כתובה' } })
+    fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
+
+    await waitFor(() => expect(screen.getByText(/הטיוטה שלך נשמרה/)).toBeTruthy())
+    expect(screen.getByLabelText('גבוהה')).toHaveProperty('checked', true)
+    expect(screen.getByLabelText('ערוך מה נחשב מספיק')).toHaveProperty('value', 'יש תשובה כתובה')
+    expect(continuePersonalAssistantInterview).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
+    await waitFor(() => expect(continuePersonalAssistantInterview).toHaveBeenCalledTimes(1))
+    expect(respondToPersonalAssistantInterview.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        expectedRevision: 10,
+        response: expect.objectContaining({ fieldEdits: { doneEnough: 'יש תשובה כתובה' } })
+      })
+    )
+  })
+
+  it('continues from durable state when the visible answer was already committed before reconnect', async () => {
+    respondToPersonalAssistantInterview.mockRejectedValueOnce(
+      Object.assign(new Error('Personal Assistant interview version conflict'), {
+        code: 4093,
+        data: {
+          code: 'interview_version_conflict',
+          latest: {
+            interviewRevision: 9,
+            readinessApproved: true,
+            tasks: [{ taskId: 'pet-results', profile: { urgency: 'high' } }]
+          }
+        }
+      })
+    )
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    fireEvent.click(screen.getByLabelText('גבוהה'))
+    fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
+
+    await waitFor(() => expect(continuePersonalAssistantInterview).toHaveBeenCalledTimes(1))
+    expect(screen.queryByText('התשובה לא נשמרה. אפשר לנסות שוב.')).toBeNull()
+    expect(continuePersonalAssistantInterview).toHaveBeenCalledWith(
+      expect.stringContaining('after committed answer'),
+      undefined
+    )
+  })
+
+  it('keeps a complete task review card disabled until streaming finishes', async () => {
+    const code = JSON.stringify(taskProfileReview)
+    const { rerender } = render(
+      <RichCodeBlock code={code} fallback={<pre>fallback code block</pre>} language="hermes-ui" streaming />
+    )
+
+    expect(screen.getByRole('status').textContent).toMatch(/Preparing/)
+    expect(screen.queryByRole('button', { name: 'אישור והמשך' })).toBeNull()
+
+    rerender(
+      <RichCodeBlock code={code} fallback={<pre>fallback code block</pre>} language="hermes-ui" streaming={false} />
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: 'אישור והמשך' })).toBeTruthy())
+  })
+
+  it('supports multiple suggested answers plus a custom answer', async () => {
+    respondToPersonalAssistantInterview.mockResolvedValue({
+      duplicate: false,
+      interview: { revision: 9 },
+      receipt: {},
+      stateVersion: 12
+    })
+    const multiReview: HermesUiTaskProfileReviewArtifact = {
+      ...taskProfileReview,
+      question: {
+        ...taskProfileReview.question,
+        id: 'connections-question',
+        label: 'למה המשימה קשורה?',
+        options: [
+          { label: 'בריאות', value: 'health' },
+          { label: 'פגישה', value: 'meeting' }
+        ],
+        profileFieldId: 'urgency',
+        type: 'multi-choice'
+      }
+    }
+    render(<TaskProfileReviewCard artifact={multiReview} />)
+
+    fireEvent.click(screen.getByLabelText('בריאות'))
+    fireEvent.click(screen.getByLabelText('פגישה'))
+    fireEvent.change(screen.getByLabelText('תשובה אחרת'), { target: { value: 'גם משפחה' } })
+    fireEvent.click(screen.getByRole('button', { name: 'אישור והמשך' }))
+
+    await waitFor(() => expect(respondToPersonalAssistantInterview).toHaveBeenCalledTimes(1))
+    expect(respondToPersonalAssistantInterview.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        response: { action: 'answer', customAnswer: 'גם משפחה', selectedValues: ['health', 'meeting'] }
+      })
+    )
+  })
+
+  it('persists pause and exposes revisit without requiring an answer', async () => {
+    respondToPersonalAssistantInterview.mockResolvedValue({
+      duplicate: false,
+      interview: { revision: 9 },
+      receipt: {},
+      stateVersion: 12
+    })
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    expect(screen.getByRole('button', { name: 'חזרה למשימה קודמת' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'השהיה' }))
+
+    await waitFor(() => expect(respondToPersonalAssistantInterview).toHaveBeenCalledTimes(1))
+    expect(respondToPersonalAssistantInterview.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ response: { action: 'pause' } })
+    )
+  })
+
+  it('commits back with the controller action understood by both clients', async () => {
+    respondToPersonalAssistantInterview.mockResolvedValue({
+      duplicate: false,
+      interview: { revision: 9 },
+      receipt: {},
+      stateVersion: 12
+    })
+    render(<TaskProfileReviewCard artifact={taskProfileReview} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'חזרה למשימה קודמת' }))
+
+    await waitFor(() => expect(respondToPersonalAssistantInterview).toHaveBeenCalledTimes(1))
+    expect(respondToPersonalAssistantInterview.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ response: { action: 'back' } })
+    )
   })
 
   it('lets the user edit, reorder, remove, and submit a bounded task breakdown', () => {
@@ -896,6 +1331,7 @@ describe('Planning interview primitives', () => {
 
 describe('Planning toolkit primitives', () => {
   const taskTable: HermesUiTaskTableArtifact = {
+    actions: [{ id: 'adjust-day', label: 'התאם את היום', submitText: 'תתאים את תכנון היום לזמן ולאנרגיה שלי.' }],
     columns: ['task', 'context', 'energy', 'urgency', 'nextStep', 'confidence'],
     direction: 'rtl',
     rows: [
@@ -954,6 +1390,10 @@ describe('Planning toolkit primitives', () => {
   }
 
   const dayTimeline: HermesUiDayTimelineArtifact = {
+    actions: [
+      { id: 'choose-plan', label: 'לבחור בתוכנית', submitText: 'בחר את תוכנית היום המלאה.' },
+      { id: 'adjust-plan', label: 'להתאים את התוכנית', submitText: 'התאם את תוכנית היום המלאה.' }
+    ],
     blocks: [
       {
         actions: [{ id: 'accept-block', label: 'השתמש בבלוק', submitText: 'תציג preview לבלוק הזה.' }],
@@ -1024,17 +1464,60 @@ describe('Planning toolkit primitives', () => {
     type: 'mutation-preview'
   }
 
-  it('renders task-table with unknowns and routes row actions', () => {
+  it('omits unknown task details and routes row actions', () => {
     render(<TaskTableCard artifact={taskTable} />)
 
     expect(screen.getByText('השוואת משימות')).toBeTruthy()
     expect(screen.getByText('לבדוק בדיקות')).toBeTruthy()
-    expect(screen.getByText('לא ידוע')).toBeTruthy()
+    expect(screen.queryByText('לא ידוע')).toBeNull()
     expect(document.querySelector('[data-hermes-ui-artifact="task-table"]')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'שאל על זה' }))
 
     expect(requestComposerSubmit).toHaveBeenCalledWith('שאל אותי שאלה אחת על בדיקות.', { target: 'main' })
+    fireEvent.click(screen.getByRole('button', { name: 'התאם את היום' }))
+    expect(requestComposerSubmit).toHaveBeenCalledWith('תתאים את תכנון היום לזמן ולאנרגיה שלי.', { target: 'main' })
+  })
+
+  it('turns a long model-defined inventory into a readable progressive task list', () => {
+    const inventoryTable: HermesUiTaskTableArtifact = {
+      columns: [
+        'task',
+        { key: 'source', label: 'מקור' },
+        { key: 'status', label: 'מצב' },
+        { key: 'due', label: 'מועד' }
+      ],
+      direction: 'rtl',
+      rows: Array.from({ length: 19 }, (_, index) => ({
+        cells: {
+          due: index === 0 ? '20.7' : 'ללא מועד',
+          source: index % 2 === 0 ? 'FlowState' : 'Notion',
+          status: index === 0 ? 'בוצע היום' : 'פתוח'
+        },
+        id: `inventory-${index}`,
+        title: `משימה ${index + 1}`
+      })),
+      title: 'הרשימה המלאה',
+      type: 'task-table'
+    }
+
+    render(<TaskTableCard artifact={inventoryTable} />)
+
+    expect(screen.getByText('19 משימות')).toBeTruthy()
+    expect(screen.getByRole('list', { name: /הרשימה המלאה/ })).toBeTruthy()
+    expect(screen.getAllByRole('listitem')).toHaveLength(8)
+    expect(screen.getAllByText('מקור')).toHaveLength(8)
+    expect(screen.getAllByText('מצב')).toHaveLength(8)
+    expect(screen.getAllByText('מועד')).toHaveLength(8)
+    expect(screen.getByText('משימה 1')).toBeTruthy()
+    expect(screen.getByText('בוצע היום')).toBeTruthy()
+    expect(screen.queryByText('לא ידוע')).toBeNull()
+    expect(screen.queryByText('פעולה')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'הצג עוד 11' }))
+
+    expect(screen.getAllByRole('listitem')).toHaveLength(19)
+    expect(screen.getByRole('button', { name: 'הצג פחות' })).toBeTruthy()
   })
 
   it('renders mini-kanban lanes and routes task actions', () => {
@@ -1052,7 +1535,7 @@ describe('Planning toolkit primitives', () => {
     expect(requestComposerSubmit).toHaveBeenCalledWith('בוא נתקן את טיוטת השבוע.', { target: 'main' })
   })
 
-  it('renders day-timeline with current time and routes block actions', () => {
+  it('keeps day-timeline block actions hidden until that block is opened', () => {
     render(<DayTimelineCard artifact={dayTimeline} />)
 
     expect(screen.getByText('תכנון יום אפשרי')).toBeTruthy()
@@ -1060,9 +1543,35 @@ describe('Planning toolkit primitives', () => {
     expect(screen.getByText('טיוטה ללקוח')).toBeTruthy()
     expect(document.querySelector('[data-hermes-ui-artifact="day-timeline"]')).toBeTruthy()
 
+    expect(screen.queryByRole('button', { name: 'השתמש בבלוק' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /טיוטה ללקוח/ }))
     fireEvent.click(screen.getByRole('button', { name: 'השתמש בבלוק' }))
 
     expect(requestComposerSubmit).toHaveBeenCalledWith('תציג preview לבלוק הזה.', { target: 'main' })
+    fireEvent.click(screen.getByRole('button', { name: 'לבחור בתוכנית' }))
+    expect(requestComposerSubmit).toHaveBeenCalledWith('בחר את תוכנית היום המלאה.', { target: 'main' })
+  })
+
+  it('omits absent metadata and internal block kinds from a day timeline', () => {
+    render(
+      <DayTimelineCard
+        artifact={{
+          blocks: [
+            { id: 'task', label: 'לשלוח את הפנייה', startTime: '17:10' },
+            { id: 'rest', kind: 'break', label: 'מנוחה', startTime: '17:40' }
+          ],
+          date: '2026-07-22',
+          direction: 'rtl',
+          type: 'day-timeline'
+        }}
+      />
+    )
+
+    expect(screen.queryByText('לא ידוע')).toBeNull()
+    expect(screen.queryByText('break')).toBeNull()
+    expect(screen.getByText('לשלוח את הפנייה')).toBeTruthy()
+    expect(screen.getByText('מנוחה')).toBeTruthy()
   })
 
   it('renders every week-planner detail visually and routes item and week actions', async () => {

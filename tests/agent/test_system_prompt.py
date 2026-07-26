@@ -119,6 +119,23 @@ class TestFlowStateGuidance:
 
         assert "FlowState tool-use requirements" not in stable
 
+    def test_mutation_guidance_serializes_same_task_and_recovers_typed_conflicts(self):
+        stable = _stable_prompt(
+            _make_agent(
+                valid_tool_names=[
+                    "flowstate_update_task",
+                    "flowstate_create_work_block",
+                ]
+            )
+        )
+
+        assert "same FlowState task are dependent" in stable
+        assert "Do not batch them in one assistant response" in stable
+        assert "`state_conflict`" in stable
+        assert "`preview_expired`" in stable
+        assert "fresh preview" in stable
+        assert "fresh approval" in stable
+
 
 class TestPersonalAssistantGuidance:
     def test_injected_when_capture_tool_is_available(self):
@@ -136,6 +153,7 @@ class TestPersonalAssistantGuidance:
         assert "protectively defer" in stable
         assert "matching context" in stable
         assert "consequential unknowns" in stable
+        assert "call `personal_assistant_interview_start` only when that current-day state is missing or incomplete" in stable
         assert "next-move, session, or full-delivery" in stable
         assert "stopping evidence" in stable
         assert "Optional work" in stable
@@ -145,6 +163,11 @@ class TestPersonalAssistantGuidance:
         assert "explicitly approves" in stable
         assert "exact live FlowState read is authoritative" in stable
         assert "notes, memory, and past sessions as context only" in stable
+        assert "Named task facts are not durable-learning proposals" in stable
+        assert "estimatedDuration" in stable
+        assert "Never use `flowstate_resize_work_block` for a date-only occurrence" in stable
+        assert "invalid_existing_work_block" in stable
+        assert "one combined approval" in stable
         assert "personal_assistant_reconcile_inventory" in stable
         assert "source scope, capture time, stable item IDs" in stable
         assert "do not state or imply an exact combined count" in stable
@@ -153,8 +176,23 @@ class TestPersonalAssistantGuidance:
         assert "Never replace a failed or partial FlowState inventory" in stable
         assert "terminal code, ledger files, date-range brute force" in stable
         assert "personal_assistant_safety_review" in stable
+        assert "`reusePriorReview` to true" in stable
+        assert "reusedPriorReview=true" in stable
         assert "protected item" in stable
         assert "all-clear" in stable
+        assert "at most twice in one planning turn" in stable
+        assert "immediately emit the compact plan" in stable
+        assert "first planning result MUST be one compact task-table with exactly three ranked rows" in stable
+        assert "Do not build a day-timeline for the first result" in stable
+        assert "do not repeat calendar preflight" in stable
+        assert "Do not interview every task" in stable
+        assert "Never use `execute_code`, terminal, `read_file`" in stable
+        assert "call `flowstate_get_task` for at most three shortlisted tasks" in stable
+        assert "do not call `skill_view` or `skills_list`" in stable
+        assert "emit the independent read-only source calls together in the same response" in stable
+        assert "current-day energy, end boundary, hard commitments, and location or travel constraints" in stable
+        assert "stale or absent, consequential unknowns remain" in stable
+        assert "check Calendar before asking the first same-day grounding question" in stable
 
     def test_absent_without_personal_assistant_tools(self):
         stable = _stable_prompt(_make_agent(valid_tool_names=["flowstate_list_tasks"]))
@@ -167,6 +205,8 @@ class TestDesktopQuestionnaireGuidance:
         stable = _stable_prompt(_make_agent(platform="desktop"))
 
         assert "Hermes Desktop interactive questions" in stable
+        assert "MUST call the `clarify` tool" in stable
+        assert "Never ask the user a question in assistant prose" in stable
         assert '`type: "form"`' in stable
         assert "one question at a time" in stable
         assert "plain Markdown list" in stable
@@ -183,6 +223,8 @@ class TestDesktopQuestionnaireGuidance:
         assert "flowstate_subtask_batch" in stable
         assert "closest supported `hermes-ui` artifact" in stable
         assert "a `task-table` for a compact untimed daily plan" in stable
+        assert "one concise named choice action per task row" in stable
+        assert "two distinct top-level actions" in stable
         assert "`day-timeline` for a one-day plan with clock times" in stable
         assert "a `week-planner` for every weekly or multi-day plan" in stable
         assert "Never use `mini-kanban` as a calendar" in stable
@@ -200,6 +242,27 @@ class TestDesktopQuestionnaireGuidance:
         assert "Do not merely offer or promise" in stable
         assert '"columns" and "rows"' in stable
         assert 'each row needs an `id` and `title`' in stable
+
+    def test_task_table_contract_supports_semantic_inventory_columns(self):
+        stable = _stable_prompt(_make_agent(platform="desktop"))
+
+        assert "semantic `key` and visible `label`" in stable
+        assert "at most 12 columns and 100 rows" in stable
+        assert "string, number, boolean, or null" in stable
+        assert '"key": "source", "label": "Source"' in stable
+        assert '"key": "status", "label": "Status"' in stable
+        assert '"key": "due", "label": "Due"' in stable
+        assert '"cells": {"source": "FlowState", "status": "Open", "due": "2026-07-20"}' in stable
+        assert "reserved keys `id`, `title`, `actions`, `cells`" in stable
+        assert "`__proto__`, `prototype`, or `constructor`" in stable
+        assert 'Legacy shorthand such as `"columns": ["time", "task"]`' in stable
+
+    def test_task_table_contract_is_injected_for_telegram(self):
+        stable = _stable_prompt(_make_agent(platform="telegram"))
+
+        assert "semantic `key` and visible `label`" in stable
+        assert "at most 12 columns and 100 rows" in stable
+        assert '"cells": {"source": "FlowState", "status": "Open", "due": "2026-07-20"}' in stable
 
     def test_injected_for_desktop_env(self, monkeypatch):
         monkeypatch.setenv("HERMES_DESKTOP", "1")

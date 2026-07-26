@@ -22,9 +22,123 @@ export type ChatMessage = {
 }
 
 const HERMES_UI_FORM_RESPONSE_PREFIX = 'Hermes UI form response:\n'
+const PERSONAL_ASSISTANT_CONTINUATION_PREFIX = 'Continue personal-assistant interview '
+const SUGGESTION_DISCIPLINE_PREFIX = '# Suggestion discipline\n'
+const CONTEXT_COMPACTION_PREFIX = '[CONTEXT COMPACTION — REFERENCE ONLY]'
+const CONTEXT_SUMMARY_END_MARKER = '--- END OF CONTEXT SUMMARY'
+const PRIVATE_DESKTOP_CORRECTION_PREFIX = '[Private Desktop correction - do not quote or mention '
+
+const PRIVATE_PERSONAL_ASSISTANT_CORRECTION_PREFIX = '[Private Personal Assistant correction — do not quote or mention '
+
+const LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST =
+  "You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools."
+
+const INTERNAL_GATE_FINISH_REASONS = new Set(['desktop_clarify_gate_continue', 'personal_assistant_gate_continue'])
+
+function isInternalGateMessage(message: SessionMessage, displayContent: string): boolean {
+  return (
+    (message.role === 'assistant' && INTERNAL_GATE_FINISH_REASONS.has(message.finish_reason || '')) ||
+    (message.role === 'user' &&
+      (displayContent === LEGACY_ITERATION_LIMIT_SUMMARY_REQUEST ||
+        displayContent.startsWith(PRIVATE_DESKTOP_CORRECTION_PREFIX) ||
+        displayContent.startsWith(PRIVATE_PERSONAL_ASSISTANT_CORRECTION_PREFIX)))
+  )
+}
 
 function isHiddenHermesUiResponse(message: SessionMessage, displayContent: string): boolean {
-  return message.role === 'user' && displayContent.startsWith(HERMES_UI_FORM_RESPONSE_PREFIX)
+  return (
+    displayContent.includes(CONTEXT_SUMMARY_END_MARKER) ||
+    (message.role === 'user' &&
+      (displayContent.startsWith(HERMES_UI_FORM_RESPONSE_PREFIX) ||
+        displayContent.startsWith(PERSONAL_ASSISTANT_CONTINUATION_PREFIX) ||
+        displayContent.startsWith(SUGGESTION_DISCIPLINE_PREFIX) ||
+        displayContent.startsWith(CONTEXT_COMPACTION_PREFIX)))
+  )
+}
+
+function dailyGroundingQuestionSignature(message: ChatMessage): string | null {
+  if (message.role !== 'assistant') {
+    return null
+  }
+
+  const match = chatMessageText(message).match(/```hermes-ui\s*\n([\s\S]*?)\n```/)
+
+  if (!match) {
+    return null
+  }
+
+  try {
+    const artifact = JSON.parse(match[1]) as Record<string, unknown>
+    const task = artifact.task as Record<string, unknown> | undefined
+    const question = artifact.question as Record<string, unknown> | undefined
+
+    if (artifact.type !== 'task-profile-review' || task?.id !== 'day-context') {
+      return null
+    }
+
+    const interviewId = String(artifact.interviewId || '').trim()
+    const questionId = String(question?.id || '').trim()
+
+    return interviewId && questionId ? interviewId : null
+  } catch {
+    return null
+  }
+}
+
+function containsPlanningArtifact(message: ChatMessage): boolean {
+  if (message.role !== 'assistant') {
+    return false
+  }
+
+  const planningTypes = new Set(['day-timeline', 'week-planner', 'task-table', 'mini-kanban'])
+  const artifacts = chatMessageText(message).matchAll(/```hermes-ui\s*\n([\s\S]*?)\n```/g)
+
+  for (const match of artifacts) {
+    try {
+      const artifact = JSON.parse(match[1]) as Record<string, unknown>
+
+      if (planningTypes.has(String(artifact.type || ''))) {
+        return true
+      }
+    } catch {
+      // Ignore malformed artifacts; their renderer handles the visible error.
+    }
+  }
+
+  return false
+}
+
+export function collapseRepeatedDailyGroundingQuestions(messages: ChatMessage[]): ChatMessage[] {
+  const seen = new Set<string>()
+  let planningSeen = false
+
+  return messages
+    .map(message => ({ ...message }))
+    .reverse()
+    .map(message => {
+      if (containsPlanningArtifact(message)) {
+        planningSeen = true
+      }
+
+      const signature = dailyGroundingQuestionSignature(message)
+
+      if (!signature) {
+        return message
+      }
+
+      if (planningSeen) {
+        return { ...message, hidden: true }
+      }
+
+      if (seen.has(signature)) {
+        return { ...message, hidden: true }
+      }
+
+      seen.add(signature)
+
+      return message
+    })
+    .reverse()
 }
 
 export function isSessionBusyMessage(value: unknown): boolean {
@@ -61,6 +175,7 @@ export type GatewayEventPayload = {
   approval_mode?: string
   yolo?: boolean
   running?: boolean
+  compacting?: boolean
   cwd?: string
   branch?: string
   credential_warning?: string
@@ -787,6 +902,14 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
     const content = message.content || message.text || message.context || message.name
     const displayContent = displayContentForMessage(message.role, content)
+
+    if (isInternalGateMessage(message, displayContent)) {
+      flushPendingTools(index)
+      activeAssistantIndex = null
+
+      return
+    }
+
     const parts: ChatMessagePart[] = []
 
     const reasoning =
@@ -868,11 +991,13 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     message.role === 'assistant' ? { ...message, parts: dedupeGeneratedImageEchoesInParts(message.parts) } : message
   )
 
-  return withUniqueToolCallIds(
-    withoutGeneratedImageEchoes.filter(
-      m =>
-        !(m.role === 'assistant' && isSessionBusyMessage(m.error || chatMessageText(m))) &&
-        (chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text'))
+  return collapseRepeatedDailyGroundingQuestions(
+    withUniqueToolCallIds(
+      withoutGeneratedImageEchoes.filter(
+        m =>
+          !(m.role === 'assistant' && isSessionBusyMessage(m.error || chatMessageText(m))) &&
+          (chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text'))
+      )
     )
   )
 }

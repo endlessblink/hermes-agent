@@ -37,6 +37,25 @@ export interface LiveSessionStatusRow {
   status?: string
 }
 
+export function liveStatusReconcileMode(
+  gatewayState: string,
+  _busy: boolean
+): 'off' | 'once' | 'poll' {
+  if (gatewayState === 'closed' || gatewayState === 'error') {
+    return 'off'
+  }
+
+  return 'poll'
+}
+
+export function liveStatusReconcileSessionId(
+  runtimeSessionId: string | null | undefined,
+  storedSessionId: string | null | undefined,
+  routedSessionId?: string | null
+): string {
+  return runtimeSessionId?.trim() || storedSessionId?.trim() || routedSessionId?.trim() || ''
+}
+
 function normalizeSessionProfileKey(name: string | null | undefined): string {
   const value = (name ?? '').trim()
 

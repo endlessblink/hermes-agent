@@ -125,6 +125,23 @@ test('pooled backend startup failures clean up partial children', () => {
   assert.match(snippet, /throw error/)
 })
 
+test('pooled backends are never killed by a wall-clock idle timer', () => {
+  const source = readElectronFile('main.ts')
+
+  // A missed renderer lease during restart, reconnect, suspend, or scheduling
+  // delay cannot prove that a backend is idle. Socket/profile pruning and the
+  // bounded LRU path own cleanup without SIGTERMing an active turn.
+  assert.doesNotMatch(source, /POOL_IDLE_MS/)
+  assert.doesNotMatch(source, /startPoolIdleReaper/)
+  assert.doesNotMatch(source, /Reaping idle profile backend/)
+  assert.match(source, /evictLruPoolBackends/)
+  assert.match(source, /if \(ready && !entry\.intentionalStop\) \{\s*sendBackendExit\(\{ code, signal, profile, pooled: true \}\)/)
+
+  const stopIndex = source.indexOf('function stopPoolBackend(profile)')
+  assert.notEqual(stopIndex, -1, 'missing pooled backend teardown')
+  assert.match(source.slice(stopIndex, stopIndex + 300), /entry\.intentionalStop = true\s*stopBackendChild/)
+})
+
 test('intentional or interactive desktop child processes stay documented', () => {
   const source = readElectronFile('main.ts')
 

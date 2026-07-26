@@ -3,6 +3,7 @@
 import { type CSSProperties, type ReactNode, useId, useMemo, useState } from 'react'
 
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
+import { useComposerScope } from '@/app/chat/composer/scope'
 import {
   buildHermesUiFormResponse,
   HERMES_UI_TASK_BREAKDOWN_LIMITS,
@@ -22,6 +23,7 @@ import {
   type HermesUiTaskContextArtifact,
   type HermesUiTaskGraphArtifact,
   type HermesUiTaskPriority,
+  type HermesUiTaskProfileReviewArtifact,
   type HermesUiTaskTableArtifact,
   type HermesUiTaskTriageArtifact,
   type HermesUiTriageDecision,
@@ -35,6 +37,7 @@ import {
 } from '@/lib/hermes-ui-artifacts'
 import { readKey, writeKey } from '@/lib/storage'
 import { cn } from '@/lib/utils'
+import { continuePersonalAssistantInterview, respondToPersonalAssistantInterview } from '@/store/personal-assistant'
 
 import type { RichFenceProps } from './types'
 
@@ -83,6 +86,7 @@ function artifactDirection(
     | HermesUiPlanningFunnelArtifact
     | HermesUiQuestionnaireArtifact
     | HermesUiTaskContextArtifact
+    | HermesUiTaskProfileReviewArtifact
     | HermesUiTaskBreakdownArtifact
     | HermesUiTaskGraphArtifact
     | HermesUiTaskTableArtifact
@@ -135,6 +139,19 @@ function artifactDirection(
         ]
       : []
 
+  const taskProfileReviewText =
+    artifact.type === 'task-profile-review'
+      ? [
+          artifact.task.title,
+          artifact.question.label,
+          artifact.question.description,
+          ...artifact.profileFields.flatMap(field => [
+            field.label,
+            ...(Array.isArray(field.value) ? field.value : [field.value])
+          ])
+        ]
+      : []
+
   const taskBreakdownText =
     artifact.type === 'task-breakdown'
       ? [
@@ -146,7 +163,17 @@ function artifactDirection(
       : []
 
   const taskTableText =
-    artifact.type === 'task-table' ? artifact.rows.flatMap(row => [row.title, row.context, row.nextStep]) : []
+    artifact.type === 'task-table'
+      ? [
+          ...artifact.columns.flatMap(column => (typeof column === 'string' ? [column] : [column.key, column.label])),
+          ...artifact.rows.flatMap(row => [
+            row.title,
+            row.context,
+            row.nextStep,
+            ...Object.values(row.cells || {}).map(value => (value === null ? undefined : String(value)))
+          ])
+        ]
+      : []
 
   const kanbanText =
     artifact.type === 'mini-kanban'
@@ -201,6 +228,7 @@ function artifactDirection(
     ...planningSessionText,
     ...funnelText,
     ...taskContextText,
+    ...taskProfileReviewText,
     ...taskBreakdownText,
     ...taskTableText,
     ...kanbanText,
@@ -373,6 +401,7 @@ function customChoiceValue(field: HermesUiFormField, value: HermesUiFormValue | 
 }
 
 export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact }) {
+  const { target: composerTarget } = useComposerScope()
   const direction = artifactDirection(artifact)
   const storageKey = useMemo(() => `${stableArtifactStorageKey(artifact)}:draft`, [artifact])
   const [values, setValues] = useState<Record<string, HermesUiFormValue>>(() =>
@@ -425,7 +454,7 @@ export function FormArtifactCard({ artifact }: { artifact: HermesUiFormArtifact 
     requestComposerSubmit(`Hermes UI form response:\n${JSON.stringify(response)}`, {
       allowWhileBusy: true,
       hidden: true,
-      target: 'main'
+      target: composerTarget
     })
   }
 
@@ -627,6 +656,7 @@ export function ChecklistArtifactCard({
 }: {
   artifact: HermesUiChecklistArtifact | HermesUiQuestionnaireArtifact
 }) {
+  const { target: composerTarget } = useComposerScope()
   const reactId = useId()
   const itemIds = useMemo(() => artifact.items.map(item => item.id), [artifact.items])
   const itemIdSet = useMemo(() => new Set(itemIds), [itemIds])
@@ -649,7 +679,7 @@ export function ChecklistArtifactCard({
     action: NonNullable<HermesUiChecklistArtifact['items'][number]['actions']>[number]
   ) => {
     if (action.submitText) {
-      requestComposerSubmit(action.submitText, { target: 'main' })
+      requestComposerSubmit(action.submitText, { target: composerTarget })
       setHandledActionId(actionKey)
 
       return
@@ -1168,9 +1198,13 @@ export function FlowStatePlanningSessionCard({ artifact }: { artifact: HermesUiF
                   {category.examples.map(example => (
                     <div className="rounded border border-border/45 px-2 py-1 text-[0.68rem]" key={example.id}>
                       <div className="font-medium text-foreground wrap-anywhere">{example.title}</div>
-                      <div className="text-muted-foreground">
-                        {example.dueDate || unknownLabel(isRtl)} · {priorityText(example.priority, isRtl)}
-                      </div>
+                      {example.dueDate || example.priority ? (
+                        <div className="text-muted-foreground">
+                          {[example.dueDate, example.priority ? priorityText(example.priority, isRtl) : null]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -1213,6 +1247,7 @@ export function FlowStatePlanningSessionCard({ artifact }: { artifact: HermesUiF
 }
 
 export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowStateBatchArtifact }) {
+  const { target: composerTarget } = useComposerScope()
   const direction = artifactDirection(artifact)
   const isRtl = direction === 'rtl'
   const directionalStyle = { direction, textAlign: isRtl ? 'right' : 'left' } satisfies CSSProperties
@@ -1225,7 +1260,7 @@ export function FlowStateTaskBatchCard({ artifact }: { artifact: HermesUiFlowSta
   }
 
   const submitBatch = () => {
-    requestComposerSubmit(batchSubmitText(artifact, state, isRtl), { target: 'main' })
+    requestComposerSubmit(batchSubmitText(artifact, state, isRtl), { target: composerTarget })
     setSubmitted(true)
   }
 
@@ -1412,6 +1447,7 @@ function formatDurationMinutes(minutes: number, isRtl: boolean): string {
 }
 
 export function FlowStateNextBlockCard({ artifact }: { artifact: HermesUiFlowStateNextBlockArtifact }) {
+  const { target: composerTarget } = useComposerScope()
   const direction = artifactDirection(artifact)
   const isRtl = direction === 'rtl'
   const directionalStyle = { direction, textAlign: isRtl ? 'right' : 'left' } satisfies CSSProperties
@@ -1424,7 +1460,7 @@ export function FlowStateNextBlockCard({ artifact }: { artifact: HermesUiFlowSta
       return
     }
 
-    requestComposerSubmit(action.submitText, { target: 'main' })
+    requestComposerSubmit(action.submitText, { target: composerTarget })
     setSubmittedActionId(action.id)
   }
 
@@ -1660,6 +1696,7 @@ function ContextLineList({ emptyLabel, items }: { emptyLabel: string; items?: st
 }
 
 export function TaskContextCard({ artifact }: { artifact: HermesUiTaskContextArtifact }) {
+  const { target: composerTarget } = useComposerScope()
   const direction = artifactDirection(artifact)
   const isRtl = direction === 'rtl'
   const directionalStyle = { direction, textAlign: isRtl ? 'right' : 'left' } satisfies CSSProperties
@@ -1670,7 +1707,7 @@ export function TaskContextCard({ artifact }: { artifact: HermesUiTaskContextArt
       return
     }
 
-    requestComposerSubmit(action.submitText, { target: 'main' })
+    requestComposerSubmit(action.submitText, { target: composerTarget })
     setSubmittedActionId(action.id)
   }
 
@@ -1770,6 +1807,437 @@ export function TaskContextCard({ artifact }: { artifact: HermesUiTaskContextArt
   )
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(',')}]`
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+export function stableInterviewRequestId(input: {
+  expectedRevision: number
+  interviewId: string
+  questionId: string
+  response: unknown
+  taskId: string
+}) {
+  const serialized = stableJson(input)
+  const hashPart = (seed: number) => {
+    let hash = seed
+    for (let index = 0; index < serialized.length; index += 1) {
+      hash ^= serialized.charCodeAt(index)
+      hash = Math.imul(hash, 0x01000193)
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0')
+  }
+  return `desktop-interview-${[
+    hashPart(0x811c9dc5),
+    hashPart(0x9e3779b9),
+    hashPart(0x85ebca6b),
+    hashPart(0xc2b2ae35)
+  ].join('')}`
+}
+
+type InterviewConflict = {
+  code?: unknown
+  currentRevision?: unknown
+  latest?: {
+    interviewRevision?: unknown
+    requestReceipts?: unknown[]
+    revision?: unknown
+    tasks?: Array<{ profile?: Record<string, unknown>; taskId?: unknown }>
+  }
+}
+
+function interviewConflict(error: unknown): InterviewConflict {
+  const top = error && typeof error === 'object' ? (error as InterviewConflict & { data?: unknown }) : {}
+  const data = top.data && typeof top.data === 'object' ? (top.data as InterviewConflict) : {}
+  return {
+    code: data.code ?? top.code,
+    currentRevision: data.currentRevision ?? top.currentRevision,
+    latest: data.latest ?? top.latest
+  }
+}
+
+function savedAnswerMatches(
+  conflict: InterviewConflict,
+  artifact: HermesUiTaskProfileReviewArtifact,
+  response: {
+    action: 'answer' | 'back' | 'pause'
+    customAnswer?: string
+    fieldEdits?: Record<string, string | string[]>
+    selectedValues?: string[]
+  }
+): boolean {
+  if (response.action !== 'answer') {
+    return false
+  }
+  const savedProfile = conflict.latest?.tasks?.find(task => task.taskId === artifact.task.id)?.profile
+  if (!savedProfile) {
+    return false
+  }
+  if (
+    response.fieldEdits &&
+    !Object.entries(response.fieldEdits).every(([field, value]) => stableJson(savedProfile[field]) === stableJson(value))
+  ) {
+    return false
+  }
+  const profileFieldId = artifact.question.profileFieldId
+  if (!profileFieldId) {
+    return Boolean(response.fieldEdits && Object.keys(response.fieldEdits).length)
+  }
+  const expectedAnswer = response.customAnswer || response.selectedValues
+  const savedAnswer = savedProfile[profileFieldId]
+  return (
+    stableJson(savedAnswer) === stableJson(expectedAnswer) ||
+    (response.selectedValues?.length === 1 && savedAnswer === response.selectedValues[0])
+  )
+}
+
+export function TaskProfileReviewCard({ artifact }: { artifact: HermesUiTaskProfileReviewArtifact }) {
+  const [currentArtifact, setCurrentArtifact] = useState(artifact)
+
+  return (
+    <TaskProfileReviewCardStep
+      key={`${currentArtifact.interviewId}:${currentArtifact.revision}:${currentArtifact.question.id}`}
+      artifact={currentArtifact}
+      onNextArtifact={setCurrentArtifact}
+    />
+  )
+}
+
+function TaskProfileReviewCardStep({
+  artifact,
+  onNextArtifact
+}: {
+  artifact: HermesUiTaskProfileReviewArtifact
+  onNextArtifact: (artifact: HermesUiTaskProfileReviewArtifact) => void
+}) {
+  const { runtimeSessionId } = useComposerScope()
+  const { direction, directionalStyle, isRtl } = useArtifactDirection(artifact)
+  const [selectedValues, setSelectedValues] = useState<string[]>([])
+  const [customAnswer, setCustomAnswer] = useState('')
+  const [usingCustomAnswer, setUsingCustomAnswer] = useState(false)
+  const [fieldEdits, setFieldEdits] = useState<Record<string, string | string[]>>({})
+  const [editingProfile, setEditingProfile] = useState(false)
+  const [profileExpanded, setProfileExpanded] = useState(false)
+  const [expectedRevision, setExpectedRevision] = useState(artifact.revision)
+  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'stale' | 'error'>('idle')
+  const [pendingContinuation, setPendingContinuation] = useState<string | null>(null)
+  const question = artifact.question
+  const isDailyGrounding = artifact.task.id === 'day-context'
+  const visibleProfileFields =
+    editingProfile || profileExpanded ? artifact.profileFields : artifact.profileFields.slice(0, 6)
+  const remainingProfileFields = artifact.profileFields.length - visibleProfileFields.length
+
+  const toggleOption = (value: string) => {
+    if (isDailyGrounding && question.type === 'single-choice') {
+      setUsingCustomAnswer(false)
+      setCustomAnswer('')
+    }
+    setSelectedValues(current =>
+      question.type === 'single-choice'
+        ? [value]
+        : current.includes(value)
+          ? current.filter(item => item !== value)
+          : [...current, value]
+    )
+  }
+
+  const commit = async (action: 'answer' | 'back' | 'pause') => {
+    if (status === 'saving' || status === 'saved') {
+      return
+    }
+
+    if (action === 'answer' && question.required && selectedValues.length === 0 && !customAnswer.trim()) {
+      return
+    }
+
+    const response = {
+      action,
+      ...(action === 'answer' && selectedValues.length ? { selectedValues } : {}),
+      ...(action === 'answer' && customAnswer.trim() ? { customAnswer: customAnswer.trim() } : {}),
+      ...(action === 'answer' && Object.keys(fieldEdits).length ? { fieldEdits } : {})
+    }
+    setStatus('saving')
+    try {
+      const result = await respondToPersonalAssistantInterview({
+        expectedRevision,
+        interviewId: artifact.interviewId,
+        questionId: question.id,
+        requestId: stableInterviewRequestId({
+          expectedRevision,
+          interviewId: artifact.interviewId,
+          questionId: question.id,
+          response,
+          taskId: artifact.task.id
+        }),
+        response,
+        taskId: artifact.task.id
+      })
+
+      if (result.nextArtifact) {
+        onNextArtifact(result.nextArtifact)
+
+        return
+      }
+
+      const continuation =
+        `Continue personal-assistant interview ${artifact.interviewId} after committed ${action}; ` +
+        `receipt=${JSON.stringify(result.receipt)}.`
+      setStatus('saved')
+      try {
+        await continuePersonalAssistantInterview(continuation, runtimeSessionId)
+      } catch {
+        setPendingContinuation(continuation)
+      }
+    } catch (error) {
+      const conflict = interviewConflict(error)
+      if (conflict?.code === 'interview_version_conflict') {
+        const latestRevision =
+          typeof conflict.currentRevision === 'number'
+            ? conflict.currentRevision
+            : typeof conflict.latest?.interviewRevision === 'number'
+              ? conflict.latest.interviewRevision
+            : typeof conflict.latest?.revision === 'number'
+              ? conflict.latest.revision
+              : expectedRevision
+        setExpectedRevision(latestRevision)
+        if (savedAnswerMatches(conflict, artifact, response)) {
+          const receipt = conflict.latest?.requestReceipts?.at(-1) ?? { interviewRevision: latestRevision }
+          const continuation =
+            `Continue personal-assistant interview ${artifact.interviewId} after committed ${action}; ` +
+            `receipt=${JSON.stringify(receipt)}.`
+          setStatus('saved')
+          try {
+            await continuePersonalAssistantInterview(continuation, runtimeSessionId)
+          } catch {
+            setPendingContinuation(continuation)
+          }
+        } else {
+          setStatus('stale')
+        }
+      } else {
+        setStatus('error')
+      }
+    }
+  }
+
+  const labels = isRtl
+    ? {
+         confirm: 'אישור והמשך',
+         dailyConfirm: 'שמירה והמשך',
+        custom: question.customAnswerLabel || 'תשובה אחרת',
+        edit: 'עריכת פרופיל המשימה',
+        error: 'התשובה לא נשמרה. אפשר לנסות שוב.',
+        pause: 'השהיה',
+         revisit: 'חזרה למשימה קודמת',
+         savedToday: 'נשמר להיום',
+         continueSaved: 'להמשיך מהתשובה שנשמרה',
+        stale: 'הכרטיס התעדכן במקום אחר. הטיוטה שלך נשמרה; בדוק ואשר שוב.'
+      }
+    : {
+         confirm: 'Confirm and continue',
+         dailyConfirm: 'Save and continue',
+        custom: question.customAnswerLabel || 'Custom answer',
+        edit: 'Edit task profile',
+        error: 'Your answer was not saved. You can try again.',
+        pause: 'Pause',
+         revisit: 'Revisit an earlier task',
+         savedToday: 'Saved for today',
+         continueSaved: 'Continue from the saved answer',
+        stale: 'This card changed elsewhere. Your draft is preserved; review and confirm again.'
+      }
+
+  return (
+    <section
+      aria-label={artifact.title || artifact.task.title}
+      className={cn('my-3 overflow-hidden rounded-xl border border-border/80 bg-muted/25', isRtl && 'text-right')}
+      data-hermes-ui-artifact="task-profile-review"
+      dir={direction}
+      style={directionalStyle}
+    >
+      <header className="border-b border-border/65 px-3 py-2.5">
+        <div className={cn('flex items-center justify-between gap-3', isRtl && 'flex-row-reverse')}>
+          <div>
+            <h3 className="m-0 text-[0.8125rem] font-semibold">{artifact.task.title}</h3>
+            {artifact.description && (
+              <p className="mt-1 text-[0.72rem] text-muted-foreground">{artifact.description}</p>
+            )}
+          </div>
+          <span
+            className="shrink-0 rounded-md border border-border/70 px-2 py-1 text-[0.68rem] text-muted-foreground"
+            dir="ltr"
+          >
+            {artifact.progress.current} / {artifact.progress.total}
+          </span>
+        </div>
+      </header>
+
+      <div className="space-y-3 px-3 py-3">
+        {!isDailyGrounding && artifact.profileFields.length ? (
+          <div>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {visibleProfileFields.map(field => (
+                <div className="rounded-md border border-border/55 bg-background/35 px-2.5 py-2" key={field.id}>
+                  <div className="text-[0.66rem] font-medium text-muted-foreground">{field.label}</div>
+                  {editingProfile ? (
+                    <input
+                      aria-label={`${isRtl ? 'ערוך' : 'Edit'} ${field.label}`}
+                      className="mt-1 w-full rounded border border-border/70 bg-background px-2 py-1 text-[0.72rem]"
+                      onChange={event => setFieldEdits(current => ({ ...current, [field.id]: event.target.value }))}
+                      value={String(
+                        fieldEdits[field.id] ??
+                          (Array.isArray(field.value) ? field.value.join(', ') : field.value || '')
+                      )}
+                    />
+                  ) : (
+                    <div className="mt-1 text-[0.72rem]">
+                      {Array.isArray(field.value) ? field.value.join(', ') : field.value || '—'}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className={cn('mt-2 flex flex-wrap gap-3', isRtl && 'justify-end')}>
+              <button
+                className="text-[0.7rem] underline underline-offset-2"
+                onClick={() => setEditingProfile(value => !value)}
+                type="button"
+              >
+                {labels.edit}
+              </button>
+              {artifact.profileFields.length > 6 && !editingProfile ? (
+                <button
+                  aria-expanded={profileExpanded}
+                  className="text-[0.7rem] underline underline-offset-2"
+                  onClick={() => setProfileExpanded(value => !value)}
+                  type="button"
+                >
+                  {profileExpanded
+                    ? isRtl
+                      ? 'הצג פחות'
+                      : 'Show less'
+                    : isRtl
+                      ? `הצג עוד ${remainingProfileFields}`
+                      : `Show ${remainingProfileFields} more`}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        <fieldset>
+          <legend className="text-[0.78rem] font-semibold">{question.label}</legend>
+          {question.description && <p className="mt-1 text-[0.7rem] text-muted-foreground">{question.description}</p>}
+          {question.options?.length ? (
+            <div className="mt-2 grid gap-1.5">
+              {question.options.map(option => (
+                <label
+                  className="flex cursor-pointer items-center gap-2 rounded-md border border-border/60 px-2.5 py-2 text-[0.72rem]"
+                  key={option.value}
+                >
+                  <input
+                    checked={selectedValues.includes(option.value)}
+                    name={question.id}
+                    onChange={() => toggleOption(option.value)}
+                    type={question.type === 'single-choice' ? 'radio' : 'checkbox'}
+                  />
+                  {option.label}
+                </label>
+              ))}
+              {isDailyGrounding && question.allowCustomAnswer ? (
+                <label className="flex cursor-pointer items-center gap-2 rounded-md border border-border/60 px-2.5 py-2 text-[0.72rem]">
+                  <input
+                    checked={usingCustomAnswer}
+                    name={question.id}
+                    onChange={() => {
+                      setSelectedValues([])
+                      setUsingCustomAnswer(true)
+                    }}
+                    type="radio"
+                  />
+                  {labels.custom}
+                </label>
+              ) : null}
+            </div>
+          ) : null}
+          {((question.allowCustomAnswer && (!isDailyGrounding || usingCustomAnswer)) ||
+            question.type === 'short-text' ||
+            question.type === 'long-text') && (
+            <textarea
+              aria-label={labels.custom}
+              className={cn(
+                'mt-2 w-full rounded-md border border-border/70 bg-background px-2 py-1.5 text-[0.72rem]',
+                isDailyGrounding ? 'min-h-10' : 'min-h-16'
+              )}
+              onChange={event => setCustomAnswer(event.target.value)}
+              value={customAnswer}
+            />
+          )}
+        </fieldset>
+
+        {status === 'stale' && <p className="text-[0.7rem] text-amber-600">{labels.stale}</p>}
+        {status === 'error' && <p className="text-[0.7rem] text-destructive">{labels.error}</p>}
+        {isDailyGrounding && status === 'saved' && (
+          <p aria-live="polite" className="text-[0.72rem] font-medium text-emerald-600">
+            {labels.savedToday}
+          </p>
+        )}
+        {pendingContinuation && (
+          <button
+            className="rounded-md border border-border/80 px-2 py-1 text-[0.72rem] font-medium"
+            onClick={() => {
+              void (async () => {
+                try {
+                  await continuePersonalAssistantInterview(pendingContinuation, runtimeSessionId)
+                  setPendingContinuation(null)
+                } catch {
+                  // The answer is already durable; keep the bounded recovery action available.
+                }
+              })()
+            }}
+            type="button"
+          >
+            {labels.continueSaved}
+          </button>
+        )}
+      </div>
+
+      <footer className={cn('flex flex-wrap gap-2 border-t border-border/65 px-3 py-2.5', isRtl && 'justify-end')}>
+        {!isDailyGrounding && (
+          <>
+            <button onClick={() => void commit('pause')} type="button">
+              {labels.pause}
+            </button>
+            <button onClick={() => void commit('back')} type="button">
+              {labels.revisit}
+            </button>
+          </>
+        )}
+        <button
+          className="rounded-md bg-foreground px-2.5 py-1 text-[0.72rem] font-medium text-background disabled:opacity-45"
+          disabled={
+            status === 'saving' ||
+            status === 'saved' ||
+            (question.required && selectedValues.length === 0 && !customAnswer.trim())
+          }
+          onClick={() => void commit('answer')}
+          type="button"
+        >
+          {isDailyGrounding ? labels.dailyConfirm : labels.confirm}
+        </button>
+      </footer>
+    </section>
+  )
+}
+
 const BREAKDOWN_SCOPE_LABELS: Record<HermesUiTaskBreakdownArtifact['scope'], { ltr: string; rtl: string }> = {
   'full-delivery': { ltr: 'Full delivery', rtl: 'מסירה מלאה' },
   'next-move': { ltr: 'Next move', rtl: 'הצעד הבא' },
@@ -1798,6 +2266,7 @@ function readTaskBreakdownDraft(
 }
 
 export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdownArtifact }) {
+  const { target: composerTarget } = useComposerScope()
   const direction = artifactDirection(artifact)
   const isRtl = direction === 'rtl'
   const directionalStyle = { direction, textAlign: isRtl ? 'right' : 'left' } satisfies CSSProperties
@@ -1890,7 +2359,7 @@ export function TaskBreakdownCard({ artifact }: { artifact: HermesUiTaskBreakdow
       .filter(Boolean)
       .join('\n')
 
-    requestComposerSubmit(response, { target: 'main' })
+    requestComposerSubmit(response, { target: composerTarget })
     setSubmitted(true)
   }
 
@@ -2130,6 +2599,7 @@ function PlanningActionButtons({
   actions?: { id: string; label: string; submitText?: string }[]
   isRtl: boolean
 }) {
+  const { target: composerTarget } = useComposerScope()
   const [submittedActionId, setSubmittedActionId] = useState<string | null>(null)
 
   if (!actions?.length) {
@@ -2144,7 +2614,7 @@ function PlanningActionButtons({
           key={action.id}
           onClick={() => {
             if (action.submitText) {
-              requestComposerSubmit(action.submitText, { target: 'main' })
+              requestComposerSubmit(action.submitText, { target: composerTarget })
               setSubmittedActionId(action.id)
             }
           }}
@@ -2157,13 +2627,13 @@ function PlanningActionButtons({
   )
 }
 
-function unknownLabel(isRtl: boolean) {
-  return isRtl ? 'לא ידוע' : 'Unknown'
+function isKnownValue(value: unknown): value is string | number | boolean {
+  return value !== undefined && value !== null && value !== '' && value !== 'unknown'
 }
 
 function valueLabel(value: string | number | boolean | null | undefined, isRtl: boolean): string {
-  if (value === undefined || value === null || value === 'unknown') {
-    return unknownLabel(isRtl)
+  if (!isKnownValue(value)) {
+    return ''
   }
 
   if (typeof value === 'boolean') {
@@ -2174,86 +2644,164 @@ function valueLabel(value: string | number | boolean | null | undefined, isRtl: 
 }
 
 function priorityText(priority: HermesUiTaskPriority | undefined, isRtl: boolean): string {
-  return priority ? formatPriority(priority, isRtl) : unknownLabel(isRtl)
+  return priority ? formatPriority(priority, isRtl) : ''
+}
+
+function taskTableColumnKey(column: HermesUiTaskTableArtifact['columns'][number]): string {
+  return typeof column === 'string' ? column : column.key
 }
 
 function columnLabel(column: HermesUiTaskTableArtifact['columns'][number], isRtl: boolean): string {
-  const labels: Record<typeof column, { ltr: string; rtl: string }> = {
+  if (typeof column !== 'string' && column.label) {
+    return column.label
+  }
+
+  const key = taskTableColumnKey(column)
+
+  const labels: Record<string, { ltr: string; rtl: string }> = {
     confidence: { ltr: 'Confidence', rtl: 'ביטחון' },
     context: { ltr: 'Context', rtl: 'הקשר' },
+    due: { ltr: 'Due', rtl: 'מועד' },
     energy: { ltr: 'Energy', rtl: 'אנרגיה' },
     externality: { ltr: 'Externality', rtl: 'חיצוני' },
     nextStep: { ltr: 'Next step', rtl: 'צעד הבא' },
+    source: { ltr: 'Source', rtl: 'מקור' },
+    status: { ltr: 'Status', rtl: 'מצב' },
     task: { ltr: 'Task', rtl: 'משימה' },
     time: { ltr: 'Time', rtl: 'שעה' },
     timeSize: { ltr: 'Size', rtl: 'גודל' },
     urgency: { ltr: 'Urgency', rtl: 'דחיפות' }
   }
 
-  return labels[column][isRtl ? 'rtl' : 'ltr']
+  if (labels[key]) {
+    return labels[key][isRtl ? 'rtl' : 'ltr']
+  }
+
+  const readable = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ')
+
+  return isRtl ? readable : readable.replace(/^./, first => first.toUpperCase())
 }
 
 export function TaskTableCard({ artifact }: { artifact: HermesUiTaskTableArtifact }) {
   const { directionalStyle, isRtl } = useArtifactDirection(artifact)
+  const [expanded, setExpanded] = useState(false)
+  const detailColumns = artifact.columns.filter(column => taskTableColumnKey(column) !== 'task')
+  const visibleRows = expanded ? artifact.rows : artifact.rows.slice(0, 8)
+  const remainingRows = artifact.rows.length - visibleRows.length
+  const itemCountLabel = isRtl ? `${artifact.rows.length} משימות` : `${artifact.rows.length} tasks`
+  const columnKeys = new Set(artifact.columns.map(taskTableColumnKey))
 
-  const cellValue = (
-    row: HermesUiTaskTableArtifact['rows'][number],
-    column: HermesUiTaskTableArtifact['columns'][number]
-  ) => {
-    if (column === 'task') {
-      return (
-        <span>
-          <span className="block font-semibold text-foreground">{row.title}</span>
-          <span className="block text-muted-foreground">
-            {row.dueDate || unknownLabel(isRtl)} · {priorityText(row.priority, isRtl)}
-          </span>
-        </span>
-      )
+  const cellValue = (row: HermesUiTaskTableArtifact['rows'][number], key: string) => {
+    const rowValue = (row as unknown as Record<string, unknown>)[key]
+
+    return Object.hasOwn(row.cells || {}, key) ? row.cells?.[key] : rowValue
+  }
+
+  const taskMetadata = (row: HermesUiTaskTableArtifact['rows'][number]) => {
+    const metadata = []
+
+    if (row.dueDate && !columnKeys.has('due') && !columnKeys.has('dueDate')) {
+      metadata.push(row.dueDate)
     }
 
-    // Clock slots render LTR even in RTL plans — "18:30-19:15" must not be
-    // bidi-scrambled (the unreadable-times report, 2026-07-19).
-    if (column === 'time') {
-      return (
-        <span className="font-mono tabular-nums whitespace-nowrap" dir="ltr">
-          {row.time || valueLabel(undefined, isRtl)}
-        </span>
-      )
+    if (row.priority && !columnKeys.has('priority')) {
+      metadata.push(priorityText(row.priority, isRtl))
     }
 
-    return valueLabel(row[column], isRtl)
+    return metadata
+  }
+
+  const displayValue = (value: unknown) => {
+    if (!isKnownValue(value)) {
+      return null
+    }
+
+    if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return valueLabel(value, isRtl)
+    }
+
+    return null
   }
 
   return (
     <ArtifactShell artifact={artifact} label={isRtl ? 'טבלת משימות' : 'Task table'}>
-      <div className="overflow-x-auto px-3 py-3">
-        <table className="w-full min-w-[34rem] border-collapse text-[0.74rem]" style={directionalStyle}>
-          <thead>
-            <tr className="border-b border-border/65 text-muted-foreground">
-              {artifact.columns.map(column => (
-                <th className="px-2 py-1.5 text-start font-medium" key={column}>
-                  {columnLabel(column, isRtl)}
-                </th>
-              ))}
-              <th className="px-2 py-1.5 text-start font-medium">{isRtl ? 'פעולה' : 'Action'}</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border/45">
-            {artifact.rows.map(row => (
-              <tr key={row.id}>
-                {artifact.columns.map(column => (
-                  <td className="max-w-[14rem] px-2 py-2 align-top leading-relaxed wrap-anywhere" key={column}>
-                    {cellValue(row, column)}
-                  </td>
-                ))}
-                <td className="px-2 py-2 align-top">
-                  <PlanningActionButtons actions={row.actions} isRtl={isRtl} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="border-b border-border/45 px-3 py-2 text-[0.72rem] font-medium text-muted-foreground">
+        {itemCountLabel}
       </div>
+      {artifact.actions?.length ? (
+        <div className="border-b border-border/45 px-3 pb-2">
+          <PlanningActionButtons actions={artifact.actions} isRtl={isRtl} />
+        </div>
+      ) : null}
+      <div
+        aria-label={`${artifact.title || (isRtl ? 'רשימת משימות' : 'Task list')} · ${itemCountLabel}`}
+        className={cn(expanded && 'max-h-[32rem] overflow-y-auto')}
+        role="region"
+        tabIndex={expanded ? 0 : undefined}
+      >
+        <ol aria-label={artifact.title || itemCountLabel} className="m-0 list-none divide-y divide-border/45 p-0">
+          {visibleRows.map(row => {
+            const metadata = taskMetadata(row)
+
+            const fields = detailColumns.flatMap(column => {
+              const key = taskTableColumnKey(column)
+              const value = displayValue(cellValue(row, key))
+
+              return value === null ? [] : [{ column, key, value }]
+            })
+
+            return (
+              <li className="px-3 py-3" key={row.id}>
+                <div className="text-[0.82rem] leading-snug font-semibold text-foreground wrap-anywhere">
+                  {row.title}
+                </div>
+                {metadata.length ? (
+                  <div className="mt-1 text-[0.7rem] text-muted-foreground">{metadata.join(' · ')}</div>
+                ) : null}
+                {fields.length ? (
+                  <dl className="mt-2 grid grid-cols-[repeat(auto-fit,minmax(8.5rem,1fr))] gap-x-4 gap-y-2">
+                    {fields.map(({ column, key, value }) => (
+                      <div className="min-w-0" key={key}>
+                        <dt className="text-[0.67rem] leading-none font-medium text-muted-foreground">
+                          {columnLabel(column, isRtl)}
+                        </dt>
+                        <dd
+                          className={cn(
+                            'm-0 mt-1 text-[0.76rem] leading-relaxed text-foreground wrap-anywhere',
+                            key === 'time' && 'font-mono tabular-nums whitespace-nowrap'
+                          )}
+                          dir={key === 'time' ? 'ltr' : undefined}
+                        >
+                          {value}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
+                <PlanningActionButtons actions={row.actions} isRtl={isRtl} />
+              </li>
+            )
+          })}
+        </ol>
+      </div>
+      {artifact.rows.length > 8 ? (
+        <div className={cn('flex border-t border-border/45 px-3 py-2', isRtl && 'justify-end')}>
+          <button
+            aria-expanded={expanded}
+            className="rounded-md px-2 py-1 text-[0.74rem] font-medium text-foreground hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            onClick={() => setExpanded(current => !current)}
+            type="button"
+          >
+            {expanded
+              ? isRtl
+                ? 'הצג פחות'
+                : 'Show less'
+              : isRtl
+                ? `הצג עוד ${remainingRows}`
+                : `Show ${remainingRows} more`}
+          </button>
+        </div>
+      ) : null}
     </ArtifactShell>
   )
 }
@@ -2279,10 +2827,17 @@ export function MiniKanbanCard({ artifact }: { artifact: HermesUiMiniKanbanArtif
                     <div className="text-[0.76rem] font-medium leading-relaxed text-foreground wrap-anywhere">
                       {task.title}
                     </div>
-                    <div className="mt-0.5 text-[0.68rem] text-muted-foreground">
-                      {task.dueDate || unknownLabel(isRtl)} · {priorityText(task.priority, isRtl)} ·{' '}
-                      {valueLabel(task.confidence, isRtl)}
-                    </div>
+                    {task.dueDate || task.priority || task.confidence ? (
+                      <div className="mt-0.5 text-[0.68rem] text-muted-foreground">
+                        {[
+                          task.dueDate,
+                          task.priority ? priorityText(task.priority, isRtl) : null,
+                          task.confidence ? valueLabel(task.confidence, isRtl) : null
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    ) : null}
                     {task.note && (
                       <div className="mt-1 text-[0.7rem] leading-relaxed text-muted-foreground wrap-anywhere">
                         {task.note}
@@ -2311,6 +2866,7 @@ export function MiniKanbanCard({ artifact }: { artifact: HermesUiMiniKanbanArtif
 
 export function DayTimelineCard({ artifact }: { artifact: HermesUiDayTimelineArtifact }) {
   const { direction, directionalStyle, isRtl } = useArtifactDirection(artifact)
+  const [expandedBlockId, setExpandedBlockId] = useState<string | null>(null)
 
   return (
     <ArtifactShell artifact={artifact} label={isRtl ? 'ציר יום' : 'Day timeline'}>
@@ -2327,31 +2883,59 @@ export function DayTimelineCard({ artifact }: { artifact: HermesUiDayTimelineArt
           </div>
         )}
         <div className="divide-y divide-border/45 rounded-md border border-border/55 bg-background/25">
-          {artifact.blocks.map(block => (
-            <div className={cn('flex gap-2 px-2.5 py-2', isRtl && 'flex-row-reverse')} key={block.id}>
-              <div className="w-16 shrink-0 text-[0.68rem] text-muted-foreground tabular-nums">
+          {artifact.blocks.map(block => {
+            const expandable = Boolean(block.doneEnough || block.actions?.length)
+            const expanded = expandedBlockId === block.id
+            const clock = (
+              <span className="w-16 shrink-0 text-[0.68rem] text-muted-foreground tabular-nums">
                 {block.startTime || (isRtl ? 'צף' : 'Float')}
                 {block.endTime ? `-${block.endTime}` : ''}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-[0.78rem] font-semibold text-foreground wrap-anywhere">{block.label}</span>
-                  <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
-                    {valueLabel(block.kind, isRtl)}
-                  </span>
-                  <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
-                    {valueLabel(block.status, isRtl)}
-                  </span>
-                </div>
-                {block.doneEnough && (
-                  <div className="mt-1 text-[0.7rem] text-muted-foreground wrap-anywhere">{block.doneEnough}</div>
+              </span>
+            )
+            const label = <span className="min-w-0 flex-1 text-[0.78rem] font-semibold wrap-anywhere">{block.label}</span>
+
+            return (
+              <div className="px-2.5 py-2" key={block.id}>
+                {expandable ? (
+                  <button
+                    aria-expanded={expanded}
+                    className={cn(
+                      'flex w-full items-start gap-2 text-start text-foreground hover:text-foreground/75',
+                      isRtl && 'flex-row-reverse text-right'
+                    )}
+                    onClick={() => setExpandedBlockId(current => (current === block.id ? null : block.id))}
+                    type="button"
+                  >
+                    {clock}
+                    {label}
+                    <span aria-hidden="true" className="shrink-0 text-[0.72rem] text-muted-foreground">
+                      {expanded ? '−' : '+'}
+                    </span>
+                  </button>
+                ) : (
+                  <div className={cn('flex items-start gap-2 text-foreground', isRtl && 'flex-row-reverse text-right')}>
+                    {clock}
+                    {label}
+                  </div>
                 )}
-                <PlanningActionButtons actions={block.actions} isRtl={isRtl} />
+                {expanded ? (
+                  <div className={cn('mt-1 ps-[4.5rem]', isRtl && 'pe-[4.5rem] ps-0')}>
+                    {block.doneEnough ? (
+                      <div className="text-[0.7rem] text-muted-foreground wrap-anywhere">{block.doneEnough}</div>
+                    ) : null}
+                    <PlanningActionButtons actions={block.actions} isRtl={isRtl} />
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </div>
+      {artifact.actions?.length ? (
+        <div className="border-t border-border/50 px-3 pb-3 pt-1" dir={direction} style={directionalStyle}>
+          <PlanningActionButtons actions={artifact.actions} isRtl={isRtl} />
+        </div>
+      ) : null}
     </ArtifactShell>
   )
 }
@@ -2428,11 +3012,11 @@ export function WeekPlannerCard({ artifact }: { artifact: HermesUiWeekPlannerArt
                             <div className="text-[0.76rem] leading-snug font-semibold text-foreground wrap-anywhere">
                               {block.label}
                             </div>
-                            {(block.kind || block.status || block.confidence) && (
+                            {[block.kind, block.status, block.confidence].some(isKnownValue) && (
                               <div className="mt-0.5 flex flex-wrap gap-x-2 text-[0.62rem] text-muted-foreground">
-                                {block.kind && <span>{valueLabel(block.kind, isRtl)}</span>}
-                                {block.status && <span>{valueLabel(block.status, isRtl)}</span>}
-                                {block.confidence && <span>{valueLabel(block.confidence, isRtl)}</span>}
+                                {[block.kind, block.status, block.confidence].filter(isKnownValue).map(value => (
+                                  <span key={String(value)}>{valueLabel(value, isRtl)}</span>
+                                ))}
                               </div>
                             )}
                             {block.note && (
@@ -2488,9 +3072,11 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
               <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
                 {change.operation}
               </span>
-              <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
-                {isRtl ? 'סיכון' : 'Risk'}: {valueLabel(change.risk, isRtl)}
-              </span>
+              {isKnownValue(change.risk) ? (
+                <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[0.62rem] text-muted-foreground">
+                  {isRtl ? 'סיכון' : 'Risk'}: {valueLabel(change.risk, isRtl)}
+                </span>
+              ) : null}
             </div>
             <div className="mt-2 grid gap-2 sm:grid-cols-2">
               {[
@@ -2501,15 +3087,15 @@ export function MutationPreviewCard({ artifact }: { artifact: HermesUiMutationPr
                   <div className="text-[0.66rem] font-medium text-muted-foreground">{String(label)}</div>
                   <div className="mt-1 space-y-0.5 text-[0.7rem]">
                     {record && Object.keys(record).length ? (
-                      Object.entries(record).map(([key, value]) => (
+                      Object.entries(record)
+                        .filter(([, value]) => isKnownValue(value))
+                        .map(([key, value]) => (
                         <div className="flex justify-between gap-2" key={key}>
                           <span className="text-muted-foreground">{key}</span>
                           <span className="text-foreground tabular-nums">{valueLabel(value, isRtl)}</span>
                         </div>
-                      ))
-                    ) : (
-                      <span className="text-muted-foreground">{unknownLabel(isRtl)}</span>
-                    )}
+                        ))
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -2549,13 +3135,13 @@ export function UrgencyEnergyMatrixCard({ artifact }: { artifact: HermesUiUrgenc
                       cell.tasks.map(task => (
                         <div className="rounded border border-border/45 px-1.5 py-1 text-[0.68rem]" key={task.id}>
                           <div className="font-medium text-foreground wrap-anywhere">{task.title}</div>
-                          <div className="text-muted-foreground">{priorityText(task.priority, isRtl)}</div>
+                          {task.priority ? (
+                            <div className="text-muted-foreground">{priorityText(task.priority, isRtl)}</div>
+                          ) : null}
                           <PlanningActionButtons actions={task.actions} isRtl={isRtl} />
                         </div>
                       ))
-                    ) : (
-                      <span className="text-[0.66rem] text-muted-foreground">{unknownLabel(isRtl)}</span>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               )
@@ -2675,6 +3261,10 @@ export default function HermesUiArtifactRenderer({ code }: RichFenceProps) {
 
   if (result.artifact.type === 'task-context') {
     return <TaskContextCard artifact={result.artifact} />
+  }
+
+  if (result.artifact.type === 'task-profile-review') {
+    return <TaskProfileReviewCard artifact={result.artifact} />
   }
 
   if (result.artifact.type === 'task-breakdown') {

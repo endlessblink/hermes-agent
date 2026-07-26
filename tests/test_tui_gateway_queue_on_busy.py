@@ -9,8 +9,11 @@ policy: interrupt the live turn (default) and queue the message to run as the
 next turn, drained in ``run``'s tail.
 """
 
+import contextlib
 import threading
 import types
+
+import pytest
 
 from tui_gateway import server
 
@@ -27,6 +30,20 @@ def _session(agent=None, **extra):
         "attached_images": [],
         **extra,
     }
+
+
+@pytest.fixture(autouse=True)
+def _durable_queue_db(monkeypatch):
+    class _Db:
+        def __init__(self):
+            self.updates = []
+
+        def patch_working_state(self, session_id, patch, *, source=""):
+            self.updates.append((session_id, patch, source))
+
+    db = _Db()
+    monkeypatch.setattr(server, "_session_db", lambda _session: contextlib.nullcontext(db))
+    return db
 
 
 # ── _enqueue_prompt ────────────────────────────────────────────────────────
@@ -85,6 +102,36 @@ def test_busy_typed_reply_resolves_pending_clarify_instead_of_waiting_in_queue()
             server._pending.pop("clarify-1", None)
             server._pending_prompt_payloads.pop("clarify-1", None)
             server._answers.pop("clarify-1", None)
+
+
+def test_new_personal_assistant_request_replaces_stale_clarify_instead_of_answering_it():
+    event = threading.Event()
+    session = _session(personal_assistant=True, running=True)
+    with server._prompt_lock:
+        server._pending["clarify-stale"] = ("sid", event)
+        server._pending_prompt_payloads["clarify-stale"] = (
+            "clarify.request",
+            {"question": "עזרה לגבי מה בדיוק?"},
+        )
+    try:
+        response = server._handle_busy_submit(
+            "r1",
+            "sid",
+            session,
+            "תכנן לי מחדש את שאר היום לפי כל המשימות וכל היומנים.",
+            "ws-1",
+        )
+
+        assert response["result"]["status"] == "queued_after_stale_clarify"
+        assert event.is_set()
+        assert session["queued_prompt"]["text"].startswith("תכנן לי מחדש")
+        with server._prompt_lock:
+            assert server._answers["clarify-stale"] == ""
+    finally:
+        with server._prompt_lock:
+            server._pending.pop("clarify-stale", None)
+            server._pending_prompt_payloads.pop("clarify-stale", None)
+            server._answers.pop("clarify-stale", None)
 
 
 def test_desktop_reconnect_reply_resolves_lost_clarify_without_parallel_turn():
@@ -156,7 +203,7 @@ def test_drain_fires_queued_prompt_and_claims_running(monkeypatch):
     fired = {}
     monkeypatch.setattr(
         server, "_run_prompt_submit",
-        lambda rid, sid, session, text: fired.update(rid=rid, sid=sid, text=text),
+        lambda rid, sid, session, text, **_kwargs: fired.update(rid=rid, sid=sid, text=text),
     )
     session = _session(queued_prompt={"text": "go", "transport": "ws-9"})
 

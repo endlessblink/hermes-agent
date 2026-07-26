@@ -639,12 +639,133 @@ class ToolRegistry:
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
         try:
+            from hermes_cli.profiles import get_active_profile_name
+            active_profile = get_active_profile_name()
+        except Exception:
+            active_profile = None
+        from agent.personal_assistant_calendar_gate import (
+            calendar_first_planning_turn_active,
+            calendar_preflight_gate,
+            complete_inventory_repeat_gate,
+            complete_calendar_first_planning_turn,
+            record_calendar_first_candidate_inventory,
+            record_calendar_first_task_detail,
+            record_calendar_first_task_inventory,
+        )
+        personal_assistant_contract = (
+            active_profile == "office-work" or calendar_first_planning_turn_active()
+        )
+        state: dict = {}
+        if personal_assistant_contract:
+            from agent.personal_assistant_state import PersonalAssistantStateStore
+            from hermes_constants import get_hermes_home
+
+            try:
+                state = PersonalAssistantStateStore(Path(get_hermes_home())).read()
+                receipt = state.get("calendar_preflight_receipt")
+            except Exception:
+                receipt = None
+            calendar_block = calendar_preflight_gate(name, receipt, tool_args=args)
+            if calendar_block is not None:
+                return json.dumps(calendar_block, ensure_ascii=False)
+            inventory_repeat_block = complete_inventory_repeat_gate(name)
+            if inventory_repeat_block is not None:
+                return json.dumps(inventory_repeat_block, ensure_ascii=False)
+        try:
             if entry.is_async:
                 from model_tools import _run_async
                 result = _run_async(entry.handler(args, **kwargs))
             else:
                 result = entry.handler(args, **kwargs)
-            return self._normalize_handler_result(name, result)
+            normalized_result = self._normalize_handler_result(name, result)
+            if personal_assistant_contract and name == "personal_assistant_calendar_preflight":
+                try:
+                    payload = (
+                        json.loads(normalized_result)
+                        if isinstance(normalized_result, str)
+                        else normalized_result
+                    )
+                    receipt = (payload.get("result") or {}).get("receipt")
+                    complete_calendar_first_planning_turn(
+                        complete=bool(isinstance(receipt, dict) and receipt.get("complete") is True)
+                    )
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    complete_calendar_first_planning_turn(complete=False)
+            if personal_assistant_contract and name == "flowstate_list_tasks":
+                try:
+                    payload = (
+                        json.loads(normalized_result)
+                        if isinstance(normalized_result, str)
+                        else normalized_result
+                    )
+                    result_payload = (
+                        payload.get("result")
+                        if isinstance(payload, dict) and isinstance(payload.get("result"), dict)
+                        else payload
+                    )
+                    record_calendar_first_task_inventory(result_payload)
+                    record_calendar_first_candidate_inventory("flowstate", result_payload)
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            if personal_assistant_contract and name == "notion_data_source_list":
+                try:
+                    payload = (
+                        json.loads(normalized_result)
+                        if isinstance(normalized_result, str)
+                        else normalized_result
+                    )
+                    result_payload = (
+                        payload.get("result")
+                        if isinstance(payload, dict) and isinstance(payload.get("result"), dict)
+                        else payload
+                    )
+                    source_id = ""
+                    source_manifest = state.get("task_source_manifest")
+                    if isinstance(source_manifest, list):
+                        for source in source_manifest:
+                            if (
+                                isinstance(source, dict)
+                                and source.get("available") is not False
+                                and str(source.get("inventoryTool") or "").strip() == name
+                            ):
+                                source_id = str(source.get("id") or "").strip()
+                                if source_id:
+                                    break
+                    if not source_id:
+                        for candidate in (
+                            args.get("sourceId"),
+                            args.get("source_id"),
+                            args.get("taskSourceId"),
+                            args.get("inventorySourceId"),
+                            args.get("dataSourceId"),
+                            args.get("databaseId"),
+                            result_payload.get("sourceId"),
+                            result_payload.get("source_id"),
+                            result_payload.get("taskSourceId"),
+                            result_payload.get("inventorySourceId"),
+                            result_payload.get("dataSourceId"),
+                            result_payload.get("databaseId"),
+                        ):
+                            source_id = str(candidate or "").strip()
+                            if source_id:
+                                break
+                    record_calendar_first_candidate_inventory(
+                        source_id or "notion",
+                        result_payload,
+                    )
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            if personal_assistant_contract and name == "flowstate_get_task":
+                try:
+                    payload = (
+                        json.loads(normalized_result)
+                        if isinstance(normalized_result, str)
+                        else normalized_result
+                    )
+                    record_calendar_first_task_detail((payload.get("result") or {}))
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            return normalized_result
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
             # Route through the sanitizer so framing tokens / CDATA / fences

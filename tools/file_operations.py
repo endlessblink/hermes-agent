@@ -400,6 +400,29 @@ def _split_tool_diagnostics(output: str) -> tuple[str, str]:
 # match because the path token forbids whitespace and a leading tool prefix
 # like "rg" is followed by ": " (space) which the negated class rejects.
 _SEARCH_OUTPUT_RE = re.compile(r'^([A-Za-z]:)?[^\s:][^\n]*?[:\-]\d|^[^\s:][^\s]*$')
+_SEARCH_PERMISSION_DIAGNOSTIC_RE = re.compile(
+    r"^(?:rg|grep): (?P<path>.+?): (?:Permission denied|Operation not permitted)(?: .*)?$"
+)
+
+
+def _only_nested_permission_diagnostics(diagnostics: str, search_path: str) -> bool:
+    """Whether rg/grep failed only because descendants were unreadable."""
+    lines = [line.strip() for line in diagnostics.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    root = os.path.abspath(search_path)
+    for line in lines:
+        match = _SEARCH_PERMISSION_DIAGNOSTIC_RE.match(line)
+        if match is None:
+            return False
+        blocked = os.path.abspath(match.group("path"))
+        try:
+            if blocked == root or os.path.commonpath((root, blocked)) != root:
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 def _parse_search_context_line(line: str) -> tuple[str, int, str] | None:
@@ -1747,19 +1770,6 @@ class ShellFileOperations(FileOperations):
         if ext not in LINTERS:
             return LintResult(skipped=True, message=f"No linter for {ext} files")
 
-        # If a real LSP server is active and claims this file, skip the
-        # shell linter for extensions whose per-file shell invocation is
-        # structurally weaker / floods phantom errors.  See
-        # ``_SHELL_LINTER_LSP_REDUNDANT`` above for the rationale per ext.
-        # The LSP tier runs separately via ``_maybe_lsp_diagnostics`` and
-        # carries the real diagnostics in ``lsp_diagnostics`` on the
-        # WriteResult / PatchResult.
-        if ext in _SHELL_LINTER_LSP_REDUNDANT and self._lsp_will_handle(path):
-            return LintResult(
-                skipped=True,
-                message=f"LSP server handles {ext} — shell linter skipped",
-            )
-
         linter_cmd = LINTERS[ext]
         # Extract the base command (first word)
         base_cmd = linter_cmd.split()[0]
@@ -2313,6 +2323,11 @@ class ShellFileOperations(FileOperations):
         # otherwise matched), so only surface an error when exit==2 AND no
         # usable match payload remains. Otherwise we keep the real matches.
         if result.exit_code == 2 and not payload.strip():
+            if _only_nested_permission_diagnostics(diagnostics, path):
+                return SearchResult(
+                    total_count=0,
+                    warning="Search skipped one or more unreadable subdirectories.",
+                )
             error_msg = diagnostics.strip() or result.stdout.strip() or "Search error"
             return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
 
@@ -2441,6 +2456,11 @@ class ShellFileOperations(FileOperations):
         # other files matched, so only surface an error when exit==2 AND no
         # usable match payload remains.
         if result.exit_code == 2 and not payload.strip():
+            if _only_nested_permission_diagnostics(diagnostics, path):
+                return SearchResult(
+                    total_count=0,
+                    warning="Search skipped one or more unreadable subdirectories.",
+                )
             error_msg = diagnostics.strip() or result.stdout.strip() or "Search error"
             return SearchResult(error=f"Search failed: {error_msg}", total_count=0)
 

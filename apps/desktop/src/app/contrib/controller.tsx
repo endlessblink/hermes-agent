@@ -49,6 +49,7 @@ import {
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH
 } from '@/store/layout'
+import { $personalAssistantState } from '@/store/personal-assistant'
 import { $filePreviewTarget, $previewTarget, closeRightRail } from '@/store/preview'
 import { $reviewOpen, closeReview, REVIEW_PANE_ID } from '@/store/review'
 import { $currentCwd, $selectedStoredSessionId, $sessions, sessionMatchesStoredId } from '@/store/session'
@@ -105,7 +106,11 @@ const workspaceDragPayload = (): SessionDragPayload | null => {
 
   const stored = $sessions.get().find(s => sessionMatchesStoredId(s, selected))
 
-  return { id: selected, profile: stored?.profile ?? '', title: stored ? storedSessionTitle(stored) : '' }
+  return {
+    id: selected,
+    profile: stored?.profile ?? '',
+    title: stored ? storedSessionTitle(stored, $personalAssistantState.get()?.sessionId) : ''
+  }
 }
 
 // The main tab drags like a session tile — drop it on a composer to link the
@@ -402,7 +407,7 @@ const syncWorkspaceTitle = () => {
   registry.register({
     id: 'workspace',
     area: 'panes',
-    title: stored ? storedSessionTitle(stored) : 'New session',
+    title: stored ? storedSessionTitle(stored, $personalAssistantState.get()?.sessionId) : 'New session',
     data: {
       // Pages aren't tab-able: the main zone's bar stands down while one shows.
       headerVeto: $workspaceIsPage.get(),
@@ -418,6 +423,7 @@ const syncWorkspaceTitle = () => {
 
 $selectedStoredSessionId.listen(syncWorkspaceTitle)
 $sessions.listen(syncWorkspaceTitle)
+$personalAssistantState.listen(syncWorkspaceTitle)
 $workspaceIsPage.listen(syncWorkspaceTitle)
 
 // Layout reset collapses every session tile into main as a tab (after the

@@ -7,6 +7,8 @@ import {
   activeRuntimeSessionStatus,
   canAutoRecoverSavedTurn,
   compressionRecoveryTarget,
+  liveStatusReconcileMode,
+  liveStatusReconcileSessionId,
   profileRestoreSessionId,
   recoverSameSessionFromCompression,
   resolveProfileRestoreSessionId,
@@ -82,6 +84,20 @@ describe('compressionRecoveryTarget', () => {
 })
 
 describe('live session status reconciliation', () => {
+  it('keeps reconciling after a turn settles so a late waiting question is restored', () => {
+    expect(liveStatusReconcileMode('open', false)).toBe('poll')
+    expect(liveStatusReconcileMode('open', true)).toBe('poll')
+    expect(liveStatusReconcileMode('idle', false)).toBe('poll')
+    expect(liveStatusReconcileMode('closed', true)).toBe('off')
+  })
+
+  it('falls back to the stored session when the settled worker drops its runtime id', () => {
+    expect(liveStatusReconcileSessionId(null, 'stored-personal-assistant')).toBe('stored-personal-assistant')
+    expect(liveStatusReconcileSessionId(null, null, 'routed-personal-assistant')).toBe(
+      'routed-personal-assistant'
+    )
+  })
+
   it('preserves a pending clarify payload so reconnect can restore the question', () => {
     expect(
       activeRuntimeSessionRow(

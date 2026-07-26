@@ -74,3 +74,38 @@ def test_note_write_failure_leaves_cache_unchanged(tmp_path, monkeypatch):
     with pytest.raises(PersonalAssistantNoteError):
         service.patch(state["version"], [{"op": "upsert", "section": "preferences", "id": "p1", "value": {"title": "Deep work"}}])
     assert store.read() == before
+
+
+def test_obsidian_reconciliation_preserves_local_planning_interview(tmp_path):
+    from agent.personal_assistant_service import PersonalAssistantStateService
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    adapter = _adapter(tmp_path)
+    store = PersonalAssistantStateStore(tmp_path / "profile")
+    service = PersonalAssistantStateService(store, adapter)
+    adapter.write(
+        {"outcomes": [], "commitments": [], "preferences": [], "archived": []},
+        expected_hash=None,
+    )
+    service.get()
+    store.patch_planning_interview(
+        interview_id="weekly",
+        expected_revision=0,
+        request_id="start",
+        operations=[
+            {
+                "op": "start",
+                "sourceSnapshot": {"fingerprint": "sources:7"},
+                "tasks": [{"taskId": "pet", "title": "Check PET results"}],
+            }
+        ],
+    )
+    adapter.path.write_text(
+        adapter.path.read_text().replace("# Outcomes", "# Outcomes\n- [o1] Ship carefully"),
+        encoding="utf-8",
+    )
+
+    reconciled = service.get()
+
+    assert reconciled["planning_interview"]["interviewId"] == "weekly"
+    assert reconciled["planning_interview"]["sourceSnapshot"]["fingerprint"] == "sources:7"

@@ -1807,7 +1807,8 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         "Please provide a final response summarizing what you've found and accomplished so far, "
         "without calling any more tools."
     )
-    messages.append({"role": "user", "content": summary_request})
+    summary_request_message = {"role": "user", "content": summary_request}
+    messages.append(summary_request_message)
 
     try:
         # Build API messages, stripping internal-only fields
@@ -2036,6 +2037,14 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     except Exception as e:
         logger.warning(f"Failed to get summary response: {e}")
         final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
+    finally:
+        # This instruction exists only for the one toolless fallback request.
+        # Leaving it in the durable conversation makes Desktop render it as if
+        # the user typed Hermes's private control message.
+        for index, message in enumerate(messages):
+            if message is summary_request_message:
+                messages.pop(index)
+                break
 
     return final_response
 

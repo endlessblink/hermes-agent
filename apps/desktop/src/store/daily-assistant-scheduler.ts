@@ -1,4 +1,5 @@
 const JERUSALEM_TIME_ZONE = 'Asia/Jerusalem'
+const LAST_DAILY_ASSISTANT_LAUNCH_KEY = 'hermes.desktop.dailyAssistant.lastLaunchDate'
 
 interface ProfileStore {
   get(): string
@@ -36,6 +37,28 @@ function localParts(date: Date): LocalParts {
   return values as unknown as LocalParts
 }
 
+function jerusalemDateKey(date = new Date()): string {
+  const local = localParts(date)
+
+  return `${local.year}-${String(local.month).padStart(2, '0')}-${String(local.day).padStart(2, '0')}`
+}
+
+function storedLaunchDate(): null | string {
+  try {
+    return localStorage.getItem(LAST_DAILY_ASSISTANT_LAUNCH_KEY)
+  } catch {
+    return null
+  }
+}
+
+function persistLaunchDate(value: string): void {
+  try {
+    localStorage.setItem(LAST_DAILY_ASSISTANT_LAUNCH_KEY, value)
+  } catch {
+    // A private or restricted renderer can still run the in-memory guard.
+  }
+}
+
 function jerusalemLocalToDate(year: number, month: number, day: number, hour: number): Date {
   const desiredWallClock = Date.UTC(year, month - 1, day, hour, 0, 0)
   let instant = desiredWallClock
@@ -64,6 +87,28 @@ export function startDailyAssistantScheduler(
   launch: (profile: string, trigger: 'scheduled') => Promise<void>
 ): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null
+  let launchInFlightDate: null | string = null
+  let lastLaunchDate = storedLaunchDate()
+
+  const launchOnce = async (selected: string) => {
+    const dateKey = jerusalemDateKey()
+
+    if (lastLaunchDate === dateKey || launchInFlightDate === dateKey) {
+      return
+    }
+
+    launchInFlightDate = dateKey
+
+    try {
+      await launch(selected, 'scheduled')
+      lastLaunchDate = dateKey
+      persistLaunchDate(dateKey)
+    } catch {
+      // Leave the date unrecorded so a later restart can retry safely.
+    } finally {
+      launchInFlightDate = null
+    }
+  }
 
   const clear = () => {
     if (timer !== null) {
@@ -83,7 +128,7 @@ export function startDailyAssistantScheduler(
     const local = localParts(now)
 
     if (catchUp && local.hour >= 9) {
-      void launch(selected, 'scheduled')
+      void launchOnce(selected)
     }
 
     const target = nextJerusalemNine(now)
@@ -94,7 +139,7 @@ export function startDailyAssistantScheduler(
         const active = profile.get()
 
         if (active === 'office-work') {
-          void launch(active, 'scheduled')
+          void launchOnce(active)
         }
 
         schedule(active, false)

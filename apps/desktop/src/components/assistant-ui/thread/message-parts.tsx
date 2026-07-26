@@ -7,7 +7,8 @@ import {
 import { useStore } from '@nanostores/react'
 import { type ComponentProps, type FC, type ReactNode, useEffect, useRef, useState } from 'react'
 
-import { ClarifyTool } from '@/components/assistant-ui/clarify-tool'
+import { useSessionView } from '@/app/chat/session-view'
+import { clarifyDirection, ClarifyTool } from '@/components/assistant-ui/clarify-tool'
 import { MarkdownText, MarkdownTextContent } from '@/components/assistant-ui/markdown-text'
 import { ToolFallback, ToolGroupSlot } from '@/components/assistant-ui/tool/fallback'
 import { useElapsedSeconds } from '@/components/chat/activity-timer'
@@ -17,6 +18,9 @@ import { GeneratedImage } from '@/components/chat/generated-image-result'
 import { useI18n } from '@/i18n'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
+import { $clarifyRequest } from '@/store/clarify'
+import { isPersonalAssistantSession } from '@/store/personal-assistant'
+import { $profileScope } from '@/store/profile'
 import { $activeSessionAwaitingInput } from '@/store/prompts'
 import { $turnStartedAt } from '@/store/session'
 
@@ -31,8 +35,20 @@ const ImageGenerateTool: FC<ToolCallMessagePartProps> = ({ args, result }) => {
 }
 
 const ChainToolFallback: FC<ToolCallMessagePartProps> = props => {
+  const sessionView = useSessionView()
+  const runtimeSessionId = useStore(sessionView.$runtimeId)
+  const storedSessionId = useStore(sessionView.$storedId)
+  const profileScope = useStore($profileScope)
+  const privateAssistantSession =
+    profileScope === 'office-work' ||
+    Boolean(runtimeSessionId && isPersonalAssistantSession(runtimeSessionId, storedSessionId))
+
   // todo parts are hoisted to a dedicated panel above the message content.
   if (props.toolName === 'todo') {
+    return null
+  }
+
+  if (privateAssistantSession && (props.toolName === 'execute_code' || props.toolName === 'terminal')) {
     return null
   }
 
@@ -51,12 +67,20 @@ const ThinkingDisclosure: FC<{
   children: ReactNode
   messageRunning?: boolean
   pending?: boolean
+  privateContent?: boolean
   startedAtMs?: number | null
   timerKey?: string
-}> = ({ children, messageRunning = false, pending = false, startedAtMs, timerKey }) => {
+}> = ({ children, messageRunning = false, pending = false, privateContent = false, startedAtMs, timerKey }) => {
   const { t } = useI18n()
   const awaitingInput = useStore($activeSessionAwaitingInput)
+  const clarifyRequest = useStore($clarifyRequest)
   const pausedForInput = messageRunning && awaitingInput
+
+  const waitingForAnswer =
+    clarifyRequest && clarifyDirection(clarifyRequest.question, clarifyRequest.choices ?? []) === 'rtl'
+      ? 'ממתין לתשובה שלך'
+      : t.sidebar.row.waitingForAnswer
+
   const effectivelyPending = pending && !pausedForInput
   // `null` = no explicit user toggle yet, defer to the streaming default.
   // The default is "auto-open while streaming, auto-collapse when done" so
@@ -70,6 +94,25 @@ const ThinkingDisclosure: FC<{
 
   const open = userOpen ?? effectivelyPending
   const isPreview = effectivelyPending && userOpen === null
+
+  const heading = (
+    <span className="flex min-w-0 items-baseline gap-1.5">
+      <span
+        className={cn(
+          'text-[length:var(--conversation-tool-font-size)] font-medium leading-(--conversation-line-height) text-(--ui-text-secondary)',
+          effectivelyPending && 'shimmer text-foreground/55'
+        )}
+      >
+        {pausedForInput ? waitingForAnswer : t.assistant.thread.thinking}
+      </span>
+      {effectivelyPending && (
+        <ActivityTimerText
+          className="text-[length:var(--conversation-caption-font-size)] tabular-nums text-(--ui-text-tertiary)"
+          seconds={elapsed}
+        />
+      )}
+    </span>
+  )
 
   // While the preview is live, pin the scroll container to the bottom on
   // every content growth so the latest tokens are always visible. Combined
@@ -106,25 +149,8 @@ const ThinkingDisclosure: FC<{
       data-slot="aui_thinking-disclosure"
       ref={enterRef}
     >
-      <DisclosureRow onToggle={() => setUserOpen(!open)} open={open}>
-        <span className="flex min-w-0 items-baseline gap-1.5">
-          <span
-            className={cn(
-              'text-[length:var(--conversation-tool-font-size)] font-medium leading-(--conversation-line-height) text-(--ui-text-secondary)',
-              effectivelyPending && 'shimmer text-foreground/55'
-            )}
-          >
-            {pausedForInput ? t.sidebar.row.waitingForAnswer : t.assistant.thread.thinking}
-          </span>
-          {effectivelyPending && (
-            <ActivityTimerText
-              className="text-[length:var(--conversation-caption-font-size)] tabular-nums text-(--ui-text-tertiary)"
-              seconds={elapsed}
-            />
-          )}
-        </span>
-      </DisclosureRow>
-      {open && (
+      {privateContent ? heading : <DisclosureRow onToggle={() => setUserOpen(!open)} open={open}>{heading}</DisclosureRow>}
+      {!privateContent && open && (
         <div
           className={cn(
             // Body sits flush with the "Thinking" header — no left indent —
@@ -153,6 +179,10 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
 }) => {
   const messageId = useAuiState(s => s.message.id)
   const messageRunning = useAuiState(s => s.message.status?.type === 'running')
+  const sessionView = useSessionView()
+  const runtimeSessionId = useStore(sessionView.$runtimeId)
+  const storedSessionId = useStore(sessionView.$storedId)
+  const profileScope = useStore($profileScope)
   const turnStartedAt = useStore($turnStartedAt)
 
   const pending = useAuiState(
@@ -184,6 +214,10 @@ const ReasoningAccordionGroup: FC<{ children?: ReactNode; endIndex: number; star
     <ThinkingDisclosure
       messageRunning={messageRunning}
       pending={pending}
+      privateContent={
+        profileScope === 'office-work' ||
+        Boolean(runtimeSessionId && isPersonalAssistantSession(runtimeSessionId, storedSessionId))
+      }
       startedAtMs={pending ? turnStartedAt : null}
       timerKey={`reasoning:${messageId}`}
     >

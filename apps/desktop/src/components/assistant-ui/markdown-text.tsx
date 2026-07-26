@@ -365,6 +365,19 @@ const MARKDOWN_CONTAINER_CLASS_NAME = cn(
 
 const MAX_MARKDOWN_CHARS = 200_000
 
+function textBeforeIncompleteHermesUiFence(text: string): string | null {
+  const openingFence = /^```hermes-ui[\t ]*$/gim
+  let lastOpening: RegExpExecArray | null = null
+
+  for (const match of text.matchAll(openingFence)) lastOpening = match
+  if (!lastOpening || lastOpening.index === undefined) return null
+
+  const contentStart = lastOpening.index + lastOpening[0].length
+  if (/^```[\t ]*$/m.test(text.slice(contentStart))) return null
+
+  return text.slice(0, lastOpening.index).trimEnd()
+}
+
 function HugeTextFallback({ containerClassName, text }: { containerClassName?: string; text: string }) {
   const chunks = useMemo(() => chunkByLines(text, 200), [text])
 
@@ -393,6 +406,7 @@ function HugeTextFallback({ containerClassName, text }: { containerClassName?: s
 function MarkdownTextSurface({ containerClassName, containerProps, defer }: MarkdownTextSurfaceProps) {
   const { status, text } = useMessagePartText()
   const isStreaming = status.type === 'running'
+  const textBeforePendingArtifact = isStreaming ? textBeforeIncompleteHermesUiFence(text) : null
 
   // Keep code parsing enabled while streaming so incomplete fenced blocks still
   // render as code cards. The expensive Shiki pass is deferred by
@@ -508,6 +522,21 @@ function MarkdownTextSurface({ containerClassName, containerProps, defer }: Mark
       }) as StreamdownTextComponents,
     [isStreaming]
   )
+
+  if (textBeforePendingArtifact !== null) {
+    return (
+      <div className="space-y-2">
+        {textBeforePendingArtifact ? (
+          <TextMessagePartProvider isRunning text={textBeforePendingArtifact}>
+            <MarkdownTextSurface containerClassName={containerClassName} containerProps={containerProps} defer={defer} />
+          </TextMessagePartProvider>
+        ) : null}
+        <div aria-live="polite" className="text-sm text-muted-foreground" role="status">
+          Preparing interactive form…
+        </div>
+      </div>
+    )
+  }
 
   if (text.length > MAX_MARKDOWN_CHARS) {
     return <HugeTextFallback containerClassName={containerClassName} text={text} />
