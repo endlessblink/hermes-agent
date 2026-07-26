@@ -389,6 +389,7 @@ class TestHermesUiTelegramRendering:
             ({"type": "task-table", "columns": ["task"], "rows": [{"id": "1", "title": "Table task"}]}, "Table task"),
             ({"type": "mini-kanban", "lanes": [{"id": "now", "title": "Now", "tasks": [{"id": "1", "title": "Kanban task"}]}]}, "Kanban task"),
             ({"type": "day-timeline", "date": "2026-07-19", "blocks": [{"id": "1", "label": "Lunch", "startTime": "13:00"}]}, "Lunch"),
+            ({"type": "week-planner", "weekStart": "2026-07-19", "days": [{"id": "sun", "label": "Sunday", "date": "2026-07-19", "blocks": [{"id": "1", "label": "Weekly focus", "durationMinutes": 35, "doneEnough": "Draft ready", "note": "Use the existing footage"}]}]}, "Draft ready"),
             ({"type": "mutation-preview", "changes": [{"taskId": "1", "title": "Changed task", "operation": "update", "risk": "low"}], "actions": []}, "Changed task"),
             ({"type": "urgency-energy-matrix", "xAxis": "energy", "yAxis": "urgency", "cells": [{"x": "high", "y": "high", "label": "Do now", "tasks": [{"id": "1", "title": "Matrix task"}]}]}, "Matrix task"),
             ({"type": "workload-bars", "bars": [{"id": "work", "label": "Work", "value": 7, "max": 10}]}, "7/10"),

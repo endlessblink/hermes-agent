@@ -274,6 +274,7 @@ TOOLSETS = {
         "tools": [
             "flowstate_get_assistant_context",
             "flowstate_health",
+            "flowstate_audit_coverage",
             "flowstate_list_tasks",
             "flowstate_search_tasks",
             "flowstate_get_task",
@@ -306,6 +307,22 @@ TOOLSETS = {
             "personal_assistant_state_change",
             "suggestion_rule_save",
         ],
+        "includes": []
+    },
+
+    "health": {
+        "description": "Durable, Jerusalem-dated food and exercise tracking",
+        "tools": [
+            "health_log_event",
+            "health_correct_event",
+            "health_get_day",
+        ],
+        "includes": []
+    },
+
+    "health_status": {
+        "description": "Privacy-safe health totals and completion flags only",
+        "tools": ["health_compact_status"],
         "includes": []
     },
 

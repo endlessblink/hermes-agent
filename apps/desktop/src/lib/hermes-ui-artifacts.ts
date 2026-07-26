@@ -347,6 +347,28 @@ export interface HermesUiDayTimelineArtifact {
   blocks: HermesUiDayTimelineBlock[]
 }
 
+export interface HermesUiWeekPlannerBlock extends HermesUiDayTimelineBlock {
+  note?: string
+}
+
+export interface HermesUiWeekPlannerDay {
+  id: string
+  label: string
+  date: string
+  blocks: HermesUiWeekPlannerBlock[]
+}
+
+export interface HermesUiWeekPlannerArtifact {
+  type: 'week-planner'
+  direction?: 'auto' | 'ltr' | 'rtl'
+  id?: string
+  title?: string
+  description?: string
+  weekStart: string
+  currentDate?: string
+  days: HermesUiWeekPlannerDay[]
+}
+
 export type HermesUiMutationOperation = 'update' | 'schedule-instance' | 'complete' | 'create' | 'delete'
 export type HermesUiMutationRisk = 'low' | 'medium' | 'high'
 export type HermesUiVisibleRecord = Record<string, string | number | boolean | null>
@@ -456,6 +478,7 @@ export interface HermesUiTaskGraphArtifact {
 export type HermesUiArtifact =
   | HermesUiChecklistArtifact
   | HermesUiDayTimelineArtifact
+  | HermesUiWeekPlannerArtifact
   | HermesUiQuestionnaireArtifact
   | HermesUiFlowStateBatchArtifact
   | HermesUiFlowStatePlanningSessionArtifact
@@ -513,6 +536,8 @@ const MIN_TASK_TABLE_ROWS = 3
 const MAX_MINI_KANBAN_LANES = 5
 const MAX_MINI_KANBAN_TASKS = 8
 const MAX_TIMELINE_BLOCKS = 12
+const WEEK_PLANNER_DAYS = 7
+const MAX_WEEK_PLANNER_BLOCKS_PER_DAY = 6
 const MAX_MUTATION_CHANGES = 10
 const MAX_MUTATION_RECORD_FIELDS = 12
 const MAX_MATRIX_CELLS = 9
@@ -612,6 +637,18 @@ const SAFE_DAY_TIMELINE_BLOCK_KEYS = new Set([
   'status',
   'taskId'
 ])
+const SAFE_WEEK_PLANNER_KEYS = new Set([
+  'currentDate',
+  'days',
+  'description',
+  'direction',
+  'id',
+  'title',
+  'type',
+  'weekStart'
+])
+const SAFE_WEEK_PLANNER_DAY_KEYS = new Set(['blocks', 'date', 'id', 'label'])
+const SAFE_WEEK_PLANNER_BLOCK_KEYS = new Set([...SAFE_DAY_TIMELINE_BLOCK_KEYS, 'note'])
 
 const SAFE_MUTATION_PREVIEW_KEYS = new Set(['actions', 'changes', 'description', 'direction', 'id', 'title', 'type'])
 const SAFE_MUTATION_CHANGE_KEYS = new Set(['after', 'before', 'operation', 'risk', 'taskId', 'title', 'untouched'])
@@ -2736,6 +2773,147 @@ function parseDayTimelineArtifact(parsed: Record<string, unknown>): HermesUiArti
   return { artifact: { ...base.fields, blocks, currentTime, date, type: 'day-timeline' }, ok: true }
 }
 
+function datePlusDays(date: string, offset: number): string {
+  const [year, month, day] = date.split('-').map(Number)
+
+  return new Date(Date.UTC(year, month - 1, day + offset)).toISOString().slice(0, 10)
+}
+
+function parseWeekPlannerArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
+  const unsupported = hasUnsupportedKeys(parsed, SAFE_WEEK_PLANNER_KEYS, 'week-planner')
+
+  if (unsupported) {
+    return unsupported
+  }
+
+  const base = parseBaseFields(parsed)
+
+  if (!base.ok) {
+    return base
+  }
+
+  const weekStart = parseScheduledDate(parsed.weekStart, 'weekStart')
+
+  if (typeof weekStart !== 'string') {
+    return weekStart
+  }
+
+  const currentDate =
+    parsed.currentDate === undefined ? undefined : parseScheduledDate(parsed.currentDate, 'currentDate')
+
+  if (currentDate && typeof currentDate !== 'string') {
+    return currentDate
+  }
+
+  if (!Array.isArray(parsed.days) || parsed.days.length !== WEEK_PLANNER_DAYS) {
+    return { error: `week-planner requires exactly ${WEEK_PLANNER_DAYS} days`, ok: false }
+  }
+
+  const days: HermesUiWeekPlannerDay[] = []
+  const seenDayIds = new Set<string>()
+  const seenBlockIds = new Set<string>()
+
+  for (const [dayIndex, rawDay] of parsed.days.entries()) {
+    if (!isRecord(rawDay)) {
+      return { error: `days[${dayIndex}] must be an object`, ok: false }
+    }
+
+    const unsupportedDay = hasUnsupportedKeys(rawDay, SAFE_WEEK_PLANNER_DAY_KEYS, `days[${dayIndex}]`)
+
+    if (unsupportedDay) {
+      return unsupportedDay
+    }
+
+    const id = normalizeText(rawDay.id, MAX_ITEM_ID_LENGTH, `days[${dayIndex}].id`)
+    const label = normalizeText(rawDay.label, MAX_LABEL_LENGTH, `days[${dayIndex}].label`)
+    const date = parseScheduledDate(rawDay.date, `days[${dayIndex}].date`)
+
+    if (typeof id !== 'string') {
+      return id
+    }
+
+    if (typeof label !== 'string') {
+      return label
+    }
+
+    if (typeof date !== 'string') {
+      return date
+    }
+
+    if (!id || !label) {
+      return { error: `days[${dayIndex}].id and label are required`, ok: false }
+    }
+
+    if (seenDayIds.has(id)) {
+      return { error: `Duplicate day id: ${id}`, ok: false }
+    }
+
+    if (date !== datePlusDays(weekStart, dayIndex)) {
+      return { error: 'week-planner days must be consecutive and start at weekStart', ok: false }
+    }
+
+    if (!Array.isArray(rawDay.blocks)) {
+      return { error: `days[${dayIndex}].blocks must be an array`, ok: false }
+    }
+
+    if (rawDay.blocks.length > MAX_WEEK_PLANNER_BLOCKS_PER_DAY) {
+      return { error: `days[${dayIndex}] has too many blocks`, ok: false }
+    }
+
+    const blocks: HermesUiWeekPlannerBlock[] = []
+
+    if (rawDay.blocks.length > 0) {
+      const notes: Array<string | undefined> = []
+      const dayTimelineBlocks: Record<string, unknown>[] = []
+
+      for (const [blockIndex, rawBlock] of rawDay.blocks.entries()) {
+        if (!isRecord(rawBlock)) {
+          return { error: `days[${dayIndex}].blocks[${blockIndex}] must be an object`, ok: false }
+        }
+
+        const field = `days[${dayIndex}].blocks[${blockIndex}]`
+        const unsupportedBlock = hasUnsupportedKeys(rawBlock, SAFE_WEEK_PLANNER_BLOCK_KEYS, field)
+
+        if (unsupportedBlock) {
+          return unsupportedBlock
+        }
+
+        const note = optionalText(rawBlock.note, MAX_RATIONALE_LENGTH, `${field}.note`)
+
+        if (note && typeof note !== 'string') {
+          return note
+        }
+
+        notes.push(note)
+        dayTimelineBlocks.push(Object.fromEntries(Object.entries(rawBlock).filter(([key]) => key !== 'note')))
+      }
+
+      const parsedDay = parseDayTimelineArtifact({ blocks: dayTimelineBlocks, date, type: 'day-timeline' })
+
+      if (!parsedDay.ok || parsedDay.artifact.type !== 'day-timeline') {
+        return parsedDay
+      }
+
+      for (const [blockIndex, block] of parsedDay.artifact.blocks.entries()) {
+        if (seenBlockIds.has(block.id)) {
+          return { error: `Duplicate block id: ${block.id}`, ok: false }
+        }
+
+        seenBlockIds.add(block.id)
+        blocks.push({ ...block, note: notes[blockIndex] })
+      }
+    }
+
+    seenDayIds.add(id)
+    days.push({ blocks, date, id, label })
+  }
+
+  return {
+    artifact: { ...base.fields, currentDate, days, type: 'week-planner', weekStart },
+    ok: true
+  }
+}
+
 function parseMutationPreviewArtifact(parsed: Record<string, unknown>): HermesUiArtifactParseResult {
   const unsupported = hasUnsupportedKeys(parsed, SAFE_MUTATION_PREVIEW_KEYS, 'mutation-preview')
 
@@ -3386,6 +3564,10 @@ export function parseHermesUiArtifact(source: string): HermesUiArtifactParseResu
 
   if (parsed.type === 'day-timeline') {
     return parseDayTimelineArtifact(parsed)
+  }
+
+  if (parsed.type === 'week-planner') {
+    return parseWeekPlannerArtifact(parsed)
   }
 
   if (parsed.type === 'mutation-preview') {

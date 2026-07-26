@@ -131,6 +131,8 @@ class TestPersonalAssistantGuidance:
         assert "Do not silently save" in stable
         assert "smallest meaningful next step" in stable
         assert "end-of-day boundary" in stable
+        assert "most compact supported visual form" in stable
+        assert "Prefer an ordered action list" not in stable
         assert "protectively defer" in stable
         assert "matching context" in stable
         assert "consequential unknowns" in stable
@@ -174,7 +176,13 @@ class TestDesktopQuestionnaireGuidance:
         assert "exact preview" in stable
         assert "flowstate_subtask_batch" in stable
         assert "closest supported `hermes-ui` artifact" in stable
-        assert "a `task-table` for a compact daily plan" in stable
+        assert "a `task-table` for a compact untimed daily plan" in stable
+        assert "`day-timeline` for a one-day plan with clock times" in stable
+        assert "`week-planner` for every weekly or multi-day plan" in stable
+        assert "Never use `mini-kanban` as a calendar" in stable
+        assert "one short framing sentence" in stable
+        assert "Never duplicate the artifact as prose" in stable
+        assert "visual artifact is the answer" in stable
         assert "daily-planning-list" not in stable
         assert "Do not merely offer or promise" in stable
         assert '"columns" and "rows"' in stable

@@ -1675,6 +1675,28 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 pass
 
             _wire_callbacks(sid)
+            # Cold resume may sanitize a dangling tool tail after the last
+            # checkpoint was written. Rebuild coverage immediately so the first
+            # user turn cannot cross the hard threshold before prewarming runs.
+            try:
+                from agent.conversation_compression import (
+                    schedule_background_compaction_checkpoint,
+                )
+
+                history_lock = current.get("history_lock")
+                if history_lock is not None:
+                    with history_lock:
+                        checkpoint_history = list(current.get("history") or [])
+                else:
+                    checkpoint_history = list(current.get("history") or [])
+                schedule_background_compaction_checkpoint(
+                    agent, checkpoint_history
+                )
+            except Exception:
+                logger.debug(
+                    "cold-resume checkpoint scheduling failed",
+                    exc_info=True,
+                )
             # Surface the self-improvement review's "💾 …" summary as an event
             # the TUI/desktop render in-transcript, honoring
             # display.memory_notifications. _init_session wires this for the
@@ -3873,6 +3895,17 @@ def _apply_personal_assistant_runtime_policy(session: dict) -> None:
     agent = session.get("agent")
     if agent is None:
         return
+    agent.personal_assistant_mode = True
+    try:
+        agent.personal_assistant_state_store = _personal_assistant_store(
+            _PERSONAL_ASSISTANT_OWNER_PROFILE
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        logger.warning(
+            "Personal Assistant state store is unavailable for the Desktop session",
+            exc_info=True,
+        )
+        agent.personal_assistant_state_store = None
     try:
         configured = int(getattr(agent, "max_iterations", _PERSONAL_ASSISTANT_MAX_ITERATIONS))
     except (TypeError, ValueError):
@@ -3990,6 +4023,91 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"state": public_state(state)})
 
 
+@method("personal_assistant.day_plan")
+def _(rid, params: dict) -> dict:
+    """Return today's authenticated FlowState work blocks without exposing auth."""
+    from urllib.parse import quote
+    from tools.flowstate_tool import _request as flowstate_request
+
+    _, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    requested_date = str(params.get("date") or "").strip()
+    try:
+        if datetime.strptime(requested_date, "%Y-%m-%d").strftime("%Y-%m-%d") != requested_date:
+            raise ValueError
+    except ValueError:
+        return _err(rid, 4000, "date must be YYYY-MM-DD")
+
+    try:
+        inventory = flowstate_request(
+            "GET", "/api/tasks/inventory?limit=100", allow_stale_cache=False
+        )
+    except Exception:
+        logger.warning("FlowState day plan inventory read failed", exc_info=True)
+        return _err(rid, 5030, "FlowState day plan is unavailable")
+    if inventory.get("fresh") is not True or inventory.get("complete") is not True:
+        return _err(rid, 5031, "FlowState day plan inventory is incomplete")
+
+    tasks = [task for task in inventory.get("items") or [] if isinstance(task, dict) and task.get("id")]
+
+    def read_instances(task):
+        task_id = str(task["id"])
+        payload = flowstate_request(
+            "GET",
+            f"/api/tasks/{quote(task_id, safe='')}/instances",
+            allow_stale_cache=False,
+        )
+        return task, payload.get("instances") or []
+
+    blocks = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(tasks)))) as pool:
+            results = pool.map(read_instances, tasks)
+            for task, instances in results:
+                for instance in instances:
+                    if not isinstance(instance, dict) or instance.get("scheduledDate") != requested_date:
+                        continue
+                    start_time = str(instance.get("scheduledTime") or "")
+                    try:
+                        if datetime.strptime(start_time, "%H:%M").strftime("%H:%M") != start_time:
+                            continue
+                    except ValueError:
+                        continue
+                    duration = instance.get("duration")
+                    duration_minutes = (
+                        int(duration)
+                        if isinstance(duration, (int, float)) and 1 <= int(duration) <= 1440
+                        else None
+                    )
+                    blocks.append(
+                        {
+                            "id": str(instance.get("id") or f"{task['id']}:{requested_date}:{start_time}"),
+                            "taskId": str(task["id"]),
+                            "title": str(task.get("title") or "Untitled task"),
+                            "startTime": start_time,
+                            "durationMinutes": duration_minutes,
+                            "priority": task.get("priority"),
+                        }
+                    )
+    except Exception:
+        logger.warning("FlowState day plan instance read failed", exc_info=True)
+        return _err(rid, 5032, "FlowState work blocks could not be read completely")
+
+    blocks.sort(key=lambda block: (block["startTime"], block["title"], block["id"]))
+    return _ok(
+        rid,
+        {
+            "source": "flowstate",
+            "date": requested_date,
+            "capturedAt": inventory.get("capturedAt"),
+            "fresh": True,
+            "complete": True,
+            "blocks": blocks,
+        },
+    )
+
+
 @method("personal_assistant.read")
 def _(rid, params: dict) -> dict:
     """Clear unread activity once while preserving pending approval counts."""
@@ -4047,6 +4165,32 @@ def _(rid, params: dict) -> dict:
     except ValueError as exc:
         return _err(rid, 4000, str(exc))
     return _ok(rid, {"state": public_state(state)})
+
+
+@method("personal_assistant.interview.respond")
+def _(rid, params: dict) -> dict:
+    """Commit one versioned interview response before model continuation."""
+
+    from agent.personal_assistant_interview import PlanningInterviewController
+    from agent.personal_assistant_state import InterviewRevisionConflict
+
+    store, error = _personal_assistant_state_params(rid, params)
+    if error:
+        return error
+    try:
+        result = PlanningInterviewController(store).respond(params)
+    except InterviewRevisionConflict as exc:
+        response = _err(rid, 4093, str(exc))
+        response["error"]["data"] = {
+            "code": "interview_version_conflict",
+            "interviewId": exc.interview_id,
+            "currentRevision": exc.current_revision,
+            "latest": exc.latest,
+        }
+        return response
+    except ValueError as exc:
+        return _err(rid, 4000, str(exc))
+    return _ok(rid, result)
 
 
 @method("personal_assistant.home")
@@ -4287,6 +4431,38 @@ def _finish_personal_assistant_monitor_delivery(
         status="available" if completed else "retry_wait",
         count=len(event_ids),
     )
+
+
+def _finish_personal_assistant_daily_delivery(
+    session: dict[str, Any],
+    *,
+    status: str,
+    has_visible_response: bool,
+) -> None:
+    """Complete a daily claim only after its persisted turn has a visible result."""
+
+    delivery = session.pop("personal_assistant_daily_delivery", None)
+    if not isinstance(delivery, dict):
+        return
+    from agent.daily_assistant_lifecycle import (
+        abandon_daily_planning_trigger,
+        complete_daily_planning_trigger,
+    )
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+    profile_home = Path(str(delivery.get("profile_home") or ""))
+    claim = delivery.get("claim")
+    completed = status == "complete" and has_visible_response
+    if completed:
+        completed = complete_daily_planning_trigger(profile_home, claim)
+    else:
+        abandon_daily_planning_trigger(profile_home, claim)
+    episode_id = str(delivery.get("episode_id") or "")
+    if episode_id:
+        PersonalAssistantStateStore(profile_home).mark_episode_status(
+            episode_id,
+            "completed" if completed else "failed",
+        )
 
 
 def _consume_personal_assistant_monitor_once(profile_home: Path) -> bool:
@@ -4706,7 +4882,7 @@ def _start_personal_assistant(rid, params: dict) -> dict:
             user_intent=user_intent,
             idempotency_key=idempotency_key,
         )
-        if duplicate and episode.get("status") == "accepted" and not monitor_events:
+        if duplicate and episode.get("status") in {"submitted", "completed"} and not monitor_events:
             return _ok(
                 rid,
                 {
@@ -4728,6 +4904,10 @@ def _start_personal_assistant(rid, params: dict) -> dict:
             "deferred": state.get("deferred", []),
             "pendingApprovals": state.get("pendingApprovals", []),
             "captureProposals": state.get("captureProposals", []),
+            "protectedItems": state.get("protected_items", []),
+            "latestCoverageReceipt": (
+                (state.get("coverage_receipts") or [None])[-1]
+            ),
             "sync": state.get("sync", {}),
             "recent_episodes": state.get("episode_summaries", [])[-20:],
             "contextLedger": [
@@ -4753,6 +4933,20 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                     "events": monitor_delivery,
                 }
 
+        if claim is not None:
+            with _sessions_lock:
+                daily_session = _sessions.get(session_id)
+                if daily_session is None:
+                    abandon_daily_planning_trigger(profile_home, claim)
+                    return _err(
+                        rid, 5000, "personal assistant runtime session is unavailable"
+                    )
+                daily_session["personal_assistant_daily_delivery"] = {
+                    "profile_home": str(profile_home),
+                    "episode_id": str(episode.get("episode_id") or "") or None,
+                    "claim": claim,
+                }
+
         submitted = _methods["prompt.submit"](
             rid,
             {
@@ -4776,13 +4970,16 @@ def _start_personal_assistant(rid, params: dict) -> dict:
                         ):
                             monitor_session.pop("personal_assistant_monitor_delivery", None)
             if claim is not None:
+                with _sessions_lock:
+                    daily_session = _sessions.get(session_id)
+                    if daily_session is not None:
+                        daily_session.pop("personal_assistant_daily_delivery", None)
+            if claim is not None:
                 abandon_daily_planning_trigger(profile_home, claim)
             return submitted
         state, episode = store.mark_episode_status(
-            str(episode.get("episode_id") or ""), "accepted"
+            str(episode.get("episode_id") or ""), "submitted"
         )
-    if claim is not None and not complete_daily_planning_trigger(profile_home, claim):
-        return _err(rid, 5000, "personal assistant reservation could not be completed")
 
     result = {
         "status": "launched",
@@ -4884,6 +5081,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "branch": _git_branch_for_cwd(cwd),
         "personality": str(personality or ""),
         "running": bool((session or {}).get("running")),
+        "compacting": bool((session or {}).get("compression_started_at")),
         "title": _session_live_title(session or {}, session_key) if session_key else "",
         "desktop_contract": DESKTOP_BACKEND_CONTRACT,
         "version": "",
@@ -11086,15 +11284,14 @@ def _compression_watchdog_timeout_seconds() -> float:
 
 
 def _turn_idle_watchdog_timeout_seconds() -> float:
-    # Active tools and approval waits are protected below. Long-context Codex
-    # turns can also spend several minutes reasoning after a tool result while
-    # the provider stream remains healthy, so this outer fail-safe must be much
-    # more generous than the provider-level stale watchdog.
-    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "600")
+    # Trusted provider/agent activity, active tools, compression, and user waits
+    # are protected below. If none of those clocks moves for thirty seconds,
+    # Desktop is visibly frozen and waiting ten minutes only compounds the loss.
+    raw = os.environ.get("HERMES_TURN_IDLE_WATCHDOG_SECONDS", "30")
     try:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
-        return 600.0
+        return 30.0
 
 
 _TURN_WAIT_EVENTS = frozenset(
@@ -11107,6 +11304,46 @@ _TURN_WAIT_EVENTS = frozenset(
         "input.request",
     }
 )
+
+
+def _watchdog_safe_token(value: Any, *, limit: int = 80) -> str:
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return "".join(
+        character
+        for character in str(value).strip()
+        if character.isalnum() or character in "._:/-"
+    )[:limit]
+
+
+def _watchdog_tool_error_category(payload: dict[str, Any]) -> str:
+    """Classify a tool result without copying its args/output into the ledger."""
+
+    result = payload.get("result")
+    if isinstance(result, dict):
+        raw_error = result.get("error")
+    elif isinstance(result, str) and (
+        result.lstrip().lower().startswith("error") or '"error"' in result.lower()
+    ):
+        raw_error = result
+    else:
+        raw_error = payload.get("error")
+    if not raw_error:
+        return ""
+    searchable = str(raw_error).lower()
+    if any(token in searchable for token in ("validation", "invalid", "schema")):
+        return "validation"
+    if any(token in searchable for token in ("timeout", "timed out", "deadline")):
+        return "timeout"
+    if any(token in searchable for token in ("connection", "connreset", "broken pipe")):
+        return "connection"
+    if any(token in searchable for token in ("unauthorized", "forbidden", "401", "403")):
+        return "authentication"
+    if "not found" in searchable:
+        return "not_found"
+    if any(token in searchable for token in ("cancel", "interrupt", "abort")):
+        return "cancelled"
+    return "unknown"
 
 
 def _record_turn_watchdog_event(
@@ -11163,6 +11400,23 @@ def _record_turn_watchdog_event(
             value = payload.get(key)
             if value is not None:
                 safe_payload[key] = value
+        if event.startswith("tool."):
+            name = _watchdog_safe_token(payload.get("name"))
+            if name:
+                safe_payload["name"] = name
+            duration = payload.get("duration_s")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                safe_payload["duration_s"] = round(max(0.0, min(float(duration), 86400.0)), 3)
+            tool_error = _watchdog_tool_error_category(payload)
+            safe_payload["status"] = (
+                "error"
+                if tool_error or event == "tool.error"
+                else "started"
+                if event == "tool.start"
+                else "complete"
+            )
+            if tool_error:
+                safe_payload["error"] = tool_error
         details = payload.get("details")
         if isinstance(details, dict):
             safe_payload["details"] = {
@@ -11933,6 +12187,17 @@ def _run_prompt_submit(
                         "Personal assistant monitor delivery settlement failed",
                         exc_info=True,
                     )
+                try:
+                    _finish_personal_assistant_daily_delivery(
+                        session,
+                        status=status,
+                        has_visible_response=isinstance(raw, str) and bool(raw.strip()),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Personal assistant daily delivery settlement failed",
+                        exc_info=True,
+                    )
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -12112,6 +12377,17 @@ def _run_prompt_submit(
                 except Exception:
                     logger.warning(
                         "Personal assistant deferred monitor delivery release failed",
+                        exc_info=True,
+                    )
+                try:
+                    _finish_personal_assistant_daily_delivery(
+                        session,
+                        status="error",
+                        has_visible_response=False,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Personal assistant deferred daily delivery release failed",
                         exc_info=True,
                     )
             _emit("session.info", sid, _session_info(agent, session))

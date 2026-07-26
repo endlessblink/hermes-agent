@@ -79,6 +79,24 @@ logger = logging.getLogger(__name__)
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
 
+def _schedule_checkpoint_after_tool_iteration(agent: Any, messages: list) -> bool:
+    """Start checkpoint preparation between tool iterations, never on the reply path."""
+    try:
+        from agent import conversation_compression
+
+        return bool(
+            conversation_compression.schedule_background_compaction_checkpoint(
+                agent, list(messages)
+            )
+        )
+    except Exception:
+        logger.debug(
+            "tool-iteration checkpoint scheduling failed",
+            exc_info=True,
+        )
+        return False
+
+
 def _stop_retrying_silent_timeout(agent: Any, error: Exception) -> bool:
     """Return whether a latency-sensitive turn should compact before retrying.
 
@@ -5050,6 +5068,7 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                _schedule_checkpoint_after_tool_iteration(agent, messages)
                 tool_execution_occurred = True
 
                 try:
