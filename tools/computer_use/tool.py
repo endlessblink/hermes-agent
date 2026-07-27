@@ -39,6 +39,7 @@ For captures / actions with `capture_after=True`:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -295,10 +296,42 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
         })
 
     try:
-        return _dispatch(backend, action, args)
+        with _delivery_scope(backend, action, args):
+            return _dispatch(backend, action, args)
     except Exception as e:
         logger.exception("computer_use %s failed", action)
         return json.dumps({"error": f"{action} failed: {e}"})
+
+
+@contextlib.contextmanager
+def _delivery_scope(backend, action: str, args: Dict[str, Any]):
+    """Apply an opt-in ``delivery_mode`` for one input action.
+
+    Default (no ``delivery_mode``) is a no-op, preserving cua-driver's
+    focus-free background routing. ``foreground`` activates the target window
+    first — required for keyboard input on Linux/X11, which has no focus-free
+    keyboard backend — and is scoped to this single action so it never leaks.
+    """
+    mode = (args.get("delivery_mode") or "").strip().lower() or None
+    if mode not in ("background", "foreground") or action not in _DESTRUCTIVE_ACTIONS:
+        yield
+        return
+    override = getattr(backend, "delivery_mode_override", None)
+    if override is None:  # backend predates the passthrough
+        yield
+        return
+    if mode == "foreground":
+        pid = getattr(backend, "_active_pid", None)
+        bring_to_front = getattr(backend, "bring_to_front", None)
+        if pid is not None and bring_to_front is not None:
+            try:
+                bring_to_front(pid=pid,
+                               window_id=getattr(backend, "_active_window_id", None))
+            except Exception:
+                logger.debug("bring_to_front before foreground input failed",
+                             exc_info=True)
+    with override(mode):
+        yield
 
 
 def _request_approval(action: str, args: Dict[str, Any]) -> Optional[str]:

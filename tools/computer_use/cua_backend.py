@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import contextlib
 import json
 import logging
 import os
@@ -105,6 +106,14 @@ _DESKTOP_WINDOW_NAMES = (
 # Setting it to "0" disables telemetry; absence => the binary's own default
 # (telemetry ON upstream).
 _CUA_TELEMETRY_ENV_VAR = "CUA_DRIVER_RS_TELEMETRY_ENABLED"
+
+# cua-driver tools that deliver synthetic input and therefore accept a
+# ``delivery_mode``. Introspection and window-management tools reject the
+# argument, so the override in ``_action`` is restricted to this set.
+_INPUT_TOOLS = frozenset({
+    "click", "double_click", "right_click", "middle_click",
+    "drag", "scroll", "type_text", "press_key", "hotkey", "set_value",
+})
 
 
 def _cua_telemetry_disabled() -> bool:
@@ -1197,6 +1206,13 @@ class CuaDriverBackend(ComputerUseBackend):
         # element. Cleared whenever a fresh capture overwrites the
         # snapshot context.
         self._snapshot_tokens: Dict[int, str] = {}
+        # Opt-in input delivery mode forwarded to cua-driver on input tools.
+        # None (default) keeps cua-driver's own default — background delivery,
+        # which never steals the user's focus. Callers that genuinely need the
+        # activating path (Linux/X11 has no focus-free keyboard backend, so
+        # type/key otherwise fail) set "foreground" for the duration of one
+        # action via ``delivery_mode_override``.
+        self._delivery_mode: Optional[str] = None
         # Per-instance cua-driver session id. cua-driver's MCP server
         # instructions ask every consumer to declare a stable session
         # at the start of a run (start_session) and tear it down at
@@ -2052,6 +2068,23 @@ class CuaDriverBackend(ComputerUseBackend):
         ``taskkill /F`` on Windows."""
         return self._action("kill_app", {"pid": int(pid)})
 
+    @contextlib.contextmanager
+    def delivery_mode_override(self, mode: Optional[str]):
+        """Temporarily force cua-driver's input ``delivery_mode``.
+
+        ``None`` / an unknown value is a no-op, so the default background
+        (focus-free) routing is preserved unless a caller explicitly opts in.
+        Scoped as a context manager so one action can activate the target
+        window without leaking foreground delivery into later actions.
+        """
+        previous = self._delivery_mode
+        if mode in ("background", "foreground"):
+            self._delivery_mode = mode
+        try:
+            yield
+        finally:
+            self._delivery_mode = previous
+
     def bring_to_front(self, *, pid: int,
                        window_id: Optional[int] = None) -> ActionResult:
         """Activate a window so subsequent foreground-dispatched input
@@ -2319,6 +2352,11 @@ class CuaDriverBackend(ComputerUseBackend):
         # stay tied to this run. setdefault preserves any explicit
         # session a caller already supplied.
         args.setdefault("session", self._session_id)
+        # Forward an opt-in delivery mode on input tools only. Introspection
+        # (capture/list_*) and window management take no delivery_mode, and
+        # sending one would make cua-driver reject the call.
+        if self._delivery_mode and name in _INPUT_TOOLS:
+            args.setdefault("delivery_mode", self._delivery_mode)
         try:
             out = self._session.call_tool(name, args)
         except Exception as e:

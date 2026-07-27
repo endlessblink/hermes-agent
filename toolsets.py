@@ -496,7 +496,12 @@ TOOLSETS = {
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
-
+            # Desktop control (gated on cua-driver via check_fn). Present here so
+            # API clients — notably the browser extension side panel — can drive
+            # the user's REAL desktop/browser window instead of only the headless
+            # browser_* session. Approval still runs through the gateway's normal
+            # tool-approval infra (computer_use installs no CLI callback).
+            "computer_use",
         ],
         "includes": []
     },

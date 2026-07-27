@@ -218,6 +218,20 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                     "matching the background co-work model."
                 ),
             },
+            # ── input delivery ─────────────────────────────────────
+            "delivery_mode": {
+                "type": "string",
+                "enum": ["background", "foreground"],
+                "description": (
+                    "How synthetic input reaches the target. 'background' "
+                    "(default) never takes the user's focus. Use 'foreground' "
+                    "ONLY when a background attempt fails with \"no focus-free "
+                    "input backend\" — typically keyboard input on Linux/X11, "
+                    "where the OS can only deliver keystrokes to the focused "
+                    "window. 'foreground' activates the target window first "
+                    "(DISRUPTS the user) and applies to that one action only."
+                ),
+            },
             # ── return shape ───────────────────────────────────────
             "capture_after": {
                 "type": "boolean",
