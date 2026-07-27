@@ -2287,6 +2287,11 @@ DEFAULT_CONFIG = {
         # memories into context.
         "scoped_memory_enabled": False,
         "scoped_memory_char_limit": 4000,
+        # Versioned SQLite ledger + verified, editable Obsidian mirror. Disabled
+        # until the active profile has passed a dry-run migration.
+        "reliable_memory_enabled": False,
+        "obsidian_memory_folder": "_System/Hermes Knowledge Graph/Memory",
+        "memory_sync_poll_seconds": 2.0,
         # External memory provider plugin (empty = built-in only).
         # Set to a provider name to activate: "openviking", "mem0",
         # "hindsight", "holographic", "retaindb", "byterover".

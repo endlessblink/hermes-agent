@@ -3402,6 +3402,13 @@ class AIAgent:
         NOT called per-turn — only at CLI exit, /reset, gateway
         session expiry, etc.
         """
+        memory_sync_worker = getattr(self, "_memory_sync_worker", None)
+        if memory_sync_worker is not None:
+            try:
+                memory_sync_worker.stop()
+            except Exception:
+                pass
+            self._memory_sync_worker = None
         if self._memory_manager:
             try:
                 self._memory_manager.on_session_end(messages or [])
@@ -3569,26 +3576,35 @@ class AIAgent:
         """
         task_id = getattr(self, "session_id", None) or ""
 
-        # 1. Kill background processes for this task
+        # 1. Stop reliable-memory reconciliation before releasing other state.
+        memory_sync_worker = getattr(self, "_memory_sync_worker", None)
+        if memory_sync_worker is not None:
+            try:
+                memory_sync_worker.stop()
+            except Exception:
+                pass
+            self._memory_sync_worker = None
+
+        # 2. Kill background processes for this task
         try:
             from tools.process_registry import process_registry
             process_registry.kill_all(task_id=task_id)
         except Exception:
             pass
 
-        # 2. Clean terminal sandbox environments
+        # 3. Clean terminal sandbox environments
         try:
             cleanup_vm(task_id)
         except Exception:
             pass
 
-        # 3. Clean browser daemon sessions
+        # 4. Clean browser daemon sessions
         try:
             cleanup_browser(task_id)
         except Exception:
             pass
 
-        # 4. Close active child agents
+        # 5. Close active child agents
         try:
             with self._active_children_lock:
                 children = list(self._active_children)
@@ -3601,7 +3617,7 @@ class AIAgent:
         except Exception:
             pass
 
-        # 5. Close the OpenAI/httpx client
+        # 6. Close the OpenAI/httpx client
         try:
             client = getattr(self, "client", None)
             if client is not None:
@@ -3610,7 +3626,7 @@ class AIAgent:
         except Exception:
             pass
 
-        # 6. Free conversation history.  Mirrors _release_evicted_agent_soft's
+        # 7. Free conversation history.  Mirrors _release_evicted_agent_soft's
         # soft-eviction clear — close() is the hard teardown for true session
         # boundaries (/new, /reset, session expiry), so the message list won't
         # be reused.  Drops the reference proactively rather than waiting for
