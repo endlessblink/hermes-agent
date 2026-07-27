@@ -158,7 +158,33 @@ describe('toChatMessages', () => {
       { role: 'assistant', content: 'The interactive question is ready.', timestamp: 3 }
     ])
 
-    expect(messages.map(chatMessageText)).toEqual(['The interactive question is ready.'])
+    expect(messages.filter(message => !message.hidden).map(chatMessageText)).toEqual([
+      'The interactive question is ready.'
+    ])
+    expect(messages.filter(message => message.hidden).map(chatMessageText)).toEqual([
+      'Which syllabus should we continue with?'
+    ])
+  })
+
+  it('keeps a locally streamed answer that the refreshed history no longer contains', () => {
+    const local = toChatMessages([
+      { role: 'user', content: 'Give me the checklist', timestamp: 1 },
+      { role: 'assistant', content: 'Here is the checklist: is it readable?', timestamp: 2 }
+    ])
+    const refreshed = toChatMessages([{ role: 'user', content: 'Give me the checklist', timestamp: 1 }])
+
+    const merged = preserveLocalAssistantErrors(refreshed, local)
+
+    expect(merged.map(chatMessageText)).toContain('Here is the checklist: is it readable?')
+  })
+
+  it('does not duplicate a streamed answer that survived the refresh under a new id', () => {
+    const local = toChatMessages([{ role: 'assistant', content: 'All done.', timestamp: 2 }])
+    const refreshed = toChatMessages([{ role: 'assistant', content: 'All done.', timestamp: 9 }])
+
+    const merged = preserveLocalAssistantErrors(refreshed, local)
+
+    expect(merged.map(chatMessageText)).toEqual(['All done.'])
   })
 
   it('drops stored assistant session-busy bounces', () => {

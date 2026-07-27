@@ -907,6 +907,20 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       flushPendingTools(index)
       activeAssistantIndex = null
 
+      // Keep an assistant draft the backend withheld as a hidden record instead
+      // of deleting it. `hidden` is filtered out of the runtime view, so this is
+      // visually identical — but the text stays recoverable rather than being
+      // silently erased from a transcript the user already read.
+      if (message.role === 'assistant' && displayContent) {
+        result.push({
+          id: `${message.timestamp || Date.now()}-${index}-${message.role}`,
+          role: message.role,
+          parts: [assistantTextPart(displayContent)],
+          timestamp: message.timestamp,
+          hidden: true
+        })
+      }
+
       return
     }
 
@@ -1061,6 +1075,32 @@ export function preserveLocalAssistantErrors(
       }
 
       break
+    }
+  }
+
+  // Safety net: an assistant answer the user already read must never be erased
+  // by a server-side filter. If locally streamed text has no counterpart in the
+  // refreshed history, keep it rather than letting the message vanish.
+  const nextAssistantTexts = mergedNextMessages
+    .filter(message => message.role === 'assistant')
+    .map(message => normalize(chatMessageText(message)))
+    .filter(Boolean)
+
+  for (const message of displayableCurrentMessages) {
+    if (message.role !== 'assistant' || message.error || message.hidden || existingIds.has(message.id)) {
+      continue
+    }
+
+    const text = normalize(chatMessageText(message))
+
+    if (!text || preserveIds.has(message.id)) {
+      continue
+    }
+
+    const survivedRefresh = nextAssistantTexts.some(candidate => candidate.includes(text) || text.includes(candidate))
+
+    if (!survivedRefresh) {
+      preserveIds.add(message.id)
     }
   }
 

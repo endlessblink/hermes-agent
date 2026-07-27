@@ -453,6 +453,25 @@ def _build_ready_personal_assistant_plan(
             ).strip()
         break
     task_details = calendar_first_task_details()
+    progress_review = ""
+    for task in interview.get("tasks") or []:
+        if not isinstance(task, Mapping) or str(
+            task.get("taskId") or task.get("id") or ""
+        ) != "day-context":
+            continue
+        profile = task.get("profile")
+        if isinstance(profile, Mapping):
+            progress_review = str(profile.get("progressReview") or "").strip().casefold()
+        break
+    completed_titles = {
+        str(record.get("title") or "").strip()
+        for records in candidates_by_source.values()
+        if isinstance(records, Mapping)
+        for record in records.values()
+        if isinstance(record, Mapping)
+        and str(record.get("title") or "").strip()
+        and str(record.get("title") or "").strip().casefold() in progress_review
+    }
     plan_kwargs = {
         "task_inventory_records": calendar_first_task_records(),
         "candidate_records": candidates_by_source,
@@ -462,7 +481,7 @@ def _build_ready_personal_assistant_plan(
         "availability": availability,
         "planning_date": planning_date,
         "preferred_task_title": preferred_task_title,
-        "excluded_task_titles": excluded_task_titles,
+        "excluded_task_titles": tuple(dict.fromkeys((*excluded_task_titles, *sorted(completed_titles)))),
         "user_message": "",
     }
     def _with_skipped_source_note(plan: Optional[str]) -> Optional[str]:
@@ -515,6 +534,29 @@ def _parse_personal_assistant_plan_adjustment(
         if title.strip()
     )
     return "", titles
+
+
+def _planning_interview_needs_progress_check(
+    interview: Mapping[str, Any],
+    *,
+    now: datetime,
+) -> bool:
+    if interview.get("readinessApproved") is not True:
+        return False
+    try:
+        context_at = datetime.fromisoformat(
+            str(
+                interview.get("readinessApprovedAt")
+                or interview.get("completedAt")
+                or interview.get("createdAt")
+                or ""
+            ).replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    if context_at.tzinfo is None:
+        return False
+    return now.astimezone(context_at.tzinfo) - context_at >= timedelta(minutes=15)
 
 
 def _build_initial_personal_assistant_planning_response(
@@ -600,7 +642,14 @@ def _build_initial_personal_assistant_planning_response(
             start_date=planning_date,
             end_date=planning_end,
         ):
-            if interview.get("readinessApproved") is True:
+            if (
+                interview.get("readinessApproved") is True
+                and (
+                    preferred_task_title
+                    or excluded_task_titles
+                    or not _planning_interview_needs_progress_check(interview, now=now)
+                )
+            ):
                 from agent.personal_assistant_calendar_gate import (
                     begin_calendar_first_planning_turn,
                 )
@@ -641,6 +690,11 @@ def _build_initial_personal_assistant_planning_response(
                 "requestId": f"deterministic-start-{uuid.uuid4()}",
                 "planningDate": planning_date,
                 "mode": "daily-grounding",
+                "questionOrder": (
+                    ["availability"]
+                    if planning_date > now.date().isoformat()
+                    else ["progressReview"]
+                ),
                 "sourceSnapshot": {
                     "calendarReceipt": receipt,
                     "localDate": planning_date,
@@ -6526,7 +6580,11 @@ def run_conversation(
                         and agent.iteration_budget.remaining > 0
                     ):
                         desktop_clarify_gate_continuations += 1
-                        final_msg["finish_reason"] = "desktop_clarify_gate_continue"
+                        # The draft already streamed to the user. Keep it in the
+                        # transcript under a finish reason the Desktop UI does
+                        # not delete, so the answer never vanishes mid-read; the
+                        # retry only adds the interactive question on top.
+                        final_msg["finish_reason"] = "desktop_clarify_gate_kept"
                         final_msg["_desktop_clarify_gate_synthetic"] = True
                         messages.append(final_msg)
                         messages.append(
@@ -6552,8 +6610,15 @@ def run_conversation(
                         "Desktop clarify output gate exhausted; reason=%s",
                         _clarify_reason,
                     )
+                    # Never trade the drafted answer for a stub. Keep the text the
+                    # user already read and note that the question control failed.
+                    _drafted = str(final_response or "").strip()
+                    _fallback_note = (
+                        "I need your input, but the interactive question control "
+                        "could not be opened."
+                    )
                     final_response = (
-                        "I need your input, but the interactive question control could not be opened."
+                        f"{_drafted}\n\n{_fallback_note}" if _drafted else _fallback_note
                     )
                     final_msg["content"] = final_response
                     final_msg["finish_reason"] = "desktop_clarify_safe_fallback"
