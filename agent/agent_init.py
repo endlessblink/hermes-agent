@@ -1395,6 +1395,7 @@ def init_agent(
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
+    agent._memory_sync_worker = None
     if not skip_memory:
         try:
             mem_config = _agent_cfg.get("memory", {})
@@ -1403,13 +1404,27 @@ def init_agent(
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
             if agent._memory_enabled or agent._user_profile_enabled:
                 from tools.memory_tool import MemoryStore
+                reliable_repository = None
+                if mem_config.get("reliable_memory_enabled", False):
+                    from agent.reliable_memory import ReliableMemoryRepository
+
+                    reliable_repository = ReliableMemoryRepository.from_profile(_agent_cfg)
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
                     scoped_memory_enabled=mem_config.get("scoped_memory_enabled", False),
                     scoped_memory_char_limit=mem_config.get("scoped_memory_char_limit", 4000),
+                    reliable_repository=reliable_repository,
                 )
                 agent._memory_store.load_from_disk()
+                if reliable_repository is not None:
+                    from agent.reliable_memory import MemorySyncWorker
+
+                    agent._memory_sync_worker = MemorySyncWorker(
+                        reliable_repository,
+                        interval=float(mem_config.get("memory_sync_poll_seconds", 2.0)),
+                    )
+                    agent._memory_sync_worker.start()
         except Exception:
             pass  # Memory is optional -- don't break agent init
     

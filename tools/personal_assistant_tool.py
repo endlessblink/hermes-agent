@@ -49,7 +49,19 @@ def _service(store: PersonalAssistantStateStore):
     from agent.personal_assistant_service import PersonalAssistantStateService
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    return PersonalAssistantStateService(store, PersonalAssistantObsidianAdapter(raw))
+    projector = None
+    if (raw.get("memory") or {}).get("reliable_memory_enabled", False):
+        from agent.personal_assistant_memory import PersonalAssistantMemoryProjector
+        from agent.reliable_memory import ReliableMemoryRepository
+
+        projector = PersonalAssistantMemoryProjector(
+            ReliableMemoryRepository.from_profile(raw)
+        )
+    return PersonalAssistantStateService(
+        store,
+        PersonalAssistantObsidianAdapter(raw),
+        projector,
+    )
 
 
 def _result(payload: dict[str, Any]) -> str:

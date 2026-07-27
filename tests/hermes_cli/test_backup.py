@@ -1825,6 +1825,7 @@ class TestQuickSnapshotProjectsKanban:
         seeded = {
             "response_store.db": ("responses", ("r1", "hello")),
             "memory_store.db": ("facts", ("f1", "the sky is blue")),
+            "memory.db": ("memory_events", ("m1", "durable correction")),
             "verification_evidence.db": ("verification_events", ("v1", "passed")),
         }
         for name, (table, row) in seeded.items():

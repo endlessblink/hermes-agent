@@ -236,6 +236,7 @@ class MemoryStore:
         user_char_limit: int = 1375,
         scoped_memory_enabled: bool = False,
         scoped_memory_char_limit: int = 4000,
+        reliable_repository: Any = None,
     ):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
@@ -243,6 +244,7 @@ class MemoryStore:
         self.user_char_limit = user_char_limit
         self.scoped_memory_enabled = bool(scoped_memory_enabled)
         self.scoped_memory_char_limit = int(scoped_memory_char_limit or 4000)
+        self.reliable_repository = reliable_repository
         self._scoped_nodes: List[Dict[str, Any]] = []
         self._scoped_debug: Dict[str, List[Dict[str, str]]] = {"loaded": [], "skipped": []}
         # Frozen snapshot for system prompt -- set once at load_from_disk()
@@ -295,6 +297,22 @@ class MemoryStore:
         Scanning is deterministic from disk bytes, so the snapshot remains
         stable for the entire session (prefix-cache invariant holds).
         """
+        if self.reliable_repository is not None:
+            self.reliable_repository.reconcile()
+            self.memory_entries = [
+                record["content"]
+                for record in self.reliable_repository.list_active(target="memory")
+            ]
+            self.user_entries = [
+                record["content"]
+                for record in self.reliable_repository.list_active(target="user")
+            ]
+            self._system_prompt_snapshot = {
+                "memory": self._render_block("memory", self.memory_entries),
+                "user": self._render_block("user", self.user_entries),
+            }
+            return
+
         mem_dir = get_memory_dir()
         mem_dir.mkdir(parents=True, exist_ok=True)
 
@@ -777,6 +795,43 @@ class MemoryStore:
 
         Returns None if the snapshot is empty (no entries at load time).
         """
+        if self.reliable_repository is not None:
+            requested_scope = {
+                key: value
+                for key, value in {
+                    "project": cwd or None,
+                    "source": session_source or None,
+                }.items()
+                if value
+            }
+            if query:
+                records = self.reliable_repository.search(
+                    query,
+                    scope=requested_scope or None,
+                    limit=64,
+                )["memories"]
+                records = [
+                    record
+                    for record in records
+                    if record["scope"].get("target") == target
+                ]
+            else:
+                records = self.reliable_repository.list_active(target=target)
+            entries = [record["content"] for record in records]
+            if not entries:
+                return None
+            limit = (
+                self.user_char_limit
+                if target == "user"
+                else self.scoped_memory_char_limit
+            )
+            selected: List[str] = []
+            for entry in entries:
+                if len(ENTRY_DELIMITER.join(selected + [entry])) > limit:
+                    continue
+                selected.append(entry)
+            return self._render_block(target, selected) if selected else None
+
         if target == "memory" and self.scoped_memory_enabled:
             block = self._render_scoped_memory_block(query=query, cwd=cwd, session_source=session_source)
             return block if block else None
@@ -1433,18 +1488,24 @@ def load_on_disk_store() -> "MemoryStore":
     """
     memory_char_limit = 2200
     user_char_limit = 1375
+    reliable_repository = None
     try:
         from hermes_cli.config import load_config
 
         mem_cfg = (load_config() or {}).get("memory", {}) or {}
         memory_char_limit = int(mem_cfg.get("memory_char_limit", memory_char_limit))
         user_char_limit = int(mem_cfg.get("user_char_limit", user_char_limit))
+        if mem_cfg.get("reliable_memory_enabled", False):
+            from agent.reliable_memory import ReliableMemoryRepository
+
+            reliable_repository = ReliableMemoryRepository.from_profile()
     except Exception:
         pass  # config optional — fall back to defaults rather than break /memory
 
     store = MemoryStore(
         memory_char_limit=memory_char_limit,
         user_char_limit=user_char_limit,
+        reliable_repository=reliable_repository,
     )
     store.load_from_disk()
     return store
@@ -1672,6 +1733,198 @@ def _scoped_dispatch(
     return json.dumps(result, ensure_ascii=False)
 
 
+def _reliable_memory_dispatch(
+    *,
+    repository: Any,
+    action: Optional[str],
+    target: str,
+    content: Optional[str],
+    old_text: Optional[str],
+    operations: Optional[List[Dict[str, Any]]],
+    node_type: Optional[str],
+    entities: Optional[List[str]],
+    project_paths: Optional[List[str]],
+    sources: Optional[List[str]],
+    is_global: bool,
+    query: Optional[str],
+    memory_id: Optional[str],
+    limit: int,
+) -> str:
+    """Compatibility bridge from the existing memory tool to the ledger."""
+    from agent.reliable_memory import MemoryConflictError, MemoryMirrorError
+
+    def scope_for(selected_target: str) -> Dict[str, Any]:
+        scope: Dict[str, Any] = {
+            "kind": "global" if is_global or not project_paths else "project",
+            "target": selected_target,
+        }
+        if project_paths:
+            scope["project"] = project_paths[0]
+            scope["project_paths"] = list(project_paths)
+        if sources:
+            scope["source"] = sources[0]
+            scope["sources"] = list(sources)
+        if entities:
+            scope["entities"] = list(entities)
+        return scope
+
+    def type_for(selected_target: str, value: str) -> str:
+        if node_type:
+            return node_type
+        if selected_target == "user":
+            return "user_preference"
+        return _infer_scoped_node_type(
+            value,
+            entities=entities,
+            project_paths=project_paths,
+            sources=sources,
+            is_global=is_global,
+        )
+
+    def success(record: Dict[str, Any], message: str) -> str:
+        return json.dumps(
+            {
+                "success": True,
+                "done": True,
+                "target": target,
+                "message": message,
+                "memory": record,
+                "note": "Ledger and Obsidian readback verified.",
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        if action == "search":
+            result = repository.search(query or "", limit=max(1, int(limit or 8)))
+            result["memories"] = [
+                record
+                for record in result["memories"]
+                if record["scope"].get("target") == target
+            ]
+            return json.dumps({"success": True, **result}, ensure_ascii=False)
+        if action == "why":
+            selector = memory_id or old_text
+            record = repository.resolve(selector, target=target)
+            return json.dumps(
+                {"success": True, **repository.why(record["id"])},
+                ensure_ascii=False,
+            )
+        if action == "sync_status":
+            return json.dumps(
+                {"success": True, **repository.sync_status()}, ensure_ascii=False
+            )
+        if action == "undo":
+            selector = memory_id or old_text
+            record = repository.resolve(selector, target=target) if not memory_id else None
+            restored = repository.undo(memory_id or record["id"])
+            return success(restored, "Memory restored.")
+        if action == "purge":
+            selector = memory_id or old_text
+            if not selector:
+                return tool_error("memory_id or old_text is required for purge.", success=False)
+            resolved_id = memory_id
+            if resolved_id is None:
+                resolved_id = repository.resolve(selector, target=target)["id"]
+            return json.dumps(
+                repository.purge(resolved_id), ensure_ascii=False
+            )
+
+        if operations:
+            applied: List[Dict[str, Any]] = []
+            try:
+                for operation in operations:
+                    op_action = str((operation or {}).get("action") or "")
+                    op_content = (operation or {}).get("content")
+                    op_old = (operation or {}).get("old_text")
+                    if op_action == "add":
+                        record = repository.add(
+                            op_content,
+                            memory_type=type_for(target, op_content or ""),
+                            trust="explicit",
+                            scope=scope_for(target),
+                            source={"kind": "memory_tool", "shape": "batch"},
+                        )
+                        applied.append({"kind": "add", "id": record["id"]})
+                    elif op_action == "replace":
+                        current = repository.resolve(op_old, target=target)
+                        repository.correct(
+                            current["id"],
+                            op_content,
+                            trust="explicit",
+                            source={"kind": "memory_tool", "shape": "batch"},
+                        )
+                        applied.append({"kind": "revise", "id": current["id"]})
+                    elif op_action == "remove":
+                        current = repository.resolve(op_old, target=target)
+                        repository.forget(
+                            current["id"],
+                            source={"kind": "memory_tool", "shape": "batch"},
+                        )
+                        applied.append({"kind": "revise", "id": current["id"]})
+                    else:
+                        raise ValueError(f"Unknown batch action: {op_action}")
+            except Exception:
+                for applied_op in reversed(applied):
+                    if applied_op["kind"] == "add":
+                        repository.purge(applied_op["id"])
+                    else:
+                        repository.undo(applied_op["id"])
+                raise
+            return json.dumps(
+                {
+                    "success": True,
+                    "done": True,
+                    "target": target,
+                    "message": f"Applied {len(applied)} verified operation(s).",
+                    "memories": [
+                        repository.why(item["id"]) for item in applied
+                        if item["kind"] != "add" or repository.history(item["id"])
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+        if action == "add":
+            if not content:
+                return tool_error("Content is required for 'add' action.", success=False)
+            record = repository.add(
+                content,
+                memory_type=type_for(target, content),
+                trust="explicit",
+                scope=scope_for(target),
+                source={"kind": "memory_tool"},
+            )
+            return success(record, "Memory added.")
+        if action == "replace":
+            if not content or not old_text:
+                return tool_error(
+                    "content and old_text are required for replace.", success=False
+                )
+            current = repository.resolve(old_text, target=target)
+            record = repository.correct(
+                current["id"],
+                content,
+                trust="explicit",
+                source={"kind": "memory_tool"},
+            )
+            return success(record, "Memory corrected.")
+        if action == "remove":
+            if not old_text:
+                return tool_error("old_text is required for remove.", success=False)
+            current = repository.resolve(old_text, target=target)
+            record = repository.forget(
+                current["id"], source={"kind": "memory_tool"}
+            )
+            return success(record, "Memory hidden; undo is available.")
+        return tool_error(
+            "Unknown action. Use add, replace, remove, search, why, undo, purge, or sync_status.",
+            success=False,
+        )
+    except (MemoryConflictError, MemoryMirrorError, ValueError) as exc:
+        return tool_error(str(exc), success=False)
+
+
 def memory_tool(
     action: str = None,
     target: str = "memory",
@@ -1684,6 +1937,9 @@ def memory_tool(
     project_paths: Optional[List[str]] = None,
     sources: Optional[List[str]] = None,
     is_global: bool = False,
+    query: str = None,
+    memory_id: str = None,
+    limit: int = 8,
     store: Optional[MemoryStore] = None,
 ) -> str:
     """
@@ -1717,6 +1973,45 @@ def memory_tool(
 
     if not action and content and not old_text:
         action = "add"
+
+    if store.reliable_repository is not None:
+        if operations:
+            if not isinstance(operations, list):
+                return tool_error(
+                    "operations must be a list of {action, content?, old_text?} objects.",
+                    success=False,
+                )
+            gate_result = _apply_batch_write_gate(target, operations)
+            if gate_result is not None:
+                return gate_result
+        elif action in {"add", "replace", "remove"}:
+            if action == "add" and not content:
+                return tool_error("Content is required for 'add' action.", success=False)
+            if action == "replace" and (not old_text or not content):
+                return tool_error(
+                    "content and old_text are required for replace.", success=False
+                )
+            if action == "remove" and not old_text:
+                return tool_error("old_text is required for remove.", success=False)
+            gate_result = _apply_write_gate(action, target, content, old_text)
+            if gate_result is not None:
+                return gate_result
+        return _reliable_memory_dispatch(
+            repository=store.reliable_repository,
+            action=action,
+            target=target,
+            content=content,
+            old_text=old_text,
+            operations=operations,
+            node_type=node_type,
+            entities=entities,
+            project_paths=project_paths,
+            sources=sources,
+            is_global=is_global,
+            query=query,
+            memory_id=memory_id,
+            limit=limit,
+        )
 
     # --- Batch path -------------------------------------------------------
     if operations:
@@ -1797,6 +2092,24 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
     target = payload.get("target", "memory")
     content = payload.get("content") or ""
     old_text = payload.get("old_text") or ""
+    if store.reliable_repository is not None:
+        result = _reliable_memory_dispatch(
+            repository=store.reliable_repository,
+            action=action,
+            target=target,
+            content=content or None,
+            old_text=old_text or None,
+            operations=payload.get("operations"),
+            node_type=payload.get("node_type"),
+            entities=payload.get("entities"),
+            project_paths=payload.get("project_paths"),
+            sources=payload.get("sources"),
+            is_global=bool(payload.get("is_global")),
+            query=payload.get("query"),
+            memory_id=payload.get("memory_id"),
+            limit=int(payload.get("limit") or 8),
+        )
+        return json.loads(result)
     if target == "scoped":
         if action == "add":
             return store.add_scoped(
@@ -1871,7 +2184,10 @@ MEMORY_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
+                "enum": [
+                    "add", "replace", "remove", "search", "why", "undo",
+                    "purge", "sync_status",
+                ],
                 "description": "The action to perform (single-op shape). Omit when using 'operations'."
             },
             "target": {
@@ -1886,6 +2202,18 @@ MEMORY_SCHEMA = {
             "old_text": {
                 "type": "string",
                 "description": "REQUIRED for 'replace' and 'remove' (single-op shape): a short unique substring identifying the existing entry. For target='scoped' it may be the node id or a unique content substring. Omit only for 'add'."
+            },
+            "query": {
+                "type": "string",
+                "description": "Query text for action='search'."
+            },
+            "memory_id": {
+                "type": "string",
+                "description": "Stable memory id for action='why', 'undo', or 'purge'."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum results for action='search'."
             },
             "node_type": {
                 "type": "string",
@@ -1965,6 +2293,9 @@ registry.register(
         project_paths=args.get("project_paths"),
         sources=args.get("sources"),
         is_global=bool(args.get("is_global", False)),
+        query=args.get("query"),
+        memory_id=args.get("memory_id"),
+        limit=args.get("limit", 8),
         store=kw.get("store")),
     check_fn=check_memory_requirements,
     emoji="🧠",
