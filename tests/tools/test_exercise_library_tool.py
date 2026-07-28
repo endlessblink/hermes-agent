@@ -363,6 +363,7 @@ def test_toolset_is_declared():
         "exercise_find",
         "exercise_demo",
         "exercise_build_workout",
+        "exercise_generate_demo",
     }
 
 

@@ -319,6 +319,7 @@ TOOLSETS = {
             "exercise_find",
             "exercise_demo",
             "exercise_build_workout",
+            "exercise_generate_demo",
         ],
         "includes": []
     },
