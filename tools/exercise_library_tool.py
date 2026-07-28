@@ -430,18 +430,47 @@ def _download_frame(relative_path: str) -> Path:
     return local
 
 
+def _safe_id(exercise: dict[str, Any]) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(exercise.get("id")))
+
+
+def illustration_path(exercise: dict[str, Any]) -> Path:
+    """Where a properly drawn illustration lives, if one has been made."""
+    return _gif_dir() / f"{_safe_id(exercise)}.gif"
+
+
+def _photo_fallback_dir() -> Path:
+    """Separate directory for photo crossfades.
+
+    Deliberately NOT the same filename as an illustration. When both shared a
+    path, the first photo fallback cached itself as the answer forever and the
+    exercise could never be upgraded to a real drawing — and because the
+    fallback always succeeds, the model was never told anything was missing, so
+    it never asked for one.
+    """
+    path = _gif_dir() / "photo"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _build_gif(exercise: dict[str, Any]) -> Path:
     """Render a looping GIF that crossfades the start frame into the end frame.
 
-    The dataset gives two stills per exercise. Blending between them reads as a
-    real repetition for most lifts and costs nothing — no API, no key, no
-    licensing question.
+    This is the *fallback*: the dataset gives two stills per exercise, and
+    blending between them costs nothing. It reads as a rough repetition but it is
+    a photograph of a stranger, not the illustrated library — see
+    ``illustration_path`` for the real thing.
     """
     from PIL import Image
 
     exercise_id = str(exercise.get("id"))
-    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", exercise_id)
-    out_path = _gif_dir() / f"{safe_id}.gif"
+    safe_id = _safe_id(exercise)
+
+    drawn = illustration_path(exercise)
+    if drawn.is_file() and drawn.stat().st_size > 0:
+        return drawn
+
+    out_path = _photo_fallback_dir() / f"{safe_id}.gif"
     if out_path.is_file() and out_path.stat().st_size > 0:
         return out_path
 
@@ -531,6 +560,10 @@ def _handle_demo(args: dict, **_kwargs) -> str:
                 continue
             entry = _summarize(exercise, full=True)
             entry["mediaPath"] = str(path)
+            # The model cannot tell an illustration from a stock photo by looking
+            # at a path, and the photo fallback never fails — so without this it
+            # never learns a proper drawing is missing, and never asks for one.
+            entry["illustrated"] = str(path) == str(illustration_path(exercise))
             demos.append(entry)
 
         if not demos:
@@ -539,15 +572,26 @@ def _handle_demo(args: dict, **_kwargs) -> str:
                 unknownIds=missing,
             )
 
+        note = (
+            "Send each demo to the user by writing MEDIA:<mediaPath> in your reply "
+            "(one per line). Summarize the instructions in the user's language "
+            "alongside it — do not paste the raw English steps verbatim."
+        )
+        undrawn = [d["exerciseId"] for d in demos if not d["illustrated"]]
+        if undrawn:
+            note += (
+                " NOTE — these are stock photographs, not the illustrated library: "
+                f"{', '.join(undrawn)}. Send them, and offer once to draw a proper "
+                "illustration with exercise_generate_demo if the user wants a clearer "
+                "one. Do not draw without being asked; it takes a minute or two each."
+            )
+
         return tool_result(
             {
                 "demos": demos,
                 "unknownIds": missing,
-                "note": (
-                    "Send each demo to the user by writing MEDIA:<mediaPath> in your reply "
-                    "(one per line). Summarize the instructions in the user's language "
-                    "alongside it — do not paste the raw English steps verbatim."
-                ),
+                "illustratedCount": sum(1 for d in demos if d["illustrated"]),
+                "note": note,
             }
         )
     except Exception as exc:
