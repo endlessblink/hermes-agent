@@ -18,6 +18,27 @@ from hermes_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import server
 
 
+class _PromptDb:
+    def patch_working_state(self, _session_id, _patch, *, source):
+        return None
+
+    def accept_pending_turn_claim(
+        self, _session_id, _prompt_hash, _claim_id, *, source
+    ):
+        return True
+
+    def resolve_resume_session_id(self, session_id):
+        return session_id
+
+
+def _use_durable_prompt_db(monkeypatch, db=None):
+    durable_db = db or _PromptDb()
+    monkeypatch.setattr(
+        server, "_session_db", lambda _session: contextlib.nullcontext(durable_db)
+    )
+    return durable_db
+
+
 def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -267,6 +288,7 @@ def test_prompt_submit_fails_open_inline_when_compute_host_dispatch_breaks(monke
 
     session = _session(agent=None, agent_ready=threading.Event())
     server._sessions["iso-fallback"] = session
+    _use_durable_prompt_db(monkeypatch)
     inline_calls = []
     monkeypatch.setattr(server, "_load_cfg", lambda: {"dashboard": {"turn_isolation": True}})
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: _BrokenSupervisor())
@@ -441,6 +463,7 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
 
     fixed_info = {"model": "gold-model", "provider": "gold-provider", "usage": {"total": 15}}
     usage = server._get_usage(_Agent())
+    _use_durable_prompt_db(monkeypatch)
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
     monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
@@ -463,7 +486,7 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
                 {"id": "turn-1", "method": "prompt.submit", "params": {"session_id": "sid", "text": "hello"}}
             )
             assert response["result"]["status"] == "streaming"
-            return events
+            return [event for event in events if event[0] != "diagnostic.event"]
         finally:
             server._sessions.pop("sid", None)
 
@@ -508,7 +531,7 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
                 {"id": "turn-1", "method": "prompt.submit", "params": {"session_id": "sid", "text": "hello"}}
             )
             assert response["result"]["status"] == "streaming"
-            return events
+            return [event for event in events if event[0] != "diagnostic.event"]
         finally:
             server._sessions.pop("sid", None)
 
@@ -3086,6 +3109,7 @@ def test_run_prompt_submit_requeues_foreign_completion(
     from tools.process_registry import process_registry
 
     _configure_immediate_prompt_run(monkeypatch, tmp_path)
+    _use_durable_prompt_db(monkeypatch)
     turns = []
     session_a = _session(session_key="session-a")
     session_b = _session(
@@ -3861,6 +3885,9 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
             }
 
     class _FakeDB:
+        def patch_working_state(self, _session_id, _patch, *, source):
+            return None
+
         def set_session_title(self, _key, _title):
             raise ValueError("Title already in use")
 
@@ -6548,6 +6575,9 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
         def replace_messages(self, session_id, messages):
             self.replaced.append((session_id, list(messages)))
 
+        def patch_working_state(self, _session_id, _patch, *, source):
+            return None
+
     stub_db = _StubDb()
 
     try:
@@ -6624,6 +6654,14 @@ def test_restart_recovery_archives_incomplete_turn_without_replacing_history(mon
         def replace_messages(self, session_id, messages):
             self.replaced.append((session_id, list(messages)))
 
+        def patch_working_state(self, _session_id, _patch, *, source):
+            return None
+
+        def accept_pending_turn_claim(
+            self, _session_id, _prompt_hash, _claim_id, *, source
+        ):
+            return True
+
     stub_db = _StubDb()
 
     try:
@@ -6641,6 +6679,7 @@ def test_restart_recovery_archives_incomplete_turn_without_replacing_history(mon
                     "session_id": "sid",
                     "text": "retry this",
                     "recovery_kind": "restart_interrupted",
+                    "recovery_claim_id": "claim-1",
                     "truncate_before_user_ordinal": 1,
                 },
             }
@@ -7799,6 +7838,7 @@ def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
+    _use_durable_prompt_db(monkeypatch)
 
     with patch("agent.title_generator.maybe_auto_title") as mock_title:
         server.handle_request(
@@ -7835,6 +7875,7 @@ def test_prompt_submit_skips_auto_title_when_interrupted(monkeypatch):
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
+    _use_durable_prompt_db(monkeypatch)
 
     with patch("agent.title_generator.maybe_auto_title") as mock_title:
         server.handle_request(
@@ -8621,6 +8662,7 @@ def test_session_activate_returns_inflight_stream_before_completion(monkeypatch)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
+    _use_durable_prompt_db(monkeypatch)
     monkeypatch.setattr(server, "_session_info", lambda agent: {"model": agent.model})
 
     def _emit(event, sid, payload=None):

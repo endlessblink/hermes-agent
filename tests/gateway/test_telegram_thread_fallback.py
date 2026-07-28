@@ -114,6 +114,12 @@ def _inject_fake_telegram(monkeypatch):
     monkeypatch.setitem(sys.modules, "telegram.constants", _fake_telegram_constants)
     monkeypatch.setitem(sys.modules, "telegram.ext", _fake_telegram_ext)
     monkeypatch.setitem(sys.modules, "telegram.request", _fake_telegram_request)
+    import plugins.platforms.telegram.adapter as telegram_mod
+
+    monkeypatch.setattr(telegram_mod, "InlineKeyboardButton", _FakeInlineKeyboardButton)
+    monkeypatch.setattr(telegram_mod, "InlineKeyboardMarkup", _FakeInlineKeyboardMarkup)
+    monkeypatch.setattr(telegram_mod, "ParseMode", _fake_telegram_constants.ParseMode)
+    monkeypatch.setattr(telegram_mod, "ChatType", _fake_telegram_constants.ChatType)
 
 
 def _make_adapter():
@@ -1371,8 +1377,7 @@ async def test_send_marks_wrapped_connect_timeout_retryable_after_exhaustion():
     async def mock_send_message(**kwargs):
         attempt[0] += 1
         err = FakeTimedOut("Timed out")
-        err.__context__ = FakeConnectTimeout("ConnectTimeout")
-        raise err
+        raise err from FakeConnectTimeout("ConnectTimeout")
 
     adapter._bot = SimpleNamespace(send_message=mock_send_message)
 

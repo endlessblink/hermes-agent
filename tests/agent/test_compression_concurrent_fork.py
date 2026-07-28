@@ -225,17 +225,28 @@ def test_pre_compress_memory_capture_does_not_block_compaction(tmp_path: Path) -
 
     agent._memory_manager = _SlowMemoryManager()
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
+    compression_finished = threading.Event()
+    result = {}
 
-    before = time.monotonic()
-    compressed, _sp = agent._compress_context(
-        messages, "sys", approx_tokens=120_000
-    )
-    elapsed = time.monotonic() - before
+    def compress() -> None:
+        result["messages"], _sp = agent._compress_context(
+            messages, "sys", approx_tokens=120_000
+        )
+        compression_finished.set()
 
-    assert started.wait(timeout=1), "memory capture was not scheduled"
-    assert elapsed < 1.0, "memory extraction blocked the compaction path"
-    assert len(compressed) == 2
-    release.set()
+    worker = threading.Thread(target=compress)
+    worker.start()
+    try:
+        assert started.wait(timeout=1), "memory capture was not scheduled"
+        assert compression_finished.wait(timeout=1), (
+            "memory extraction blocked the compaction path"
+        )
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(result["messages"]) == 2
 
 
 def test_noop_compression_does_not_reinject_tasks_or_rewrite_history(
