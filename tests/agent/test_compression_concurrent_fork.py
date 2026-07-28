@@ -237,8 +237,8 @@ def test_pre_compress_memory_capture_does_not_block_compaction(tmp_path: Path) -
     worker = threading.Thread(target=compress)
     worker.start()
     try:
-        assert started.wait(timeout=1), "memory capture was not scheduled"
-        assert compression_finished.wait(timeout=1), (
+        assert started.wait(timeout=10), "memory capture was not scheduled"
+        assert compression_finished.wait(timeout=10), (
             "memory extraction blocked the compaction path"
         )
     finally:

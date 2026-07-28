@@ -3295,9 +3295,24 @@ def test_run_prompt_submit_delivers_completion_owned_through_compression_lineage
         server, "_session_owns_notification_event", _record_ownership_check
     )
     turns = []
+    notification_delivered = threading.Event()
+
+    class _SignalingRecordingAgent(_RecordingAgent):
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            result = super().run_conversation(
+                prompt,
+                conversation_history=conversation_history,
+                stream_callback=stream_callback,
+            )
+            if "proc_precompression" in prompt:
+                notification_delivered.set()
+            return result
+
     session = _session(
         session_key="new-child-key",
-        agent=_RecordingAgent(turns),
+        agent=_SignalingRecordingAgent(turns),
         running=True,
     )
     event = {
@@ -3317,6 +3332,7 @@ def test_run_prompt_submit_delivers_completion_owned_through_compression_lineage
         server._run_prompt_submit("rid-b", "sid_b", session, "session-b-turn")
 
         assert turns[0] == "session-b-turn"
+        assert notification_delivered.wait(timeout=5)
         assert len(turns) == 2
         assert "proc_precompression" in turns[1]
         assert ownership_checks == ["proc_precompression"]
