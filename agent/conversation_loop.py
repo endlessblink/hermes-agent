@@ -6517,7 +6517,11 @@ def run_conversation(
                         and agent.iteration_budget.remaining > 0
                     ):
                         desktop_clarify_gate_continuations += 1
-                        final_msg["finish_reason"] = "desktop_clarify_gate_continue"
+                        # The draft already streamed to the user. Keep it in the
+                        # transcript under a finish reason the Desktop UI does
+                        # not delete, so the answer never vanishes mid-read; the
+                        # retry only adds the interactive question on top.
+                        final_msg["finish_reason"] = "desktop_clarify_gate_kept"
                         final_msg["_desktop_clarify_gate_synthetic"] = True
                         messages.append(final_msg)
                         messages.append(
@@ -6543,8 +6547,15 @@ def run_conversation(
                         "Desktop clarify output gate exhausted; reason=%s",
                         _clarify_reason,
                     )
+                    # Never trade the drafted answer for a stub. Keep the text the
+                    # user already read and note that the question control failed.
+                    _drafted = str(final_response or "").strip()
+                    _fallback_note = (
+                        "I need your input, but the interactive question control "
+                        "could not be opened."
+                    )
                     final_response = (
-                        "I need your input, but the interactive question control could not be opened."
+                        f"{_drafted}\n\n{_fallback_note}" if _drafted else _fallback_note
                     )
                     final_msg["content"] = final_response
                     final_msg["finish_reason"] = "desktop_clarify_safe_fallback"

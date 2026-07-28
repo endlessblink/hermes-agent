@@ -369,6 +369,13 @@ export function useMessageStream({
           const visibleFinalText = stripGeneratedImageEchoes(finalText, generatedImageEchoSources(parts)).trim()
           const dedupeReference = normalize(visibleFinalText)
 
+          // A terminal payload with no text (turn ended on a blocking tool such
+          // as `clarify`, or the answer was withheld upstream) must not wipe the
+          // prose the user already watched stream in.
+          if (!visibleFinalText) {
+            return parts
+          }
+
           const kept = parts.filter(part => {
             if (part.type === 'text') {
               return false
