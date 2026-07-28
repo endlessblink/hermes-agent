@@ -115,3 +115,21 @@ def test_note_is_clean_when_everything_is_illustrated(_isolated):
     (_isolated / "Pullups.gif").write_bytes(b"GIF89a" + b"\0" * 5000)
     note = _demo()["note"]
     assert "photograph" not in note.lower()
+
+
+# --------------------------------------------------------------------------
+# path leakage — the bot once messaged raw /opt/... paths to the user
+# --------------------------------------------------------------------------
+
+def test_every_demo_carries_a_ready_to_copy_media_tag():
+    """The model emitted bare paths, which Telegram showed as chat text."""
+    demo = _demo()["demos"][0]
+    assert demo["mediaTag"] == f"MEDIA:{demo['mediaPath']}"
+    assert demo["mediaTag"].startswith("MEDIA:/")
+
+
+def test_note_forbids_bare_paths_and_stale_paths():
+    """Both observed failure modes must be named in the instruction."""
+    note = _demo()["note"]
+    assert "bare file path" in note
+    assert "reuse a path from earlier" in note

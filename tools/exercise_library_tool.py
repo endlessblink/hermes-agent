@@ -560,6 +560,10 @@ def _handle_demo(args: dict, **_kwargs) -> str:
                 continue
             entry = _summarize(exercise, full=True)
             entry["mediaPath"] = str(path)
+            # Pre-formatted so the model copies one line verbatim. Emitting the
+            # bare path instead has happened in production: the paths were then
+            # delivered to the user as chat messages full of /opt/... noise.
+            entry["mediaTag"] = f"MEDIA:{path}"
             # The model cannot tell an illustration from a stock photo by looking
             # at a path, and the photo fallback never fails — so without this it
             # never learns a proper drawing is missing, and never asks for one.
@@ -573,9 +577,13 @@ def _handle_demo(args: dict, **_kwargs) -> str:
             )
 
         note = (
-            "Send each demo to the user by writing MEDIA:<mediaPath> in your reply "
-            "(one per line). Summarize the instructions in the user's language "
-            "alongside it — do not paste the raw English steps verbatim."
+            "Copy each demo's mediaTag onto its own line in your reply, exactly as "
+            "given. Never write a bare file path — a path without the MEDIA: prefix "
+            "is delivered to the user as chat text instead of a picture. Never reuse "
+            "a path from earlier in the conversation; those go stale and silently "
+            "fail to deliver, so always use the mediaTag from this result. Summarize "
+            "the instructions in the user's language alongside it — do not paste the "
+            "raw English steps verbatim."
         )
         undrawn = [d["exerciseId"] for d in demos if not d["illustrated"]]
         if undrawn:
