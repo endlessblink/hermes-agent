@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+import threading
 from zoneinfo import ZoneInfo
 
 
@@ -83,6 +84,44 @@ def test_concurrent_consumers_create_only_one_daily_claim(tmp_path):
 
     assert sum(result.claimed for result in results) == 1
     assert sum(result.status == "already_claimed" for result in results) == 15
+
+
+def test_fresh_incomplete_reservation_is_not_reclaimed(monkeypatch, tmp_path):
+    import agent.daily_assistant_lifecycle as lifecycle
+
+    now = datetime(2026, 7, 12, 9, 0, tzinfo=JERUSALEM)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    write_lock = threading.Lock()
+    write_calls = 0
+    original_write = lifecycle.os.write
+
+    def _blocking_first_write(fd, payload):
+        nonlocal write_calls
+        with write_lock:
+            write_calls += 1
+            should_block = write_calls == 1
+        if should_block:
+            write_started.set()
+            assert release_write.wait(timeout=5)
+        return original_write(fd, payload)
+
+    monkeypatch.setattr(lifecycle.os, "write", _blocking_first_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(
+            lifecycle.claim_daily_planning_trigger,
+            "office-work",
+            tmp_path,
+            now=now,
+        )
+        assert write_started.wait(timeout=5)
+        second = lifecycle.claim_daily_planning_trigger(
+            "office-work", tmp_path, now=now
+        )
+        release_write.set()
+
+    assert first.result().claimed
+    assert second.status == "already_claimed"
 
 
 def test_failed_delivery_can_abandon_reservation_and_retry(tmp_path):

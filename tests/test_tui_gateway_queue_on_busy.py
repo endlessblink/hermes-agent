@@ -9,10 +9,30 @@ policy: interrupt the live turn (default) and queue the message to run as the
 next turn, drained in ``run``'s tail.
 """
 
+import contextlib
 import threading
 import types
 
+import pytest
+
 from tui_gateway import server
+
+
+class _DurableDb:
+    def __init__(self):
+        self.patches = []
+
+    def patch_working_state(self, session_id, patch, *, source):
+        self.patches.append((session_id, patch, source))
+
+
+@pytest.fixture(autouse=True)
+def _durable_session_db(monkeypatch):
+    db = _DurableDb()
+    monkeypatch.setattr(
+        server, "_session_db", lambda _session: contextlib.nullcontext(db)
+    )
+    return db
 
 
 def _session(agent=None, **extra):
@@ -156,7 +176,9 @@ def test_drain_fires_queued_prompt_and_claims_running(monkeypatch):
     fired = {}
     monkeypatch.setattr(
         server, "_run_prompt_submit",
-        lambda rid, sid, session, text: fired.update(rid=rid, sid=sid, text=text),
+        lambda rid, sid, session, text, **_kwargs: fired.update(
+            rid=rid, sid=sid, text=text
+        ),
     )
     session = _session(queued_prompt={"text": "go", "transport": "ws-9"})
 

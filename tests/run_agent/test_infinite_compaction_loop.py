@@ -241,6 +241,14 @@ class TestEffectiveCompressionResetsCounter:
         comp._find_tail_cut_by_tokens = lambda _messages, _head: compress_start + 2
 
         comp.compress(messages, current_tokens=200_000)
+        comp.record_completed_compaction()
+        comp.update_from_response(
+            {
+                "prompt_tokens": 200_000,
+                "completion_tokens": 0,
+                "total_tokens": 200_000,
+            }
+        )
 
         assert comp._ineffective_compression_count >= 2, (
             "large fixed tool-schema overhead must not make an ineffective "

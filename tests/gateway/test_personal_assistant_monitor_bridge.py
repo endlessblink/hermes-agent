@@ -213,8 +213,12 @@ async def test_runner_schedules_office_work_monitor_bridge(monkeypatch, tmp_path
     )
 
     assert runner._start_personal_assistant_telegram_monitor_bridge(tmp_path) is True
+    task = runner._personal_assistant_telegram_monitor_task
     await asyncio.wait_for(started.wait(), timeout=1)
-    assert runner._personal_assistant_telegram_monitor_task in runner._background_tasks
+    await task
+    await asyncio.sleep(0)
+    assert task.done()
+    assert task not in runner._background_tasks
 
 
 @pytest.mark.asyncio

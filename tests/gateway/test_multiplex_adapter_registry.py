@@ -222,7 +222,7 @@ class TestSecondaryProfileConfigHandling:
 
         monkeypatch.setattr(
             "hermes_cli.profiles.profiles_to_serve",
-            lambda multiplex: [
+            lambda multiplex, served_profiles=None: [
                 ("default", Path("/tmp/default")),
                 ("bad", Path("/tmp/bad")),
                 ("good", Path("/tmp/good")),
@@ -264,7 +264,7 @@ class TestSecondaryProfileConfigHandling:
 
         monkeypatch.setattr(
             "hermes_cli.profiles.profiles_to_serve",
-            lambda multiplex: [
+            lambda multiplex, served_profiles=None: [
                 ("default", Path("/tmp/default")),
                 ("unsafe", Path("/tmp/unsafe")),
             ],
