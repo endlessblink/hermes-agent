@@ -1,79 +1,70 @@
-# Dropoff — 2026-07-19 19:46 Sunday
+# Dropoff — 2026-07-28 22:17 Tuesday
 
 ```
-You are continuing work in hermes-agent (~/.hermes/hermes-agent, the LIVE install) on branch main.
+You are continuing work in hermes-agent (worktree exercise-library) on branch feat/exercise-library.
 
 ## Current task & next step
-Design a reliable fix for blocking compaction pauses ("Summarizing thread", measured 112-235s,
-median ~217s, re-fires every ~10-30 min in the office-work profile) — next: finish the PLAN
-(user demanded deep research, NO ad-hoc changes), then implement task #35 after approval.
-A plan-mode session was interrupted mid-research; the plan file was never written
-(/home/endlessblink/.claude/plans/snuggly-baking-lecun.md is empty/absent).
-
-Research already gathered (reuse, don't redo):
-- Measured: compaction succeeds 8/8 since Jul-18 but blocks 2-4 min; residue after compaction
-  was ~92k of ~120k because protect_last_n kept giant tool results (now 10, was 20, all 9 configs).
-- Industry patterns (Claude Code/Codex/OpenCode/Amp — see gist.github.com/badlogic/cd2ef65b0697c4dbe2d13fbecb0a0a5f
-  and codex.danielvaughan.com compaction deep dives): (1) trim/offload BULKY TOOL RESULTS first
-  (microcompaction — cheap, no LLM); (2) keep summaries small + prompt-cache-friendly (delete
-  less, keep prefix stable); (3) offload big outputs to files with path references (near-lossless;
-  Hermes already has archived rows + FTS recall to lean on); (4) parallel/async compaction exists
-  in research, but tool-result trimming is the proven cheap win.
-- Candidate insertion point (verified): gateway _compress_session_history (tui_gateway/server.py
-  ~3590) + session.compress RPC (~9882) snapshots history WITHOUT holding history_lock during the
-  LLM call and has history_version conflict detection — i.e. a post-turn (after message.complete)
-  trigger at ~90% threshold can reuse it; pre-API compaction stays as backstop (task #35).
-- Machinery map COMPLETE — read docs/superpowers/specs/2026-07-19-compaction-nonblocking-map.md
-  (call graph, locks/invariants, the 217s anatomy, ready-made seams incl. partial_compress.py
-  and the turn_finalizer post-response background pattern). Do NOT re-explore.
+The fitness bot (Telegram topic 303, "excersize bot") now draws its own illustrated exercise
+demos on demand and has a 20-exercise kettlebell library — next: regenerate
+Kettlebell_Sumo_High_Pull and One-Arm_Kettlebell_Clean, whose figures slide sideways
+(49.5px and 110px drift) because the model drew the athlete in a different spot per panel.
 
 ## Files touched / in flight
-All committed & pushed (tip 699e8a703). No uncommitted changes. Key recent work:
-- tui_gateway/server.py (compression watchdog derives from aux budget), agent/auxiliary_client.py
-  (unconfigured providers 1h skip), agent/context_compressor.py (4k summary ceiling — DO NOT
-  change without fresh measurements, see memory no-blind-tuning), agent/prompt_builder.py
-  (skills-index cap; day-timeline + multi-choice + timeline guidance), apps/desktop/src/*
-  (folder menu+drag, PA button, profile restore, stale-clarify re-queue, queue toasts,
-  time column, day-timeline prompt support, description 1200).
-- Configs (outside git, all 9 = base + 8 profiles): reasoning_effort low, tool_search auto
-  (REVERTED from on — deferral cost LLM rounds), compression.threshold 0.35, protect_last_n 10.
-  Backups: *.bak-toolsearch-20260717, *.bak-compthresh-20260717.
+Working tree clean; everything committed and pushed. Recently added:
+- tools/exercise_demo_generator.py — the exercise_generate_demo tool (Codex -> gpt-image-2)
+- tools/exercise_strip.py — deterministic strip -> centred looping GIF (Pillow only)
+- tools/exercise_library_tool.py — search, workout builder, demo delivery, provenance
+- assets/exercise_demos/cast/*.png — the three locked reference figures
+- tests/tools/test_exercise_demo_{generator,provenance,delivery_chain}.py
+Outside the repo: ~/.codex/skills/exercise-demo-gifs/ (symlinked into ~/.claude/skills/),
+~/.claude/workflows/exercise-demo-batch.js, and generated assets in ~/exercise-demos/.
 
 ## Key decisions & gotchas
-- MEMORY FILES ARE CURRENT — read MEMORY.md first: hermes-speed-lane (full state),
-  upstream-merge-postmortem-20260718 (mandatory next-merge checklist), no-blind-tuning
-  (NEVER retune constants without fresh measurements — user exploded over this),
-  merge-preserve-all-features.
-- SINGLE WRITER: another Claude/codex session edits this tree sometimes (it cherry-picked
-  77f77f1cf and switched branches mid-day). Check `git branch --show-current` + `git status`
-  before EVERY commit; commits once landed on a stray branch (fix/desktop-custom-time-picker,
-  since merged).
-- The app re-serializes config.yaml (YAML `on` becomes `true`) — match both spellings when editing.
-- Desktop changes need: `npm run pack --workspace apps/desktop` from REPO ROOT (root install only;
-  an apps/desktop-local node_modules breaks the build), then the USER must quit+reopen the app.
-  Backend/prompt changes need `systemctl --user restart hermes-gateway.service` + app relaunch.
-- Several "bugs" were stale-build artifacts — ALWAYS verify the running app/process start time
-  vs the asar/commit timestamp before debugging (ps lstart vs stat app.asar).
-- rtk wraps grep/ls and mangles output — use awk/sed or ctx_execute for parsing.
-- Pre-existing red tests (NOT ours): desktop-fs picker (2), approval-group clarify-card (1),
-  skills index isolation (7 with full suite), tui_gateway env-sensitive family (5-13 by env).
-  CI: footguns now green; js-autofix gated off the fork.
-- User rules: responses 1-4 plain sentences + Next steps (hook enforces); no live cloud LLM
-  calls for testing; superpowers skills on demand; investigate before ANY fix.
+- One strip, not N images. Separately generated poses drift in camera distance and scale;
+  panels inside a single image match by construction, and cost one generation.
+- Don't interpolate. ffmpeg minterpolate cannot bridge large pose changes — it silently
+  duplicates frames. Draw more panels instead.
+- VERIFY THE CONTAINER RUNS YOUR CODE before trusting any check. A quiet
+  `docker build -q ... >/dev/null` can leave the old image in place; the container looks
+  healthy and your check measures stale behaviour. Grep the running container for a line
+  you just wrote. The tell that caught it: a semantically impossible result.
+- exercise_demo ALWAYS succeeds — it falls back to crossfading the dataset's two stock
+  photos. Never conclude demos are live from a green check. Run scripts/check_bot_demos.py
+  inside the container: prints ILLUSTRATION vs photo, exits non-zero on any photo.
+- A demo's path NEVER changes. Topic 303 is one unbroken chat, so every path the bot ever
+  emitted stays in history and gets reused. Provenance lives in a .illustrated marker file
+  beside the GIF, never in the file's location. Moving files broke delivery once.
+- Codex invocation: prompt goes on STDIN, never as a positional — -i/--image takes a list
+  and swallows a trailing positional as another image path ("No prompt provided", exit 1).
+- config.yaml: never write a colon-followed-by-space inside a persona prompt; YAML reads it
+  as a mapping and the whole file stops parsing. The gateway then serves NO personas while
+  looking healthy. Validate the candidate in memory, then write.
+- uid 10000 owns everything under /opt/hermes-data. A docker exec without -u 10000 creates
+  root-owned files and locks the bot out.
+- No numpy in the container — Pillow only.
+- .dockerignore excludes assets/; there is an explicit exception for assets/exercise_demos/.
+- Image model rule: only GPT Image 2 or Seedream 5, ever. Codex's built-in image_generation
+  (stable, on by default in 0.133.0) uses gpt-image-2 on the ChatGPT login — no API key.
+  Flux was raised and explicitly declined.
+- The Codex login EXPIRES; it did mid-session. Re-auth is interactive:
+  CODEX_HOME=/opt/codex-auth codex login --device-auth, then chown -R 10000:10000
+  /opt/codex-auth. The device-code page rejects automated keystrokes — a human must type it.
 
 ## Env / run state
-Branch: main | Last commit: 699e8a703 feat(desktop+prompt): day-timeline + regression nets
-Running: hermes-gateway.service (restarted 16:10+ with all fixes), user's desktop app
-(restarts frequently — verify build stamp), FlowState app + local Supabase docker (healthy),
-hermes-live-watchdog.service, PA monitor timer (15-min, healthy).
-Open tasks: #32 verify speed settings live, #33 verify behavior rules, #34 verify cross-profile
-answers (SOUL rule added — session_search profile param, never raw sqlite), #35 post-reply
-compaction (THE next implementation, plan first).
-User-confirmed working: queue-while-busy, custom form answers, folder drag+menu, profile
-switching, PA button, Google calendar access.
+Branch: feat/exercise-library (pushed, in sync with origin)
+Last commit: e72551b68 fix(exercise): feed codex the prompt on stdin, and name an expired login
+Base: branched off the DEPLOYED commit b2143eae5, not origin/main — main lacks the health
+tooling (tools/health_tool.py is untracked in the live tree). Check the diff before merging.
+VPS 84.46.253.137: hermes-gateway up, image hermes-agent:council-20260719
+(rollback tags: rollback-20260725, rollback-20260728).
+Library: 55 demos cached, 21 illustrated (20 kettlebell + bench press).
+Deploy = copy files to /opt/hermes-runtime/source-council-20260719/, rebuild, then
+docker compose up -d --force-recreate gateway (compose service is "gateway").
+Open items: the two sliding demos; switching the library to MP4 (measured 789 KB GIF ->
+91 KB MP4, ~9x smaller — WebP is smaller still but gets delivered as a static photo);
+batching several generations per request.
 
-Start by: reading docs/superpowers/specs/2026-07-19-compaction-nonblocking-map.md, then
-write the plan for #35 (post-message.complete trigger at ~90% threshold reusing
-_compress_session_history, PLUS tool-result trimming/offload as the likely bigger win) and
-present it for approval before touching anything.
+Start by: regenerate Kettlebell_Sumo_High_Pull with a prompt that pins the athlete's feet to
+the same spot in all three panels, using the pattern in /tmp/gen_batch.py in the container:
+docker exec -u 10000 -w /opt/hermes hermes-gateway python /tmp/gen_batch.py <exercise_id>
 ```
