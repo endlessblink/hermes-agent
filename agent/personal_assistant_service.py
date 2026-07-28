@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, Protocol
 
 from agent.personal_assistant_obsidian import DURABLE_SECTIONS, PersonalAssistantObsidianAdapter
 from agent.personal_assistant_state import PersonalAssistantStateStore, StateVersionConflict, _apply_operation
 
 
+class _MemoryProjector(Protocol):
+    def sync(self, note: dict[str, Any], *, trust: str) -> dict[str, int]: ...
+
+
 class PersonalAssistantStateService:
-    def __init__(self, store: PersonalAssistantStateStore, adapter: PersonalAssistantObsidianAdapter):
+    def __init__(
+        self,
+        store: PersonalAssistantStateStore,
+        adapter: PersonalAssistantObsidianAdapter,
+        memory_projector: _MemoryProjector | None = None,
+    ):
         self.store = store
         self.adapter = adapter
+        self.memory_projector = memory_projector
 
     def get(self) -> dict[str, Any]:
         note = self.adapter.read()
+        if self.memory_projector is not None:
+            self.memory_projector.sync(note, trust="user_edit")
         state = self.store.read()
         source = state.get("durableSource") or {}
         if note.get("sourceHash") != source.get("hash"):
@@ -52,6 +64,8 @@ class PersonalAssistantStateService:
                     continue
                 _apply_operation(proposed, operation, editable)
             note_result = self.adapter.write(proposed, expected_hash=note.get("sourceHash"))
+            if self.memory_projector is not None:
+                self.memory_projector.sync(note_result, trust="explicit")
 
         updated = self.store.patch(
             "edit", {}, expected_version=expected_version, operations=operations

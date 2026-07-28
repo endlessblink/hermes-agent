@@ -74,3 +74,84 @@ def test_note_write_failure_leaves_cache_unchanged(tmp_path, monkeypatch):
     with pytest.raises(PersonalAssistantNoteError):
         service.patch(state["version"], [{"op": "upsert", "section": "preferences", "id": "p1", "value": {"title": "Deep work"}}])
     assert store.read() == before
+def test_personal_assistant_note_projects_into_unified_memory(tmp_path):
+    from agent.personal_assistant_memory import PersonalAssistantMemoryProjector
+    from agent.personal_assistant_service import PersonalAssistantStateService
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+    from agent.reliable_memory import ReliableMemoryRepository
+
+    adapter = _adapter(tmp_path)
+    repository = ReliableMemoryRepository(
+        db_path=tmp_path / "memory.db",
+        mirror_root=tmp_path / "memory-notes",
+    )
+    service = PersonalAssistantStateService(
+        PersonalAssistantStateStore(tmp_path / "profile"),
+        adapter,
+        PersonalAssistantMemoryProjector(repository),
+    )
+
+    state = service.get()
+    service.patch(
+        state["version"],
+        [
+            {
+                "op": "upsert",
+                "section": "preferences",
+                "id": "p1",
+                "value": {"title": "Keep answers compact"},
+            }
+        ],
+    )
+
+    projected = repository.list_active(target="personal_assistant")
+    assert [record["content"] for record in projected] == ["Keep answers compact"]
+    assert repository.note_path(projected[0]["id"]).is_file()
+
+
+def test_manual_personal_assistant_note_edit_updates_and_archive_hides_memory(
+    tmp_path,
+):
+    from agent.personal_assistant_memory import PersonalAssistantMemoryProjector
+    from agent.personal_assistant_service import PersonalAssistantStateService
+    from agent.personal_assistant_state import PersonalAssistantStateStore
+    from agent.reliable_memory import ReliableMemoryRepository
+
+    adapter = _adapter(tmp_path)
+    repository = ReliableMemoryRepository(
+        db_path=tmp_path / "memory.db",
+        mirror_root=tmp_path / "memory-notes",
+    )
+    service = PersonalAssistantStateService(
+        PersonalAssistantStateStore(tmp_path / "profile"),
+        adapter,
+        PersonalAssistantMemoryProjector(repository),
+    )
+    state = service.get()
+    state = service.patch(
+        state["version"],
+        [
+            {
+                "op": "upsert",
+                "section": "outcomes",
+                "id": "o1",
+                "value": {"title": "Ship proposal"},
+            }
+        ],
+    )
+
+    adapter.path.write_text(
+        adapter.path.read_text(encoding="utf-8").replace(
+            "Ship proposal", "Ship carefully"
+        ),
+        encoding="utf-8",
+    )
+    reconciled = service.get()
+
+    projected = repository.list_active(target="personal_assistant")
+    assert [record["content"] for record in projected] == ["Ship carefully"]
+    service.patch(
+        reconciled["version"],
+        [{"op": "archive", "section": "outcomes", "id": "o1"}],
+    )
+    assert repository.list_active(target="personal_assistant") == []
