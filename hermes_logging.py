@@ -34,6 +34,7 @@ import logging
 import os
 import queue
 import sys
+import tempfile
 import threading
 from logging.handlers import QueueHandler, QueueListener
 from pathlib import Path
@@ -256,6 +257,25 @@ COMPONENT_PREFIXES = {
 # Main setup
 # ---------------------------------------------------------------------------
 
+
+def _running_under_pytest() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
+
+
+def _default_hermes_home() -> Path:
+    """Resolve the Hermes home for log files.
+
+    A test run must never write into the real ``~/.hermes/logs``. Deliberately
+    raised errors from the suite land in ``errors.log`` and then read as genuine
+    production incidents during triage, so under pytest the logs go to a
+    throwaway directory unless the caller named a home explicitly.
+    """
+
+    if _running_under_pytest():
+        return Path(tempfile.gettempdir()) / f"hermes-test-logs-{os.getpid()}"
+    return get_hermes_home()
+
+
 def setup_logging(
     *,
     hermes_home: Optional[Path] = None,
@@ -300,7 +320,7 @@ def setup_logging(
         The ``logs/`` directory where files are written.
     """
     global _logging_initialized
-    home = hermes_home or get_hermes_home()
+    home = hermes_home or _default_hermes_home()
     log_dir = home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 

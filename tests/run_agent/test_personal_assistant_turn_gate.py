@@ -1,6 +1,8 @@
 import json
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -397,21 +399,22 @@ def test_alternatives_action_parses_day_scope_and_visible_title_exclusions() -> 
 def test_alternatives_action_reuses_ready_interview_without_model_or_source_reads(
     agent,
 ) -> None:
+    planning_date = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
     receipt = {
         "status": "complete",
         "complete": True,
         "expiresAt": "2099-01-01T00:00:00+00:00",
         "timezone": "Asia/Jerusalem",
         "range": {
-            "startDate": "2026-07-24",
-            "endDate": "2026-07-25",
+            "startDate": planning_date.isoformat(),
+            "endDate": (planning_date + timedelta(days=1)).isoformat(),
         },
     }
     interview = {
         "interviewId": "planning-2026-07-24",
         "status": "active",
         "mode": "daily-grounding",
-        "planningDate": "2026-07-24",
+        "planningDate": planning_date.isoformat(),
         "readinessApproved": True,
         "sourceSnapshot": {"calendarReceipt": receipt},
         "tasks": [{"taskId": "day-context", "title": "תכנון שאר היום"}],

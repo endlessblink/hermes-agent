@@ -35,7 +35,7 @@ _CAPABILITY_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("flowstate_list_subtasks", "read subtasks"),
             (
                 "flowstate_subtask_batch",
-                "apply an approved subtask plan",
+                "preview or atomically apply an approved ordered subtask plan",
             ),
         ),
     ),
