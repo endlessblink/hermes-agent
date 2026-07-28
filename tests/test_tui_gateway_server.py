@@ -3323,7 +3323,17 @@ def test_run_prompt_submit_delivers_completion_owned_through_compression_lineage
         "exit_code": 0,
         "output": "owned",
     }
-    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    class _OwnerQueue(_queue_mod.Queue):
+        def __init__(self):
+            super().__init__()
+            self.owner_thread_id = threading.get_ident()
+
+        def get(self, block=True, timeout=None):
+            if threading.get_ident() != self.owner_thread_id:
+                raise _queue_mod.Empty
+            return super().get(block=block, timeout=timeout)
+
+    isolated_queue: _queue_mod.Queue = _OwnerQueue()
     isolated_queue.put(event)
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
     server._sessions["sid_b"] = session
