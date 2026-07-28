@@ -4,6 +4,12 @@ The image model draws one strip containing N pose panels of a single exercise;
 this slices it and assembles the animation. Everything here is deterministic —
 no model, no network — so a bad result is a prompt problem, not a pipeline one.
 
+Pillow only, deliberately: the runtime image ships Pillow but not numpy, and the
+project pins dependencies exactly, so adding one for a single tool is not worth
+it. Column profiles are extracted with ``resize`` (a C-level reduction) and the
+one genuinely iterative step, the alignment search, runs over a few hundred
+integers.
+
 Each step exists because of an observed failure:
 
 * **Shared background.** Panels differ slightly in tone and carry drawn rules at
@@ -26,10 +32,9 @@ Each step exists because of an observed failure:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 # Summed per-channel distance from the background colour. SOFT finds the figure
 # at all; SOLID is high enough that the soft ground shadow never reaches it.
@@ -48,42 +53,78 @@ DEFAULT_HOLD_MID = 520
 DRIFT_WARN_PX = 20.0
 
 
-def _background_colour(arr: np.ndarray) -> np.ndarray:
-    border = np.concatenate([
-        arr[:6].reshape(-1, 3), arr[-6:].reshape(-1, 3),
-        arr[:, :6].reshape(-1, 3), arr[:, -6:].reshape(-1, 3),
-    ])
-    return np.median(border, axis=0)
+def _median(values: Sequence[int]) -> int:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
 
 
-def _figure_matte(panel: Image.Image) -> Image.Image:
+def _background_colour(img: Image.Image) -> Tuple[int, int, int]:
+    """Median colour of the panel border — the paper the figure sits on."""
+    w, h = img.size
+    edge = 6
+    strips = [
+        img.crop((0, 0, w, edge)), img.crop((0, h - edge, w, h)),
+        img.crop((0, 0, edge, h)), img.crop((w - edge, 0, w, h)),
+    ]
+    channels: List[List[int]] = [[], [], []]
+    for s in strips:
+        raw = s.tobytes()  # RGB, 3 bytes per pixel
+        for c in range(3):
+            channels[c].extend(raw[c::3])
+    return (_median(channels[0]), _median(channels[1]), _median(channels[2]))
+
+
+def _distance_map(img: Image.Image, bg: Tuple[int, int, int]) -> Image.Image:
+    """Per-pixel summed |channel - background|, as an 8-bit image.
+
+    Channel addition saturates at 255, which is harmless: both thresholds are
+    well below that, so the thresholded result is unaffected.
+    """
+    diff = ImageChops.difference(img, Image.new("RGB", img.size, bg))
+    r, g, b = diff.split()
+    return ImageChops.add(ImageChops.add(r, g), b)
+
+
+def _threshold(dist: Image.Image, level: int) -> Image.Image:
+    """Binary mask (mode L, 0/255) of pixels further than ``level`` from bg."""
+    return dist.point(lambda v: 255 if v > level else 0)
+
+
+def _figure_matte(panel: Image.Image, bg: Tuple[int, int, int]) -> Image.Image:
     """Feathered alpha for the drawn figure, with interior holes filled."""
-    arr = np.asarray(panel).astype(float)
-    bg = _background_colour(arr)
-    dist = np.abs(arr - bg).sum(axis=2)
+    dist = _distance_map(panel, bg)
+    near_bg = dist.point(lambda v: 255 if v <= SOFT_INK else 0)
 
-    near_bg = (dist <= SOFT_INK).astype(np.uint8) * 255
-    mask_img = Image.fromarray(near_bg, mode="L")
-    w, h = mask_img.size
+    w, h = near_bg.size
     for seed in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
-        if mask_img.getpixel(seed) == 255:
-            ImageDraw.floodfill(mask_img, seed, 128)
+        if near_bg.getpixel(seed) == 255:
+            ImageDraw.floodfill(near_bg, seed, 128)
 
-    # Anything the flood could not reach from the border is interior, so it stays
-    # fully opaque even where it is as pale as the paper. The blur feathers the
+    # Anything the flood could not reach from the border is interior, so it
+    # stays opaque even where it is as pale as the paper. The blur feathers the
     # silhouette edge so the composite has no hard cut-out fringe.
-    outside = np.asarray(mask_img) == 128
-    alpha = np.where(outside, 0.0, 1.0)
-    return Image.fromarray((alpha * 255).astype(np.uint8)).filter(
-        ImageFilter.GaussianBlur(0.8)
-    )
+    alpha = near_bg.point(lambda v: 0 if v == 128 else 255)
+    return alpha.filter(ImageFilter.GaussianBlur(0.8))
 
 
-def _solid_mask(arr: np.ndarray, bg: np.ndarray) -> np.ndarray:
-    return np.abs(arr - bg).sum(axis=2) > SOLID_INK
+def _column_profile(mask: Image.Image) -> List[int]:
+    """1 per column that contains any ink. Uses a C-level box reduction.
+
+    ``tobytes`` rather than ``getdata``: the mask is mode L, so the buffer is one
+    byte per pixel, and ``getdata`` is deprecated from Pillow 14.
+    """
+    w, _ = mask.size
+    row = mask.resize((w, 1), Image.Resampling.BOX)
+    return [1 if v > 0 else 0 for v in row.tobytes()]
 
 
-def _anchor_profile(mask: np.ndarray, mode: str) -> np.ndarray:
+def _row_profile(mask: Image.Image) -> List[int]:
+    _, h = mask.size
+    col = mask.resize((1, h), Image.Resampling.BOX)
+    return [1 if v > 0 else 0 for v in col.tobytes()]
+
+
+def _anchor_profile(mask: Image.Image, mode: str) -> List[int]:
     """Column profile used to line consecutive poses up horizontally.
 
     ``feet`` uses only the bottom band — correct when the athlete is standing,
@@ -91,29 +132,44 @@ def _anchor_profile(mask: np.ndarray, mode: str) -> np.ndarray:
     for lying, seated or hanging exercises with no ground contact.
     """
     if mode == "full":
-        return mask.any(axis=0).astype(float)
-    rows = np.where(mask.any(axis=1))[0]
-    if not len(rows):
-        return mask.any(axis=0).astype(float)
-    bottom = int(rows.max())
-    top = max(0, bottom - round(mask.shape[0] * ANCHOR_BAND))
-    band = np.zeros_like(mask)
-    band[top:bottom + 1, :] = mask[top:bottom + 1, :]
-    return band.any(axis=0).astype(float)
+        return _column_profile(mask)
+    w, h = mask.size
+    rows = _row_profile(mask)
+    filled = [i for i, v in enumerate(rows) if v]
+    if not filled:
+        return _column_profile(mask)
+    bottom = filled[-1]
+    top = max(0, bottom - round(h * ANCHOR_BAND))
+    return _column_profile(mask.crop((0, top, w, bottom + 1)))
 
 
-def _best_shift(profile: np.ndarray, reference: np.ndarray, limit: int) -> int:
-    best_score, best_dx = -1.0, 0
+def _ground_row(mask: Image.Image) -> int:
+    rows = _row_profile(mask)
+    filled = [i for i, v in enumerate(rows) if v]
+    return filled[-1] if filled else mask.size[1] - 1
+
+
+def _best_shift(profile: Sequence[int], reference: Sequence[int], limit: int) -> int:
+    """Horizontal shift that best overlaps this profile with the reference."""
+    n = len(profile)
+    ref_on = [i for i, v in enumerate(reference) if v]
+    if not ref_on:
+        return 0
+    best_score, best_dx = -1, 0
     for dx in range(-limit, limit + 1):
-        shifted = np.roll(profile, dx)
-        if dx > 0:
-            shifted[:dx] = 0
-        elif dx < 0:
-            shifted[dx:] = 0
-        score = float((shifted * reference).sum())
+        score = 0
+        for i in ref_on:
+            j = i - dx
+            if 0 <= j < n and profile[j]:
+                score += 1
         if score > best_score:
             best_score, best_dx = score, dx
     return best_dx
+
+
+def _profile_centre(profile: Sequence[int]) -> float:
+    on = [i for i, v in enumerate(profile) if v]
+    return (on[0] + on[-1]) / 2 if on else 0.0
 
 
 def build_frames(
@@ -133,44 +189,43 @@ def build_frames(
         for i in range(panels)
     ]
     panel_w, panel_h = cuts[0].size
-    canon = _background_colour(np.asarray(cuts[0]).astype(float))
+    canon = _background_colour(cuts[0])
 
     placed = []
     for panel in cuts:
-        canvas = Image.new("RGB", (panel_w, panel_h), tuple(canon.astype(int)))
-        canvas.paste(panel, (0, 0), _figure_matte(panel))
+        canvas = Image.new("RGB", (panel_w, panel_h), canon)
+        canvas.paste(panel, (0, 0), _figure_matte(panel, _background_colour(panel)))
         placed.append(canvas)
 
-    arrs = [np.asarray(p).astype(float) for p in placed]
-    masks = [_solid_mask(a, canon) for a in arrs]
-    if not all(m.any() for m in masks):
+    dists = [_distance_map(p, canon) for p in placed]
+    solid = [_threshold(d, SOLID_INK) for d in dists]
+    if not all(m.getbbox() for m in solid):
         raise ValueError("a panel contains no figure — check the strip and panel count")
 
-    ground = [int(np.where(m.any(axis=1))[0].max()) for m in masks]
+    ground = [_ground_row(m) for m in solid]
     target_y = int(panel_h * 0.95)
 
-    reference = _anchor_profile(masks[0], anchor)
+    reference = _anchor_profile(solid[0], anchor)
     shifts = [_best_shift(_anchor_profile(m, anchor), reference, panel_w // 2)
-              for m in masks]
+              for m in solid]
 
     aligned = []
     for canvas, dx, gy in zip(placed, shifts, ground):
-        out = Image.new("RGB", (panel_w, panel_h), tuple(canon.astype(int)))
+        out = Image.new("RGB", (panel_w, panel_h), canon)
         out.paste(canvas, (dx, target_y - gy))
         aligned.append(out)
 
-    centres = []
-    for a in aligned:
-        prof = _anchor_profile(_solid_mask(np.asarray(a).astype(float), canon), anchor)
-        xs = np.where(prof > 0)[0]
-        centres.append((xs.min() + xs.max()) / 2 if len(xs) else 0)
+    centres = [
+        _profile_centre(_anchor_profile(_threshold(_distance_map(a, canon), SOLID_INK), anchor))
+        for a in aligned
+    ]
     drift = float(max(centres) - min(centres))
 
     boxes = []
     for a in aligned:
-        m = np.abs(np.asarray(a).astype(float) - canon).sum(axis=2) > SOFT_INK
-        ys, xs = np.where(m)
-        boxes.append((xs.min(), ys.min(), xs.max(), ys.max()))
+        box = _threshold(_distance_map(a, canon), SOFT_INK).getbbox()
+        if box:
+            boxes.append(box)
     x0 = max(0, min(b[0] for b in boxes) - CROP_PAD)
     y0 = max(0, min(b[1] for b in boxes) - CROP_PAD)
     x1 = min(panel_w, max(b[2] for b in boxes) + CROP_PAD)
