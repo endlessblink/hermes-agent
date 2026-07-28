@@ -1510,6 +1510,14 @@ class APIServerAdapter(BasePlatformAdapter):
             ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
             ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
             ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run),
+            # Browser-control channel: the extension announces the tab it has
+            # pinned, long-polls for commands the agent queued, and posts each
+            # result back. This is what lets the agent act in the user's REAL
+            # signed-in tab instead of the headless browser session.
+            ("POST", "/v1/browser/channel", self._handle_browser_channel),
+            ("DELETE", "/v1/browser/channel", self._handle_browser_channel_close),
+            ("GET", "/v1/browser/commands/next", self._handle_browser_next_command),
+            ("POST", "/v1/browser/commands/{command_id}/result", self._handle_browser_command_result),
         ]
         if _CRON_AVAILABLE:
             # Chronos managed-cron fire webhook (NAS → agent). Authenticated
@@ -5082,6 +5090,89 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return response
 
+
+    # ------------------------------------------------------------------
+    # Browser control channel (extension side panel ↔ agent)
+    # ------------------------------------------------------------------
+
+    async def _handle_browser_channel(self, request: "web.Request") -> "web.Response":
+        """POST /v1/browser/channel — announce/refresh the pinned tab."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        from gateway.browser_control import BROKER
+
+        state = BROKER.announce(
+            str(body.get("channel_id") or "default"),
+            tab_id=body.get("tab_id"),
+            window_id=body.get("window_id"),
+            url=str(body.get("url") or ""),
+            title=str(body.get("title") or ""),
+        )
+        return web.json_response(state)
+
+    async def _handle_browser_channel_close(self, request: "web.Request") -> "web.Response":
+        """DELETE /v1/browser/channel — panel closed; fail anything queued."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        from gateway.browser_control import BROKER
+
+        BROKER.disconnect(request.query.get("channel_id") or "default")
+        return web.json_response({"connected": False})
+
+    async def _handle_browser_next_command(self, request: "web.Request") -> "web.Response":
+        """GET /v1/browser/commands/next — long-poll for the next command.
+
+        The broker is thread-based on purpose, so the wait runs in the default
+        executor and never blocks the event loop.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        from gateway.browser_control import BROKER
+
+        channel_id = request.query.get("channel_id") or "default"
+        try:
+            wait = float(request.query.get("wait", "25"))
+        except (TypeError, ValueError):
+            wait = 25.0
+        wait = max(1.0, min(wait, 55.0))
+
+        loop = asyncio.get_running_loop()
+        command = await loop.run_in_executor(None, BROKER.take_command, channel_id, wait)
+        if command is None:
+            return web.json_response({"command": None})
+        return web.json_response({"command": command})
+
+    async def _handle_browser_command_result(self, request: "web.Request") -> "web.Response":
+        """POST /v1/browser/commands/{command_id}/result — return a result."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(_openai_error("Invalid JSON"), status=400)
+
+        from gateway.browser_control import BROKER
+
+        command_id = request.match_info["command_id"]
+        if not BROKER.resolve(command_id, body if isinstance(body, dict) else {}):
+            # Already resolved, timed out, or never existed — all indistinguishable
+            # to the extension, and all mean "stop waiting on this one".
+            return web.json_response(
+                _openai_error(f"Unknown or expired command: {command_id}",
+                              code="unknown_browser_command"),
+                status=404,
+            )
+        return web.json_response({"accepted": True})
 
     async def _handle_run_approval(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs/{run_id}/approval — resolve a pending run approval."""

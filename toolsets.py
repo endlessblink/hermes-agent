@@ -160,6 +160,22 @@ TOOLSETS = {
         "includes": []
     },
 
+    "browser_control": {
+        "description": (
+            "Act inside the tab pinned in the Hermes browser extension — snapshot, "
+            "click, type, select, scroll, attach a file. Runs in the user's real "
+            "signed-in tab via the extension, NOT the headless browser_* session. "
+            "Gated on a connected side panel via check_fn."
+        ),
+        "tools": [
+            "extension_browser_snapshot", "extension_browser_click",
+            "extension_browser_type", "extension_browser_select",
+            "extension_browser_scroll", "extension_browser_upload",
+            "extension_browser_status",
+        ],
+        "includes": []
+    },
+
     "terminal": {
         "description": "Terminal/command execution and process management tools",
         "tools": ["terminal", "process"],
@@ -496,7 +512,13 @@ TOOLSETS = {
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
-
+            # Control of the tab pinned in the browser extension. Only ever in
+            # the schema while a side panel is actually connected (check_fn),
+            # so headless-only API clients are unaffected.
+            "extension_browser_snapshot", "extension_browser_click",
+            "extension_browser_type", "extension_browser_select",
+            "extension_browser_scroll", "extension_browser_upload",
+            "extension_browser_status",
         ],
         "includes": []
     },
