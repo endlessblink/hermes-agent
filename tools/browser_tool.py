@@ -1819,7 +1819,7 @@ atexit.register(_stop_browser_cleanup_thread)
 BROWSER_TOOL_SCHEMAS = [
     {
         "name": "browser_navigate",
-        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). For plain-text endpoints — URLs ending in .md, .txt, .json, .yaml, .yml, .csv, .xml, raw.githubusercontent.com, or any documented API endpoint — prefer curl via the terminal tool or web_extract; the browser stack is overkill and much slower for these. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
+        "description": "Navigate to a URL in a SEPARATE browser session that does NOT share the user's cookies or logins. If the Hermes browser extension reports a pinned tab (extension_browser_status), that tab is already open and signed in — use extension_browser_snapshot and the extension_browser_* tools on it instead; this tool will refuse a URL on the pinned tab's own site. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). For plain-text endpoints — URLs ending in .md, .txt, .json, .yaml, .yml, .csv, .xml, raw.githubusercontent.com, or any documented API endpoint — prefer curl via the terminal tool or web_extract; the browser stack is overkill and much slower for these. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1862,7 +1862,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_type",
-        "description": "Type text into an input field identified by its ref ID. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first.",
+        "description": "Type text into an input field identified by its ref ID, in the SEPARATE headless browser session — not the user's own tab. To fill a form the user has open, use extension_browser_type instead. Clears the field first, then types the new text. Requires browser_navigate and browser_snapshot to be called first.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -2691,6 +2691,51 @@ def _redact_browser_output(value: Any) -> Any:
 # Browser Tool Functions
 # ============================================================================
 
+def _pinned_tab_conflict(url: str) -> Optional[str]:
+    """Refuse to re-open, in a stranger browser, a site the user has pinned.
+
+    The browser_* tools drive a separate browser session with its own cookie
+    jar. Pointing it at a page the user already has open and signed in to is
+    how the agent ends up staring at a login wall or a bot challenge while the
+    real, authenticated tab sits right there.
+
+    Deliberately narrow: same origin as the pinned tab only. A different site
+    is a legitimate use of the headless browser and passes straight through,
+    as does every case where no extension is connected.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        from gateway.browser_control import BROKER
+
+        status = BROKER.channel_status()
+        if not status.get("connected") or status.get("tab_id") is None:
+            return None
+        pinned_url = str(status.get("url") or "")
+        if not pinned_url:
+            return None
+        pinned = urlparse(pinned_url)
+        requested = urlparse(url)
+        if not pinned.netloc or pinned.netloc.lower() != requested.netloc.lower():
+            return None
+        return json.dumps({
+            "success": False,
+            "error": "pinned_tab_available",
+            "message": (
+                f"You already have {pinned.netloc} open and signed in as the pinned tab "
+                f"in the Hermes browser extension. This tool would open a SEPARATE "
+                f"browser that does not share those cookies, which is how you end up at "
+                f"a login wall or bot challenge."
+            ),
+            "hint": "Call extension_browser_snapshot to see that tab, then act on it with "
+                    "extension_browser_click / extension_browser_type.",
+            "pinned_url": pinned_url,
+        })
+    except Exception:  # pragma: no cover - never let steering break navigation
+        logger.debug("pinned-tab conflict check failed", exc_info=True)
+        return None
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -2723,6 +2768,10 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": "Blocked: URL contains what appears to be an API key or token. "
                      "Secrets must not be sent in URLs.",
         })
+
+    pinned_conflict = _pinned_tab_conflict(url)
+    if pinned_conflict:
+        return pinned_conflict
 
     # SSRF protection — block private/internal addresses before navigating.
     # Skipped for local backends (Camofox, headless Chromium without a cloud
