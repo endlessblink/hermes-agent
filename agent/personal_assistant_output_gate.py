@@ -620,6 +620,10 @@ def build_safe_interview_fallback(interview: Mapping[str, Any] | None) -> str:
                 "hardCommitments": "יש היום התחייבות שלא מופיעה ביומן?",
                 "location": "איפה תהיה בזמן העבודה שנותר?",
                 "availability": "באילו שעות אתה רוצה שאשתמש לתכנון מחר, מעבר להתחייבויות שכבר ביומן?",
+                "progressReview": (
+                    "מה כבר הושלם מאז הבדיקה האחרונה? "
+                    "כתוב שמות משימות, או ״שום דבר״."
+                ),
             }
         )
     field_labels = {
@@ -641,6 +645,7 @@ def build_safe_interview_fallback(interview: Mapping[str, Any] | None) -> str:
         "hardCommitments": "התחייבויות נוספות",
                 "location": "מיקום",
                 "availability": "זמינות מחר",
+                "progressReview": "מה הושלם",
     }
     options = {
         "urgency": [
@@ -838,6 +843,14 @@ def build_grounded_plan_fallback(
         for records in all_sources.values()
         if isinstance(records, Mapping)
     ]
+    preferred_task_ids = {
+        str(task_id)
+        for source in (details, inventory, *normalized_sources)
+        for task_id, raw_task in source.items()
+        if preferred_title
+        and isinstance(raw_task, Mapping)
+        and str(raw_task.get("title") or "").strip().casefold() == preferred_title
+    }
     for source in (details, inventory, *normalized_sources):
         for task_id, raw_task in source.items():
             if task_id in seen or not isinstance(raw_task, Mapping):
@@ -886,7 +899,15 @@ def build_grounded_plan_fallback(
                 _baseline_task_priority_score(task, planning_date)
                 - (15 if task["recentlySuggested"] else 0)
                  + (10 if task["disposition"] == "actionable" else 0)
-                + (100 if preferred_title and task["title"].casefold() == preferred_title else 0)
+                + (
+                    100
+                    if preferred_title
+                    and (
+                        task["title"].casefold() == preferred_title
+                        or task["id"] in preferred_task_ids
+                    )
+                    else 0
+                )
                 - (
                     35
                     if task["disposition"] in {"waiting", "deferred", "needs_context"}
@@ -975,7 +996,11 @@ def build_grounded_plan_fallback(
         (
             row["title"]
             for row in rows
-            if preferred_title and str(row.get("title") or "").casefold() == preferred_title
+            if preferred_title
+            and (
+                str(row.get("title") or "").casefold() == preferred_title
+                or str(row.get("id") or "") in preferred_task_ids
+            )
         ),
         "",
     )

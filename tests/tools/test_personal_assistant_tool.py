@@ -328,7 +328,10 @@ def test_interview_resume_refreshes_source_snapshot_without_losing_answers(
                 "planningDate": "2026-07-24",
                 "mode": "daily-grounding",
                 "sourceSnapshot": {
-                    "calendarReceipt": {"capturedAt": "2026-07-24T08:00:00Z"}
+                    "calendarReceipt": {
+                        "capturedAt": "2026-07-24T08:00:00Z",
+                        "eventCount": 1,
+                    }
                 },
                 "tasks": [{"taskId": "day-context", "title": "תכנון שאר היום"}],
             }
@@ -356,7 +359,10 @@ def test_interview_resume_refreshes_source_snapshot_without_losing_answers(
                 "planningDate": "2026-07-24",
                 "mode": "daily-grounding",
                 "sourceSnapshot": {
-                    "calendarReceipt": {"capturedAt": "2026-07-24T09:00:00Z"}
+                    "calendarReceipt": {
+                        "capturedAt": "2026-07-24T09:00:00Z",
+                        "eventCount": 2,
+                    }
                 },
                 "tasks": [{"taskId": "day-context", "title": "תכנון שאר היום"}],
             }
@@ -370,6 +376,42 @@ def test_interview_resume_refreshes_source_snapshot_without_losing_answers(
     )
     assert resumed["interview"]["tasks"][0]["profile"]["energy"] == "medium"
     assert resumed["interview"]["interviewRevision"] == answered["interviewRevision"] + 1
+
+
+def test_snapshot_refresh_ignores_capture_time_but_detects_material_changes() -> None:
+    from tools.personal_assistant_tool import _snapshot_materially_changed
+
+    current = {
+        "calendarReceipt": {
+            "capturedAt": "2026-07-24T08:00:00Z",
+            "eventCount": 1,
+        }
+    }
+
+    assert (
+        _snapshot_materially_changed(
+            current,
+            {
+                "calendarReceipt": {
+                    "capturedAt": "2026-07-24T09:00:00Z",
+                    "eventCount": 1,
+                }
+            },
+        )
+        is False
+    )
+    assert (
+        _snapshot_materially_changed(
+            current,
+            {
+                "calendarReceipt": {
+                    "capturedAt": "2026-07-24T09:00:00Z",
+                    "eventCount": 2,
+                }
+            },
+        )
+        is True
+    )
 
 
 def test_interview_start_resumes_legacy_interview_for_its_effective_date(

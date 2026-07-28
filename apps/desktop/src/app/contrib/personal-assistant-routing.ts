@@ -27,7 +27,7 @@ interface PersonalAssistantLaunchDependencies {
 }
 
 interface PersonalAssistantTabDependencies {
-  bindSessionRuntime: (storedSessionId: string, runtimeSessionId: string) => void
+  bindSessionRuntime: (storedSessionId: string, runtimeSessionId: string, profile: string) => void
   focusOpenSession: (storedSessionId: string) => boolean
   openHome: () => Promise<PersonalAssistantDestination>
   openSessionTile: (
@@ -87,6 +87,7 @@ export async function openPersonalAssistantTab({
   openSessionTile
 }: PersonalAssistantTabDependencies): Promise<PersonalAssistantDestination> {
   const destination = await openHome()
+  const destinationProfile = destination.profile || PERSONAL_ASSISTANT_OWNER_PROFILE
   const alreadyOpen = focusOpenSession(destination.canonicalSessionId)
 
   openSessionTile(
@@ -94,10 +95,10 @@ export async function openPersonalAssistantTab({
     'center',
     undefined,
     undefined,
-    PERSONAL_ASSISTANT_OWNER_PROFILE,
+    destinationProfile,
     destination.runtimeSessionId
   )
-  bindSessionRuntime(destination.canonicalSessionId, destination.runtimeSessionId)
+  bindSessionRuntime(destination.canonicalSessionId, destination.runtimeSessionId, destinationProfile)
 
   if (!alreadyOpen) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -113,10 +114,10 @@ export async function openPersonalAssistantTab({
           'center',
           undefined,
           undefined,
-          PERSONAL_ASSISTANT_OWNER_PROFILE,
+          destinationProfile,
           destination.runtimeSessionId
         )
-        bindSessionRuntime(destination.canonicalSessionId, destination.runtimeSessionId)
+        bindSessionRuntime(destination.canonicalSessionId, destination.runtimeSessionId, destinationProfile)
         break
       }
     }

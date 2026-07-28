@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "evidence": {
+    "path": "docs/evidence/personal-manager/2026-07-26/session-not-found-stale-options.png",
+    "sha256": "3ce47d86ea30aee51560eee34cd87e4c3d45d079c2c5abf568e036148b09d890"
+  },
+  "incidents": [
+    {
+      "id": "runtime-session-rejected",
+      "observed": "A rejected runtime was selected again because the local cache still mapped the durable session to that same dead runtime.",
+      "violatedInvariants": ["PA-INV-01", "PA-INV-03", "PA-INV-05"],
+      "initialState": {
+        "phase": "submitting",
+        "durableSessionId": "assistant-home",
+        "runtimeSessionId": "runtime-dead",
+        "submissionId": "submission-1"
+      },
+      "events": [
+        {"type": "runtime-rejected", "runtimeSessionId": "runtime-dead"},
+        {"type": "runtime-recovered", "runtimeSessionId": "runtime-live"},
+        {"type": "turn-completed", "submissionId": "submission-1"}
+      ],
+      "expected": {
+        "finalPhase": "completed",
+        "acceptedSubmissionCount": 1,
+        "visibleOutcomeCount": 1,
+        "rejectedRuntimeIds": ["runtime-dead"],
+        "runtimeSessionId": "runtime-live",
+        "rawErrorVisible": false
+      }
+    },
+    {
+      "id": "duplicate-user-submission",
+      "observed": "The same visible request appeared more than once while recovery and retry competed.",
+      "violatedInvariants": ["PA-INV-02", "PA-INV-04"],
+      "initialState": {
+        "phase": "idle",
+        "durableSessionId": "assistant-home",
+        "runtimeSessionId": "runtime-live"
+      },
+      "events": [
+        {"type": "submit", "submissionId": "stable-submission"},
+        {"type": "submit", "submissionId": "stable-submission"},
+        {"type": "turn-completed", "submissionId": "stable-submission"}
+      ],
+      "expected": {
+        "finalPhase": "completed",
+        "acceptedSubmissionCount": 1,
+        "visibleOutcomeCount": 1,
+        "transcriptUserMessageCount": 1
+      }
+    },
+    {
+      "id": "stale-actionable-options",
+      "observed": "Options from an older plan remained actionable after a later failed request changed the authoritative turn state.",
+      "violatedInvariants": ["PA-INV-04", "PA-INV-06"],
+      "initialState": {
+        "phase": "completed",
+        "durableSessionId": "assistant-home",
+        "runtimeSessionId": "runtime-live",
+        "activeCardRevision": 8
+      },
+      "events": [
+        {"type": "card-action", "cardRevision": 7, "actionId": "choose-option-1"}
+      ],
+      "expected": {
+        "finalPhase": "completed",
+        "acceptedSubmissionCount": 0,
+        "visibleOutcomeCount": 1,
+        "acceptedActionCount": 0,
+        "activeCardRevision": 8
+      }
+    },
+    {
+      "id": "stale-context-options",
+      "observed": "An hours-old same-day context was treated as fresh because rendering another plan updated the interview timestamp.",
+      "violatedInvariants": ["PA-INV-07", "PA-INV-08", "PA-INV-09"],
+      "initialState": {
+        "phase": "completed",
+        "durableSessionId": "assistant-home",
+        "runtimeSessionId": "runtime-live",
+        "contextConfirmedAt": "2026-07-26T12:55:23.975098+00:00",
+        "stateUpdatedAt": "2026-07-26T15:29:44.325302+00:00"
+      },
+      "events": [
+        {"type": "submit", "submissionId": "plan-today"},
+        {"type": "context-evaluated", "stale": true}
+      ],
+      "expected": {
+        "finalPhase": "awaiting-context",
+        "acceptedSubmissionCount": 1,
+        "visibleOutcomeCount": 1,
+        "visibleOutcomeKind": "progress-question",
+        "recommendationCount": 0
+      }
+    }
+  ]
+}

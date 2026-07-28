@@ -1,3 +1,82 @@
+# Dropoff — 2026-07-26 18:50 Asia/Jerusalem
+
+The active fast-track lane is PA-STAB-002, defined in
+`docs/plans/2026-07-26-personal-assistant-stabilization-lane.md`. Stop reactive
+repairs. The durable-context and validated legacy source adapters and
+single-instance profile-gated shadow worker are implemented. Resume by wiring
+that worker into the generated acceptance-profile lifecycle; it currently
+refuses `office-work` and has no live startup call site.
+The root
+`MASTER_PLAN.md` records PA-STAB-002 through PA-STAB-008 in the required
+`$next-fast-track` order.
+
+Architecture decision: keep Hermes as the runtime shell and rebuild only the
+Personal Assistant orchestration core behind a single typed state-machine
+boundary. Reuse the existing Desktop, gateway, sessions, source connectors,
+approvals, persistence, monitoring, and packaged restart machinery. Do not
+start a separate agent or continue adding policy branches to the generic
+conversation loop. The decision and exception gate are recorded in the PA-STAB
+plan.
+
+PA-STAB implementation has begun without changing live routing. The original
+2026-07-26 screenshot is preserved as permanent evidence, four machine-readable
+incident fixtures separate its failures, and the proposed backend-owned state
+machine now replays them. The new core rejects impossible transitions and
+rejected runtime reuse, deduplicates submissions, owns card revisions, suppresses
+raw failure output, and persists through the existing state store with
+compare-and-swap revisions and idempotent receipts. A concurrency regression
+proves two simultaneous writers cannot both accept a turn. State transitions and
+deterministic pending effects commit atomically, and replay returns the original
+effect identities rather than appending duplicates. Outbox delivery now uses
+exclusive bounded leases, survives restart through expired-lease recovery,
+rejects completion by an obsolete worker, and acknowledges delivery
+idempotently. The adapter runner commits delivery, its normalized result event,
+and all next effects atomically; an invalid result cannot consume the effect and
+strand the turn. Typed shadow adapters now complete a generated journey from
+stale-context question through persisted answer, one source reconciliation, and
+exactly one named-task plan. The core now persists and explicitly forwards the
+bounded user intent with its submission identity. The safe current turn is now
+available through the additive public state contract without outbox, lease,
+runtime, receipt, or raw-error fields. Runtime recovery republishes the exact
+persisted outcome instead of resubmitting the user prompt, removing a duplicate
+orchestration path before production wiring. The focused
+contract/core/adapter/runner suite passes 56 tests. The apparent
+snapshot-refresh failure was a stale test:
+capture-time-only changes intentionally keep the active card revision stable,
+while material calendar changes refresh without losing answers. The corrected
+wider suite passes all 417 tests. Six focused Desktop files pass 163 tests and
+Desktop typecheck passes. This remains shadow architecture only and is
+not a live fix.
+
+The 2026-07-26 screenshot disproved the prior usability claim. The packaged
+Desktop exposed a raw prompt failure, repeated the same request, retained stale
+options, and generated recommendations without checking what had changed since
+the earlier same-day context. This is recorded as GRV-38 in the exhaustive E2E
+matrix.
+
+Candidate regression-first changes remain uncommitted:
+
+- Desktop submission recovery rejects a backend-rejected runtime even when the
+  local cache maps back to that same ID.
+- Same-day planning can ask one progress-review question after meaningful user
+  context becomes stale and can exclude named completed work.
+- Future readiness approvals receive a dedicated timestamp; legacy interviews
+  fall back to their creation time rather than generic update time.
+
+Current evidence is deliberately incomplete. The focused Personal Assistant
+Python suites pass 147 tests and targeted Ruff checks pass. Earlier focused
+Desktop tests, typecheck, and package build passed for the session candidate.
+One packaged retry showed no visible raw error, but additional backend 404s were
+still observed and the progress-review path was not proved after a clean full
+restart. Do not call either candidate fixed until PA-STAB-003 and PA-STAB-004
+meet their packaged proof gates.
+
+Preserve unrelated existing edits in `agent/desktop_clarify_gate.py` and
+`tests/agent/test_desktop_clarify_gate.py`. The current worktree is dirty; do
+not reset or broadly stage it.
+
+---
+
 # Dropoff — 2026-07-21 10:48 Asia/Jerusalem
 
 ```

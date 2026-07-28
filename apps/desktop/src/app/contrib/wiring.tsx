@@ -51,7 +51,7 @@ import {
   hydratePersonalAssistantStateWhenReady,
   isPersonalAssistantSession,
   openPersonalAssistantHome,
-  PERSONAL_ASSISTANT_OWNER_PROFILE,
+  PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE,
   refreshPersonalAssistantState,
   startPersonalAssistant
 } from '@/store/personal-assistant'
@@ -1066,10 +1066,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   const openPersonalAssistantInTab = useCallback(async () => {
     try {
-      await openPersonalAssistantTab({
-        bindSessionRuntime: (storedSessionId, runtimeSessionId) => {
+      const destination = await openPersonalAssistantTab({
+        bindSessionRuntime: (storedSessionId, runtimeSessionId, profile) => {
           updateSessionState(runtimeSessionId, state => state, storedSessionId)
-          void getSessionMessages(storedSessionId, PERSONAL_ASSISTANT_OWNER_PROFILE)
+          void getSessionMessages(storedSessionId, profile)
             .then(result => {
               updateSessionState(
                 runtimeSessionId,
@@ -1086,6 +1086,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         openHome: openPersonalAssistantHome,
         openSessionTile
       })
+
+      if (destination.profile === PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE) {
+        $personalAssistantContextOpen.set(true)
+      }
     } catch (error) {
       notify({
         kind: 'error',

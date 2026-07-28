@@ -4,12 +4,33 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AssistantState } from './personal-assistant'
 import { $activeSessionId } from './session'
 
+const { $activeGatewayProfile, $activeProfile } = vi.hoisted(() => {
+  let gatewayValue = 'default'
+  let profileValue = 'default'
+
+  return {
+    $activeGatewayProfile: {
+      get: () => gatewayValue,
+      set: (next: string) => {
+        gatewayValue = next
+      }
+    },
+    $activeProfile: {
+      get: () => profileValue,
+      set: (next: string) => {
+        profileValue = next
+      }
+    }
+  }
+})
+
 const request = vi.fn()
 const foregroundRequest = vi.fn()
 const gatewayForProfile = vi.fn(async () => ({ request }))
 const $gateway = atom<unknown>({ request: foregroundRequest })
 
 vi.mock('@/store/gateway', () => ({ $gateway, gatewayForProfile }))
+vi.mock('@/store/profile', () => ({ $activeGatewayProfile, $activeProfile }))
 
 const {
   $personalAssistantState,
@@ -21,6 +42,7 @@ const {
   patchPersonalAssistantState,
   respondToPersonalAssistantInterview,
   refreshPersonalAssistantState,
+  submitPersonalAssistantShadowAction,
   startPersonalAssistant
 } = await import('./personal-assistant')
 
@@ -31,6 +53,8 @@ beforeEach(() => {
   gatewayForProfile.mockResolvedValue({ request })
   $gateway.set({ request: foregroundRequest })
   $activeSessionId.set(null)
+  $activeGatewayProfile.set('default')
+  $activeProfile.set('default')
   $personalAssistantState.set(null)
 })
 
@@ -76,11 +100,59 @@ describe('startPersonalAssistant', () => {
     })
   })
 
+  it('never starts the production assistant from the generated acceptance profile', async () => {
+    $activeGatewayProfile.set('personal-assistant-acceptance')
+    request.mockResolvedValue({
+      canonical_session_id: 'acceptance-home',
+      session_id: 'acceptance-live',
+      state: { schemaVersion: 1, version: 1, sessionId: 'acceptance-home' },
+      status: 'ready'
+    })
+
+    await expect(startPersonalAssistant('manual')).resolves.toEqual({
+      sessionId: 'acceptance-home',
+      status: 'ready'
+    })
+    expect(gatewayForProfile).toHaveBeenCalledWith('personal-assistant-acceptance')
+    expect(request).toHaveBeenCalledWith('personal_assistant.shadow.home', {
+      profile: 'personal-assistant-acceptance'
+    })
+    expect(request).not.toHaveBeenCalledWith('personal_assistant.start', expect.anything())
+  })
+
+  it('uses the generated shadow route while its primary gateway is still activating', async () => {
+    $activeProfile.set('personal-assistant-acceptance')
+    request.mockResolvedValue({
+      canonical_session_id: 'acceptance-home',
+      session_id: 'acceptance-live',
+      state: { schemaVersion: 1, version: 1, sessionId: 'acceptance-home' },
+      status: 'ready'
+    })
+
+    await openPersonalAssistantHome()
+
+    expect(gatewayForProfile).toHaveBeenCalledWith('personal-assistant-acceptance')
+    expect(request).toHaveBeenCalledWith('personal_assistant.shadow.home', {
+      profile: 'personal-assistant-acceptance'
+    })
+  })
+
   it('opens the canonical home and retains its live situation state', async () => {
     const state = {
       schemaVersion: 1 as const,
       version: 4,
       sessionId: 'assistant-home',
+      activeTurn: {
+        submissionId: 'plan-today',
+        phase: 'awaiting-context',
+        revision: 2,
+        cardRevision: 1,
+        outcome: {
+          kind: 'progress-question' as const,
+          cardRevision: 1,
+          questionId: 'progressReview' as const
+        }
+      },
       outcomes: [],
       commitments: [],
       capacity: { summary: 'Three focused hours', updatedAt: '2026-07-12T09:00:00Z' },
@@ -98,10 +170,87 @@ describe('startPersonalAssistant', () => {
 
     await expect(openPersonalAssistantHome()).resolves.toEqual({
       canonicalSessionId: 'assistant-home',
+      profile: 'office-work',
       runtimeSessionId: 'assistant-live'
     })
     expect(gatewayForProfile).toHaveBeenCalledWith('office-work')
     expect(request).toHaveBeenCalledWith('personal_assistant.home', { profile: 'office-work' })
+    expect($personalAssistantState.get()).toEqual(state)
+  })
+
+  it('opens the acceptance-only shadow home when that generated profile is active', async () => {
+    const state = {
+      schemaVersion: 1 as const,
+      version: 1,
+      sessionId: 'acceptance-home',
+      unreadCount: 0
+    } as unknown as AssistantState
+
+    $personalAssistantState.set({ ...state, sessionId: 'office-home', version: 999 })
+    $activeGatewayProfile.set('personal-assistant-acceptance')
+    request.mockResolvedValue({
+      canonical_session_id: 'acceptance-home',
+      session_id: 'acceptance-live',
+      state,
+      status: 'ready'
+    })
+
+    await expect(openPersonalAssistantHome()).resolves.toEqual({
+      canonicalSessionId: 'acceptance-home',
+      profile: 'personal-assistant-acceptance',
+      runtimeSessionId: 'acceptance-live'
+    })
+    expect(gatewayForProfile).toHaveBeenCalledWith('personal-assistant-acceptance')
+    expect(request).toHaveBeenCalledWith('personal_assistant.shadow.home', {
+      profile: 'personal-assistant-acceptance'
+    })
+    expect($personalAssistantState.get()).toEqual(state)
+  })
+
+  it('submits acceptance-profile text through the shadow runtime', async () => {
+    const state = {
+      schemaVersion: 1 as const,
+      version: 2,
+      sessionId: 'acceptance-home',
+      unreadCount: 0
+    } as unknown as AssistantState
+
+    $activeGatewayProfile.set('personal-assistant-acceptance')
+    $activeSessionId.set('acceptance-live')
+    request.mockResolvedValue({ state })
+
+    await continuePersonalAssistantInterview('Plan the rest of today')
+
+    expect(request).toHaveBeenCalledWith('personal_assistant.shadow.submit', {
+      eventId: expect.stringMatching(/^desktop:/),
+      profile: 'personal-assistant-acceptance',
+      session_id: 'acceptance-live',
+      submissionId: expect.stringMatching(/^desktop:/),
+      userIntent: 'Plan the rest of today'
+    })
+    expect($personalAssistantState.get()).toEqual(state)
+  })
+
+  it('applies a visible acceptance-profile card action and stores the result', async () => {
+    const state = {
+      schemaVersion: 1 as const,
+      version: 3,
+      sessionId: 'acceptance-home',
+      unreadCount: 0
+    } as unknown as AssistantState
+
+    $activeGatewayProfile.set('personal-assistant-acceptance')
+    request.mockResolvedValue({ state })
+
+    await submitPersonalAssistantShadowAction('include:task-one', 2)
+
+    expect(request).toHaveBeenCalledWith('personal_assistant.shadow.action', {
+      actionId: 'include:task-one',
+      cardRevision: 2,
+      eventId: expect.stringMatching(/^desktop-action:/),
+      input: {},
+      profile: 'personal-assistant-acceptance'
+    })
     expect($personalAssistantState.get()).toEqual(state)
   })
 

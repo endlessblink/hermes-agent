@@ -451,7 +451,24 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             requestGateway('prompt.submit', { session_id: sessionId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
           )
         } catch (firstErr) {
-          if ((isSessionNotFoundError(firstErr) || isGatewayTimeoutError(firstErr)) && startingStoredSessionId) {
+          if (isSessionNotFoundError(firstErr) && !startingStoredSessionId) {
+            // A volatile-only session cannot be resumed after the gateway loses
+            // its runtime table. Re-home the exact pending prompt once instead
+            // of leaving a dead action in the transcript for the user to retry.
+            const replacementSessionId = await createBackendSessionForSend(visibleText)
+
+            if (replacementSessionId) {
+              sessionId = replacementSessionId
+              startingStoredSessionId = selectedStoredSessionIdRef.current
+              startingRouteToken = getRouteToken()
+              seedOptimistic(sessionId)
+              await withSessionBusyRetry(() =>
+                requestGateway('prompt.submit', { session_id: sessionId, text }, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS)
+              )
+            } else {
+              submitErr = firstErr
+            }
+          } else if ((isSessionNotFoundError(firstErr) || isGatewayTimeoutError(firstErr)) && startingStoredSessionId) {
             // Re-register the session in the gateway and get a fresh live ID.
             // Timeouts recover the same way as "session not found": a starved
             // backend loop (#55578 symptom d) rejects the submit even though
@@ -472,7 +489,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             const recoveredId = activeSessionIdRef.current
             const validatedRuntimeId = getRuntimeIdForStoredSession(startingStoredSessionId)
 
-            let retrySessionId = recoveredId && recoveredId === validatedRuntimeId ? recoveredId : null
+            // The backend has already rejected `sessionId`; a cache that still
+            // maps the stored conversation to that same runtime is evidence of
+            // staleness, not a valid recovery target.
+            let retrySessionId =
+              recoveredId && recoveredId !== sessionId && recoveredId === validatedRuntimeId ? recoveredId : null
 
             if (!retrySessionId && recoverMissingStoredSession) {
               retrySessionId = await recoverMissingStoredSession(startingStoredSessionId)

@@ -13,7 +13,8 @@ import {
   type AssistantStateItem,
   type AssistantStateSection,
   patchPersonalAssistantState,
-  refreshPersonalAssistantState
+  refreshPersonalAssistantState,
+  submitPersonalAssistantShadowAction
 } from '@/store/personal-assistant'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 
@@ -285,6 +286,150 @@ function attentionHeadline(attention: PersonalAssistantAttention) {
   return `${attention.blockers} ${attention.blockers === 1 ? 'blocker needs' : 'blockers need'} attention`
 }
 
+function ActiveTurnCard({
+  onReviewInChat,
+  state
+}: {
+  onReviewInChat: (prompt: string) => void
+  state: AssistantState
+}) {
+  const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [progressAnswer, setProgressAnswer] = useState('')
+  const outcome = state.activeTurn?.outcome
+
+  if (!outcome) {
+    return null
+  }
+
+  const choose = async (actionId: string, input?: Record<string, unknown>) => {
+    setBusyAction(actionId)
+    setError(null)
+
+    try {
+      if (input) {
+        await submitPersonalAssistantShadowAction(actionId, outcome.cardRevision, input)
+      } else {
+        await submitPersonalAssistantShadowAction(actionId, outcome.cardRevision)
+      }
+
+      return true
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The plan could not be updated.')
+
+      return false
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
+  const outcomeDetails = outcome as unknown as Record<string, unknown>
+  const fallbackOutcomeText =
+    typeof outcomeDetails.message === 'string'
+      ? outcomeDetails.message
+      : typeof outcomeDetails.summary === 'string'
+        ? outcomeDetails.summary
+        : typeof outcomeDetails.reason === 'string'
+          ? outcomeDetails.reason
+          : outcome.kind === 'approval'
+            ? 'Review the proposed change before anything is applied.'
+            : outcome.kind === 'canceled'
+              ? 'This assistant turn was canceled.'
+              : 'The assistant needs your help to continue safely.'
+
+  return (
+    <section aria-label="Active assistant turn" className="space-y-2">
+      <div>
+        <h2 className="text-xs font-semibold text-(--ui-text-primary)">
+          {outcome.kind === 'plan'
+            ? 'Plan ready'
+            : outcome.kind === 'progress-question'
+              ? 'Progress check'
+              : 'Assistant update'}
+        </h2>
+        <p className="mt-0.5 text-[0.6875rem] text-(--ui-text-tertiary)">
+          {outcome.kind === 'plan'
+            ? 'Choose one focused next step.'
+            : outcome.kind === 'progress-question'
+              ? 'What have you completed since we last checked?'
+              : fallbackOutcomeText}
+        </p>
+      </div>
+      {outcome.kind === 'plan' && (
+        <ul className="divide-y divide-(--ui-stroke-tertiary) border-y border-(--ui-stroke-tertiary)">
+          {outcome.options.slice(0, 3).map(option => (
+            <li
+              className="py-3"
+              dir="auto"
+              key={`${option.actionId ?? option.taskName}:${option.taskName}`}
+            >
+              <p className="text-sm font-medium text-(--ui-text-primary)">{option.taskName}</p>
+              <p className="mt-1 text-xs text-(--ui-text-secondary)">{option.reason}</p>
+              {option.actionId && (
+                <Button
+                  aria-label={`Choose ${option.taskName}`}
+                  className="mt-3"
+                  disabled={busyAction !== null}
+                  onClick={() => void choose(option.actionId!)}
+                  size="sm"
+                  type="button"
+                >
+                  {busyAction === option.actionId ? 'Updating…' : 'Choose'}
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {outcome.kind === 'progress-question' && (
+        <form
+          className="space-y-2"
+          onSubmit={event => {
+            event.preventDefault()
+            const answer = progressAnswer.trim()
+
+            if (!answer) {
+              return
+            }
+
+            void choose('answer-progress', { progressReview: answer }).then(submitted => {
+              if (submitted) {
+                setProgressAnswer('')
+              }
+            })
+          }}
+        >
+          <textarea
+            aria-label="Progress since last check"
+            className="min-h-20 w-full resize-y rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-3 py-2 text-sm text-(--ui-text-primary) outline-none placeholder:text-(--ui-text-tertiary) focus:border-(--ui-accent)"
+            disabled={busyAction !== null}
+            onChange={event => setProgressAnswer(event.target.value)}
+            placeholder="What changed?"
+            value={progressAnswer}
+          />
+          <Button disabled={busyAction !== null || !progressAnswer.trim()} size="sm" type="submit">
+            {busyAction === 'answer-progress' ? 'Updating…' : 'Continue planning'}
+          </Button>
+        </form>
+      )}
+      {(outcome.kind === 'approval' || outcome.kind === 'recovery') && (
+        <Button
+          onClick={() => onReviewInChat('Review the current assistant update with me and help me choose the safe next step.')}
+          size="sm"
+          type="button"
+        >
+          Review in chat
+        </Button>
+      )}
+      {error && (
+        <p className="text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
+  )
+}
+
 type PersonalAssistantSituationProps = {
   onOpenChange: (open: boolean) => void
   onOpenChat: () => void
@@ -308,7 +453,9 @@ export function PersonalAssistantSituation({
     if (!open) {
       return
     }
+
     void refreshPersonalAssistantState().catch(() => undefined)
+
     const interval = window.setInterval(() => {
       void refreshPersonalAssistantState().catch(() => undefined)
     }, 10_000)
@@ -376,10 +523,17 @@ export function PersonalAssistantSituation({
     onReviewInChat(prompt)
     onOpenChange(false)
   }
+  const activeOutcome = state.activeTurn?.outcome
+  const activeTurnHeadline =
+    activeOutcome?.kind === 'plan'
+      ? 'Assistant has a focused next step'
+      : activeOutcome?.kind === 'progress-question'
+        ? 'Assistant has one question'
+        : 'Assistant needs review'
 
   return (
     <>
-      {showAttentionStrip && attention.total > 0 && (
+      {showAttentionStrip && (attention.total > 0 || state.activeTurn?.outcome) && (
         <aside
           className="relative z-10 shrink-0 border-b border-(--ui-stroke-tertiary) bg-(--ui-sidebar-surface-background) px-3 py-1.5"
           dir="ltr"
@@ -394,8 +548,12 @@ export function PersonalAssistantSituation({
               <Codicon name="bell-dot" />
             </span>
             <span className="min-w-0 flex-1">
-              <span className="block text-xs font-medium text-(--ui-text-primary)">{attentionHeadline(attention)}</span>
-              <span className="block text-[0.6875rem] text-(--ui-text-tertiary)">Review what needs your attention</span>
+              <span className="block text-xs font-medium text-(--ui-text-primary)">
+                {activeOutcome ? activeTurnHeadline : attentionHeadline(attention)}
+              </span>
+              <span className="block text-[0.6875rem] text-(--ui-text-tertiary)">
+                {state.activeTurn?.outcome ? 'Review the current turn' : 'Review what needs your attention'}
+              </span>
             </span>
             <Codicon className="text-(--ui-text-tertiary) group-hover:text-(--ui-text-primary)" name="chevron-right" />
           </button>
@@ -423,6 +581,7 @@ export function PersonalAssistantSituation({
           </SheetHeader>
 
           <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4">
+            <ActiveTurnCard onReviewInChat={reviewInChat} state={state} />
             {state.watchdog && (
               <section aria-label="Reliability" className="space-y-3">
                 <h2 className="text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-(--ui-text-tertiary)">

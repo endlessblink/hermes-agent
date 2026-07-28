@@ -1,6 +1,8 @@
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -13,11 +15,31 @@ from agent.conversation_loop import (
     _build_ready_personal_assistant_plan,
     _effective_pressure_threshold,
     _parse_personal_assistant_plan_adjustment,
+    _planning_interview_needs_progress_check,
     _personal_assistant_pressure_exceeded,
     _personal_assistant_soft_pressure_requires_compaction,
     _successful_safety_review_in_batch,
 )
 from agent.personal_assistant_output_gate import OutputGateDecision
+
+
+def test_ready_same_day_interview_needs_one_progress_check_after_fifteen_minutes() -> None:
+    now = datetime(2026, 7, 26, 18, 0, tzinfo=timezone.utc)
+    interview = {
+        "readinessApproved": True,
+        "createdAt": (now - timedelta(minutes=16)).isoformat(),
+        "updatedAt": now.isoformat(),
+    }
+
+    assert _planning_interview_needs_progress_check(interview, now=now) is True
+
+    interview = {
+        "readinessApproved": True,
+        "createdAt": (now - timedelta(minutes=14)).isoformat(),
+        "updatedAt": (now - timedelta(minutes=16)).isoformat(),
+    }
+
+    assert _planning_interview_needs_progress_check(interview, now=now) is False
 
 
 def test_personal_assistant_compacts_before_long_history_becomes_slow() -> None:
@@ -397,21 +419,22 @@ def test_alternatives_action_parses_day_scope_and_visible_title_exclusions() -> 
 def test_alternatives_action_reuses_ready_interview_without_model_or_source_reads(
     agent,
 ) -> None:
+    planning_date = datetime.now(ZoneInfo("Asia/Jerusalem")).date()
     receipt = {
         "status": "complete",
         "complete": True,
         "expiresAt": "2099-01-01T00:00:00+00:00",
         "timezone": "Asia/Jerusalem",
         "range": {
-            "startDate": "2026-07-24",
-            "endDate": "2026-07-25",
+            "startDate": planning_date.isoformat(),
+            "endDate": (planning_date + timedelta(days=1)).isoformat(),
         },
     }
     interview = {
-        "interviewId": "planning-2026-07-24",
+        "interviewId": f"planning-{planning_date.isoformat()}",
         "status": "active",
         "mode": "daily-grounding",
-        "planningDate": "2026-07-24",
+        "planningDate": planning_date.isoformat(),
         "readinessApproved": True,
         "sourceSnapshot": {"calendarReceipt": receipt},
         "tasks": [{"taskId": "day-context", "title": "תכנון שאר היום"}],

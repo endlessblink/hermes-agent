@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import fcntl
 import hashlib
 import json
@@ -44,6 +44,7 @@ INTERVIEW_SCHEMA_VERSION = 1
 INTERVIEW_TASK_LIMIT = 500
 INTERVIEW_RECEIPT_LIMIT = 64
 INTERVIEW_ARCHIVE_LIMIT = 32
+TURN_EVENT_RECEIPT_LIMIT = 128
 INTERVIEW_REQUIRED_PROFILE_FIELDS = (
     "urgency", "importance", "outcome", "dependencies", "effort", "energy",
     "timing", "risks", "doneEnough",
@@ -56,7 +57,7 @@ _INTERVIEW_PROFILE_FIELDS = {
     "urgency", "importance", "outcome", "dependencies", "effort", "energy",
     "timing", "risks", "doneEnough", "notes", "context", "confidence",
     "evidence", "constraints", "workBoundary", "hardCommitments", "location",
-    "availability",
+    "availability", "progressReview",
 }
 
 
@@ -65,7 +66,7 @@ def interview_question_order(interview: dict[str, Any]) -> tuple[str, ...]:
         return INTERVIEW_REQUIRED_PROFILE_FIELDS
     configured = interview.get("questionOrder")
     if isinstance(configured, list) and configured:
-        allowed = set(DAILY_GROUNDING_FIELDS) | set(FUTURE_DAY_GROUNDING_FIELDS)
+        allowed = set(DAILY_GROUNDING_FIELDS) | set(FUTURE_DAY_GROUNDING_FIELDS) | {"progressReview"}
         values = tuple(str(value) for value in configured)
         if len(values) == len(set(values)) and all(value in allowed for value in values):
             return values
@@ -546,6 +547,7 @@ def _default() -> dict[str, Any]:
         "planning_interview_archive": [],
         "calendar_preflight_receipt": None,
         "pending_timer_action": None,
+        "active_turn": None,
     }
 
 
@@ -638,7 +640,7 @@ def _new_planning_interview(
         if mode == "daily-grounding"
         else INTERVIEW_REQUIRED_PROFILE_FIELDS
     )
-    allowed_questions = set(DAILY_GROUNDING_FIELDS) | set(FUTURE_DAY_GROUNDING_FIELDS)
+    allowed_questions = set(DAILY_GROUNDING_FIELDS) | set(FUTURE_DAY_GROUNDING_FIELDS) | {"progressReview"}
     if mode == "daily-grounding" and (
         not question_order
         or len(question_order) != len(set(question_order))
@@ -658,6 +660,7 @@ def _new_planning_interview(
         "tasks": tasks,
         "cursor": {"taskId": tasks[0]["taskId"], "questionId": question_id},
         "readinessApproved": False,
+        "readinessApprovedAt": None,
         "plan": None,
         "createdAt": now,
         "updatedAt": now,
@@ -832,6 +835,7 @@ def _apply_interview_operation(interview: dict[str, Any], operation: dict[str, A
                 "every planning interview task must be confirmed or deferred"
             )
         interview["readinessApproved"] = True
+        interview["readinessApprovedAt"] = now
         return
     if op == "record-plan":
         if not interview.get("readinessApproved"):
@@ -909,6 +913,409 @@ class PersonalAssistantStateStore:
     def get_pending_timer_action(self) -> dict[str, Any] | None:
         pending = self._read().get("pending_timer_action")
         return copy.deepcopy(pending) if isinstance(pending, dict) else None
+
+    def get_active_turn(self) -> dict[str, Any] | None:
+        active_turn = self._read().get("active_turn")
+        return copy.deepcopy(active_turn) if isinstance(active_turn, dict) else None
+
+    def apply_turn_event(
+        self,
+        *,
+        expected_revision: int,
+        event_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        from agent.personal_assistant_turn_state import (
+            apply_turn_event,
+            decide_turn_effects,
+        )
+
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 0
+        ):
+            raise ValueError("turn expected revision must be a non-negative integer")
+        event_id = _bounded_identifier(event_id, "turn event id", limit=300)
+        if not isinstance(event, dict) or not event:
+            raise ValueError("turn event must be a non-empty object")
+        try:
+            encoded = json.dumps(
+                event,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("turn event must be JSON-safe") from exc
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            state = self._read()
+            current = state.get("active_turn")
+            if not isinstance(current, dict):
+                current = {
+                    "phase": "idle",
+                    "turnRevision": 0,
+                    "eventReceipts": [],
+                }
+            receipt = next(
+                (
+                    value
+                    for value in current.get("eventReceipts") or []
+                    if value.get("eventId") == event_id
+                ),
+                None,
+            )
+            if receipt is not None:
+                if receipt.get("digest") != digest:
+                    raise ValueError(
+                        "turn event id was reused with a different payload"
+                    )
+                effect_ids = set(receipt.get("effectIds") or [])
+                effects = [
+                    copy.deepcopy(value)
+                    for value in current.get("pendingEffects") or []
+                    if value.get("effectId") in effect_ids
+                ]
+                return {
+                    "turn": copy.deepcopy(current),
+                    "stateVersion": int(
+                        receipt.get("stateVersion") or state.get("version") or 0
+                    ),
+                    "duplicate": True,
+                    "receipt": copy.deepcopy(receipt),
+                    "effects": effects,
+                }
+            current_revision = int(current.get("turnRevision") or 0)
+            if expected_revision != current_revision:
+                raise TurnRevisionConflict(current_revision, current)
+
+            turn = apply_turn_event(current, event)
+            for pending in turn.get("pendingEffects") or []:
+                if pending.get("status") in {"pending", "processing"}:
+                    pending["status"] = "superseded"
+                    pending["supersededByEventId"] = event_id
+                    pending.pop("leaseExpiresAt", None)
+            effect_specs = decide_turn_effects(current, turn, event)
+            effects = [
+                {
+                    "effectId": f"{event_id}:{index}:{spec['kind']}",
+                    "eventId": event_id,
+                    "kind": spec["kind"],
+                    "payload": copy.deepcopy(spec["payload"]),
+                    "status": "pending",
+                }
+                for index, spec in enumerate(effect_specs)
+            ]
+            pending_effects = turn.setdefault("pendingEffects", [])
+            pending_effects.extend(effects)
+            turn_revision = current_revision + 1
+            state_version = int(
+                state.get("revision") or state.get("version") or 0
+            ) + 1
+            turn["turnRevision"] = turn_revision
+            receipts = turn.setdefault("eventReceipts", [])
+            receipt = {
+                "eventId": event_id,
+                "digest": digest,
+                "turnRevision": turn_revision,
+                "stateVersion": state_version,
+                "effectIds": [effect["effectId"] for effect in effects],
+            }
+            receipts.append(receipt)
+            del receipts[:-TURN_EVENT_RECEIPT_LIMIT]
+            state["active_turn"] = turn
+            state["revision"] = state_version
+            state["version"] = state_version
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            atomic_json_write(self.path, state, indent=2, mode=0o600)
+            return {
+                "turn": copy.deepcopy(turn),
+                "stateVersion": state_version,
+                "duplicate": False,
+                "receipt": copy.deepcopy(receipt),
+                "effects": copy.deepcopy(effects),
+            }
+
+    def claim_next_turn_effect(
+        self,
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+        lease_seconds: int = 30,
+    ) -> dict[str, Any] | None:
+        worker_id = _bounded_identifier(worker_id, "turn effect worker id", limit=300)
+        if (
+            not isinstance(lease_seconds, int)
+            or isinstance(lease_seconds, bool)
+            or not 1 <= lease_seconds <= 300
+        ):
+            raise ValueError("turn effect lease must be between 1 and 300 seconds")
+        claimed_at = now or datetime.now(timezone.utc)
+        if claimed_at.tzinfo is None:
+            raise ValueError("turn effect claim time must include a timezone")
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            state = self._read()
+            turn = state.get("active_turn")
+            if not isinstance(turn, dict):
+                return None
+            candidate = None
+            for effect in turn.get("pendingEffects") or []:
+                status = effect.get("status")
+                if status == "pending":
+                    candidate = effect
+                    break
+                if status != "processing":
+                    continue
+                try:
+                    lease_expires_at = datetime.fromisoformat(
+                        str(effect.get("leaseExpiresAt") or "").replace(
+                            "Z", "+00:00"
+                        )
+                    )
+                except ValueError:
+                    lease_expires_at = claimed_at
+                if lease_expires_at.tzinfo is None or lease_expires_at <= claimed_at:
+                    candidate = effect
+                    break
+            if candidate is None:
+                return None
+
+            candidate["status"] = "processing"
+            candidate["workerId"] = worker_id
+            candidate["claimedAt"] = claimed_at.isoformat()
+            candidate["leaseExpiresAt"] = (
+                claimed_at + timedelta(seconds=lease_seconds)
+            ).isoformat()
+            candidate["attemptCount"] = int(candidate.get("attemptCount") or 0) + 1
+            turn["turnRevision"] = int(turn.get("turnRevision") or 0) + 1
+            state_version = int(
+                state.get("revision") or state.get("version") or 0
+            ) + 1
+            state["revision"] = state_version
+            state["version"] = state_version
+            state["updated_at"] = claimed_at.isoformat()
+            atomic_json_write(self.path, state, indent=2, mode=0o600)
+            return {
+                "effect": copy.deepcopy(candidate),
+                "turnRevision": turn["turnRevision"],
+                "stateVersion": state_version,
+            }
+
+    def complete_turn_effect(
+        self,
+        *,
+        effect_id: str,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        effect_id = _bounded_identifier(effect_id, "turn effect id", limit=500)
+        worker_id = _bounded_identifier(worker_id, "turn effect worker id", limit=300)
+        completed_at = now or datetime.now(timezone.utc)
+        if completed_at.tzinfo is None:
+            raise ValueError("turn effect completion time must include a timezone")
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            state = self._read()
+            turn = state.get("active_turn")
+            if not isinstance(turn, dict):
+                raise ValueError("no active turn effect exists")
+            effect = next(
+                (
+                    value
+                    for value in turn.get("pendingEffects") or []
+                    if value.get("effectId") == effect_id
+                ),
+                None,
+            )
+            if effect is None:
+                raise ValueError("turn effect does not exist")
+            if effect.get("status") == "delivered":
+                return {
+                    "effect": copy.deepcopy(effect),
+                    "turnRevision": int(turn.get("turnRevision") or 0),
+                    "stateVersion": int(
+                        effect.get("deliveredStateVersion")
+                        or state.get("version")
+                        or 0
+                    ),
+                    "duplicate": True,
+                }
+            if (
+                effect.get("status") != "processing"
+                or effect.get("workerId") != worker_id
+            ):
+                raise ValueError("turn effect can only be completed by its lease owner")
+
+            effect["status"] = "delivered"
+            effect["deliveredAt"] = completed_at.isoformat()
+            effect.pop("leaseExpiresAt", None)
+            turn["turnRevision"] = int(turn.get("turnRevision") or 0) + 1
+            state_version = int(
+                state.get("revision") or state.get("version") or 0
+            ) + 1
+            effect["deliveredStateVersion"] = state_version
+            state["revision"] = state_version
+            state["version"] = state_version
+            state["updated_at"] = completed_at.isoformat()
+            atomic_json_write(self.path, state, indent=2, mode=0o600)
+            return {
+                "effect": copy.deepcopy(effect),
+                "turnRevision": turn["turnRevision"],
+                "stateVersion": state_version,
+                "duplicate": False,
+            }
+
+    def complete_turn_effect_with_result(
+        self,
+        *,
+        effect_id: str,
+        worker_id: str,
+        result_event: dict[str, Any],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        from agent.personal_assistant_turn_state import (
+            apply_turn_event,
+            decide_turn_effects,
+        )
+
+        effect_id = _bounded_identifier(effect_id, "turn effect id", limit=500)
+        worker_id = _bounded_identifier(worker_id, "turn effect worker id", limit=300)
+        if not isinstance(result_event, dict) or not result_event:
+            raise ValueError("turn effect result must be a non-empty event")
+        completed_at = now or datetime.now(timezone.utc)
+        if completed_at.tzinfo is None:
+            raise ValueError("turn effect completion time must include a timezone")
+        result_event_id = f"{effect_id}:result"
+        encoded = json.dumps(
+            result_event,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            state = self._read()
+            current = state.get("active_turn")
+            if not isinstance(current, dict):
+                raise ValueError("no active turn effect exists")
+            effect = next(
+                (
+                    value
+                    for value in current.get("pendingEffects") or []
+                    if value.get("effectId") == effect_id
+                ),
+                None,
+            )
+            if effect is None:
+                raise ValueError("turn effect does not exist")
+            prior_receipt = next(
+                (
+                    value
+                    for value in current.get("eventReceipts") or []
+                    if value.get("eventId") == result_event_id
+                ),
+                None,
+            )
+            if effect.get("status") == "delivered" and prior_receipt is not None:
+                if prior_receipt.get("digest") != digest:
+                    raise ValueError(
+                        "turn event id was reused with a different payload"
+                    )
+                return {
+                    "effect": copy.deepcopy(effect),
+                    "turn": copy.deepcopy(current),
+                    "turnRevision": int(current.get("turnRevision") or 0),
+                    "stateVersion": int(
+                        prior_receipt.get("stateVersion")
+                        or state.get("version")
+                        or 0
+                    ),
+                    "duplicate": True,
+                    "receipt": copy.deepcopy(prior_receipt),
+                    "effects": [
+                        copy.deepcopy(value)
+                        for value in current.get("pendingEffects") or []
+                        if value.get("effectId")
+                        in set(prior_receipt.get("effectIds") or [])
+                    ],
+                }
+            if (
+                effect.get("status") != "processing"
+                or effect.get("workerId") != worker_id
+            ):
+                raise ValueError("turn effect can only be completed by its lease owner")
+
+            turn = apply_turn_event(current, result_event)
+            delivered = next(
+                value
+                for value in turn.get("pendingEffects") or []
+                if value.get("effectId") == effect_id
+            )
+            delivered["status"] = "delivered"
+            delivered["deliveredAt"] = completed_at.isoformat()
+            delivered.pop("leaseExpiresAt", None)
+            for pending in turn.get("pendingEffects") or []:
+                if pending is delivered:
+                    continue
+                if pending.get("status") in {"pending", "processing"}:
+                    pending["status"] = "superseded"
+                    pending["supersededByEventId"] = result_event_id
+                    pending.pop("leaseExpiresAt", None)
+
+            effect_specs = decide_turn_effects(current, turn, result_event)
+            new_effects = [
+                {
+                    "effectId": f"{result_event_id}:{index}:{spec['kind']}",
+                    "eventId": result_event_id,
+                    "kind": spec["kind"],
+                    "payload": copy.deepcopy(spec["payload"]),
+                    "status": "pending",
+                }
+                for index, spec in enumerate(effect_specs)
+            ]
+            turn.setdefault("pendingEffects", []).extend(new_effects)
+            turn_revision = int(current.get("turnRevision") or 0) + 1
+            state_version = int(
+                state.get("revision") or state.get("version") or 0
+            ) + 1
+            turn["turnRevision"] = turn_revision
+            delivered["deliveredStateVersion"] = state_version
+            receipt = {
+                "eventId": result_event_id,
+                "digest": digest,
+                "turnRevision": turn_revision,
+                "stateVersion": state_version,
+                "effectIds": [value["effectId"] for value in new_effects],
+            }
+            receipts = turn.setdefault("eventReceipts", [])
+            receipts.append(receipt)
+            del receipts[:-TURN_EVENT_RECEIPT_LIMIT]
+            state["active_turn"] = turn
+            state["revision"] = state_version
+            state["version"] = state_version
+            state["updated_at"] = completed_at.isoformat()
+            atomic_json_write(self.path, state, indent=2, mode=0o600)
+            return {
+                "effect": copy.deepcopy(delivered),
+                "turn": copy.deepcopy(turn),
+                "turnRevision": turn_revision,
+                "stateVersion": state_version,
+                "duplicate": False,
+                "receipt": copy.deepcopy(receipt),
+                "effects": copy.deepcopy(new_effects),
+            }
 
     def set_pending_timer_action(
         self, pending: dict[str, Any] | None
@@ -1465,6 +1872,13 @@ class InterviewRevisionConflict(ValueError):
         self.latest = copy.deepcopy(latest)
 
 
+class TurnRevisionConflict(ValueError):
+    def __init__(self, current_revision: int, turn: dict[str, Any]):
+        super().__init__(f"turn revision conflict; current revision is {current_revision}")
+        self.current_revision = current_revision
+        self.turn = copy.deepcopy(turn)
+
+
 def _apply_operation(
     state: dict[str, Any], operation: dict[str, Any], editable: set[str]
 ) -> None:
@@ -1508,12 +1922,27 @@ def _apply_operation(
     raise ValueError(f"unsupported personal assistant state operation: {op}")
 
 
+def _public_active_turn(state: dict[str, Any]) -> dict[str, Any] | None:
+    turn = state.get("active_turn")
+    if not isinstance(turn, dict):
+        return None
+    outcome = turn.get("visibleOutcome")
+    return {
+        "submissionId": turn.get("submissionId"),
+        "phase": turn.get("phase"),
+        "revision": int(turn.get("turnRevision") or 0),
+        "cardRevision": turn.get("activeCardRevision"),
+        "outcome": copy.deepcopy(outcome) if isinstance(outcome, dict) else None,
+    }
+
+
 def public_state(state: dict[str, Any]) -> dict[str, Any]:
     """Return the stable camelCase desktop contract, hiding storage metadata."""
     return {
         "schemaVersion": SCHEMA_VERSION,
         "version": int(state.get("version") or 0),
         "sessionId": state.get("canonical_session_id"),
+        "activeTurn": _public_active_turn(state),
         "outcomes": copy.deepcopy(state.get("outcomes") or []),
         "commitments": copy.deepcopy(state.get("commitments") or []),
         "capacity": copy.deepcopy(

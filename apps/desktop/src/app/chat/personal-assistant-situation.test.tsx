@@ -8,6 +8,7 @@ import type { AssistantState } from '@/store/personal-assistant'
 const patchPersonalAssistantState = vi.fn(async () => undefined)
 const acknowledgePersonalAssistantRead = vi.fn(async () => undefined)
 const refreshPersonalAssistantState = vi.fn(async () => undefined)
+const submitPersonalAssistantShadowAction = vi.fn(async () => undefined)
 const $threadScrolledUp = atom(false)
 
 const baseState: AssistantState = {
@@ -41,7 +42,8 @@ vi.mock('@/store/personal-assistant', () => ({
   $personalAssistantState,
   acknowledgePersonalAssistantRead,
   patchPersonalAssistantState,
-  refreshPersonalAssistantState
+  refreshPersonalAssistantState,
+  submitPersonalAssistantShadowAction
 }))
 vi.mock('@/store/thread-scroll', () => ({ $threadScrolledUp }))
 
@@ -83,6 +85,7 @@ beforeEach(() => {
   acknowledgePersonalAssistantRead.mockClear()
   refreshPersonalAssistantState.mockClear()
   patchPersonalAssistantState.mockClear()
+  submitPersonalAssistantShadowAction.mockClear()
   reviewInChat.mockClear()
   openChat.mockClear()
   $personalAssistantState.set(baseState)
@@ -197,6 +200,78 @@ describe('PersonalAssistantSituation', () => {
     expect(screen.getByText('Waiting for approval')).toBeTruthy()
     expect(screen.getByText('1 approval · 0 proposals')).toBeTruthy()
     expect(screen.getByText('fresh')).toBeTruthy()
+  })
+
+  it('shows the active plan as task names and applies its direct action', async () => {
+    $personalAssistantState.set({
+      ...baseState,
+      activeTurn: {
+        cardRevision: 2,
+        outcome: {
+          cardRevision: 2,
+          kind: 'plan',
+          options: [{ actionId: 'include:task-one', reason: 'Fits the available hour', taskName: 'Finish the proposal' }]
+        },
+        phase: 'awaiting-action',
+        revision: 3,
+        submissionId: 'turn-1'
+      }
+    })
+
+    renderSituation(true)
+
+    expect(screen.getByText('Plan ready')).toBeTruthy()
+    expect(screen.getByText('Finish the proposal')).toBeTruthy()
+    expect(screen.getByText('Fits the available hour')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Choose Finish the proposal' }))
+
+    await waitFor(() => expect(submitPersonalAssistantShadowAction).toHaveBeenCalledWith('include:task-one', 2))
+  })
+
+  it('submits the progress answer directly to the active assistant turn', async () => {
+    $personalAssistantState.set({
+      ...baseState,
+      activeTurn: {
+        cardRevision: 1,
+        outcome: { cardRevision: 1, kind: 'progress-question', questionId: 'progressReview' },
+        phase: 'awaiting-context',
+        revision: 2,
+        submissionId: 'turn-1'
+      }
+    })
+
+    renderSituation(true)
+
+    expect(screen.getByText('What have you completed since we last checked?')).toBeTruthy()
+    fireEvent.change(screen.getByRole('textbox', { name: 'Progress since last check' }), {
+      target: { value: 'I finished the release notes.' }
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Continue planning' }))
+
+    await waitFor(() =>
+      expect(submitPersonalAssistantShadowAction).toHaveBeenCalledWith('answer-progress', 1, {
+        progressReview: 'I finished the release notes.'
+      })
+    )
+  })
+
+  it('renders recovery outcomes without claiming a focused next step', () => {
+    $personalAssistantState.set({
+      ...baseState,
+      activeTurn: {
+        cardRevision: 3,
+        outcome: { cardRevision: 3, kind: 'recovery', message: 'The plan needs to be refreshed.' },
+        phase: 'recoverable-failure',
+        revision: 4,
+        submissionId: 'turn-1'
+      }
+    })
+
+    renderSituation()
+
+    expect(screen.getByText('Assistant needs review')).toBeTruthy()
+    expandSituation()
+    expect(screen.getByText('The plan needs to be refreshed.')).toBeTruthy()
   })
 
   it('shows whether the protected safety sweep is complete and actionable', () => {

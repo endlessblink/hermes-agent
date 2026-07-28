@@ -2,9 +2,11 @@ import { atom } from 'nanostores'
 
 import type { HermesUiTaskProfileReviewArtifact } from '@/lib/hermes-ui-artifacts'
 import { gatewayForProfile } from '@/store/gateway'
+import { $activeGatewayProfile, $activeProfile } from '@/store/profile'
 import { $activeSessionId } from '@/store/session'
 
 export const PERSONAL_ASSISTANT_OWNER_PROFILE = 'office-work'
+export const PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE = 'personal-assistant-acceptance'
 
 export type PersonalAssistantTrigger = 'manual' | 'scheduled'
 
@@ -15,6 +17,7 @@ interface PersonalAssistantStartResult {
 
 export interface PersonalAssistantDestination {
   canonicalSessionId: string
+  profile?: string
   runtimeSessionId: string
 }
 
@@ -76,10 +79,40 @@ export interface AssistantWatchdogStatus {
   watchedSources: number
 }
 
+export type PersonalAssistantVisibleOutcome =
+  | {
+      cardRevision: number
+      kind: 'progress-question'
+      questionId: 'progressReview'
+    }
+  | {
+      cardRevision: number
+      kind: 'plan'
+      options: Array<{
+        actionId?: string
+        reason: string
+        taskName: string
+      }>
+    }
+  | {
+      cardRevision: number
+      kind: 'approval' | 'canceled' | 'recovery'
+      [key: string]: unknown
+    }
+
+export interface PersonalAssistantActiveTurn {
+  cardRevision: number | null
+  outcome: PersonalAssistantVisibleOutcome | null
+  phase: string | null
+  revision: number
+  submissionId: string | null
+}
+
 export interface AssistantState {
   schemaVersion: 1
   version: number
   sessionId: string | null
+  activeTurn?: PersonalAssistantActiveTurn | null
   outcomes: AssistantStateItem[]
   commitments: AssistantStateItem[]
   capacity: { summary: string | null; updatedAt: string | null }
@@ -149,6 +182,13 @@ export const $personalAssistantContextOpen = atom(false)
 export const $personalAssistantTodayOpen = atom(false)
 
 let stateHydration: Promise<AssistantState> | null = null
+let storedStateProfile: string | null = null
+
+$personalAssistantState.subscribe(state => {
+  if (state === null) {
+    storedStateProfile = null
+  }
+})
 
 export function isPersonalAssistantSession(sessionId: string, lineageRootId?: string | null): boolean {
   const canonicalSessionId = $personalAssistantState.get()?.sessionId
@@ -156,13 +196,17 @@ export function isPersonalAssistantSession(sessionId: string, lineageRootId?: st
   return Boolean(canonicalSessionId && (sessionId === canonicalSessionId || lineageRootId === canonicalSessionId))
 }
 
-function storePersonalAssistantState(state: AssistantState): AssistantState {
+function storePersonalAssistantState(
+  state: AssistantState,
+  profile: string = PERSONAL_ASSISTANT_OWNER_PROFILE
+): AssistantState {
   const current = $personalAssistantState.get()
 
-  if (current && state.version < current.version) {
+  if (current && storedStateProfile === profile && state.version < current.version) {
     return current
   }
 
+  storedStateProfile = profile
   $personalAssistantState.set(state)
   $personalAssistantPendingCount.set(
     (state.pendingApprovals?.filter(item => !item.status || item.status === 'pending').length ?? 0) +
@@ -182,7 +226,31 @@ async function ownerGateway() {
   return gateway
 }
 
+function activeAssistantProfile(): string {
+  return $activeProfile.get() === PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE ||
+    $activeGatewayProfile.get() === PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE
+    ? PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE
+    : PERSONAL_ASSISTANT_OWNER_PROFILE
+}
+
+async function activeAssistantGateway() {
+  const profile = activeAssistantProfile()
+  const gateway = await gatewayForProfile(profile)
+
+  if (!gateway) {
+    throw new Error('Hermes gateway is unavailable')
+  }
+
+  return { gateway, profile }
+}
+
 export async function startPersonalAssistant(trigger: PersonalAssistantTrigger): Promise<PersonalAssistantStartResult> {
+  if (activeAssistantProfile() === PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE) {
+    const { canonicalSessionId } = await openPersonalAssistantHome()
+
+    return { sessionId: canonicalSessionId, status: 'ready' }
+  }
+
   const gateway = await ownerGateway()
 
   const response = (await gateway.request('personal_assistant.start', {
@@ -211,14 +279,17 @@ export async function startPersonalAssistant(trigger: PersonalAssistantTrigger):
 }
 
 export async function openPersonalAssistantHome(): Promise<PersonalAssistantDestination> {
-  const response = await (
-    await ownerGateway()
-  ).request<{
+  const { gateway, profile } = await activeAssistantGateway()
+
+  const response = await gateway.request<{
     canonical_session_id: string
     session_id: string
     state: AssistantState
     status: 'ready'
-  }>('personal_assistant.home', { profile: PERSONAL_ASSISTANT_OWNER_PROFILE })
+  }>(
+    profile === PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE ? 'personal_assistant.shadow.home' : 'personal_assistant.home',
+    { profile }
+  )
 
   const destinationSessionId = response.canonical_session_id || response.state.sessionId
 
@@ -226,22 +297,48 @@ export async function openPersonalAssistantHome(): Promise<PersonalAssistantDest
     throw new Error('Personal assistant home did not return a session')
   }
 
-  storePersonalAssistantState(response.state)
+  storePersonalAssistantState(response.state, profile)
 
   return {
     canonicalSessionId: destinationSessionId,
+    profile,
     runtimeSessionId: response.session_id
   }
 }
 
 export async function refreshPersonalAssistantState(): Promise<AssistantState> {
-  const response = await (
-    await ownerGateway()
-  ).request<{ state: AssistantState }>('personal_assistant.state.get', {
-    profile: PERSONAL_ASSISTANT_OWNER_PROFILE
+  const { gateway, profile } = await activeAssistantGateway()
+
+  const response = await gateway.request<{ state: AssistantState }>(
+    profile === PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE
+      ? 'personal_assistant.shadow.state.get'
+      : 'personal_assistant.state.get',
+    { profile }
+  )
+
+  return storePersonalAssistantState(response.state, profile)
+}
+
+export async function submitPersonalAssistantShadowAction(
+  actionId: string,
+  cardRevision: number,
+  input: Record<string, unknown> = {}
+): Promise<AssistantState> {
+  const { gateway, profile } = await activeAssistantGateway()
+
+  if (profile !== PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE) {
+    throw new Error('Shadow actions require the generated acceptance profile')
+  }
+
+  const response = await gateway.request<{ state: AssistantState }>('personal_assistant.shadow.action', {
+    actionId,
+    cardRevision,
+    eventId: `desktop-action:${crypto.randomUUID()}`,
+    input,
+    profile
   })
 
-  return storePersonalAssistantState(response.state)
+  return storePersonalAssistantState(response.state, profile)
 }
 
 export async function fetchPersonalAssistantDayPlan(date: string): Promise<PersonalAssistantDayPlan> {
@@ -330,9 +427,25 @@ export async function fetchCurrentPersonalAssistantInterview(): Promise<{
 }
 
 export async function continuePersonalAssistantInterview(text: string, runtimeSessionId?: string): Promise<void> {
-  const gateway = await ownerGateway()
+  const { gateway, profile } = await activeAssistantGateway()
   const activeRuntimeSessionId = runtimeSessionId || $activeSessionId.get()
   const destination = activeRuntimeSessionId ? null : await openPersonalAssistantHome()
+
+  if (profile === PERSONAL_ASSISTANT_ACCEPTANCE_PROFILE) {
+    const submissionId = `desktop:${crypto.randomUUID()}`
+
+    const response = await gateway.request<{ state: AssistantState }>('personal_assistant.shadow.submit', {
+      eventId: submissionId,
+      profile,
+      session_id: activeRuntimeSessionId || destination?.runtimeSessionId,
+      submissionId,
+      userIntent: text
+    })
+
+    storePersonalAssistantState(response.state, profile)
+
+    return
+  }
 
   await gateway.request('prompt.submit', {
     reject_if_busy: true,

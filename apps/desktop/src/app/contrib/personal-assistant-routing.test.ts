@@ -171,7 +171,7 @@ describe('openPersonalAssistantTab', () => {
       'assistant-live'
     )
     expect(openSessionTile).toHaveBeenCalledTimes(2)
-    expect(bindSessionRuntime).toHaveBeenCalledWith('assistant-home', 'assistant-live')
+    expect(bindSessionRuntime).toHaveBeenCalledWith('assistant-home', 'assistant-live', 'office-work')
     expect(bindSessionRuntime).toHaveBeenCalledTimes(2)
   })
 
@@ -194,7 +194,37 @@ describe('openPersonalAssistantTab', () => {
       'office-work',
       'assistant-live'
     )
-    expect(bindSessionRuntime).toHaveBeenCalledWith('assistant-home', 'assistant-live')
+    expect(bindSessionRuntime).toHaveBeenCalledWith('assistant-home', 'assistant-live', 'office-work')
+  })
+
+  it('opens the generated acceptance assistant on its own profile gateway', async () => {
+    const bindSessionRuntime = vi.fn()
+    const openSessionTile = vi.fn()
+
+    await openPersonalAssistantTab({
+      bindSessionRuntime,
+      focusOpenSession: () => true,
+      openHome: async () => ({
+        canonicalSessionId: 'acceptance-home',
+        profile: 'personal-assistant-acceptance',
+        runtimeSessionId: 'acceptance-live'
+      }),
+      openSessionTile
+    })
+
+    expect(openSessionTile).toHaveBeenCalledWith(
+      'acceptance-home',
+      'center',
+      undefined,
+      undefined,
+      'personal-assistant-acceptance',
+      'acceptance-live'
+    )
+    expect(bindSessionRuntime).toHaveBeenCalledWith(
+      'acceptance-home',
+      'acceptance-live',
+      'personal-assistant-acceptance'
+    )
   })
 
   it('waits for a newly opened assistant pane to exist before focusing it', async () => {

@@ -85,6 +85,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS/Windows/Linux)", "background desktop control via cua-driver"),
+    ("browser_control",  "🧭 Browser Tab Control",      "act in the tab pinned in the Hermes browser extension"),
 ]
 
 

@@ -3900,6 +3900,7 @@ _PERSONAL_ASSISTANT_TRIGGERS = {
     "review",
 }
 _PERSONAL_ASSISTANT_OWNER_PROFILE = "office-work"
+_PERSONAL_ASSISTANT_SHADOW_PROFILE = "personal-assistant-acceptance"
 # Still bounded for responsiveness, with headroom for preview/apply and
 # desktop verification after the six-round timer-start failure.
 _PERSONAL_ASSISTANT_MAX_ITERATIONS = 12
@@ -3914,6 +3915,8 @@ _PERSONAL_ASSISTANT_RESPONSIVENESS_POLICY = """Personal Assistant responsiveness
 """.strip()
 _personal_assistant_start_lock = threading.RLock()
 _personal_assistant_monitor_stop: threading.Event | None = None
+_personal_assistant_shadow_runtime = None
+_personal_assistant_shadow_runtime_lock = threading.RLock()
 
 
 def _apply_personal_assistant_runtime_policy(session: dict) -> None:
@@ -4017,6 +4020,70 @@ def _personal_assistant_store(profile: str):
     from agent.personal_assistant_state import PersonalAssistantStateStore
 
     return PersonalAssistantStateStore(_personal_assistant_profile_home(profile))
+
+
+def _resolve_personal_assistant_shadow_agent(durable_session_id: str):
+    with _sessions_lock:
+        sessions = list(_sessions.values())
+    for session in sessions:
+        if (
+            str(session.get("session_key") or "") == durable_session_id
+            and session.get("personal_assistant_shadow") is True
+        ):
+            return session.get("agent")
+    return None
+
+
+def _recover_personal_assistant_shadow_runtime(
+    durable_session_id: str,
+    rejected_runtime_ids: tuple[str, ...],
+) -> str | None:
+    with _sessions_lock:
+        sessions = list(_sessions.items())
+    for runtime_session_id, session in sessions:
+        if (
+            runtime_session_id not in rejected_runtime_ids
+            and str(session.get("session_key") or "") == durable_session_id
+            and session.get("personal_assistant_shadow") is True
+        ):
+            return runtime_session_id
+    return None
+
+
+def _ensure_personal_assistant_shadow_runtime(store):
+    global _personal_assistant_shadow_runtime
+    with _personal_assistant_shadow_runtime_lock:
+        runtime = _personal_assistant_shadow_runtime
+        if runtime is not None:
+            return runtime
+        from agent.personal_assistant_shadow_runtime import (
+            PersonalAssistantShadowRuntime,
+        )
+        from agent.personal_assistant_shadow_worker import (
+            build_acceptance_shadow_worker_lifecycle,
+        )
+
+        lifecycle = build_acceptance_shadow_worker_lifecycle(
+            store=store,
+            active_profile=_current_profile_name(),
+            resolve_agent=_resolve_personal_assistant_shadow_agent,
+            recover_runtime=_recover_personal_assistant_shadow_runtime,
+        )
+        runtime = PersonalAssistantShadowRuntime(store=store, lifecycle=lifecycle)
+        _personal_assistant_shadow_runtime = runtime
+        return runtime
+
+
+def _shutdown_personal_assistant_shadow_runtime() -> None:
+    global _personal_assistant_shadow_runtime
+    with _personal_assistant_shadow_runtime_lock:
+        runtime = _personal_assistant_shadow_runtime
+        _personal_assistant_shadow_runtime = None
+    if runtime is not None:
+        runtime.close(timeout=5)
+
+
+atexit.register(_shutdown_personal_assistant_shadow_runtime)
 
 
 def _personal_assistant_canonical_is_stale(canonical_session_id: str) -> bool:
@@ -4202,6 +4269,151 @@ def _(rid, params: dict) -> dict:
         _PERSONAL_ASSISTANT_OWNER_PROFILE
     )
     return _ok(rid, {"state": result})
+
+
+def _personal_assistant_shadow_params(rid, params: dict):
+    profile = str(params.get("profile") or _current_profile_name()).strip()
+    if (
+        profile != _PERSONAL_ASSISTANT_SHADOW_PROFILE
+        or _current_profile_name() != _PERSONAL_ASSISTANT_SHADOW_PROFILE
+    ):
+        return None, _err(
+            rid,
+            4000,
+            "Personal Assistant shadow runtime requires the generated acceptance profile",
+        )
+    try:
+        return _personal_assistant_store(profile), None
+    except FileNotFoundError as exc:
+        return None, _err(rid, 4007, str(exc))
+
+
+def _personal_assistant_shadow_session(rid, params: dict):
+    runtime_session_id = str(params.get("session_id") or "").strip()
+    if not runtime_session_id:
+        created = _methods["session.create"](
+            rid,
+            {
+                "personal_assistant": True,
+                "profile": _PERSONAL_ASSISTANT_SHADOW_PROFILE,
+                "source": "desktop",
+                "title": "Personal assistant acceptance",
+            },
+        )
+        if "error" in created:
+            return None, created
+        runtime_session_id = str((created.get("result") or {}).get("session_id") or "")
+    with _sessions_lock:
+        session = _sessions.get(runtime_session_id)
+    if session is None:
+        return None, _err(rid, 4007, "shadow runtime session is unavailable")
+    ready = session.get("agent_ready")
+    if ready is not None and not ready.wait(30):
+        return None, _err(rid, 5030, "shadow runtime agent did not become ready")
+    agent = session.get("agent")
+    if agent is None:
+        return None, _err(rid, 5030, "shadow runtime agent is unavailable")
+    session["personal_assistant"] = True
+    session["personal_assistant_shadow"] = True
+    agent.personal_assistant_mode = True
+    return (runtime_session_id, session), None
+
+
+@method("personal_assistant.shadow.home")
+def _(rid, params: dict) -> dict:
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_shadow_params(rid, params)
+    if error:
+        return error
+    resolved, error = _personal_assistant_shadow_session(rid, params)
+    if error:
+        return error
+    runtime_session_id, session = resolved
+    durable_session_id = str(session.get("session_key") or runtime_session_id)
+    store.set_canonical_session(durable_session_id)
+    return _ok(
+        rid,
+        {
+            "canonical_session_id": durable_session_id,
+            "session_id": runtime_session_id,
+            "state": public_state(store.read()),
+            "status": "ready",
+        },
+    )
+
+
+@method("personal_assistant.shadow.submit")
+def _(rid, params: dict) -> dict:
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_shadow_params(rid, params)
+    if error:
+        return error
+    resolved, error = _personal_assistant_shadow_session(rid, params)
+    if error:
+        return error
+    runtime_session_id, session = resolved
+    durable_session_id = str(session.get("session_key") or runtime_session_id)
+    store.set_canonical_session(durable_session_id)
+    runtime = _ensure_personal_assistant_shadow_runtime(store)
+    submission_id = str(params.get("submissionId") or "").strip()
+    event_id = str(params.get("eventId") or f"submit:{submission_id}").strip()
+    user_intent = str(params.get("userIntent") or "").strip()
+    try:
+        result = runtime.submit(
+            event_id=event_id,
+            durable_session_id=durable_session_id,
+            submission_id=submission_id,
+            user_intent=user_intent,
+            lineage_root_id=durable_session_id,
+        )
+    except (RuntimeError, ValueError) as exc:
+        return _err(rid, 4000, str(exc))
+    return _ok(
+        rid,
+        {
+            "duplicate": bool(result.get("duplicate")),
+            "runtime_session_id": runtime_session_id,
+            "state": public_state(store.read()),
+        },
+    )
+
+
+@method("personal_assistant.shadow.action")
+def _(rid, params: dict) -> dict:
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_shadow_params(rid, params)
+    if error:
+        return error
+    runtime = _ensure_personal_assistant_shadow_runtime(store)
+    try:
+        result = runtime.submit_card_action(
+            event_id=str(params.get("eventId") or "").strip(),
+            action_id=str(params.get("actionId") or "").strip(),
+            card_revision=int(params.get("cardRevision") or 0),
+            input=params.get("input") or {},
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        return _err(rid, 4000, str(exc))
+    return _ok(
+        rid,
+        {
+            "duplicate": bool(result.get("duplicate")),
+            "state": public_state(store.read()),
+        },
+    )
+
+
+@method("personal_assistant.shadow.state.get")
+def _(rid, params: dict) -> dict:
+    from agent.personal_assistant_state import public_state
+
+    store, error = _personal_assistant_shadow_params(rid, params)
+    if error:
+        return error
+    return _ok(rid, {"state": public_state(store.read())})
 
 
 @method("personal_assistant.day_plan")

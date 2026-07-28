@@ -258,6 +258,27 @@ def test_daily_grounding_fallback_asks_one_short_hebrew_day_question() -> None:
     assert "How urgent" not in fallback
 
 
+def test_progress_review_fallback_asks_what_was_completed_before_recommending() -> None:
+    interview = {
+        "interviewId": "today",
+        "interviewRevision": 2,
+        "mode": "daily-grounding",
+        "questionOrder": ["progressReview"],
+        "tasks": [
+            {"taskId": "day-context", "title": "תכנון שאר היום", "profile": {}}
+        ],
+        "cursor": {
+            "taskId": "day-context",
+            "questionId": "progressReview",
+        },
+    }
+
+    fallback = build_safe_interview_fallback(interview)
+
+    assert "מה כבר הושלם מאז הבדיקה האחרונה?" in fallback
+    assert "שמות משימות" in fallback
+
+
 def test_future_day_fallback_asks_one_availability_question() -> None:
     fallback = build_safe_interview_fallback(
         {
@@ -1231,6 +1252,51 @@ def test_selected_named_option_is_promoted_and_keeps_tomorrow_context() -> None:
     assert artifact["rows"][0]["id"] == "selected"
     assert artifact["title"] == "תוכנית גמישה סביב האפשרות שבחרתי"
     assert "לתכנון מחר" in artifact["rows"][0]["actions"][0]["submitText"]
+
+
+def test_selected_option_survives_hydrated_detail_title_drift() -> None:
+    candidate_records = {
+        "flowstate": {
+            "selected": {
+                "id": "selected",
+                "title": "להעביר 200$ לאלכס",
+                "status": "todo",
+                "priority": "high",
+            },
+            "other-one": {
+                "id": "other-one",
+                "title": "משימה אחרת",
+                "status": "todo",
+                "priority": "high",
+            },
+            "other-two": {
+                "id": "other-two",
+                "title": "עוד משימה",
+                "status": "todo",
+                "priority": "medium",
+            },
+        }
+    }
+    task_details = {
+        "selected": {
+            "id": "selected",
+            "title": "להעביר 200 דולר לאלכס",
+            "status": "todo",
+            "priority": "high",
+        }
+    }
+
+    response = build_grounded_plan_fallback(
+        task_inventory_records={},
+        task_details=task_details,
+        candidate_records=candidate_records,
+        preferred_task_title="להעביר 200$ לאלכס",
+        user_message="",
+    )
+    artifact = json.loads(response.removeprefix("```hermes-ui\n").removesuffix("\n```"))
+
+    assert artifact["rows"][0]["id"] == "selected"
+    assert artifact["title"] == "תוכנית גמישה סביב להעביר 200 דולר לאלכס"
 
 
 def test_show_alternatives_action_keeps_day_scope_and_excludes_visible_titles() -> None:

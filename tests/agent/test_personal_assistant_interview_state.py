@@ -391,6 +391,7 @@ def test_readiness_and_record_plan_are_gated_by_confirmed_profiles(tmp_path):
     )
 
     assert ready["interview"]["readinessApproved"] is True
+    assert ready["interview"]["readinessApprovedAt"]
     assert completed["interview"]["plan"]["artifactId"] == "week-1"
     assert completed["interview"]["status"] == "completed"
     assert completed["interview"]["completedAt"]
