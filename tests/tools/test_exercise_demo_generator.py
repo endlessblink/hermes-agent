@@ -63,7 +63,11 @@ def _isolated(monkeypatch, tmp_path):
     for member in gen.CAST:
         Image.new("RGB", (64, 96), (200, 200, 200)).save(cast_dir / member["file"])
 
-    monkeypatch.setattr(gen, "_gif_dir", lambda: gif_dir)
+    # Patch at the source: demo_path / is_illustrated / mark_illustrated all
+    # resolve the directory through exercise_library_tool at call time.
+    from tools import exercise_library_tool as lib
+
+    monkeypatch.setattr(lib, "_gif_dir", lambda: gif_dir)
     monkeypatch.setattr(gen, "_cast_dir", lambda: cast_dir)
     monkeypatch.setattr(gen, "_codex_available", lambda: True)
     monkeypatch.setattr(gen, "_by_id", lambda i: {"Pullups": PULLUPS,
@@ -99,8 +103,10 @@ def test_generates_a_gif_and_reports_the_path():
 
 
 def test_tells_the_model_how_to_deliver_it():
+    """A ready-to-copy tag, because the bot once messaged bare paths as text."""
     result = _payload(gen._handle_generate({"exerciseId": "Pullups", "poses": POSES}))
-    assert "MEDIA:" in result["note"]
+    assert result["mediaTag"] == f"MEDIA:{result['mediaPath']}"
+    assert "mediaTag" in result["note"]
 
 
 def test_keeps_the_strip_for_free_rebuilds(tmp_path):

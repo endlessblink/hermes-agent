@@ -80,39 +80,44 @@ def test_photo_fallback_tells_the_model_it_is_a_photograph():
     assert "exercise_generate_demo" in note
 
 
-def test_photo_fallback_does_not_occupy_the_illustration_path(_isolated):
-    """The bug: a fallback cached here blocked that exercise forever."""
-    result = _demo()
-    path = result["demos"][0]["mediaPath"]
-    assert not path.endswith("/Pullups.gif") or "/photo/" in path
-    assert not (_isolated / "Pullups.gif").exists(), (
-        "a stock-photo fallback must not squat on the illustration filename"
-    )
+def test_the_demo_path_never_changes(_isolated):
+    """The chat is one unbroken thread, so every path the bot ever emitted stays
+    in its history and gets reused. Moving a file to reclassify it broke delivery
+    for every stale path — the gateway rejected the now-missing file silently."""
+    photo_path = _demo()["demos"][0]["mediaPath"]
+
+    ex.mark_illustrated(PULLUPS)
+    (_isolated / "Pullups.gif").write_bytes(b"GIF89a" + b"\0" * 5000)
+    drawn_path = _demo()["demos"][0]["mediaPath"]
+
+    assert photo_path == drawn_path, "upgrading to a drawing must not move the file"
 
 
 def test_a_real_illustration_is_reported_as_illustrated(_isolated):
     (_isolated / "Pullups.gif").write_bytes(b"GIF89a" + b"\0" * 5000)
+    ex.mark_illustrated(PULLUPS)
     result = _demo()
     demo = result["demos"][0]
     assert demo["illustrated"] is True
     assert demo["mediaPath"].endswith("Pullups.gif")
-    assert "/photo/" not in demo["mediaPath"]
     assert result["illustratedCount"] == 1
 
 
-def test_an_illustration_wins_over_an_existing_photo_fallback(_isolated):
-    """Drawing one later must actually take effect."""
-    first = _demo()["demos"][0]["mediaPath"]
-    assert "/photo/" in first
-
+def test_an_unmarked_file_is_treated_as_a_photo(_isolated):
+    """Provenance comes from the marker, not from the file being present."""
     (_isolated / "Pullups.gif").write_bytes(b"GIF89a" + b"\0" * 5000)
-    second = _demo()["demos"][0]
-    assert second["illustrated"] is True
-    assert "/photo/" not in second["mediaPath"]
+    assert _demo()["demos"][0]["illustrated"] is False
+
+
+def test_a_failed_render_never_marks_the_exercise_illustrated():
+    assert ex.is_illustrated(PULLUPS) is False
+    _demo()  # produces only a photo fallback
+    assert ex.is_illustrated(PULLUPS) is False
 
 
 def test_note_is_clean_when_everything_is_illustrated(_isolated):
     (_isolated / "Pullups.gif").write_bytes(b"GIF89a" + b"\0" * 5000)
+    ex.mark_illustrated(PULLUPS)
     note = _demo()["note"]
     assert "photograph" not in note.lower()
 

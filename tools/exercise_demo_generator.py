@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -28,7 +27,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from tools.exercise_library_tool import _by_id, _gif_dir
+from tools.exercise_library_tool import (
+    _by_id,
+    demo_path,
+    is_illustrated,
+    mark_illustrated,
+)
 from tools.exercise_strip import build_demo_gif
 from tools.registry import registry, tool_error, tool_result
 
@@ -187,13 +191,16 @@ def _handle_generate(args: dict, **_kwargs) -> str:
         if exercise is None:
             return tool_error(f"no exercise with id {exercise_id!r} in the library")
 
-        out_path = _gif_dir() / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', str(exercise['id']))}.gif"
-        if out_path.is_file() and out_path.stat().st_size > 0 and not args.get("force"):
+        out_path = demo_path(exercise)
+        # Only a real drawing counts as "already done" — a stock-photo fallback
+        # sitting at this path is exactly what the user wants replaced.
+        if is_illustrated(exercise) and out_path.is_file() and not args.get("force"):
             return tool_result({
                 "exerciseId": exercise["id"],
                 "mediaPath": str(out_path),
+                "mediaTag": f"MEDIA:{out_path}",
                 "generated": False,
-                "note": "Already drawn. Deliver it with MEDIA:<mediaPath> on its own line.",
+                "note": "Already drawn. Copy mediaTag onto its own line to send it.",
             })
 
         poses = [str(p).strip() for p in (args.get("poses") or []) if str(p).strip()]
@@ -240,15 +247,21 @@ def _handle_generate(args: dict, **_kwargs) -> str:
             except OSError:
                 pass
 
+        # Record that this path now holds a drawing rather than a stock photo.
+        # Written only after the GIF exists, so a failed render never leaves the
+        # exercise wrongly marked as illustrated.
+        mark_illustrated(exercise)
+
         payload = {
             "exerciseId": exercise["id"],
             "name": exercise.get("name"),
             "mediaPath": result["path"],
+            "mediaTag": f"MEDIA:{result['path']}",
             "generated": True,
             "driftPx": result["driftPx"],
             "note": (
-                "Deliver it by writing MEDIA:<mediaPath> on its own line in your reply. "
-                "It is cached now, so showing this exercise again is instant."
+                "Copy mediaTag onto its own line in your reply, exactly as given, to "
+                "send it. It is cached now, so showing this exercise again is instant."
             ),
         }
         if result["drifts"]:

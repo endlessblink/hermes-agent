@@ -434,23 +434,32 @@ def _safe_id(exercise: dict[str, Any]) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(exercise.get("id")))
 
 
-def illustration_path(exercise: dict[str, Any]) -> Path:
-    """Where a properly drawn illustration lives, if one has been made."""
+def demo_path(exercise: dict[str, Any]) -> Path:
+    """The one and only path a demo for this exercise ever lives at.
+
+    Deliberately stable whichever kind of demo it holds. Chats here are a single
+    unbroken thread, so any path the bot has ever emitted stays in its history
+    forever and it will reuse one. Moving a file to mark it as a different kind
+    silently broke delivery for every stale path — the gateway rejected the now
+    missing file and the user got text with no picture.
+
+    Provenance is therefore recorded beside the file, not in its location.
+    """
     return _gif_dir() / f"{_safe_id(exercise)}.gif"
 
 
-def _photo_fallback_dir() -> Path:
-    """Separate directory for photo crossfades.
+def _illustrated_marker(exercise: dict[str, Any]) -> Path:
+    return _gif_dir() / f"{_safe_id(exercise)}.illustrated"
 
-    Deliberately NOT the same filename as an illustration. When both shared a
-    path, the first photo fallback cached itself as the answer forever and the
-    exercise could never be upgraded to a real drawing — and because the
-    fallback always succeeds, the model was never told anything was missing, so
-    it never asked for one.
-    """
-    path = _gif_dir() / "photo"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+
+def is_illustrated(exercise: dict[str, Any]) -> bool:
+    """True when the demo at ``demo_path`` is a real drawing, not a stock photo."""
+    return _illustrated_marker(exercise).is_file()
+
+
+def mark_illustrated(exercise: dict[str, Any]) -> None:
+    """Record that the demo at ``demo_path`` is a drawing. Called after generating."""
+    _illustrated_marker(exercise).write_text("generated\n", encoding="utf-8")
 
 
 def _build_gif(exercise: dict[str, Any]) -> Path:
@@ -458,19 +467,15 @@ def _build_gif(exercise: dict[str, Any]) -> Path:
 
     This is the *fallback*: the dataset gives two stills per exercise, and
     blending between them costs nothing. It reads as a rough repetition but it is
-    a photograph of a stranger, not the illustrated library — see
-    ``illustration_path`` for the real thing.
+    a photograph of a stranger, not the illustrated library. A generated drawing
+    overwrites it in place and drops the marker beside it, so the path an old
+    message points at keeps working and quietly improves.
     """
     from PIL import Image
 
     exercise_id = str(exercise.get("id"))
-    safe_id = _safe_id(exercise)
 
-    drawn = illustration_path(exercise)
-    if drawn.is_file() and drawn.stat().st_size > 0:
-        return drawn
-
-    out_path = _photo_fallback_dir() / f"{safe_id}.gif"
+    out_path = demo_path(exercise)
     if out_path.is_file() and out_path.stat().st_size > 0:
         return out_path
 
@@ -567,7 +572,7 @@ def _handle_demo(args: dict, **_kwargs) -> str:
             # The model cannot tell an illustration from a stock photo by looking
             # at a path, and the photo fallback never fails — so without this it
             # never learns a proper drawing is missing, and never asks for one.
-            entry["illustrated"] = str(path) == str(illustration_path(exercise))
+            entry["illustrated"] = is_illustrated(exercise)
             demos.append(entry)
 
         if not demos:
