@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -152,17 +153,20 @@ def _run_codex(prompt: str, reference: Path, workdir: Path) -> tuple[Path | None
         f"resulting PNG as exactly 'strip.png' in your current working directory. "
         f"Do not write any other files, do not explain, do not ask questions."
     )
+    # The prompt goes on stdin, never as a positional argument. `-i/--image`
+    # takes a *list* of files, so a trailing positional is parsed as another
+    # image path: codex then reported "No prompt provided" and exited 1 with no
+    # image. Codex reads instructions from stdin when no positional is given.
     argv = [
         "codex", "exec",
         "--cd", str(workdir),
         "--skip-git-repo-check",
         "--sandbox", "workspace-write",
         "-i", str(reference),
-        instruction,
     ]
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True,
+            argv, input=instruction, capture_output=True, text=True,
             timeout=CODEX_TIMEOUT_SECONDS, cwd=str(workdir),
         )
     except subprocess.TimeoutExpired:
@@ -178,7 +182,16 @@ def _run_codex(prompt: str, reference: Path, workdir: Path) -> tuple[Path | None
     if found:
         return found, ""
 
-    tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+    combined = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+    # A dead ChatGPT login is the one failure an operator must act on, and the
+    # raw codex dump buries it. Surface it as something actionable instead.
+    if re.search(r"refresh token|could not be refreshed|log out and sign in|401 Unauthorized",
+                 combined, re.I):
+        return None, (
+            "the drawing service is signed out — an operator needs to run "
+            "`codex login` on the server to sign in again"
+        )
+    tail = combined.strip()[-400:]
     return None, f"codex produced no image (exit {proc.returncode}): {tail}"
 
 

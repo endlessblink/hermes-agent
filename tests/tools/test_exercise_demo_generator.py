@@ -14,6 +14,10 @@ from PIL import Image
 
 from tools import exercise_demo_generator as gen
 
+# Captured before the autouse fixture stubs it, so the invocation tests below
+# exercise the real subprocess call rather than the stub.
+_REAL_RUN_CODEX = gen._run_codex
+
 
 PULLUPS = {
     "id": "Pullups",
@@ -166,6 +170,57 @@ def test_surfaces_a_codex_failure_without_crashing(monkeypatch):
     parsed = json.loads(gen._handle_generate({"exerciseId": "Pullups", "poses": POSES}))
     assert "error" in parsed
     assert "timed out" in parsed["error"]
+
+
+# --------------------------------------------------------------------------
+# how codex is invoked — both faults here were seen in production
+# --------------------------------------------------------------------------
+
+def test_the_prompt_is_never_passed_as_a_positional_argument(monkeypatch, tmp_path):
+    """`-i/--image` takes a LIST of files, so a trailing positional prompt is
+    parsed as another image path. Codex then reported "No prompt provided",
+    exited 1, and drew nothing. The prompt must go on stdin."""
+    seen = {}
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["input"] = kwargs.get("input")
+        (tmp_path / "strip.png").write_bytes(b"x" * 20_000)
+        return _Proc()
+
+    monkeypatch.setattr(gen.subprocess, "run", fake_run)
+    _REAL_RUN_CODEX("DRAW THIS", tmp_path / "ref.png", tmp_path)
+
+    assert "DRAW THIS" in (seen["input"] or ""), "the prompt must be fed on stdin"
+    assert seen["argv"][-2] == "-i", "the image flag must be last, with nothing after its value"
+    assert not any("DRAW THIS" in a for a in seen["argv"]), (
+        "the prompt must not appear in argv, or -i swallows it as an image"
+    )
+
+
+@pytest.mark.parametrize("stderr", [
+    "ERROR: Your access token could not be refreshed. Please log out and sign in again.",
+    "failed to connect to websocket: HTTP error: 401 Unauthorized",
+    "your refresh token was already used",
+])
+def test_an_expired_login_is_reported_as_something_an_operator_can_fix(
+    monkeypatch, tmp_path, stderr,
+):
+    """The raw codex dump buries the one failure that needs human action."""
+    class _Proc:
+        returncode = 1
+        stdout = ""
+
+    _Proc.stderr = stderr
+    monkeypatch.setattr(gen.subprocess, "run", lambda argv, **kw: _Proc())
+
+    path, err = _REAL_RUN_CODEX("prompt", tmp_path / "ref.png", tmp_path)
+    assert path is None
+    assert "signed out" in err
+    assert "codex login" in err
 
 
 # --------------------------------------------------------------------------
