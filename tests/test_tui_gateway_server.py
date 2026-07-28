@@ -2791,7 +2791,17 @@ def test_notification_poller_live_loop_requeues_foreign_completion_for_owner(
         "exit_code": 0,
         "output": "owner",
     }
-    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    class _OwnerQueue(_queue_mod.Queue):
+        def __init__(self):
+            super().__init__()
+            self.owner_thread_id = threading.get_ident()
+
+        def get(self, block=True, timeout=None):
+            if threading.get_ident() != self.owner_thread_id:
+                raise _queue_mod.Empty
+            return super().get(block=block, timeout=timeout)
+
+    isolated_queue: _queue_mod.Queue = _OwnerQueue()
     isolated_queue.put(event)
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
     monkeypatch.setattr(server, "_get_db", lambda: None)
@@ -3198,8 +3208,17 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
     nested_started = threading.Event()
     release_nested = threading.Event()
     turns = []
+    allowed_queue_thread_ids = {threading.get_ident()}
 
     def _recording_thread(*args, **kwargs):
+        target = kwargs.get("target")
+
+        def _registered_target():
+            allowed_queue_thread_ids.add(threading.get_ident())
+            if target is not None:
+                target()
+
+        kwargs["target"] = _registered_target
         thread = real_thread_class(*args, **kwargs)
         threads.append(thread)
         return thread
@@ -3232,7 +3251,13 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
         }
         for index in range(1, 4)
     ]
-    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    class _OwnedQueue(_queue_mod.Queue):
+        def get(self, block=True, timeout=None):
+            if threading.get_ident() not in allowed_queue_thread_ids:
+                raise _queue_mod.Empty
+            return super().get(block=block, timeout=timeout)
+
+    isolated_queue: _queue_mod.Queue = _OwnedQueue()
     for event in events:
         isolated_queue.put(event)
     original_put = isolated_queue.put
