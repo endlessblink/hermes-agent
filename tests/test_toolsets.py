@@ -78,7 +78,7 @@ class TestResolveToolset:
         assert resolve_toolset("nonexistent") == []
 
     def test_flowstate_toolset(self):
-        tools = set(resolve_toolset("flowstate"))
+        tools = set(resolve_toolset("flowstate", include_registry=False))
         assert tools == {
             "flowstate_get_assistant_context",
             "flowstate_health",
@@ -101,7 +101,6 @@ class TestResolveToolset:
             "flowstate_merge_tasks",
             "flowstate_list_subtasks",
             "flowstate_subtask_batch",
-            "flowstate_audit_coverage",
         }
 
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):

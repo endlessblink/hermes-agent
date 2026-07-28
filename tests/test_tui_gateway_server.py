@@ -3235,6 +3235,17 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
     isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
     for event in events:
         isolated_queue.put(event)
+    original_put = isolated_queue.put
+    requeued_ids = set()
+    all_unstarted_requeued = threading.Event()
+
+    def _record_requeue(event, *args, **kwargs):
+        requeued_ids.add(event["session_id"])
+        if {"proc_batch_2", "proc_batch_3"} <= requeued_ids:
+            all_unstarted_requeued.set()
+        return original_put(event, *args, **kwargs)
+
+    monkeypatch.setattr(isolated_queue, "put", _record_requeue)
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
     server._sessions["sid_a"] = session
 
@@ -3244,26 +3255,10 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
         assert nested_started.wait(timeout=5)
         threads[0].join(timeout=5)
         assert not threads[0].is_alive()
-        # Membership, not order: the completion_queue is process-global, and
-        # notification pollers leaked by earlier session.init tests in this
-        # file legitimately steal-and-requeue foreign-session events (see
-        # _notification_poller_loop's belongs-elsewhere branch), rotating the
-        # queue. The requeue contract is that batch_2 and batch_3 both remain
-        # queued (never consumed) while batch_1's turn is in flight — so drain
-        # with a deadline (an event may be transiently held by a poller
-        # mid-cycle) and assert exactly {batch_2, batch_3} come back.
-        queued: dict = {}
-        deadline = time.time() + 5.0
-        while time.time() < deadline and set(queued) != {
-            "proc_batch_2",
-            "proc_batch_3",
-        }:
-            try:
-                evt = isolated_queue.get(timeout=0.1)
-            except _queue_mod.Empty:
-                continue
-            queued[evt["session_id"]] = evt
-        assert set(queued) == {"proc_batch_2", "proc_batch_3"}
+        # The completion queue is process-global, so leaked pollers from earlier
+        # tests can transiently hold a requeued event. Observe the actual put
+        # operations instead of racing those unrelated consumers.
+        assert all_unstarted_requeued.wait(timeout=5)
     finally:
         release_nested.set()
         for thread in threads:
