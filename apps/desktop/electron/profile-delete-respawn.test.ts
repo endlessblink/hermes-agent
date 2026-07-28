@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import test from 'node:test'
+import { test } from 'vitest'
 
 const ELECTRON_DIR = import.meta.dirname
 
@@ -23,13 +23,9 @@ test('prepareProfileDeleteRequest returns the torn-down profile name', () => {
   const fnStart = source.indexOf('async function prepareProfileDeleteRequest(')
   assert.notEqual(fnStart, -1, 'prepareProfileDeleteRequest function not found')
 
-  // The function must contain "return profile" (pool and primary paths).
+  // The function must return the profile selected by the routing decision.
   const fnBody = source.slice(fnStart, fnStart + 800)
-  const returnProfileCount = (fnBody.match(/return profile/g) || []).length
-  assert.ok(
-    returnProfileCount >= 2,
-    `expected at least 2 "return profile" statements (primary + pool paths), found ${returnProfileCount}`
-  )
+  assert.match(fnBody, /return decision\.profile/)
 
   // The early-exit guard must return null (not void/undefined).
   assert.match(fnBody, /return null/, 'early-exit guard should return null, not undefined')
@@ -49,7 +45,7 @@ test('hermes:api handler routes profile-delete requests to the primary backend',
   // torn-down profile, routing to the primary (null) instead.
   assert.match(
     source,
-    /const routeProfile = tornDownProfile \? null : profile/,
+    /const routeProfile = resolveRouteProfile\(tornDownProfile, profile\)/,
     'handler should route to primary backend when a profile was just torn down'
   )
 
@@ -62,12 +58,12 @@ test('hermes:api handler routes profile-delete requests to the primary backend',
 })
 
 test('hermes:api handler restarts a timed-out local pooled profile backend once', () => {
-  const source = readElectronFile('main.cjs')
+  const source = readElectronFile('main.ts')
 
-  assert.match(source, /function isHermesBackendTimeout\(error\)/, 'missing timeout classifier')
+  assert.match(source, /function isHermesBackendTimeout\(error: any\)/, 'missing timeout classifier')
   assert.match(
     source,
-    /function shouldRetryLocalPooledBackend\(profile, connection, error\)/,
+    /function shouldRetryLocalPooledBackend\(profile: any, connection: any, error: any\)/,
     'missing local pooled backend retry guard'
   )
   assert.match(

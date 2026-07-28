@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import pwd
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -50,8 +49,11 @@ def _native_gws_config_dir() -> Path:
     if configured:
         return Path(configured).expanduser()
     try:
-        system_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except (KeyError, OSError):
+        import pwd
+
+        get_uid = getattr(os, "getuid")
+        system_home = Path(pwd.getpwuid(get_uid()).pw_dir)
+    except (AttributeError, ImportError, KeyError, OSError):
         system_home = Path.home()
     return system_home / ".config" / "gws"
 

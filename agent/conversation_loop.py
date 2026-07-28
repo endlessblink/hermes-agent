@@ -6247,6 +6247,7 @@ def run_conversation(
                             ),
                             "_empty_recovery_synthetic": True,
                         })
+                        final_response = None
                         continue
 
                     # ── Thinking-only prefill continuation ──────────
@@ -6344,6 +6345,7 @@ def run_conversation(
                                 "now using %s on %s",
                                 agent.model, agent.provider,
                             )
+                            final_response = None
                             continue
 
                     # Exhausted retries and fallback chain (or no

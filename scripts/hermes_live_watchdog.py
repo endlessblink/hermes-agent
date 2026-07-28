@@ -634,11 +634,7 @@ def restart_flowstate_app() -> bool:
     while primary_pids and time.monotonic() < deadline:
         remaining: list[int] = []
         for process_id in primary_pids:
-            try:
-                os.kill(process_id, 0)
-            except ProcessLookupError:
-                continue
-            except OSError:
+            if not Path(f"/proc/{process_id}").exists():
                 continue
             remaining.append(process_id)
         primary_pids = remaining
@@ -647,7 +643,7 @@ def restart_flowstate_app() -> bool:
 
     for process_id in primary_pids:
         try:
-            os.kill(process_id, signal.SIGKILL)
+            os.kill(process_id, getattr(signal, "SIGKILL", signal.SIGTERM))
         except ProcessLookupError:
             continue
         except OSError:

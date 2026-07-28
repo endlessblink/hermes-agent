@@ -2144,16 +2144,14 @@ def test_subtask_batch_defaults_to_preview_and_forwards_canonical_operations(mon
         "baseRevision": 4,
         "operations": [
             {
-                "action": "create",
-                "subtask": {
-                    "id": _SUBTASK_UUID,
-                    "title": "First subtask",
-                    "description": "",
-                    "isCompleted": False,
-                    "completedPomodoros": 0,
-                    "doneEnough": "shipped",
-                    "estimateMinutes": None,
-                },
+                "kind": "create",
+                "clientId": _SUBTASK_UUID,
+                "title": "First subtask",
+                "description": "",
+                "isCompleted": False,
+                "completedPomodoros": 0,
+                "doneEnough": "shipped",
+                "estimateMinutes": None,
                 "order": 0,
             }
         ],

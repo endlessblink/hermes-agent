@@ -81,6 +81,7 @@ class TestResolveToolset:
         tools = set(resolve_toolset("flowstate", include_registry=False))
         assert tools == {
             "flowstate_get_assistant_context",
+            "flowstate_audit_coverage",
             "flowstate_health",
             "flowstate_list_tasks",
             "flowstate_search_tasks",
@@ -91,6 +92,8 @@ class TestResolveToolset:
             "flowstate_restore_task",
             "flowstate_set_task_status",
             "flowstate_get_current_timer",
+            "flowstate_start_timer",
+            "flowstate_stop_timer",
             "flowstate_get_timer_diagnostics",
             "flowstate_list_task_instances",
             "flowstate_create_work_block",

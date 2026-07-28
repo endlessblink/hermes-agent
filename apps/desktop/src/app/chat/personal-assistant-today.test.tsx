@@ -16,7 +16,7 @@ function Harness() {
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
-  vi.setSystemTime(new Date('2026-07-20T12:00:00+03:00'))
+  vi.setSystemTime(new Date(2026, 6, 20, 12, 0))
   fetchPersonalAssistantDayPlan.mockReset()
 })
 

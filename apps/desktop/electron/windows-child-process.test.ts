@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import test from 'node:test'
+import { test } from 'vitest'
 import { fileURLToPath } from 'node:url'
 
 const ELECTRON_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -28,7 +28,7 @@ function requireHiddenChildOptions(source, needle) {
 test('desktop background child processes opt into hidden Windows consoles', () => {
   const source = readElectronFile('main.ts')
 
-  assert.match(source, /function hiddenWindowsChildOptions\(options: any = \{\}\)/)
+  assert.match(source, /import \{ hiddenWindowsChildOptions \} from '.\/windows-child-options'/)
 
   requireHiddenChildOptions(source, "execFileSync(\n          'reg'")
   requireHiddenChildOptions(source, /execFileSync\(\s*pyExe/)
@@ -41,9 +41,8 @@ test('desktop background child processes opt into hidden Windows consoles', () =
   requireHiddenChildOptions(source, /spawn\(\s*py,\s*\['-m', 'hermes_cli\.main', 'uninstall', '--gui-summary'\]/)
 
   assert.match(source, /function unwrapWindowsVenvHermesCommand\(command, backendArgs\)/)
-  assert.match(source, /function getVenvSitePackagesEntries\(venvRoot\)/)
+  assert.match(source, /getVenvSitePackagesEntries,/)
   assert.match(source, /function inferVenvRootForPython\(root, python\)/)
-  assert.match(source, /path\.join\(venvRoot, 'Lib', 'site-packages'\)/)
   assert.match(source, /args: \['-m', 'hermes_cli\.main', \.\.\.backendArgs\]/)
 })
 
@@ -95,9 +94,7 @@ test('desktop backend teardown tree-kills Windows backend descendants', () => {
   const helperIndex = source.indexOf('function stopBackendChild(child)')
   assert.notEqual(helperIndex, -1, 'missing backend teardown helper')
   const helperSnippet = source.slice(helperIndex, helperIndex + 500)
-  assert.match(helperSnippet, /IS_WINDOWS && Number\.isInteger\(child\.pid\)/)
-  assert.match(helperSnippet, /forceKillProcessTree\(child\.pid\)/)
-  assert.match(helperSnippet, /child\.kill\('SIGTERM'\)/)
+  assert.match(helperSnippet, /stopBackendChildImpl\(child/)
 
   const resetIndex = source.indexOf('function resetHermesConnection(')
   assert.notEqual(resetIndex, -1, 'missing resetHermesConnection')
@@ -108,7 +105,7 @@ test('desktop backend teardown tree-kills Windows backend descendants', () => {
   const quitIndex = source.indexOf("app.on('before-quit'")
   assert.notEqual(quitIndex, -1, 'missing before-quit handler')
   const quitSnippet = source.slice(quitIndex, quitIndex + 900)
-  assert.match(quitSnippet, /stopBackendChild\(hermesProcess\)/)
+  assert.match(quitSnippet, /stopBackendChild\(backendConnectionState\.getProcess\(\)\)/)
   assert.doesNotMatch(quitSnippet, /hermesProcess\.kill\('SIGTERM'\)/)
 })
 
@@ -147,8 +144,7 @@ test('intentional or interactive desktop child processes stay documented', () =>
 
   assert.match(source, /windowsHide: false/)
   assert.match(source, /handOffWindowsBootstrapRecovery/)
-  assert.match(source, /'--repair', '--branch'/)
-  assert.match(source, /'--update', '--branch'/)
+  assert.match(source, /from '.\/windows-hermes-path'/)
   assert.match(source, /nodePty\.spawn\(command, args/)
   assert.match(source, /spawn\('cmd\.exe', \['\/c', 'start'/)
 })
@@ -156,6 +152,6 @@ test('intentional or interactive desktop child processes stay documented', () =>
 test('bootstrap PowerShell runner hides Windows console children', () => {
   const source = readElectronFile('bootstrap-runner.ts')
 
-  assert.match(source, /function hiddenWindowsChildOptions\(options = \{\}\)/)
+  assert.match(source, /import \{ hiddenWindowsChildOptions \} from '.\/windows-child-options'/)
   requireHiddenChildOptions(source, /spawn\(\s*ps,\s*fullArgs/)
 })
