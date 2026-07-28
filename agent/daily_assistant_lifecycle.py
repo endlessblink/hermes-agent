@@ -158,7 +158,13 @@ def _remove_stale_reservation(path: Path, now: datetime) -> bool:
         created_at = datetime.fromisoformat(raw["created_at"])
         stale = created_at.tzinfo is not None and now - created_at >= RESERVATION_TTL
     except (KeyError, TypeError, ValueError):
-        stale = True
+        try:
+            modified_at = datetime.fromtimestamp(path.stat().st_mtime, tz=now.tzinfo)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        stale = now - modified_at >= RESERVATION_TTL
     if not stale:
         return False
     try:

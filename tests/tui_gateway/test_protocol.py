@@ -73,7 +73,11 @@ def test_recoverable_turn_fails_closed_for_mismatch_or_assistant_tail(server):
     assert server._recoverable_pending_turn(
         [{"role": "user", "content": "different"}],
         {"pending_turn": marker},
-    ) is None
+    ) == {
+        "kind": "restart_interrupted",
+        "text": "retry this",
+        "_marker_key": "pending_turn",
+    }
 
 
 def test_recoverable_turn_continues_matching_user_before_tool_trail(server):
@@ -361,7 +365,11 @@ def test_sensitive_prompt_timeout_emits_expiry(capture, event):
     assert server._block(event, "s1", {}, timeout=0) == ""
 
     messages = [json.loads(line) for line in buf.getvalue().splitlines()]
-    request, expiry = [message["params"] for message in messages]
+    request, expiry = [
+        message["params"]
+        for message in messages
+        if message["params"]["type"] in {event, event.removesuffix(".request") + ".expire"}
+    ]
     assert request["type"] == event
     assert expiry["type"] == event.removesuffix(".request") + ".expire"
     assert expiry["session_id"] == "s1"

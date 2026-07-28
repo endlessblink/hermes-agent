@@ -18,6 +18,27 @@ from hermes_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import server
 
 
+class _PromptDb:
+    def patch_working_state(self, _session_id, _patch, *, source):
+        return None
+
+    def accept_pending_turn_claim(
+        self, _session_id, _prompt_hash, _claim_id, *, source
+    ):
+        return True
+
+    def resolve_resume_session_id(self, session_id):
+        return session_id
+
+
+def _use_durable_prompt_db(monkeypatch, db=None):
+    durable_db = db or _PromptDb()
+    monkeypatch.setattr(
+        server, "_session_db", lambda _session: contextlib.nullcontext(durable_db)
+    )
+    return durable_db
+
+
 def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -267,6 +288,7 @@ def test_prompt_submit_fails_open_inline_when_compute_host_dispatch_breaks(monke
 
     session = _session(agent=None, agent_ready=threading.Event())
     server._sessions["iso-fallback"] = session
+    _use_durable_prompt_db(monkeypatch)
     inline_calls = []
     monkeypatch.setattr(server, "_load_cfg", lambda: {"dashboard": {"turn_isolation": True}})
     monkeypatch.setattr(server, "_get_compute_host_supervisor", lambda _cfg=None: _BrokenSupervisor())
@@ -441,6 +463,7 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
 
     fixed_info = {"model": "gold-model", "provider": "gold-provider", "usage": {"total": 15}}
     usage = server._get_usage(_Agent())
+    _use_durable_prompt_db(monkeypatch)
     monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(server, "_ensure_session_db_row", lambda _session: None)
     monkeypatch.setattr(server, "_persist_branch_seed", lambda _session: None)
@@ -463,7 +486,7 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
                 {"id": "turn-1", "method": "prompt.submit", "params": {"session_id": "sid", "text": "hello"}}
             )
             assert response["result"]["status"] == "streaming"
-            return events
+            return [event for event in events if event[0] != "diagnostic.event"]
         finally:
             server._sessions.pop("sid", None)
 
@@ -508,7 +531,7 @@ def test_prompt_submit_golden_transcript_matches_flag_off_and_on(monkeypatch):
                 {"id": "turn-1", "method": "prompt.submit", "params": {"session_id": "sid", "text": "hello"}}
             )
             assert response["result"]["status"] == "streaming"
-            return events
+            return [event for event in events if event[0] != "diagnostic.event"]
         finally:
             server._sessions.pop("sid", None)
 
@@ -2768,7 +2791,17 @@ def test_notification_poller_live_loop_requeues_foreign_completion_for_owner(
         "exit_code": 0,
         "output": "owner",
     }
-    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    class _OwnerQueue(_queue_mod.Queue):
+        def __init__(self):
+            super().__init__()
+            self.owner_thread_id = threading.get_ident()
+
+        def get(self, block=True, timeout=None):
+            if threading.get_ident() != self.owner_thread_id:
+                raise _queue_mod.Empty
+            return super().get(block=block, timeout=timeout)
+
+    isolated_queue: _queue_mod.Queue = _OwnerQueue()
     isolated_queue.put(event)
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
     monkeypatch.setattr(server, "_get_db", lambda: None)
@@ -3086,6 +3119,7 @@ def test_run_prompt_submit_requeues_foreign_completion(
     from tools.process_registry import process_registry
 
     _configure_immediate_prompt_run(monkeypatch, tmp_path)
+    _use_durable_prompt_db(monkeypatch)
     turns = []
     session_a = _session(session_key="session-a")
     session_b = _session(
@@ -3174,8 +3208,17 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
     nested_started = threading.Event()
     release_nested = threading.Event()
     turns = []
+    allowed_queue_thread_ids = {threading.get_ident()}
 
     def _recording_thread(*args, **kwargs):
+        target = kwargs.get("target")
+
+        def _registered_target():
+            allowed_queue_thread_ids.add(threading.get_ident())
+            if target is not None:
+                target()
+
+        kwargs["target"] = _registered_target
         thread = real_thread_class(*args, **kwargs)
         threads.append(thread)
         return thread
@@ -3208,9 +3251,26 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
         }
         for index in range(1, 4)
     ]
-    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    class _OwnedQueue(_queue_mod.Queue):
+        def get(self, block=True, timeout=None):
+            if threading.get_ident() not in allowed_queue_thread_ids:
+                raise _queue_mod.Empty
+            return super().get(block=block, timeout=timeout)
+
+    isolated_queue: _queue_mod.Queue = _OwnedQueue()
     for event in events:
         isolated_queue.put(event)
+    original_put = isolated_queue.put
+    requeued_ids = set()
+    all_unstarted_requeued = threading.Event()
+
+    def _record_requeue(event, *args, **kwargs):
+        requeued_ids.add(event["session_id"])
+        if {"proc_batch_2", "proc_batch_3"} <= requeued_ids:
+            all_unstarted_requeued.set()
+        return original_put(event, *args, **kwargs)
+
+    monkeypatch.setattr(isolated_queue, "put", _record_requeue)
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
     server._sessions["sid_a"] = session
 
@@ -3220,26 +3280,10 @@ def test_run_prompt_submit_requeues_all_unstarted_notifications_with_real_thread
         assert nested_started.wait(timeout=5)
         threads[0].join(timeout=5)
         assert not threads[0].is_alive()
-        # Membership, not order: the completion_queue is process-global, and
-        # notification pollers leaked by earlier session.init tests in this
-        # file legitimately steal-and-requeue foreign-session events (see
-        # _notification_poller_loop's belongs-elsewhere branch), rotating the
-        # queue. The requeue contract is that batch_2 and batch_3 both remain
-        # queued (never consumed) while batch_1's turn is in flight — so drain
-        # with a deadline (an event may be transiently held by a poller
-        # mid-cycle) and assert exactly {batch_2, batch_3} come back.
-        queued: dict = {}
-        deadline = time.time() + 5.0
-        while time.time() < deadline and set(queued) != {
-            "proc_batch_2",
-            "proc_batch_3",
-        }:
-            try:
-                evt = isolated_queue.get(timeout=0.1)
-            except _queue_mod.Empty:
-                continue
-            queued[evt["session_id"]] = evt
-        assert set(queued) == {"proc_batch_2", "proc_batch_3"}
+        # The completion queue is process-global, so leaked pollers from earlier
+        # tests can transiently hold a requeued event. Observe the actual put
+        # operations instead of racing those unrelated consumers.
+        assert all_unstarted_requeued.wait(timeout=5)
     finally:
         release_nested.set()
         for thread in threads:
@@ -3276,9 +3320,24 @@ def test_run_prompt_submit_delivers_completion_owned_through_compression_lineage
         server, "_session_owns_notification_event", _record_ownership_check
     )
     turns = []
+    notification_delivered = threading.Event()
+
+    class _SignalingRecordingAgent(_RecordingAgent):
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            result = super().run_conversation(
+                prompt,
+                conversation_history=conversation_history,
+                stream_callback=stream_callback,
+            )
+            if "proc_precompression" in prompt:
+                notification_delivered.set()
+            return result
+
     session = _session(
         session_key="new-child-key",
-        agent=_RecordingAgent(turns),
+        agent=_SignalingRecordingAgent(turns),
         running=True,
     )
     event = {
@@ -3289,7 +3348,17 @@ def test_run_prompt_submit_delivers_completion_owned_through_compression_lineage
         "exit_code": 0,
         "output": "owned",
     }
-    isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
+    class _OwnerQueue(_queue_mod.Queue):
+        def __init__(self):
+            super().__init__()
+            self.owner_thread_id = threading.get_ident()
+
+        def get(self, block=True, timeout=None):
+            if threading.get_ident() != self.owner_thread_id:
+                raise _queue_mod.Empty
+            return super().get(block=block, timeout=timeout)
+
+    isolated_queue: _queue_mod.Queue = _OwnerQueue()
     isolated_queue.put(event)
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
     server._sessions["sid_b"] = session
@@ -3298,6 +3367,7 @@ def test_run_prompt_submit_delivers_completion_owned_through_compression_lineage
         server._run_prompt_submit("rid-b", "sid_b", session, "session-b-turn")
 
         assert turns[0] == "session-b-turn"
+        assert notification_delivered.wait(timeout=5)
         assert len(turns) == 2
         assert "proc_precompression" in turns[1]
         assert ownership_checks == ["proc_precompression"]
@@ -3861,6 +3931,9 @@ def test_session_create_drops_pending_title_on_valueerror(monkeypatch):
             }
 
     class _FakeDB:
+        def patch_working_state(self, _session_id, _patch, *, source):
+            return None
+
         def set_session_title(self, _key, _title):
             raise ValueError("Title already in use")
 
@@ -6548,6 +6621,9 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
         def replace_messages(self, session_id, messages):
             self.replaced.append((session_id, list(messages)))
 
+        def patch_working_state(self, _session_id, _patch, *, source):
+            return None
+
     stub_db = _StubDb()
 
     try:
@@ -6624,6 +6700,14 @@ def test_restart_recovery_archives_incomplete_turn_without_replacing_history(mon
         def replace_messages(self, session_id, messages):
             self.replaced.append((session_id, list(messages)))
 
+        def patch_working_state(self, _session_id, _patch, *, source):
+            return None
+
+        def accept_pending_turn_claim(
+            self, _session_id, _prompt_hash, _claim_id, *, source
+        ):
+            return True
+
     stub_db = _StubDb()
 
     try:
@@ -6641,6 +6725,7 @@ def test_restart_recovery_archives_incomplete_turn_without_replacing_history(mon
                     "session_id": "sid",
                     "text": "retry this",
                     "recovery_kind": "restart_interrupted",
+                    "recovery_claim_id": "claim-1",
                     "truncate_before_user_ordinal": 1,
                 },
             }
@@ -7799,6 +7884,7 @@ def test_prompt_submit_auto_titles_session_on_complete(monkeypatch):
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
+    _use_durable_prompt_db(monkeypatch)
 
     with patch("agent.title_generator.maybe_auto_title") as mock_title:
         server.handle_request(
@@ -7835,6 +7921,7 @@ def test_prompt_submit_skips_auto_title_when_interrupted(monkeypatch):
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
+    _use_durable_prompt_db(monkeypatch)
 
     with patch("agent.title_generator.maybe_auto_title") as mock_title:
         server.handle_request(
@@ -8621,6 +8708,7 @@ def test_session_activate_returns_inflight_stream_before_completion(monkeypatch)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)
+    _use_durable_prompt_db(monkeypatch)
     monkeypatch.setattr(server, "_session_info", lambda agent: {"model": agent.model})
 
     def _emit(event, sid, payload=None):

@@ -78,7 +78,7 @@ class TestResolveToolset:
         assert resolve_toolset("nonexistent") == []
 
     def test_flowstate_toolset(self):
-        tools = set(resolve_toolset("flowstate"))
+        tools = set(resolve_toolset("flowstate", include_registry=False))
         assert tools == {
             "flowstate_get_assistant_context",
             "flowstate_health",
@@ -88,16 +88,18 @@ class TestResolveToolset:
             "flowstate_create_task",
             "flowstate_update_task",
             "flowstate_delete_task",
+            "flowstate_restore_task",
+            "flowstate_set_task_status",
             "flowstate_get_current_timer",
             "flowstate_get_timer_diagnostics",
             "flowstate_list_task_instances",
-            "flowstate_schedule_task_instance",
+            "flowstate_create_work_block",
+            "flowstate_move_work_block",
+            "flowstate_resize_work_block",
+            "flowstate_remove_work_block",
             "flowstate_done_for_now",
             "flowstate_merge_tasks",
             "flowstate_list_subtasks",
-            "flowstate_create_subtask",
-            "flowstate_update_subtask",
-            "flowstate_delete_subtask",
             "flowstate_subtask_batch",
         }
 
