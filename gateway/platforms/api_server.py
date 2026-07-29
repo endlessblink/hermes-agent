@@ -87,6 +87,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
     is_network_accessible,
+    resolve_channel_prompt,
     validate_media_delivery_path,
 )
 from agent.redact import redact_sensitive_text
@@ -119,12 +120,64 @@ def _hermes_version() -> str:
 
 # Default settings
 DEFAULT_HOST = "127.0.0.1"
+
+# Header naming the channel whose persona a request should answer as.
+# Value is ``<chat_id>:<thread_id>`` — the same key ``channel_prompts`` uses —
+# optionally prefixed with the owning platform (``telegram:-100123:303``).
+PERSONA_HEADER = "X-Hermes-Persona"
+DEFAULT_PERSONA_PLATFORM = "telegram"
 DEFAULT_PORT = 8642
 MAX_STORED_RESPONSES = 100
 MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations with tool calls
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
+
+
+class PersonaNotFound(ValueError):
+    """Raised when a request names a persona the gateway does not have."""
+
+
+def resolve_persona(reference: str) -> tuple[str, str]:
+    """Resolve ``X-Hermes-Persona`` to ``(platform_name, channel_prompt)``.
+
+    Personas live where the humans talk to them: as ``channel_prompts`` entries
+    on a messaging platform, keyed ``<chat_id>:<thread_id>``. This lets an API
+    caller answer *as* one of them, using that platform's toolset, so a fix can
+    be checked by holding the same conversation the user would rather than by
+    inspecting the parts in isolation.
+
+    Raises :class:`PersonaNotFound` rather than quietly falling back to the
+    plain assistant. Silently answering as nobody in particular is how a demo
+    request came back as a YouTube link — the endpoint looked like it worked.
+    """
+    from gateway.run import _load_gateway_config
+
+    reference = (reference or "").strip()
+    if not reference:
+        raise PersonaNotFound("persona reference is empty")
+
+    platform_name, _, channel = reference.partition(":")
+    if not channel or platform_name.lstrip("-").isdigit():
+        # No platform prefix — the whole value is the channel key.
+        platform_name, channel = DEFAULT_PERSONA_PLATFORM, reference
+    platform_name = platform_name.strip().lower()
+    channel = channel.strip()
+
+    config = _load_gateway_config() or {}
+    platform_cfg = config.get(platform_name)
+    if not isinstance(platform_cfg, dict):
+        raise PersonaNotFound(f"no platform named {platform_name!r} in the gateway config")
+
+    chat_id = channel.split(":")[0] if ":" in channel else None
+    prompt = resolve_channel_prompt(platform_cfg, channel, chat_id)
+    if not prompt:
+        known = sorted((platform_cfg.get("channel_prompts") or {}).keys())
+        raise PersonaNotFound(
+            f"no persona for {channel!r} on {platform_name}"
+            + (f" — known personas: {', '.join(known)}" if known else "")
+        )
+    return platform_name, prompt
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -1707,6 +1760,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         route: Optional[Dict[str, Any]] = None,
+        persona_platform: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1800,7 +1854,11 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        # A persona is only itself if it has its own tools. Answering as the
+        # fitness bot with the API server's toolset produced a YouTube link
+        # instead of a demo, because the exercise tools were not loaded.
+        toolset_platform = persona_platform or "api_server"
+        enabled_toolsets = sorted(_get_platform_tools(user_config, toolset_platform))
 
         max_iterations = _current_max_iterations()
 
@@ -2566,6 +2624,25 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
 
+        # Answer as one of the gateway's channel personas when asked to. An
+        # unknown persona is a 400, never a silent fall-through to the plain
+        # assistant — the whole point is to reproduce a specific bot.
+        persona_platform: Optional[str] = None
+        persona_prompt: Optional[str] = None
+        persona_ref = request.headers.get(PERSONA_HEADER, "").strip()
+        if persona_ref:
+            try:
+                persona_platform, persona_prompt = resolve_persona(persona_ref)
+            except PersonaNotFound as exc:
+                return web.json_response(
+                    {"error": {
+                        "message": str(exc),
+                        "type": "invalid_request_error",
+                        "param": PERSONA_HEADER,
+                    }},
+                    status=400,
+                )
+
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
         conversation_messages: List[Dict[str, str]] = []
@@ -2587,6 +2664,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 except ValueError as exc:
                     return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
                 conversation_messages.append({"role": role, "content": content})
+
+        # The persona is the channel's own standing instruction, so it goes
+        # first; anything the caller sent layers on top of it.
+        if persona_prompt:
+            system_prompt = (
+                f"{persona_prompt}\n{system_prompt}" if system_prompt else persona_prompt
+            )
 
         # Extract the last user message as the primary input
         user_message: Any = ""
@@ -2761,6 +2845,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 route=route,
+                persona_platform=persona_platform,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -2781,6 +2866,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 route=route,
+                persona_platform=persona_platform,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -4528,6 +4614,7 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         route: Optional[Dict[str, Any]] = None,
+        persona_platform: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -4569,6 +4656,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         tool_complete_callback=tool_complete_callback,
                         gateway_session_key=gateway_session_key,
                         route=route,
+                        persona_platform=persona_platform,
                     )
                     if agent_ref is not None:
                         agent_ref[0] = agent
