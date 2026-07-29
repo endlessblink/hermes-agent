@@ -48,6 +48,46 @@ def test_five_panels_produce_a_loop_long_enough_to_read_as_motion(tmp_path):
     assert result["frames"] == 8
 
 
+def test_both_dimensions_are_even(tmp_path):
+    """Phones re-encode the clip to H.264, which needs even sides. An odd side
+    makes the encoder pad or rescale, and the result shimmers on mobile while
+    playing perfectly on a desktop GIF player."""
+    for w, h, panels in ((601, 331, 3), (900, 300, 5), (777, 999, 3)):
+        src = _strip_image(tmp_path / f"s{w}x{h}.png", panels=panels, w=w, h=h)
+        out = tmp_path / f"o{w}x{h}.gif"
+        strip.build_demo_gif(src, out, panels=panels, label="Test Move")
+        with Image.open(out) as im:
+            assert im.size[0] % 2 == 0 and im.size[1] % 2 == 0, im.size
+
+
+def test_every_frame_has_the_same_delay(tmp_path):
+    """Mixed delays give the clip no single frame rate, so re-encoding it to
+    constant-rate video lands frames unevenly and the movement stutters."""
+    src = _strip_image(tmp_path / "s.png", panels=5)
+    out = tmp_path / "out.gif"
+    strip.build_demo_gif(src, out, panels=5)
+
+    durations = _frames(out)
+    assert len(set(durations)) == 1, durations
+
+
+def test_one_palette_for_the_whole_animation(tmp_path):
+    """A colour table that changes between frames survives a GIF player but
+    shows as the picture flickering once a phone re-encodes it."""
+    src = _strip_image(tmp_path / "s.png", panels=5)
+    out = tmp_path / "out.gif"
+    strip.build_demo_gif(src, out, panels=5)
+
+    palettes = set()
+    with Image.open(out) as im:
+        for i in range(im.n_frames):
+            im.seek(i)
+            pal = im.getpalette()
+            if pal:
+                palettes.add(bytes(pal))
+    assert len(palettes) == 1, "frames must not carry differing colour tables"
+
+
 def test_no_frame_is_held_long_enough_to_look_like_a_still(tmp_path):
     """The old timing held the first pose 1100ms of a 3240ms loop — a third of
     the animation on one picture, which is what users saw as 'it doesn't play'."""
@@ -56,8 +96,7 @@ def test_no_frame_is_held_long_enough_to_look_like_a_still(tmp_path):
     strip.build_demo_gif(src, out, panels=5)
 
     durations = _frames(out)
-    assert max(durations) <= 400, durations
-    assert max(durations) / sum(durations) < 0.2, "no single frame may dominate the loop"
+    assert max(durations) <= 200, durations
 
 
 def test_a_tall_demo_is_scaled_down_rather_than_shipped_as_a_ribbon(tmp_path):
@@ -111,12 +150,14 @@ def test_auto_is_the_default(tmp_path):
     assert chosen == auto
 
 
-def test_an_unlabelled_demo_is_unchanged(tmp_path):
-    """Labelling is opt-in, so existing callers keep their exact output size."""
+def test_an_unlabelled_demo_keeps_the_frame_size(tmp_path):
+    """Labelling is opt-in — an unlabelled demo gains no caption band, and only
+    ever loses the odd row or column that would break the mobile re-encode."""
     src = _strip_image(tmp_path / "s.png", panels=3)
     out = tmp_path / "out.gif"
     strip.build_demo_gif(src, out, panels=3, label="")
 
     frames, _ = strip.build_frames(src, 3)
+    want = tuple(v - (v % 2) for v in frames[0].size)
     with Image.open(out) as im:
-        assert im.size == frames[0].size
+        assert im.size == want

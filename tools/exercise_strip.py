@@ -51,7 +51,13 @@ DEFAULT_WIDTH = 460
 # first pose occupied a third of the loop, and on a phone — where Telegram
 # transcodes the GIF and autoplays it — that reads as a still image that keeps
 # resetting. Short, even steps read as movement.
-DEFAULT_HOLD_END = 260
+#
+# Every frame gets DEFAULT_HOLD_MID. A GIF with mixed delays has no single frame
+# rate, so re-encoding it to constant-rate video — which is what a phone does —
+# lands frames unevenly and the movement stutters, while a desktop GIF player
+# honours each delay and looks fine. DEFAULT_HOLD_END is kept for callers that
+# still pass it and is no longer used.
+DEFAULT_HOLD_END = 150
 DEFAULT_HOLD_MID = 150
 
 # A 460×1301 demo is a sliver on a phone, and Telegram rejects extreme aspect
@@ -334,6 +340,21 @@ def _with_label(frame: Image.Image, label: str) -> Image.Image:
     return out
 
 
+def _evened(frame: Image.Image) -> Image.Image:
+    """Trim to even width and height.
+
+    Phones do not play the GIF — Telegram re-encodes it to H.264 video, which
+    stores colour at half resolution and therefore requires both dimensions to
+    be even. An odd side forces the encoder to pad or rescale, and the result
+    shimmers on the phone while the original plays perfectly on a desktop, which
+    is exactly the "fine on the computer, glitchy on mobile" report.
+    """
+    w, h = frame.size
+    if w % 2 == 0 and h % 2 == 0:
+        return frame
+    return frame.crop((0, 0, w - (w % 2), h - (h % 2)))
+
+
 def build_demo_gif(
     strip_path: str | Path, out_path: str | Path, panels: int = 3,
     anchor: str = "auto", width: int = DEFAULT_WIDTH,
@@ -346,15 +367,26 @@ def build_demo_gif(
     if label:
         keys = [_with_label(k, label) for k in keys]
 
+    keys = [_evened(k) for k in keys]
+
     # Out and back without repeating the end poses: 0,1,..,N-1,..,1
     order = list(range(len(keys))) + list(range(len(keys) - 2, 0, -1))
     frames = [keys[i] for i in order]
-    durations = [hold_end if i in (0, len(keys) - 1) else hold_mid for i in order]
+    # One delay for every frame. A pause at the ends was tried two ways and
+    # both lose: a longer delay on one frame leaves the clip with no single
+    # frame rate, and repeating the end frame does nothing because the GIF
+    # encoder merges identical neighbours back into one long frame. The
+    # out-and-back order already gives the rep its rhythm.
+    durations = [hold_mid] * len(frames)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pal = [f.convert("P", palette=Image.Palette.ADAPTIVE, colors=GIF_COLORS)
-           for f in frames]
+    # One palette for the whole animation. Per-frame adaptive palettes shift the
+    # colour table between frames, which survives a GIF player but shows as the
+    # picture flickering once a phone re-encodes the clip to video.
+    base = frames[0].quantize(colors=GIF_COLORS, method=Image.Quantize.MEDIANCUT)
+    pal = [base] + [f.quantize(palette=base, dither=Image.Dither.FLOYDSTEINBERG)
+                    for f in frames[1:]]
     pal[0].save(out_path, save_all=True, append_images=pal[1:], duration=durations,
                 loop=0, optimize=True, disposal=1)
 

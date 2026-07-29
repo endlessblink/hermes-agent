@@ -1529,6 +1529,47 @@ MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
 )
 
 
+def split_interleaved_media(content: str) -> List[Tuple[str, str]]:
+    """Split a response into ordered ``("text", …)`` / ``("media", path)`` parts.
+
+    A workout reads as one exercise, its demo, the next exercise, its demo. The
+    model writes it that way, but the normal dispatch sends the entire text as a
+    single message and then every picture in one batch afterwards, so the reader
+    gets a wall of instructions followed by a pile of unlabelled clips.
+
+    Returns an empty list when the response is not interleaved — a single
+    trailing attachment, or several pictures with nothing between them, is
+    better off in one batch, and leaving those alone keeps this from splitting
+    ordinary replies into extra messages.
+    """
+    parts: List[Tuple[str, str]] = []
+    cursor = 0
+    for match in MEDIA_TAG_CLEANUP_RE.finditer(content):
+        text = content[cursor:match.start()].strip()
+        if text:
+            parts.append(("text", text))
+        parts.append(("media", _normalize_media_tag_path(match.group("path"))))
+        cursor = match.end()
+    tail = content[cursor:].strip()
+    if tail:
+        parts.append(("text", tail))
+
+    media_count = sum(1 for kind, _ in parts if kind == "media")
+    if media_count < 2:
+        return []
+    # Interleaved means a block of text sits *between* two pictures. Requiring
+    # media on both sides is what keeps ordinary replies whole: a preamble above
+    # a gallery, or a sign-off below one, is not a per-item layout and splitting
+    # on it would turn one message into several for no benefit.
+    seen_media = False
+    for index, (kind, _value) in enumerate(parts):
+        if kind == "media":
+            seen_media = True
+        elif seen_media and any(k == "media" for k, _ in parts[index + 1:]):
+            return parts
+    return []
+
+
 def _normalize_media_tag_path(raw: str) -> str:
     path = str(raw or "").strip()
     if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
@@ -3261,6 +3302,70 @@ class BasePlatformAdapter(ABC):
                 await stop_typing(chat_id, metadata=metadata)
                 return
         await self.stop_typing(chat_id)
+
+    async def _deliver_interleaved(
+        self,
+        event,
+        parts: List[Tuple[str, str]],
+        metadata: Optional[Dict[str, Any]],
+        reply_to: Optional[str] = None,
+    ) -> bool:
+        """Send text and pictures in the order the response wrote them.
+
+        Returns True when it took ownership of the whole response, so the
+        caller's batch paths must not send any of it again. Returns False
+        without sending anything if a picture cannot be delivered, leaving the
+        normal path to handle the response as before — a half-delivered workout
+        is worse than one in the old layout.
+        """
+        media_parts = [p for kind, p in parts if kind == "media"]
+        resolved: Dict[str, str] = {}
+        for path in media_parts:
+            ok = validate_media_delivery_path(path)
+            if not ok:
+                logger.info(
+                    "[%s] Interleaved delivery declined: %s is not deliverable",
+                    self.name, safe_url_for_log(path),
+                )
+                return False
+            resolved[path] = ok if isinstance(ok, str) else path
+
+        chat_id = event.source.chat_id
+        delay = self._get_human_delay()
+        first = True
+        for kind, value in parts:
+            if kind == "text":
+                await self._send_with_retry(
+                    chat_id=chat_id,
+                    content=value,
+                    # Only the opening message answers the user's message; the
+                    # rest are a continuation and reply-anchoring every one of
+                    # them turns the topic into a wall of quoted replies.
+                    reply_to=reply_to if first else None,
+                    metadata=metadata,
+                )
+                first = False
+                continue
+
+            path = resolved.get(value, value)
+            ext = Path(path).suffix.lower()
+            try:
+                if ext == ".gif":
+                    await self.send_animation(
+                        chat_id=chat_id, animation_url=path, metadata=metadata,
+                    )
+                else:
+                    await self.send_image_file(
+                        chat_id=chat_id, image_path=path, metadata=metadata,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Interleaved media send failed for %s: %s",
+                    self.name, safe_url_for_log(path), exc,
+                )
+            if delay > 0:
+                await asyncio.sleep(delay)
+        return True
 
     async def send_multiple_images(
         self,
@@ -5111,6 +5216,27 @@ class BasePlatformAdapter(ABC):
                             os.remove(_tts_path)
                         except OSError:
                             pass
+
+                # A response that alternates text and pictures is delivered in
+                # that order — each exercise with its own demo under it — rather
+                # than as one block of text followed by a pile of clips.
+                _interleaved = (
+                    []
+                    if (_tts_caption_delivered or force_document_attachments)
+                    else split_interleaved_media(_response_pre_extract)
+                )
+                if _interleaved:
+                    _delivered_any = await self._deliver_interleaved(
+                        event, _interleaved, _final_thread_metadata,
+                        reply_to=_reply_anchor_for_event(event),
+                    )
+                    if _delivered_any:
+                        # Everything in the response has now been sent in order;
+                        # the batch paths below must not send any of it again.
+                        text_content = ""
+                        images = []
+                        media_files = []
+                        local_files = []
 
                 # Send the text portion
                 if text_content and not _tts_caption_delivered:
