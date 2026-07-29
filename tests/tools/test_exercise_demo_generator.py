@@ -354,7 +354,14 @@ def test_prompt_includes_the_given_poses(_isolated):
         assert pose in _isolated[0]["prompt"]
 
 
-def test_lying_camera_defaults_to_the_full_anchor(monkeypatch, _isolated):
+def test_the_anchor_is_measured_rather_than_guessed_from_the_camera(monkeypatch, _isolated):
+    """Picking the anchor by camera angle was wrong more often than right.
+
+    "feet" is the intuitive choice for a standing lift, and it was the losing
+    choice on four of the five shakiest demos in the library — held equipment and
+    a stance that widens through the movement drag the bottom-band correlation.
+    The assembler already measures the residual drift, so it decides.
+    """
     seen = {}
     real = gen.build_demo_gif
 
@@ -364,6 +371,21 @@ def test_lying_camera_defaults_to_the_full_anchor(monkeypatch, _isolated):
 
     monkeypatch.setattr(gen, "build_demo_gif", spy)
     gen._handle_generate({"exerciseId": "Pullups", "poses": POSES, "camera": "lying"})
+    assert seen.get("anchor") == "auto"
+
+
+def test_an_explicit_anchor_is_still_honoured(monkeypatch, _isolated):
+    seen = {}
+    real = gen.build_demo_gif
+
+    def spy(strip, out, **kw):
+        seen.update(kw)
+        return real(strip, out, **kw)
+
+    monkeypatch.setattr(gen, "build_demo_gif", spy)
+    gen._handle_generate({
+        "exerciseId": "Pullups", "poses": POSES, "camera": "lying", "anchor": "full",
+    })
     assert seen.get("anchor") == "full"
 
 

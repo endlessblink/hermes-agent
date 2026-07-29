@@ -91,6 +91,26 @@ def test_the_exercise_name_is_printed_inside_the_picture(tmp_path):
     assert min(band.convert("L").getextrema()) < 200, "the caption band looks empty"
 
 
+def test_auto_anchor_never_does_worse_than_either_fixed_choice(tmp_path):
+    """Measured across the drawn library, the hand-picked anchor lost four times
+    out of five: a pistol squat slid 88px on 'feet' and 10px on 'full'. The
+    residual drift is already computed, so it picks."""
+    src = _strip_image(tmp_path / "s.png", panels=5)
+
+    _, feet = strip.build_frames(src, 5, "feet")
+    _, full = strip.build_frames(src, 5, "full")
+    _, auto = strip.build_frames(src, 5, "auto")
+
+    assert auto <= min(feet, full) + 1e-6
+
+
+def test_auto_is_the_default(tmp_path):
+    src = _strip_image(tmp_path / "s.png", panels=3)
+    _, chosen = strip.build_frames(src, 3)
+    _, auto = strip.build_frames(src, 3, "auto")
+    assert chosen == auto
+
+
 def test_an_unlabelled_demo_is_unchanged(tmp_path):
     """Labelling is opt-in, so existing callers keep their exact output size."""
     src = _strip_image(tmp_path / "s.png", panels=3)

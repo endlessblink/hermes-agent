@@ -325,9 +325,13 @@ def _handle_generate(args: dict, **_kwargs) -> str:
             return tool_error(f"cast reference missing: {reference.name}")
 
         camera = str(args.get("camera") or "side").lower()
-        anchor = str(args.get("anchor") or ("full" if camera == "lying" else "feet")).lower()
-        if anchor not in ("feet", "full"):
-            anchor = "feet"
+        # Default to letting the assembler measure both anchors and keep the
+        # steadier one. Hand-picking by camera angle was wrong more often than it
+        # was right — "feet" is the intuitive choice for a standing lift, and it
+        # was the losing choice on four of the five shakiest demos in the library.
+        anchor = str(args.get("anchor") or "auto").lower()
+        if anchor not in ("feet", "full", "auto"):
+            anchor = "auto"
 
         prompt = _build_prompt(exercise, poses, camera, member["look"])
 

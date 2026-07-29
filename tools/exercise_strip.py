@@ -190,13 +190,35 @@ def _profile_centre(profile: Sequence[int]) -> float:
 
 
 def build_frames(
-    strip_path: str | Path, panels: int = 3, anchor: str = "feet",
+    strip_path: str | Path, panels: int = 3, anchor: str = "auto",
     width: int = DEFAULT_WIDTH,
 ) -> Tuple[List[Image.Image], float]:
     """Slice a strip into aligned, background-matched key frames.
 
     Returns the frames plus the residual horizontal drift in pixels.
+
+    ``anchor="auto"`` builds both ways and keeps whichever leaves less drift.
+    Choosing by hand went badly: "feet" is the obvious pick for a standing
+    exercise, but held equipment and a stance that widens or narrows through the
+    movement drag the bottom-band correlation. Measured across the drawn library,
+    "full" beat the hand-picked anchor on four of the five worst demos — a sumo
+    high pull went from 84px of slide to 31, a two-arm row from 36.5 to 8.5, a
+    pistol squat from 88 to 10. The measurement is already computed, so letting
+    it decide costs one extra pass over a handful of small images and no
+    generations.
     """
+    if anchor == "auto":
+        best_frames, best_drift = None, None
+        for candidate in ("feet", "full"):
+            try:
+                frames, drift = build_frames(strip_path, panels, candidate, width)
+            except ValueError:
+                continue
+            if best_drift is None or drift < best_drift:
+                best_frames, best_drift = frames, drift
+        if best_frames is None:
+            raise ValueError("a panel contains no figure — check the strip and panel count")
+        return best_frames, best_drift
     strip = Image.open(strip_path).convert("RGB")
     sw, sh = strip.size
     pw = sw // panels
@@ -314,7 +336,7 @@ def _with_label(frame: Image.Image, label: str) -> Image.Image:
 
 def build_demo_gif(
     strip_path: str | Path, out_path: str | Path, panels: int = 3,
-    anchor: str = "feet", width: int = DEFAULT_WIDTH,
+    anchor: str = "auto", width: int = DEFAULT_WIDTH,
     hold_end: int = DEFAULT_HOLD_END, hold_mid: int = DEFAULT_HOLD_MID,
     contact_sheet: str | Path | None = None,
     label: str = "",
