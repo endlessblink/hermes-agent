@@ -355,6 +355,43 @@ def _evened(frame: Image.Image) -> Image.Image:
     return frame.crop((0, 0, w - (w % 2), h - (h % 2)))
 
 
+def normalize_demo_gif(
+    gif_path: str | Path, out_path: str | Path | None = None,
+    frame_ms: int = DEFAULT_HOLD_MID, label: str = "",
+) -> dict:
+    """Re-encode an existing demo so a phone can transcode it cleanly.
+
+    The three properties that break the mobile re-encode — odd dimensions, mixed
+    frame delays, per-frame palettes — are all in the *encoding*, not in the
+    drawing. A demo whose source strip was not kept can therefore still be fixed
+    from its own frames, without spending a generation to draw it again.
+
+    This cannot add motion: a clip built from three poses still has three poses.
+    Redrawing is the only cure for that.
+    """
+    src = Image.open(gif_path)
+    frames = []
+    for i in range(getattr(src, "n_frames", 1)):
+        src.seek(i)
+        frames.append(_evened(src.convert("RGB")))
+    if label:
+        frames = [_evened(_with_label(f, label)) for f in frames]
+
+    target = Path(out_path or gif_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    base = frames[0].quantize(colors=GIF_COLORS, method=Image.Quantize.MEDIANCUT)
+    pal = [base] + [f.quantize(palette=base, dither=Image.Dither.FLOYDSTEINBERG)
+                    for f in frames[1:]]
+    pal[0].save(target, save_all=True, append_images=pal[1:],
+                duration=[frame_ms] * len(pal), loop=0, optimize=True, disposal=1)
+    return {
+        "path": str(target),
+        "frames": len(pal),
+        "size": frames[0].size,
+        "bytes": target.stat().st_size,
+    }
+
+
 def build_demo_gif(
     strip_path: str | Path, out_path: str | Path, panels: int = 3,
     anchor: str = "auto", width: int = DEFAULT_WIDTH,

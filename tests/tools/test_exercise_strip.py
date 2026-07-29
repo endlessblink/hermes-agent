@@ -150,6 +150,45 @@ def test_auto_is_the_default(tmp_path):
     assert chosen == auto
 
 
+def test_an_existing_demo_can_be_repaired_without_redrawing(tmp_path):
+    """The properties that break the phone's re-encode live in the encoding, not
+    the drawing, so a demo whose source strip was lost is still fixable from its
+    own frames — no generation spent."""
+    bad = tmp_path / "bad.gif"
+    frames = [Image.new("RGB", (101, 55), c) for c in
+              ((240, 10, 10), (10, 240, 10), (10, 10, 240))]
+    pal = [f.convert("P", palette=Image.Palette.ADAPTIVE, colors=64) for f in frames]
+    pal[0].save(bad, save_all=True, append_images=pal[1:],
+                duration=[1100, 520, 900], loop=0)
+
+    strip.normalize_demo_gif(bad, label="Old Move")
+
+    with Image.open(bad) as im:
+        assert im.size[0] % 2 == 0 and im.size[1] % 2 == 0
+        durations, palettes = [], set()
+        for i in range(im.n_frames):
+            im.seek(i)
+            durations.append(im.info.get("duration"))
+            p = im.getpalette()
+            if p:
+                palettes.add(bytes(p))
+    assert len(set(durations)) == 1, durations
+    assert len(palettes) == 1
+
+
+def test_repairing_a_demo_cannot_invent_motion(tmp_path):
+    """Honest limit: three pictures stay three pictures. Only a redraw adds
+    frames, and the caller needs to know that repair is not a substitute."""
+    bad = tmp_path / "bad.gif"
+    frames = [Image.new("RGB", (100, 60), c) for c in ((250, 0, 0), (0, 250, 0))]
+    pal = [f.convert("P", palette=Image.Palette.ADAPTIVE, colors=8) for f in frames]
+    pal[0].save(bad, save_all=True, append_images=pal[1:], duration=[600, 600], loop=0)
+
+    result = strip.normalize_demo_gif(bad)
+
+    assert result["frames"] == 2
+
+
 def test_an_unlabelled_demo_keeps_the_frame_size(tmp_path):
     """Labelling is opt-in — an unlabelled demo gains no caption band, and only
     ever loses the odd row or column that would break the mobile re-encode."""
