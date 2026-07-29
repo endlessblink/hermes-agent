@@ -19,6 +19,25 @@ from tools import exercise_demo_generator as gen
 _REAL_RUN_CODEX = gen._run_codex
 
 
+@pytest.fixture
+def signed_in_codex_home(monkeypatch, tmp_path):
+    """Point CODEX_HOME at a home that looks signed in.
+
+    The generator now refuses to shell out when the ChatGPT login is missing, so
+    tests that want to reach the subprocess have to say they are signed in
+    rather than inheriting whatever the machine running the suite happens to
+    have in ~/.codex.
+    """
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "auth.json").write_text(
+        json.dumps({"tokens": {"refresh_token": "rt", "account_id": "acct"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return home
+
+
 PULLUPS = {
     "id": "Pullups",
     "name": "Pullups",
@@ -49,9 +68,12 @@ def _strip_image(path, panels=3):
     w, h = 900, 300
     im = Image.new("RGB", (w, h), (255, 255, 255))
     pw = w // panels
+    # Spread the crouch across however many panels there are, so the last one
+    # still has a body rather than collapsing to zero height.
+    step = 120 // max(1, panels - 1)
     for i in range(panels):
-        top = 60 + i * 40  # crouches lower each panel
-        for x in range(i * pw + 60, i * pw + 60 + 80):
+        top = 60 + i * step  # crouches lower each panel
+        for x in range(i * pw + pw // 4, i * pw + pw // 4 + max(20, pw // 3)):
             for y in range(top, 250):
                 im.putpixel((x, y), (20, 20, 20))
     im.save(path)
@@ -81,7 +103,13 @@ def _isolated(monkeypatch, tmp_path):
 
     def fake_codex(prompt, reference, workdir):
         calls.append({"prompt": prompt, "reference": str(reference)})
-        return _strip_image(workdir / "strip.png"), ""
+        # Draw as many panels as the prompt asked for. A fixed three-panel stub
+        # would make every wider strip fail slicing for a reason the real
+        # pipeline never hits.
+        panels = sum(
+            1 for i in range(1, gen.MAX_POSES + 1) if f"Panel {i}" in prompt
+        ) or 3
+        return _strip_image(workdir / "strip.png", panels=panels), ""
 
     monkeypatch.setattr(gen, "_run_codex", fake_codex)
     yield calls
@@ -151,11 +179,22 @@ def test_rejects_an_unknown_exercise():
     assert "error" in parsed
 
 
-@pytest.mark.parametrize("poses", [[], ["only one"], ["a", "b"], ["a", "b", "c", "d"]])
-def test_requires_exactly_three_poses(poses):
+@pytest.mark.parametrize("poses", [[], ["only one"], ["a", "b"], ["p"] * (gen.MAX_POSES + 1)])
+def test_rejects_pose_counts_outside_the_supported_range(poses):
     parsed = json.loads(gen._handle_generate({"exerciseId": "Pullups", "poses": poses}))
     assert "error" in parsed
     assert "3" in parsed["error"]
+
+
+@pytest.mark.parametrize("count", range(3, gen.MAX_POSES + 1))
+def test_more_poses_than_three_are_accepted(count):
+    """Three poses is three pictures, which plays as a slideshow. Extra panels
+    are the only way to buy smoother motion — interpolation cannot bridge poses
+    this far apart, it just duplicates frames."""
+    parsed = json.loads(
+        gen._handle_generate({"exerciseId": "Pullups", "poses": ["pose"] * count})
+    )
+    assert "error" not in parsed, parsed
 
 
 def test_reports_clearly_when_codex_is_missing(monkeypatch):
@@ -176,7 +215,9 @@ def test_surfaces_a_codex_failure_without_crashing(monkeypatch):
 # how codex is invoked — both faults here were seen in production
 # --------------------------------------------------------------------------
 
-def test_the_prompt_is_never_passed_as_a_positional_argument(monkeypatch, tmp_path):
+def test_the_prompt_is_never_passed_as_a_positional_argument(
+    monkeypatch, tmp_path, signed_in_codex_home,
+):
     """`-i/--image` takes a LIST of files, so a trailing positional prompt is
     parsed as another image path. Codex then reported "No prompt provided",
     exited 1, and drew nothing. The prompt must go on stdin."""
@@ -201,13 +242,59 @@ def test_the_prompt_is_never_passed_as_a_positional_argument(monkeypatch, tmp_pa
     )
 
 
+def test_a_missing_login_is_reported_without_shelling_out(monkeypatch, tmp_path):
+    """No login means no point starting codex — and the raw dump it produces
+    when it fails names a temp-dir permission warning, not the real problem."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-home"))
+
+    def _must_not_run(*a, **kw):
+        raise AssertionError("codex must not be started without a login")
+
+    monkeypatch.setattr(gen.subprocess, "run", _must_not_run)
+
+    path, err = _REAL_RUN_CODEX("prompt", tmp_path / "ref.png", tmp_path)
+    assert path is None
+    assert "signed out" in err and "codex login" in err
+
+
+def test_an_expired_access_token_alone_does_not_block_a_draw(
+    monkeypatch, tmp_path, signed_in_codex_home,
+):
+    """Codex refreshes on use, so a stale access token is the normal state
+    between refreshes — blocking on it would refuse perfectly good draws."""
+    import base64
+
+    expired = base64.urlsafe_b64encode(b'{"exp": 1}').decode().rstrip("=")
+    (signed_in_codex_home / "auth.json").write_text(
+        json.dumps({"tokens": {"refresh_token": "rt", "id_token": f"h.{expired}.s"}}),
+        encoding="utf-8",
+    )
+
+    class _Proc:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(argv, **kwargs):
+        (tmp_path / "strip.png").write_bytes(b"x" * 20_000)
+        return _Proc()
+
+    monkeypatch.setattr(gen.subprocess, "run", fake_run)
+
+    path, err = _REAL_RUN_CODEX("prompt", tmp_path / "ref.png", tmp_path)
+    assert err == ""
+    assert path is not None
+
+
 @pytest.mark.parametrize("stderr", [
     "ERROR: Your access token could not be refreshed. Please log out and sign in again.",
     "failed to connect to websocket: HTTP error: 401 Unauthorized",
     "your refresh token was already used",
+    # The account is shared across several Codex homes; whichever one refreshes
+    # last revokes the rest, and that arrives worded like this.
+    "unexpected status 401 Unauthorized: {\"error\": \"token_revoked\"}",
+    "oauth token exchange failed: invalid_grant",
 ])
 def test_an_expired_login_is_reported_as_something_an_operator_can_fix(
-    monkeypatch, tmp_path, stderr,
+    monkeypatch, tmp_path, stderr, signed_in_codex_home,
 ):
     """The raw codex dump buries the one failure that needs human action."""
     class _Proc:

@@ -1009,6 +1009,12 @@ MEDIA_DELIVERY_SAFE_ROOTS = (
 # still rejected.
 _MEDIA_DELIVERY_TRUST_RECENT_DEFAULT_SECONDS = 600
 
+# Batches longer than this are paced, because chat platforms rate-limit a rapid
+# run of media to one chat. Telegram's per-chat allowance is roughly twenty
+# messages a minute, so a three-second gap keeps a long batch under it.
+_BATCH_PACING_THRESHOLD = 5
+_BATCH_PACING_DELAY = 3.0
+
 # Hard denylist applied even when a path would otherwise pass recency trust.
 # These prefixes hold credentials, system state, or process introspection that
 # should never be uploaded as a gateway attachment, regardless of how new the
@@ -3277,9 +3283,17 @@ class BasePlatformAdapter(ABC):
         """
         from urllib.parse import unquote as _unquote
 
+        # A long batch fired back to back trips per-chat rate limits — Telegram
+        # answered a 53-image exercise-library dump with 42 RetryAfter errors in
+        # five minutes. Waiting out each rejection afterwards costs far more time
+        # than spacing the sends does, so pace anything past a handful.
+        effective_delay = human_delay
+        if len(images) > _BATCH_PACING_THRESHOLD:
+            effective_delay = max(human_delay, _BATCH_PACING_DELAY)
+
         for image_url, alt_text in images:
-            if human_delay > 0:
-                await asyncio.sleep(human_delay)
+            if effective_delay > 0:
+                await asyncio.sleep(effective_delay)
             try:
                 logger.info(
                     "[%s] Sending image: %s (alt=%s)",

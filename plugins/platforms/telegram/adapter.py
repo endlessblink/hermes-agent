@@ -1019,6 +1019,10 @@ _UPDATER_START_TIMEOUT = 30.0
 # A generation is not healthy until the dedicated getUpdates request returns
 # successfully. This exceeds a normal long-poll cycle for healthy idle bots.
 _POLLING_PROGRESS_TIMEOUT = 60.0
+# Telegram answers a media burst with RetryAfter and a server-chosen interval.
+# Waiting it out keeps the animation an animation; the cap stops one pathological
+# interval from parking a send for minutes.
+_FLOOD_RETRY_MAX_WAIT_SECONDS = 60.0
 _POLLING_GENERATION_CONTEXT: ContextVar[Optional[int]] = ContextVar(
     "telegram_polling_generation", default=None
 )
@@ -7493,6 +7497,17 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
+        # A local filesystem path is not a URL and must not be run through the
+        # SSRF check: it has no scheme, so is_safe_url() rejects it and the base
+        # class then posts the path itself as a text message. Hand it to the
+        # local-file sender instead, which uploads the bytes.
+        # Guarded on the file actually existing so a Telegram file_id — also
+        # schemeless — keeps its current path through send_photo.
+        if not image_url.startswith(("http://", "https://")) and os.path.exists(image_url):
+            return await self.send_image_file(
+                chat_id, image_url, caption, reply_to, metadata=metadata,
+            )
+
         from tools.url_safety import is_safe_url
         if not is_safe_url(image_url):
             logger.warning("[%s] Blocked unsafe image URL (SSRF protection)", self.name)
@@ -7595,17 +7610,17 @@ class TelegramAdapter(BasePlatformAdapter):
                 error=self._missing_media_path_error("Animation", animation_url),
             )
 
-        try:
-            _anim_thread = self._metadata_thread_id(metadata)
-            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
-            animation_thread_kwargs = self._thread_kwargs_for_send(
-                chat_id,
-                _anim_thread,
-                metadata,
-                reply_to_message_id=reply_to_id,
-                reply_to_mode=self._reply_to_mode
-            )
+        _anim_thread = self._metadata_thread_id(metadata)
+        reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
+        animation_thread_kwargs = self._thread_kwargs_for_send(
+            chat_id,
+            _anim_thread,
+            metadata,
+            reply_to_message_id=reply_to_id,
+            reply_to_mode=self._reply_to_mode
+        )
 
+        async def _attempt():
             with contextlib.ExitStack() as stack:
                 if is_local:
                     animation_file = stack.enter_context(open(animation_url, "rb"))
@@ -7615,7 +7630,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     animation_arg = animation_url
                     reset_media = None
 
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
+                return await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_animation,
                     {
                         "chat_id": normalize_telegram_chat_id(chat_id),
@@ -7630,15 +7645,47 @@ class TelegramAdapter(BasePlatformAdapter):
                     "animation",
                     reset_media=reset_media,
                 )
+
+        try:
+            msg = await _attempt()
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
+            # Flood control is not a reason to degrade an animation into a still
+            # image — it is a reason to wait. Sending a library of demos in one
+            # burst reliably trips this, and the photo fallback below turns every
+            # tripped send into a static frame (or, for a local path, into a bare
+            # filesystem path as text). Wait the server-requested interval and
+            # retry the animation once before giving up on it.
+            # ``_send_with_dm_topic_reply_anchor_retry`` only retries the topic /
+            # reply-anchor case, so there is no double-retry here.
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after is not None:
+                wait = min(float(retry_after) + 0.5, _FLOOD_RETRY_MAX_WAIT_SECONDS)
+                logger.warning(
+                    "[%s] Telegram flood control on animation, waiting %.1fs before retry: %s",
+                    self.name, wait, _redact_telegram_error_text(e),
+                )
+                await asyncio.sleep(wait)
+                try:
+                    msg = await _attempt()
+                    return SendResult(success=True, message_id=str(msg.message_id))
+                except Exception as retry_err:
+                    e = retry_err
+
             logger.error(
                 "[%s] Failed to send Telegram animation, falling back to photo: %s",
                 self.name,
                 _redact_telegram_error_text(e),
                 exc_info=True,
             )
-            # Fallback: try as a regular photo
+            # Fallback: try as a regular photo. A local path must go to
+            # send_image_file — send_image runs the URL SSRF check, which rejects
+            # a bare path for having no scheme and then hands it to the base
+            # class, which posts the path itself as a text message.
+            if is_local:
+                return await self.send_image_file(
+                    chat_id, animation_url, caption, reply_to, metadata=metadata,
+                )
             return await self.send_image(chat_id, animation_url, caption, reply_to, metadata=metadata)
 
     @staticmethod

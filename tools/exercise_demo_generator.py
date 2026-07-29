@@ -43,6 +43,11 @@ logger = logging.getLogger(__name__)
 # 60-90s so a slow render is not mistaken for a failure.
 CODEX_TIMEOUT_SECONDS = 420
 
+# Panels per strip. More panels read as motion; fewer keep each panel wide enough
+# for the figure to stay legible once the strip is sliced.
+PREFERRED_POSES = 5
+MAX_POSES = 6
+
 CAST = (
     {
         "file": "01_male_navy.png",
@@ -99,32 +104,45 @@ def _build_prompt(exercise: dict, poses: list[str], camera: str, look: str) -> s
         if secondary else ""
     )
 
+    n = len(poses)
+    words = {3: "THREE", 4: "FOUR", 5: "FIVE", 6: "SIX", 7: "SEVEN", 8: "EIGHT"}
+    count_word = words.get(n, str(n))
+    # Positional hints only make sense at the ends; the middle panels are simply
+    # numbered, which also keeps the prompt correct for any panel count.
+    panel_lines = "\n".join(
+        f"Panel {i + 1}"
+        f"{' (leftmost)' if i == 0 else ' (rightmost)' if i == n - 1 else ''}: {pose}"
+        for i, pose in enumerate(poses)
+    )
+
     return f"""Using the attached reference image as the exact locked style and character: \
 the SAME {look}. Same face, same build, same precise ink linework and neutral flesh \
 tone, same plain flat white background, same anatomical fitness training-manual \
 illustration style.
 
-Draw a THREE-PANEL SEQUENCE STRIP on one continuous sheet, three equal side-by-side \
-panels separated by thin vertical rules, showing one repetition of \
+Draw a {count_word}-PANEL SEQUENCE STRIP on one continuous sheet, {count_word.lower()} \
+equal side-by-side panels separated by thin vertical rules, showing one repetition of \
 {exercise.get('name')} from a fixed {'side-on' if camera != 'front' else 'front-on'} camera:
-Panel 1 (left): {poses[0]}
-Panel 2 (centre): {poses[1]}
-Panel 3 (right): {poses[2]}
+{panel_lines}
 
-The change between consecutive panels must be SMALL and EVEN — three equal steps of \
-one continuous movement, not three unrelated poses.
+The change between consecutive panels must be SMALL and EVEN — {count_word.lower()} equal \
+steps of one continuous movement, not {count_word.lower()} unrelated poses. Consecutive \
+panels should look almost the same, so that flipping through them reads as smooth motion.
 
 Shade the working muscles anatomically: {primary.upper()} in deep anatomical red as \
 the prime mover.{secondary_clause} All other muscles stay neutral flesh tone. The same \
-muscles must be shaded identically in all three panels.
+muscles must be shaded identically in every panel.
 {equipment_clause}
-CRITICAL: identical figure scale and identical distance from the camera in all three \
-panels, {ground} at the same height in every panel, the whole figure fully visible and \
-identically framed in each panel, as if a fixed camera photographed three moments. \
+CRITICAL: identical figure scale and identical distance from the camera in all \
+{count_word.lower()} panels, {ground} at the same height in every panel, and the athlete \
+standing in the SAME horizontal position within every panel — do not let the figure move \
+sideways from panel to panel. The whole figure must be fully visible and identically \
+framed in each panel, as if a fixed camera photographed {count_word.lower()} moments. \
 Same lighting and same white background in every panel.
 
 No text, no numbers, no labels, no arrows, no logos, no watermark. \
-Use a wide 21:9 landscape aspect ratio."""
+Use the widest landscape aspect ratio available, roughly {n * 2}:3, so that all \
+{count_word.lower()} panels sit side by side on one row and none is cropped."""
 
 
 def _newest_png(*dirs: Path, newer_than: float) -> Path | None:
@@ -142,10 +160,72 @@ def _newest_png(*dirs: Path, newer_than: float) -> Path | None:
     return best
 
 
+SIGNED_OUT_MESSAGE = (
+    "the drawing service is signed out — an operator needs to run "
+    "`codex login` on the server to sign in again"
+)
+
+
+def _login_problem(codex_home: Path) -> str:
+    """Return an operator-facing message if the ChatGPT login is unusable.
+
+    Worth checking up front because the alternative is what production actually
+    produced: a raw ``codex produced no image (exit 1)`` dump quoting an unrelated
+    temp-dir permission warning, which tells nobody what to do. An empty string
+    means the login looks usable.
+
+    Note that a past-expiry access token is *not* a failure — Codex refreshes it
+    on use. It only becomes one when the refresh itself is rejected, which shows
+    up in the process output and is matched after the run.
+    """
+    auth = codex_home / "auth.json"
+    if not auth.is_file():
+        return SIGNED_OUT_MESSAGE
+    try:
+        import json
+
+        tokens = (json.loads(auth.read_text(encoding="utf-8")) or {}).get("tokens") or {}
+    except Exception as exc:
+        logger.warning("codex auth.json at %s is unreadable: %s", auth, exc)
+        return SIGNED_OUT_MESSAGE
+    if not tokens.get("refresh_token"):
+        return SIGNED_OUT_MESSAGE
+
+    expiry = _token_expiry(tokens.get("id_token"))
+    if expiry is not None and expiry < time.time():
+        # Only a warning: this is the normal state between refreshes, but when a
+        # generation does fail it is the first thing an operator wants to see.
+        logger.warning(
+            "codex access token at %s expired %.0f minutes ago; a refresh is due",
+            auth, (time.time() - expiry) / 60.0,
+        )
+    return ""
+
+
+def _token_expiry(id_token: Any) -> float | None:
+    """Seconds-since-epoch expiry encoded in a JWT, or None if unreadable."""
+    if not isinstance(id_token, str) or id_token.count(".") != 2:
+        return None
+    try:
+        import base64
+        import json
+
+        payload = id_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+        return float(exp) if exp is not None else None
+    except Exception:
+        return None
+
+
 def _run_codex(prompt: str, reference: Path, workdir: Path) -> tuple[Path | None, str]:
     """Ask Codex to generate the strip. Returns (png path, error message)."""
     started = time.time() - 1
     codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+
+    problem = _login_problem(codex_home)
+    if problem:
+        return None, problem
 
     instruction = (
         f"{prompt}\n\n"
@@ -185,12 +265,16 @@ def _run_codex(prompt: str, reference: Path, workdir: Path) -> tuple[Path | None
     combined = f"{proc.stderr or ''}\n{proc.stdout or ''}"
     # A dead ChatGPT login is the one failure an operator must act on, and the
     # raw codex dump buries it. Surface it as something actionable instead.
-    if re.search(r"refresh token|could not be refreshed|log out and sign in|401 Unauthorized",
-                 combined, re.I):
-        return None, (
-            "the drawing service is signed out — an operator needs to run "
-            "`codex login` on the server to sign in again"
-        )
+    if re.search(
+        r"refresh token|could not be refreshed|log out and sign in|401 Unauthorized"
+        # The account is shared across several Codex homes, and each one that
+        # refreshes rotates the chain and revokes the others. That arrives as
+        # token_revoked / invalid_grant rather than a plain 401.
+        r"|token_revoked|invalid_grant|not logged in|please (?:re-?)?login",
+        combined,
+        re.I,
+    ):
+        return None, SIGNED_OUT_MESSAGE
     tail = combined.strip()[-400:]
     return None, f"codex produced no image (exit {proc.returncode}): {tail}"
 
@@ -217,10 +301,17 @@ def _handle_generate(args: dict, **_kwargs) -> str:
             })
 
         poses = [str(p).strip() for p in (args.get("poses") or []) if str(p).strip()]
-        if len(poses) != 3:
+        # Three poses produce three distinct pictures, which plays as a slideshow
+        # rather than a movement — the first version of this library held each of
+        # them for over a second and users read it as a still image that kept
+        # resetting. Five is the working compromise: enough steps to read as
+        # motion, few enough that each panel is still drawn wide enough to see.
+        if not 3 <= len(poses) <= MAX_POSES:
             return tool_error(
-                "poses must be exactly 3 short descriptions — the start, the midpoint "
-                "and the end of one repetition, taken from the exercise's instructions"
+                f"poses must be between 3 and {MAX_POSES} short descriptions — evenly "
+                f"spaced moments through one repetition, taken from the exercise's "
+                f"instructions. {PREFERRED_POSES} reads as smooth motion; 3 looks like "
+                f"a slideshow."
             )
 
         if not _codex_available():
@@ -248,7 +339,10 @@ def _handle_generate(args: dict, **_kwargs) -> str:
                 return tool_error(f"could not draw this exercise: {err}")
 
             try:
-                result = build_demo_gif(strip, out_path, anchor=anchor)
+                result = build_demo_gif(
+                    strip, out_path, panels=len(poses), anchor=anchor,
+                    label=str(exercise.get("name") or exercise_id),
+                )
             except Exception as exc:
                 logger.warning("strip assembly failed for %s: %s", exercise_id, exc)
                 return tool_error(f"the drawing came out unusable: {exc}")
@@ -295,7 +389,7 @@ GENERATE_SCHEMA = {
         "and cache it. Takes 1-2 minutes and costs a generation, so tell the user it "
         "is being drawn before calling, and only call it when they actually want to "
         "see the movement. Call exercise_demo first — if that returns a demo, this is "
-        "not needed. You must supply the three pose stages yourself, taken from the "
+        "not needed. You must supply the pose stages yourself, taken from the "
         "exercise's own instructions."
     ),
     "parameters": {
@@ -309,12 +403,14 @@ GENERATE_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 3,
-                "maxItems": 3,
+                "maxItems": MAX_POSES,
                 "description": (
-                    "Exactly three short English descriptions of body position: the "
-                    "start, a true midpoint, and the end of one repetition. Derive "
-                    "them from the exercise's instructions, and make the step between "
-                    "each one roughly equal."
+                    f"Short English descriptions of body position at evenly spaced "
+                    f"moments through one repetition, from the start to the end. "
+                    f"Supply {PREFERRED_POSES} unless the movement is very simple — "
+                    f"consecutive poses should differ only slightly, because that is "
+                    f"what makes the finished demo look like motion instead of a "
+                    f"slideshow. Derive them from the exercise's instructions."
                 ),
             },
             "camera": {

@@ -588,7 +588,13 @@ def _handle_demo(args: dict, **_kwargs) -> str:
             "a path from earlier in the conversation; those go stale and silently "
             "fail to deliver, so always use the mediaTag from this result. Summarize "
             "the instructions in the user's language alongside it — do not paste the "
-            "raw English steps verbatim."
+            "raw English steps verbatim. "
+            "Label each demo with the exact 'name' given here and nothing else. A "
+            "drawn demo has that name printed inside the picture, so calling it "
+            "something the user asked for but the library does not have — a Halo "
+            "shown as a Figure 8 — contradicts the image itself. If the library has "
+            "no demo for what was asked, say so plainly instead of sending a "
+            "different exercise."
         )
         undrawn = [d["exerciseId"] for d in demos if not d["illustrated"]]
         if undrawn:
@@ -596,7 +602,10 @@ def _handle_demo(args: dict, **_kwargs) -> str:
                 " NOTE — these are stock photographs, not the illustrated library: "
                 f"{', '.join(undrawn)}. Send them, and offer once to draw a proper "
                 "illustration with exercise_generate_demo if the user wants a clearer "
-                "one. Do not draw without being asked; it takes a minute or two each."
+                "one. Do not draw without being asked; it takes a minute or two each. "
+                "Never describe these as animated, illustrated or drawn, and never "
+                "count them when telling the user how many drawn demos exist — only "
+                "the entries with illustrated=true are drawings."
             )
 
         return tool_result(

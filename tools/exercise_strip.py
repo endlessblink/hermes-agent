@@ -46,8 +46,25 @@ CROP_PAD = 26         # px of breathing room around the union figure box
 ANCHOR_BAND = 0.13    # fraction of panel height used as the "feet" anchor band
 GIF_COLORS = 110
 DEFAULT_WIDTH = 460
-DEFAULT_HOLD_END = 1100
-DEFAULT_HOLD_MID = 520
+
+# Three poses held for over a second each is a slideshow, not an animation: the
+# first pose occupied a third of the loop, and on a phone — where Telegram
+# transcodes the GIF and autoplays it — that reads as a still image that keeps
+# resetting. Short, even steps read as movement.
+DEFAULT_HOLD_END = 260
+DEFAULT_HOLD_MID = 150
+
+# A 460×1301 demo is a sliver on a phone, and Telegram rejects extreme aspect
+# ratios as photos outright (Photo_invalid_dimensions). Taller than this and the
+# frame is scaled down to fit rather than shipped as a ribbon.
+MAX_ASPECT = 1.7
+
+LABEL_FONTS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+)
+LABEL_BAND = 34       # px of caption strip added under the figure
+LABEL_PAD = 8
 
 # Drift above this means the figure visibly slides during playback.
 DRIFT_WARN_PX = 20.0
@@ -234,7 +251,65 @@ def build_frames(
     keys = [a.crop((x0, y0, x1, y1)) for a in aligned]
     cw, ch = keys[0].size
     height = round(ch * width / cw)
-    return [k.resize((width, height), Image.Resampling.LANCZOS) for k in keys], drift
+    scaled = [k.resize((width, height), Image.Resampling.LANCZOS) for k in keys]
+    if height > width * MAX_ASPECT:
+        # Widen the canvas rather than shrinking the athlete. Scaling both sides
+        # would keep the same ribbon shape; padding brings the ratio down while
+        # the figure stays exactly as large as it was drawn.
+        padded_w = round(height / MAX_ASPECT)
+        offset = (padded_w - width) // 2
+        widened = []
+        for frame in scaled:
+            canvas = Image.new("RGB", (padded_w, height), (255, 255, 255))
+            canvas.paste(frame, (offset, 0))
+            widened.append(canvas)
+        scaled = widened
+    return scaled, drift
+
+
+def _label_font(size: int):
+    """Bold face for the caption band, or Pillow's built-in if none is installed."""
+    for path in LABEL_FONTS:
+        if Path(path).is_file():
+            try:
+                from PIL import ImageFont
+
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    from PIL import ImageFont
+
+    return ImageFont.load_default()
+
+
+def _with_label(frame: Image.Image, label: str) -> Image.Image:
+    """Return the frame with the exercise name printed under it.
+
+    The name belongs *in* the picture. Captions are written by the model in the
+    surrounding chat text, so nothing stopped it from presenting a Figure-8 clip
+    as a Halo — which is exactly what happened in production. A label burned into
+    the frame travels with the file and cannot be contradicted.
+    """
+    if not label:
+        return frame
+    w, h = frame.size
+    out = Image.new("RGB", (w, h + LABEL_BAND), (255, 255, 255))
+    out.paste(frame, (0, 0))
+    draw = ImageDraw.Draw(out)
+    text = label.replace("_", " ").strip()
+
+    size = LABEL_BAND - 2 * LABEL_PAD + 4
+    while size > 8:
+        font = _label_font(size)
+        if draw.textlength(text, font=font) <= w - 2 * LABEL_PAD:
+            break
+        size -= 1
+    else:
+        font = _label_font(9)
+
+    draw.text((w // 2, h + LABEL_BAND // 2), text, font=font,
+              fill=(40, 40, 40), anchor="mm")
+    return out
 
 
 def build_demo_gif(
@@ -242,9 +317,12 @@ def build_demo_gif(
     anchor: str = "feet", width: int = DEFAULT_WIDTH,
     hold_end: int = DEFAULT_HOLD_END, hold_mid: int = DEFAULT_HOLD_MID,
     contact_sheet: str | Path | None = None,
+    label: str = "",
 ) -> dict:
     """Build a looping demo GIF from a strip. Returns a small result dict."""
     keys, drift = build_frames(strip_path, panels, anchor, width)
+    if label:
+        keys = [_with_label(k, label) for k in keys]
 
     # Out and back without repeating the end poses: 0,1,..,N-1,..,1
     order = list(range(len(keys))) + list(range(len(keys) - 2, 0, -1))
