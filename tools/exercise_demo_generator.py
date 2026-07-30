@@ -30,6 +30,7 @@ from typing import Any
 
 from tools.exercise_library_tool import (
     _by_id,
+    add_custom_exercise,
     demo_path,
     is_illustrated,
     mark_illustrated,
@@ -286,7 +287,34 @@ def _handle_generate(args: dict, **_kwargs) -> str:
             return tool_error("exerciseId is required")
         exercise = _by_id(exercise_id)
         if exercise is None:
-            return tool_error(f"no exercise with id {exercise_id!r} in the library")
+            # The dataset is large but not complete — a kettlebell halo is not
+            # among its 873 entries. Refusing here meant the bot could explain a
+            # movement perfectly and still be unable to draw it, which is what a
+            # user actually asks for. Supply a name and the movement joins the
+            # library, so the drawing has somewhere to live and every later
+            # request finds it.
+            name = str(args.get("name") or "").strip()
+            if not name:
+                return tool_error(
+                    f"no exercise with id {exercise_id!r} in the library. If this "
+                    f"movement is genuinely missing, call again with 'name' set "
+                    f"to its English name and it will be added and drawn.",
+                    unknownId=exercise_id,
+                )
+            exercise = add_custom_exercise({
+                "id": exercise_id,
+                "name": name,
+                "primaryMuscles": [
+                    str(m).strip().lower()
+                    for m in (args.get("primaryMuscles") or []) if str(m).strip()
+                ],
+                "secondaryMuscles": [],
+                "equipment": str(args.get("equipment") or "body only"),
+                "level": "intermediate",
+                "category": "strength",
+                "instructions": [],
+                "custom": True,
+            })
 
         out_path = demo_path(exercise)
         # Only a real drawing counts as "already done" — a stock-photo fallback
@@ -401,7 +429,35 @@ GENERATE_SCHEMA = {
         "properties": {
             "exerciseId": {
                 "type": "string",
-                "description": "Exercise id from exercise_find.",
+                "description": (
+                    "Exercise id from exercise_find. For a movement the library "
+                    "does not have, invent a stable id in the same style "
+                    "(Kettlebell_Halo) and also pass 'name'."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": (
+                    "Only for a movement exercise_find could not find. Its English "
+                    "name. Supplying it adds the movement to the library and draws "
+                    "it, instead of refusing. Do not pass this for an exercise that "
+                    "already exists — you would create a duplicate."
+                ),
+            },
+            "primaryMuscles": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Only with 'name'. The muscles the movement works, in English, "
+                    "so the drawing can shade them."
+                ),
+            },
+            "equipment": {
+                "type": "string",
+                "description": (
+                    "Only with 'name'. What the movement is performed with, e.g. "
+                    "kettlebell. Defaults to body only."
+                ),
             },
             "poses": {
                 "type": "array",

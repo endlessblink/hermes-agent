@@ -414,3 +414,49 @@ def test_cast_assets_ship_with_the_code():
     from pathlib import Path
     for member in gen.CAST:
         assert (Path(real_cast) / member["file"]).is_file(), member["file"]
+
+
+def _offline_library(monkeypatch, tmp_path):
+    """Point the library at a local dataset so no test touches the network."""
+    from tools import exercise_library_tool as lib
+
+    monkeypatch.setattr(lib, "_data_dir", lambda: tmp_path)
+    (tmp_path / "exercises.json").write_text(json.dumps([PULLUPS]), encoding="utf-8")
+    monkeypatch.setattr(lib, "_dataset_cache", None, raising=False)
+    return lib
+
+# --------------------------------------------------------------------------
+# movements the dataset does not have
+# --------------------------------------------------------------------------
+
+def test_a_movement_missing_from_the_dataset_can_still_be_drawn(monkeypatch, tmp_path):
+    """The dataset has 873 entries and no kettlebell halo. Refusing to draw one
+    meant the bot could explain a movement perfectly and still have no way to
+    show it — which is the thing the user actually asked for."""
+    lib = _offline_library(monkeypatch, tmp_path)
+
+    parsed = json.loads(gen._handle_generate({
+        "exerciseId": "Kettlebell_Halo",
+        "name": "Kettlebell Halo",
+        "primaryMuscles": ["shoulders"],
+        "equipment": "kettlebell",
+        "poses": POSES,
+    }))
+
+    assert "error" not in parsed, parsed
+    assert parsed["exerciseId"] == "Kettlebell_Halo"
+    # And it is now a library member, so asking again finds it.
+    assert lib._by_id("Kettlebell_Halo") is not None
+
+
+def test_an_unknown_id_without_a_name_says_how_to_proceed(monkeypatch, tmp_path):
+    """Silently inventing an exercise from a typo'd id would fill the library
+    with junk, so the name has to be deliberate — but the refusal must say so."""
+    _offline_library(monkeypatch, tmp_path)
+
+    parsed = json.loads(gen._handle_generate({
+        "exerciseId": "Kettlebell_Wibble", "poses": POSES,
+    }))
+
+    assert "error" in parsed
+    assert "name" in parsed["error"]

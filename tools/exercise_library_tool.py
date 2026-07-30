@@ -173,6 +173,7 @@ def _load_dataset(force_refresh: bool = False) -> list[dict[str, Any]]:
     if fresh and not force_refresh:
         try:
             cached: list[dict[str, Any]] = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached = cached + _load_custom_exercises()
             _dataset_cache = cached
             return cached
         except (OSError, ValueError) as exc:
@@ -186,15 +187,52 @@ def _load_dataset(force_refresh: bool = False) -> list[dict[str, Any]]:
         cache_path.write_text(
             json.dumps(parsed, ensure_ascii=False), encoding="utf-8"
         )
+        parsed = parsed + _load_custom_exercises()
         _dataset_cache = parsed
         return parsed
     except Exception as exc:
         if cache_path.is_file():
             logger.warning("Exercise dataset refresh failed, using cache: %s", exc)
             stale: list[dict[str, Any]] = json.loads(cache_path.read_text(encoding="utf-8"))
+            stale = stale + _load_custom_exercises()
             _dataset_cache = stale
             return stale
         raise
+
+
+def _custom_path() -> Path:
+    return _data_dir() / "custom_exercises.json"
+
+
+def _load_custom_exercises() -> list[dict[str, Any]]:
+    """Movements added by hand because the public dataset does not have them.
+
+    The dataset is large but not complete — a kettlebell halo, for one, is not in
+    any of its 873 entries. Without somewhere to put such a movement the bot can
+    describe it perfectly and still be unable to draw it, because every drawing
+    is keyed to a library entry.
+    """
+    try:
+        entries = json.loads(_custom_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("id")]
+
+
+def add_custom_exercise(entry: dict[str, Any]) -> dict[str, Any]:
+    """Persist a movement the dataset lacks and return it. Idempotent by id."""
+    global _dataset_cache
+    existing = _load_custom_exercises()
+    wanted = str(entry.get("id", "")).lower()
+    for known in existing:
+        if str(known.get("id", "")).lower() == wanted:
+            return known
+    existing.append(entry)
+    path = _custom_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    _dataset_cache = None      # force a reload so the new entry is findable
+    return entry
 
 
 def _by_id(exercise_id: str) -> dict[str, Any] | None:
