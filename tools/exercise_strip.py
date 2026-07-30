@@ -52,13 +52,27 @@ DEFAULT_WIDTH = 460
 # transcodes the GIF and autoplays it — that reads as a still image that keeps
 # resetting. Short, even steps read as movement.
 #
-# Every frame gets DEFAULT_HOLD_MID. A GIF with mixed delays has no single frame
+# Every frame gets the same delay. A GIF with mixed delays has no single frame
 # rate, so re-encoding it to constant-rate video — which is what a phone does —
 # lands frames unevenly and the movement stutters, while a desktop GIF player
-# honours each delay and looks fine. DEFAULT_HOLD_END is kept for callers that
-# still pass it and is no longer used.
-DEFAULT_HOLD_END = 150
-DEFAULT_HOLD_MID = 150
+# honours each delay and looks fine.
+#
+# The delay is derived from the frame count so the whole repetition takes about
+# as long as the real movement, whatever the clip is made of. A fixed delay does
+# not work across the library: the same 150 ms that reads as smooth on an
+# eight-frame drawing makes a four-frame one flicker past in half a second.
+TARGET_LOOP_MS = 1800
+MIN_FRAME_MS = 120
+MAX_FRAME_MS = 400
+DEFAULT_HOLD_END = 0    # kept for callers that still pass it; unused
+DEFAULT_HOLD_MID = 0    # 0 means "derive from the frame count"
+
+
+def frame_delay_for(frame_count: int) -> int:
+    """Per-frame delay that makes ``frame_count`` frames last one repetition."""
+    if frame_count <= 0:
+        return MAX_FRAME_MS
+    return max(MIN_FRAME_MS, min(MAX_FRAME_MS, round(TARGET_LOOP_MS / frame_count)))
 
 # A 460×1301 demo is a sliver on a phone, and Telegram rejects extreme aspect
 # ratios as photos outright (Photo_invalid_dimensions). Taller than this and the
@@ -357,7 +371,7 @@ def _evened(frame: Image.Image) -> Image.Image:
 
 def normalize_demo_gif(
     gif_path: str | Path, out_path: str | Path | None = None,
-    frame_ms: int = DEFAULT_HOLD_MID, label: str = "",
+    frame_ms: int = 0, label: str = "",
 ) -> dict:
     """Re-encode an existing demo so a phone can transcode it cleanly.
 
@@ -382,11 +396,13 @@ def normalize_demo_gif(
     base = frames[0].quantize(colors=GIF_COLORS, method=Image.Quantize.MEDIANCUT)
     pal = [base] + [f.quantize(palette=base, dither=Image.Dither.FLOYDSTEINBERG)
                     for f in frames[1:]]
+    delay = frame_ms or frame_delay_for(len(pal))
     pal[0].save(target, save_all=True, append_images=pal[1:],
-                duration=[frame_ms] * len(pal), loop=0, optimize=True, disposal=1)
+                duration=[delay] * len(pal), loop=0, optimize=True, disposal=1)
     return {
         "path": str(target),
         "frames": len(pal),
+        "frameMs": delay,
         "size": frames[0].size,
         "bytes": target.stat().st_size,
     }
@@ -414,7 +430,8 @@ def build_demo_gif(
     # frame rate, and repeating the end frame does nothing because the GIF
     # encoder merges identical neighbours back into one long frame. The
     # out-and-back order already gives the rep its rhythm.
-    durations = [hold_mid] * len(frames)
+    delay = hold_mid or frame_delay_for(len(frames))
+    durations = [delay] * len(frames)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

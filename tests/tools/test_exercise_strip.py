@@ -96,7 +96,9 @@ def test_no_frame_is_held_long_enough_to_look_like_a_still(tmp_path):
     strip.build_demo_gif(src, out, panels=5)
 
     durations = _frames(out)
-    assert max(durations) <= 200, durations
+    # The whole repetition, not one pose, should take about a second and a half.
+    assert max(durations) <= strip.MAX_FRAME_MS, durations
+    assert strip.TARGET_LOOP_MS * 0.7 <= sum(durations) <= strip.TARGET_LOOP_MS * 1.4
 
 
 def test_a_tall_demo_is_scaled_down_rather_than_shipped_as_a_ribbon(tmp_path):
