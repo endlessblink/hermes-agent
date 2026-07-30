@@ -369,6 +369,47 @@ def _evened(frame: Image.Image) -> Image.Image:
     return frame.crop((0, 0, w - (w % 2), h - (h % 2)))
 
 
+def build_demo_mp4(gif_path: str | Path, out_path: str | Path | None = None) -> dict:
+    """Encode a demo as the silent H.264 MP4 Telegram stores anyway.
+
+    Telegram does not keep GIFs — it converts every one to H.264 on upload, and
+    the mobile conversion is what mangles the picture. Handing it a file already
+    in that form skips the conversion entirely. It still autoplays, loops, and
+    shows no controls, provided the encode has: no audio stream at all (one
+    silent track is enough to turn it into a video with a play button), both
+    dimensions even (yuv420p subsamples chroma 2x2), and the index at the front
+    so playback can start before the download finishes.
+
+    Raises RuntimeError when ffmpeg is missing or the encode fails, so a caller
+    can fall back to the GIF rather than deliver nothing.
+    """
+    import subprocess
+
+    src = Path(gif_path)
+    target = Path(out_path) if out_path else src.with_suffix(".mp4")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    argv = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-an",                                  # no audio stream whatsoever
+        "-c:v", "libx264",
+        "-profile:v", "main",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-crf", "23",
+        str(target),
+    ]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg is not installed") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ffmpeg timed out") from exc
+    if proc.returncode != 0 or not target.is_file():
+        raise RuntimeError(f"ffmpeg failed: {(proc.stderr or '')[-300:]}")
+    return {"path": str(target), "bytes": target.stat().st_size}
+
+
 def normalize_demo_gif(
     gif_path: str | Path, out_path: str | Path | None = None,
     frame_ms: int = 0, label: str = "",

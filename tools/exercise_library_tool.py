@@ -563,6 +563,14 @@ def _handle_demo(args: dict, **_kwargs) -> str:
                 logger.warning("demo render failed for %s: %s", exercise_id, exc)
                 missing.append(exercise_id)
                 continue
+            # Telegram converts every GIF to H.264 on upload, and its mobile
+            # conversion is what makes demos shimmer and stutter. When the
+            # already-converted copy exists, send that instead and skip the
+            # conversion. The GIF stays exactly where it was — old messages
+            # still point at it.
+            video = path.with_suffix(".mp4")
+            if want_gif and video.is_file():
+                path = video
             entry = _summarize(exercise, full=True)
             entry["mediaPath"] = str(path)
             # Pre-formatted so the model copies one line verbatim. Emitting the
@@ -582,7 +590,12 @@ def _handle_demo(args: dict, **_kwargs) -> str:
             )
 
         note = (
-            "Copy each demo's mediaTag onto its own line in your reply, exactly as "
+            # Demos are silent looping clips, not films. Without this marker the
+            # gateway delivers an .mp4 as an ordinary video, with a play button
+            # and no loop, instead of autoplaying inline like the GIFs did.
+            ("Put [[as_animation]] on its own line once, anywhere in your reply. "
+             if any(str(d["mediaPath"]).endswith(".mp4") for d in demos) else "")
+            + "Copy each demo's mediaTag onto its own line in your reply, exactly as "
             "given. Never write a bare file path — a path without the MEDIA: prefix "
             "is delivered to the user as chat text instead of a picture. Never reuse "
             "a path from earlier in the conversation; those go stale and silently "

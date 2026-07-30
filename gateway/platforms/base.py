@@ -1596,9 +1596,14 @@ def _strip_media_tag_directives(text: str) -> str:
         "MEDIA:" not in text
         and "[[audio_as_voice]]" not in text
         and "[[as_document]]" not in text
+        and "[[as_animation]]" not in text
     ):
         return text
-    cleaned = text.replace("[[audio_as_voice]]", "").replace("[[as_document]]", "")
+    cleaned = (
+        text.replace("[[audio_as_voice]]", "")
+        .replace("[[as_document]]", "")
+        .replace("[[as_animation]]", "")
+    )
 
     def _strip_extensionless(match: re.Match) -> str:
         path = _normalize_media_tag_path(match.group("path"))
@@ -3309,6 +3314,7 @@ class BasePlatformAdapter(ABC):
         parts: List[Tuple[str, str]],
         metadata: Optional[Dict[str, Any]],
         reply_to: Optional[str] = None,
+        as_animation: bool = False,
     ) -> bool:
         """Send text and pictures in the order the response wrote them.
 
@@ -3350,7 +3356,11 @@ class BasePlatformAdapter(ABC):
             path = resolved.get(value, value)
             ext = Path(path).suffix.lower()
             try:
-                if ext == ".gif":
+                # A silent MP4 sent through the animation endpoint autoplays and
+                # loops with no controls, which is what Telegram stores a GIF as
+                # anyway — sending one directly skips the server-side conversion
+                # that mangles the picture on phones.
+                if ext == ".gif" or (as_animation and ext == ".mp4"):
                     await self.send_animation(
                         chat_id=chat_id, animation_url=path, metadata=metadata,
                     )
@@ -3830,6 +3840,10 @@ class BasePlatformAdapter(ABC):
         # ``content`` for it (so they can still react to it); here we just
         # keep it out of the user-visible cleaned text.
         cleaned = cleaned.replace("[[as_document]]", "")
+        # Same for [[as_animation]], which asks for a silent MP4 to be delivered
+        # through the animation endpoint so it autoplays and loops like a GIF
+        # instead of arriving as a video with playback controls.
+        cleaned = cleaned.replace("[[as_animation]]", "")
         
         # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
         # and quoted/backticked paths for LLM-formatted outputs. The extension
@@ -3904,6 +3918,7 @@ class BasePlatformAdapter(ABC):
             "MEDIA:" not in text
             and "[[audio_as_voice]]" not in text
             and "[[as_document]]" not in text
+            and "[[as_animation]]" not in text
         ):
             return text
         cleaned = _strip_media_tag_directives(text)
@@ -5220,6 +5235,7 @@ class BasePlatformAdapter(ABC):
                 # A response that alternates text and pictures is delivered in
                 # that order — each exercise with its own demo under it — rather
                 # than as one block of text followed by a pile of clips.
+                _as_animation = "[[as_animation]]" in _response_pre_extract
                 _interleaved = (
                     []
                     if (_tts_caption_delivered or force_document_attachments)
@@ -5229,6 +5245,7 @@ class BasePlatformAdapter(ABC):
                     _delivered_any = await self._deliver_interleaved(
                         event, _interleaved, _final_thread_metadata,
                         reply_to=_reply_anchor_for_event(event),
+                        as_animation=_as_animation,
                     )
                     if _delivered_any:
                         # Everything in the response has now been sent in order;
@@ -5322,6 +5339,28 @@ class BasePlatformAdapter(ABC):
                         )
                     except Exception as batch_err:
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
+
+                # Silent MP4s flagged [[as_animation]] go to the animation
+                # endpoint so they autoplay and loop like a GIF rather than
+                # arriving as a video with controls.
+                if _as_animation:
+                    _still_media = []
+                    for media_path, is_voice in _non_image_media:
+                        if is_voice or Path(media_path).suffix.lower() != ".mp4":
+                            _still_media.append((media_path, is_voice))
+                            continue
+                        try:
+                            await self.send_animation(
+                                chat_id=event.source.chat_id,
+                                animation_url=media_path,
+                                metadata=_final_thread_metadata,
+                            )
+                        except Exception as anim_err:
+                            logger.warning(
+                                "[%s] Animation send failed for %s: %s",
+                                self.name, safe_url_for_log(media_path), anim_err,
+                            )
+                    _non_image_media = _still_media
 
                 for media_path, is_voice in _non_image_media:
                     if human_delay > 0:
