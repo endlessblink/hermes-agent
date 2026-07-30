@@ -90,6 +90,14 @@ def test_topic_route_beats_chat_route_then_falls_back_to_default():
     assert runner._resolve_inbound_profile(_source("999")) == "default"
 
 
+def test_legacy_profile_lookup_accepts_route_table():
+    runner = _runner()
+
+    assert runner._profile_name_for_source(
+        _source("-1004230590253", "2")
+    ) == "life-advisor"
+
+
 def test_yaml_numeric_chat_and_topic_keys_are_normalized():
     runner = _runner()
     runner.config.profile_routes = {

@@ -59,6 +59,29 @@ def _make_adapter(extra=None):
     return adapter
 
 
+@pytest.mark.asyncio
+async def test_paragraph_separator_sends_each_paragraph_as_its_own_message():
+    adapter = _make_adapter(extra={"message_split_marker": "\n\n"})
+    adapter._bot.send_message = AsyncMock(
+        side_effect=[
+            SimpleNamespace(message_id=41),
+            SimpleNamespace(message_id=42),
+        ]
+    )
+
+    result = await adapter.send(
+        chat_id="-1004230590253",
+        content="First short paragraph.\n\nSecond short paragraph.",
+        metadata={"thread_id": "2"},
+    )
+
+    assert result.success is True
+    assert adapter._bot.send_message.await_count == 2
+    assert [
+        call.kwargs["text"] for call in adapter._bot.send_message.await_args_list
+    ] == ["First short paragraph\\.", "Second short paragraph\\."]
+
+
 class _AuthRunner:
     """Minimal runner shim for callback auth tests."""
 

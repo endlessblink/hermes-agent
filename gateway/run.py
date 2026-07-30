@@ -18012,6 +18012,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         routes = getattr(config, "profile_routes", None)
         if not routes:
             return None
+        if isinstance(routes, dict):
+            return self._resolve_inbound_profile(source)
         from gateway.profile_routing import match_profile_route
         try:
             matched = match_profile_route(
