@@ -460,3 +460,25 @@ def test_an_unknown_id_without_a_name_says_how_to_proceed(monkeypatch, tmp_path)
 
     assert "error" in parsed
     assert "name" in parsed["error"]
+
+
+def test_a_new_drawing_also_gets_its_video_form(monkeypatch):
+    """Telegram converts every GIF to H.264 on upload and its mobile conversion
+    is what makes demos shimmer, so a fresh drawing must not be left GIF-only."""
+    encoded = []
+    monkeypatch.setattr(gen, "build_demo_mp4", lambda p: encoded.append(str(p)))
+
+    result = _payload(gen._handle_generate({"exerciseId": "Pullups", "poses": POSES}))
+
+    assert encoded == [result["mediaPath"]]
+
+
+def test_a_failed_video_encode_does_not_lose_the_drawing(monkeypatch):
+    """The GIF beside it still delivers, so a missing encoder is not fatal."""
+    def _boom(_path):
+        raise RuntimeError("ffmpeg is not installed")
+
+    monkeypatch.setattr(gen, "build_demo_mp4", _boom)
+
+    result = _payload(gen._handle_generate({"exerciseId": "Pullups", "poses": POSES}))
+    assert result["generated"] is True

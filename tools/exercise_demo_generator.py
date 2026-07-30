@@ -35,7 +35,7 @@ from tools.exercise_library_tool import (
     is_illustrated,
     mark_illustrated,
 )
-from tools.exercise_strip import build_demo_gif
+from tools.exercise_strip import build_demo_gif, build_demo_mp4
 from tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
@@ -378,6 +378,15 @@ def _handle_generate(args: dict, **_kwargs) -> str:
             except Exception as exc:
                 logger.warning("strip assembly failed for %s: %s", exercise_id, exc)
                 return tool_error(f"the drawing came out unusable: {exc}")
+
+            # Encode the video form too. Telegram converts every GIF to H.264 on
+            # upload anyway, and its mobile conversion is what makes demos
+            # shimmer — handing it a file already in that form skips the step.
+            # A failure here is not fatal: the GIF beside it still delivers.
+            try:
+                build_demo_mp4(out_path)
+            except Exception as exc:
+                logger.warning("demo video encode failed for %s: %s", exercise_id, exc)
 
             # Keep the strip next to the GIF: re-timing or re-anchoring it later
             # is free, whereas regenerating costs another image generation.
