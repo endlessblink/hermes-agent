@@ -1748,6 +1748,7 @@ def _reliable_memory_dispatch(
     is_global: bool,
     query: Optional[str],
     memory_id: Optional[str],
+    claim_id: Optional[str],
     limit: int,
 ) -> str:
     """Compatibility bridge from the existing memory tool to the ledger."""
@@ -1766,6 +1767,8 @@ def _reliable_memory_dispatch(
             scope["sources"] = list(sources)
         if entities:
             scope["entities"] = list(entities)
+        if claim_id:
+            scope["claim_id"] = claim_id
         return scope
 
     def type_for(selected_target: str, value: str) -> str:
@@ -1814,6 +1817,15 @@ def _reliable_memory_dispatch(
             return json.dumps(
                 {"success": True, **repository.sync_status()}, ensure_ascii=False
             )
+        if action == "conflicts":
+            return json.dumps(
+                {"success": True, "conflicts": repository.list_conflicts(claim_id=claim_id)},
+                ensure_ascii=False,
+            )
+        if action == "resolve_conflict":
+            if not claim_id or not memory_id:
+                return tool_error("claim_id and memory_id are required for resolve_conflict.", success=False)
+            return success(repository.resolve_conflict(claim_id, memory_id), "Conflict resolved.")
         if action == "undo":
             selector = memory_id or old_text
             record = repository.resolve(selector, target=target) if not memory_id else None
@@ -1837,6 +1849,7 @@ def _reliable_memory_dispatch(
                     op_action = str((operation or {}).get("action") or "")
                     op_content = (operation or {}).get("content")
                     op_old = (operation or {}).get("old_text")
+                    op_claim = (operation or {}).get("claim_id") or claim_id
                     if op_action == "add":
                         record = repository.add(
                             op_content,
@@ -1844,6 +1857,7 @@ def _reliable_memory_dispatch(
                             trust="explicit",
                             scope=scope_for(target),
                             source={"kind": "memory_tool", "shape": "batch"},
+                            claim_id=op_claim,
                         )
                         applied.append({"kind": "add", "id": record["id"]})
                     elif op_action == "replace":
@@ -1894,6 +1908,7 @@ def _reliable_memory_dispatch(
                 trust="explicit",
                 scope=scope_for(target),
                 source={"kind": "memory_tool"},
+                claim_id=claim_id,
             )
             return success(record, "Memory added.")
         if action == "replace":
@@ -1939,6 +1954,7 @@ def memory_tool(
     is_global: bool = False,
     query: str = None,
     memory_id: str = None,
+    claim_id: str = None,
     limit: int = 8,
     store: Optional[MemoryStore] = None,
 ) -> str:
@@ -2010,6 +2026,7 @@ def memory_tool(
             is_global=is_global,
             query=query,
             memory_id=memory_id,
+            claim_id=claim_id,
             limit=limit,
         )
 
@@ -2107,6 +2124,7 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
             is_global=bool(payload.get("is_global")),
             query=payload.get("query"),
             memory_id=payload.get("memory_id"),
+            claim_id=payload.get("claim_id"),
             limit=int(payload.get("limit") or 8),
         )
         return json.loads(result)
@@ -2186,7 +2204,7 @@ MEMORY_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "add", "replace", "remove", "search", "why", "undo",
-                    "purge", "sync_status",
+                    "purge", "sync_status", "conflicts", "resolve_conflict",
                 ],
                 "description": "The action to perform (single-op shape). Omit when using 'operations'."
             },
@@ -2210,6 +2228,10 @@ MEMORY_SCHEMA = {
             "memory_id": {
                 "type": "string",
                 "description": "Stable memory id for action='why', 'undo', or 'purge'."
+            },
+            "claim_id": {
+                "type": "string",
+                "description": "Stable identity for one durable fact. Repeating the same claim and content is idempotent; changing content under the same claim is preserved as an unresolved conflict instead of silently overwriting it.",
             },
             "limit": {
                 "type": "integer",

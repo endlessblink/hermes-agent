@@ -194,20 +194,41 @@ class ReliableMemoryRepository:
         scope: dict[str, Any] | None = None,
         source: dict[str, Any] | None = None,
         memory_id: str | None = None,
+        claim_id: str | None = None,
     ) -> dict[str, Any]:
         content = self._validate_content(content)
+        scope = dict(scope or {"kind": "global"})
+        if claim_id:
+            claim_id = str(claim_id).strip()
+            if not claim_id:
+                raise ValueError("claim_id cannot be empty")
+            scope["claim_id"] = claim_id
+            if memory_id is None:
+                memory_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"hermes-memory:{claim_id}"))
         memory_id = memory_id or str(uuid.uuid4())
         with self._exclusive():
+            if claim_id:
+                for candidate in self._claim_rows(claim_id):
+                    if candidate["content_hash"] == _content_hash(content):
+                        return self._row_to_record(candidate)
+                operation = "conflict" if self._claim_rows(claim_id) else "add"
+                if operation == "conflict":
+                    memory_id = str(uuid.uuid4())
+            else:
+                operation = "add"
             if self._current_row(memory_id) is not None:
+                current = self._current_row(memory_id)
+                if current and current["content_hash"] == _content_hash(content):
+                    return self._row_to_record(current)
                 raise MemoryConflictError(f"Memory already exists: {memory_id}")
             return self._commit_revision_locked(
                 memory_id=memory_id,
                 revision=1,
-                operation="add",
+                operation=operation,
                 content=content,
                 memory_type=memory_type,
                 trust=trust,
-                scope=scope or {"kind": "global"},
+                scope=scope,
                 source=source or {},
                 supersedes_revision=None,
             )
@@ -332,15 +353,67 @@ class ReliableMemoryRepository:
                 ORDER BY event.created_at
                 """
             ).fetchall()
-        records = []
-        for row in rows:
-            if row["memory_id"] in blocked:
+        records = [self._row_to_record(row) for row in rows]
+        conflicted_claims = {
+            record["scope"].get("claim_id")
+            for record in records
+            if record["scope"].get("claim_id")
+        }
+        claim_counts: dict[str, set[str]] = {}
+        for record in records:
+            claim_id = record["scope"].get("claim_id")
+            if claim_id:
+                claim_counts.setdefault(claim_id, set()).add(record["content_hash"])
+        conflicted_claims = {
+            claim_id for claim_id in conflicted_claims
+            if len(claim_counts.get(claim_id, set())) > 1
+        }
+        filtered = []
+        for record in records:
+            if record["id"] in blocked:
                 continue
-            record = self._row_to_record(row)
+            if record["scope"].get("claim_id") in conflicted_claims:
+                continue
             if target and record["scope"].get("target") != target:
                 continue
-            records.append(record)
-        return records
+            filtered.append(record)
+        return filtered
+
+    def list_conflicts(self, *, claim_id: str | None = None) -> list[dict[str, Any]]:
+        """Return active candidates for claims whose contents disagree."""
+        self.reconcile()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event.* FROM current_memories current
+                JOIN memory_events event ON event.event_id = current.event_id
+                WHERE event.status = 'active' ORDER BY event.created_at
+                """
+            ).fetchall()
+        records = [self._row_to_record(row) for row in rows]
+        hashes: dict[str, set[str]] = {}
+        for record in records:
+            key = record["scope"].get("claim_id")
+            if key:
+                hashes.setdefault(key, set()).add(record["content_hash"])
+        return [
+            record for record in records
+            if record["scope"].get("claim_id")
+            and len(hashes.get(record["scope"]["claim_id"], set())) > 1
+            and (claim_id is None or record["scope"].get("claim_id") == claim_id)
+        ]
+
+    def resolve_conflict(self, claim_id: str, memory_id: str) -> dict[str, Any]:
+        """Keep one candidate and hide the other candidates for a claim."""
+        candidates = self.list_conflicts(claim_id=claim_id)
+        if not candidates:
+            raise MemoryConflictError(f"No unresolved conflict for claim: {claim_id}")
+        if memory_id not in {record["id"] for record in candidates}:
+            raise MemoryConflictError("Selected memory is not a candidate for this claim")
+        for candidate in candidates:
+            if candidate["id"] != memory_id:
+                self.forget(candidate["id"], source={"kind": "conflict_resolution", "claim_id": claim_id})
+        return self.resolve(memory_id)
 
     def resolve(self, selector: str, *, target: str | None = None) -> dict[str, Any]:
         selector = str(selector or "").strip()
@@ -376,11 +449,20 @@ class ReliableMemoryRepository:
                 """
             ).fetchall()
         query_terms = set(_TOKEN.findall((query or "").casefold()))
-        ranked: list[tuple[int, float, sqlite3.Row]] = []
-        for row in rows:
+        records = [self._row_to_record(row) for row in rows]
+        claim_hashes: dict[str, set[str]] = {}
+        for record in records:
+            claim_id = record["scope"].get("claim_id")
+            if claim_id:
+                claim_hashes.setdefault(claim_id, set()).add(record["content_hash"])
+        conflicted_claims = {claim_id for claim_id, hashes in claim_hashes.items() if len(hashes) > 1}
+        ranked: list[tuple[int, float, dict[str, Any]]] = []
+        for row, record in zip(rows, records):
             if row["memory_id"] in blocked:
                 continue
             row_scope = json.loads(row["scope_json"])
+            if row_scope.get("claim_id") in conflicted_claims:
+                continue
             if not self._scope_matches(row_scope, scope):
                 continue
             content_lower = row["content"].casefold()
@@ -396,11 +478,11 @@ class ReliableMemoryRepository:
                 "mechanical": 3,
                 "inferred": 1,
             }.get(row["trust"], 0)
-            ranked.append((phrase + overlap * 2 + trust_score, row["created_at"], row))
+            ranked.append((phrase + overlap * 2 + trust_score, row["created_at"], record))
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
         return {
             "memories": [
-                self._row_to_record(row) for _, _, row in ranked[: max(1, int(limit))]
+                record for _, _, record in ranked[: max(1, int(limit))]
             ],
             "sync": sync,
         }
@@ -809,6 +891,18 @@ class ReliableMemoryRepository:
                 (memory_id,),
             ).fetchone()
 
+    def _claim_rows(self, claim_id: str) -> list[sqlite3.Row]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event.*
+                FROM current_memories current
+                JOIN memory_events event ON event.event_id = current.event_id
+                WHERE event.status = 'active'
+                """
+            ).fetchall()
+        return [row for row in rows if json.loads(row["scope_json"]).get("claim_id") == claim_id]
+
     def _require_current(self, memory_id: str) -> sqlite3.Row:
         row = self._current_row(memory_id)
         if row is None:
@@ -841,6 +935,7 @@ class ReliableMemoryRepository:
             "event_id": row["event_id"],
             "revision": int(row["revision"]),
             "operation": row["operation"],
+            "conflict": row["operation"] == "conflict",
             "status": row["status"],
             "content": row["content"],
             "memory_type": row["memory_type"],

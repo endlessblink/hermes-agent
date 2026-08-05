@@ -65,6 +65,47 @@ def test_search_and_why_return_source_receipts(tmp_path):
     assert receipt["note_path"]
 
 
+def test_memory_tool_claim_id_is_stable_and_conflicts_fail_closed(tmp_path):
+    store, repository = _store(tmp_path)
+    first = json.loads(memory_tool(
+        action="add",
+        target="user",
+        content="The user prefers concise updates.",
+        claim_id="user.preference.update-length",
+        store=store,
+    ))
+    retry = json.loads(memory_tool(
+        action="add",
+        target="user",
+        content="The user prefers concise updates.",
+        claim_id="user.preference.update-length",
+        store=store,
+    ))
+    conflicting = json.loads(memory_tool(
+        action="add",
+        target="user",
+        content="The user prefers detailed updates.",
+        claim_id="user.preference.update-length",
+        store=store,
+    ))
+
+    assert retry["memory"]["id"] == first["memory"]["id"]
+    assert conflicting["memory"]["conflict"] is True
+    assert json.loads(memory_tool(
+        action="search", target="user", query="updates", store=store
+    ))["memories"] == []
+    assert len(repository.history(first["memory"]["id"])) == 1
+    conflicts = json.loads(memory_tool(
+        action="conflicts", target="user", claim_id="user.preference.update-length", store=store
+    ))
+    assert len(conflicts["conflicts"]) == 2
+    resolved = json.loads(memory_tool(
+        action="resolve_conflict", target="user", claim_id="user.preference.update-length",
+        memory_id=first["memory"]["id"], store=store
+    ))
+    assert resolved["memory"]["id"] == first["memory"]["id"]
+
+
 def test_replace_remove_undo_and_purge_keep_mirror_in_sync(tmp_path):
     store, repository = _store(tmp_path)
     added = json.loads(

@@ -147,6 +147,51 @@ def test_correction_stops_using_old_revision_and_undo_restores_it(repository):
     )
 
 
+def test_claim_identity_makes_retries_idempotent(repository):
+    first = repository.add(
+        "The user prefers concise updates.",
+        memory_type="user_preference",
+        trust="explicit",
+        claim_id="user.preference.update-length",
+    )
+    retry = repository.add(
+        "The user prefers concise updates.",
+        memory_type="user_preference",
+        trust="explicit",
+        claim_id="user.preference.update-length",
+    )
+
+    assert retry["id"] == first["id"]
+    assert retry["revision"] == 1
+    assert len(repository.history(first["id"])) == 1
+
+
+def test_changed_claim_is_preserved_as_conflict_and_not_retrieved(repository):
+    original = repository.add(
+        "The user prefers concise updates.",
+        memory_type="user_preference",
+        trust="explicit",
+        claim_id="user.preference.update-length",
+    )
+    conflicting = repository.add(
+        "The user prefers detailed updates.",
+        memory_type="user_preference",
+        trust="explicit",
+        claim_id="user.preference.update-length",
+    )
+
+    assert conflicting["conflict"] is True
+    assert conflicting["operation"] == "conflict"
+    assert conflicting["id"] != original["id"]
+    assert repository.history(original["id"])[0]["content"] == "The user prefers concise updates."
+    assert repository.search("updates")["memories"] == []
+    assert len(repository.list_active()) == 0
+    assert len(repository.list_conflicts(claim_id="user.preference.update-length")) == 2
+    resolved = repository.resolve_conflict("user.preference.update-length", original["id"])
+    assert resolved["id"] == original["id"]
+    assert repository.search("concise updates")["memories"][0]["id"] == original["id"]
+
+
 def test_purge_removes_history_and_obsidian_note(repository):
     record = repository.add(
         "A sensitive fact.",
