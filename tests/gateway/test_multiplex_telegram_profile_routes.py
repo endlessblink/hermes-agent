@@ -282,6 +282,51 @@ def test_shared_route_authorizes_from_target_profile_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_topic_routed_shared_adapter_auth_scopes_profile_env(
+    tmp_path, monkeypatch
+):
+    from agent import secret_scope as ss
+
+    runner = _runner()
+    owner_adapter = runner.adapters[Platform.TELEGRAM]
+    runner._profile_adapters["life-advisor"][Platform.TELEGRAM] = owner_adapter
+    runner.pairing_store = MagicMock()
+    runner.pairing_stores = {"life-advisor": MagicMock()}
+    runner.pairing_stores["life-advisor"].is_approved.return_value = False
+    runner.session_store = MagicMock()
+    runner._update_prompt_pending = {}
+    runner._running_agents_ts = {}
+    life_home = tmp_path / "life-advisor"
+    life_home.mkdir()
+    (life_home / ".env").write_text(
+        "TELEGRAM_ALLOWED_USERS=life-user\n", encoding="utf-8"
+    )
+    runner._resolve_profile_home_for_source = lambda _source: life_home
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "default-user")
+    source = _source("-1004230590253", "2")
+    source.user_id = "life-user"
+    source.profile = runner._resolve_inbound_profile(source)
+    quick_key = "telegram:shared-topic"
+    runner._session_key_for_source = lambda _source: quick_key
+    runner._running_agents = {quick_key: object()}
+    runner._handle_status_command = AsyncMock(return_value="status-ok")
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_args, **_kwargs: [])
+    event = MessageEvent(text="/status", message_id="m1", source=source)
+
+    ss.set_multiplex_active(True)
+    try:
+        old_auth_scope = runner._is_user_authorized_in_event_scope
+        runner._is_user_authorized_in_event_scope = runner._is_user_authorized
+        with pytest.raises(ss.UnscopedSecretError):
+            await runner._handle_message(event)
+        runner._is_user_authorized_in_event_scope = old_auth_scope
+        assert await runner._handle_message(event) == "status-ok"
+        runner._handle_status_command.assert_awaited_once_with(event)
+    finally:
+        ss.set_multiplex_active(False)
+
+
+@pytest.mark.asyncio
 async def test_unauthorized_routed_dm_generates_pairing_in_target_store(tmp_path, monkeypatch):
     runner = _runner()
     owner_adapter = SimpleNamespace(send=AsyncMock())

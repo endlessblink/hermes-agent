@@ -3,6 +3,7 @@ import type { Translations } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { type ClarifyRequest, clearClarifyRequest } from '@/store/clarify'
 import { notifyError } from '@/store/notifications'
+import { noteSessionActivity } from '@/store/session'
 
 type ClarifyCopy = Translations['assistant']['clarify']
 
@@ -14,7 +15,8 @@ export async function respondToClarifyRequest({
   onBeforeSend,
   onError,
   request,
-  requestGateway
+  requestGateway,
+  watchdogSessionId
 }: {
   allowEmpty?: boolean
   answer: string
@@ -24,6 +26,7 @@ export async function respondToClarifyRequest({
   onError?: (error: unknown) => void
   request: ClarifyRequest | null | undefined
   requestGateway?: <T>(method: string, params: Record<string, unknown>) => Promise<T>
+  watchdogSessionId?: string | null
 }): Promise<boolean | 'stale'> {
   const trimmed = answer.trim()
 
@@ -44,6 +47,7 @@ export async function respondToClarifyRequest({
   }
 
   onBeforeSend?.()
+  noteSessionActivity(watchdogSessionId)
 
   try {
     const send = requestGateway ?? gateway!.request.bind(gateway)

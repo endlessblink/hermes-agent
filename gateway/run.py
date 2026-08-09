@@ -5551,7 +5551,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # creating a session.  The busy path must enforce the same check;
         # otherwise unauthorized users in shared threads (Slack/Telegram/Discord)
         # can inject messages into an active session they don't own.
-        if not self._is_user_authorized(event.source):
+        if not self._is_user_authorized_in_event_scope(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
                 "user=%s (%s), platform=%s, session=%s",
@@ -7586,6 +7586,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._running = True
         self._update_runtime_status("running")
         self._start_personal_assistant_telegram_monitor_bridge(_hermes_home)
+        self._start_lifeboat_followup_bridge(_hermes_home)
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -8269,6 +8270,53 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
         logger.info("Personal-assistant Telegram monitor bridge started")
+        return True
+
+    def _start_lifeboat_followup_bridge(self, profile_home: "Path") -> bool:
+        """Schedule durable follow-ups for the Life-Boat Telegram profile."""
+        owner_profile = self._active_profile_name()
+        owner_home = profile_home
+        if owner_profile != "life-advisor":
+            if not getattr(self.config, "multiplex_profiles", False):
+                return False
+            from hermes_cli.profiles import profiles_to_serve
+
+            served = profiles_to_serve(
+                multiplex=True,
+                served_profiles=getattr(self.config, "multiplex_served_profiles", None),
+            )
+            owner_home = next(
+                (home for name, home in served if name == "life-advisor"),
+                None,
+            )
+            if owner_home is None:
+                return False
+
+        followup_router = self.delivery_router
+        if Platform.TELEGRAM not in followup_router.adapters:
+            profile_adapters = getattr(self, "_profile_adapters", {})
+            shared_adapter = (
+                profile_adapters.get("life-advisor", {}).get(Platform.TELEGRAM)
+                or profile_adapters.get("office-work", {}).get(Platform.TELEGRAM)
+            )
+            if shared_adapter is None:
+                return False
+            followup_router = DeliveryRouter(
+                self.config,
+                adapters={Platform.TELEGRAM: shared_adapter},
+            )
+
+        from gateway.lifeboat_followups import LifeBoatFollowupBridge
+
+        bridge = LifeBoatFollowupBridge(owner_home, followup_router)
+        task = asyncio.create_task(bridge.run(lambda: self._running))
+        self._lifeboat_followup_bridge = bridge
+        self._lifeboat_followup_task = task
+        background_tasks = getattr(self, "_background_tasks", None)
+        if background_tasks is not None:
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
+        logger.info("Life-Boat Telegram follow-up bridge started")
         return True
 
     # ── Kanban board watchers ───────────────────────────────────────────
@@ -9330,6 +9378,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
             return self._is_user_authorized(source)
 
+    def _is_user_authorized_in_event_scope(self, source: SessionSource) -> bool:
+        """Run user authorization inside the event profile scope when multiplexing."""
+        if getattr(self, "config", None) is not None and getattr(
+            self.config, "multiplex_profiles", False
+        ):
+            with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+                return self._is_user_authorized(source)
+        return self._is_user_authorized(source)
+
     async def _handle_routed_message(self, event: MessageEvent) -> Optional[str]:
         """Stamp and scope a shared-adapter event before hooks, auth, or sessions."""
         source = getattr(event, "source", None)
@@ -9693,10 +9750,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # chat-scoped allowlist (e.g. TELEGRAM_GROUP_ALLOWED_CHATS
             # authorizes every member of the listed chat regardless of
             # sender). Defer to _is_user_authorized so that path runs.
-            if not self._is_user_authorized(source):
+            if not self._is_user_authorized_in_event_scope(source):
                 logger.debug("Ignoring message with no user_id from %s", source.platform.value)
                 return None
-        elif not self._is_user_authorized(source):
+        elif not self._is_user_authorized_in_event_scope(source):
             logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
             # In DMs: offer pairing code. In groups: silently ignore.
             if (
@@ -9748,6 +9805,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        try:
+            from gateway.lifeboat_followups import (
+                build_continuation_prompt,
+                build_lifeboat_coaching_prompt,
+                consume_followup_context,
+                is_lifeboat_source,
+            )
+
+            if is_lifeboat_source(source):
+                reminder_context = consume_followup_context(
+                    self._resolve_profile_home_for_source(source), _quick_key
+                )
+                if reminder_context and (event.text or "").strip():
+                    event.text = build_continuation_prompt(event.text, reminder_context)
+                elif (event.text or "").strip():
+                    event.text = build_lifeboat_coaching_prompt(event.text)
+        except Exception:
+            logger.debug("Life-Boat follow-up cancellation failed", exc_info=True)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -11070,6 +11145,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             source=source,
                             final_response=_final_text,
                         )
+                    try:
+                        from gateway.lifeboat_followups import arm_lifeboat_prompts
+
+                        if getattr(event.source, "profile", "") == "life-advisor" or getattr(
+                            event.source, "thread_id", None
+                        ) == "2":
+                            outcomes = arm_lifeboat_prompts(
+                                self._resolve_profile_home_for_source(event.source),
+                                _quick_key,
+                                event.source,
+                                _final_text,
+                            )
+                            logger.info(
+                                "Life-Boat proactive scheduling followup=%s achievement=%s",
+                                outcomes["followup"],
+                                outcomes["achievement"],
+                            )
+                    except Exception:
+                        logger.debug("Life-Boat follow-up arming failed", exc_info=True)
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
             return _agent_result

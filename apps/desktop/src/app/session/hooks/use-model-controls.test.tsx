@@ -137,6 +137,34 @@ describe('useModelControls', () => {
     expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
   })
 
+  it('interrupts a stale busy turn and retries the model switch', async () => {
+    $activeSessionId.set('session-1')
+    let configAttempts = 0
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'config.set' && ++configAttempts === 1) {
+        throw new Error('session busy')
+      }
+      return {} as never
+    })
+    let controls!: Controls
+
+    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
+
+    await expect(controls.selectModel({ model: 'claude-sonnet-4.6', provider: 'anthropic' })).resolves.toBe(true)
+
+    expect(requestGateway).toHaveBeenNthCalledWith(1, 'config.set', {
+      session_id: 'session-1',
+      key: 'model',
+      value: 'claude-sonnet-4.6 --provider anthropic --session'
+    })
+    expect(requestGateway).toHaveBeenNthCalledWith(2, 'session.interrupt', { session_id: 'session-1' })
+    expect(requestGateway).toHaveBeenNthCalledWith(3, 'config.set', {
+      session_id: 'session-1',
+      key: 'model',
+      value: 'claude-sonnet-4.6 --provider anthropic --session'
+    })
+  })
+
   it('session-scopes MoA preset selections so they cannot persist as the global gateway default', async () => {
     $activeSessionId.set('session-1')
     const requestGateway = vi.fn(async () => ({ key: 'model', value: 'BeastMode' }) as never)

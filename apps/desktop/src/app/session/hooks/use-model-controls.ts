@@ -113,11 +113,26 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
       }
 
       try {
-        await requestGateway('config.set', {
+        const params = {
           session_id: liveSessionId,
           key: 'model',
           value: `${selection.model} --provider ${selection.provider} --session`
-        })
+        }
+
+        try {
+          await requestGateway('config.set', params)
+        } catch (err) {
+          // A stale/in-flight turn can leave the gateway's busy guard ahead of
+          // the renderer. Interrupt once, then retry the user's explicit pick.
+          // Without this, the optimistic state rolls back and the picker appears
+          // permanently pinned to the old model.
+          if (!String(err).toLowerCase().includes('session busy')) {
+            throw err
+          }
+
+          await requestGateway('session.interrupt', { session_id: liveSessionId })
+          await requestGateway('config.set', params)
+        }
 
         void queryClient.invalidateQueries({ queryKey: ['model-options', liveSessionId] })
 

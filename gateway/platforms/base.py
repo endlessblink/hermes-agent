@@ -1105,6 +1105,18 @@ def _kanban_attachment_roots() -> List[Path]:
 def _media_delivery_allowed_roots() -> List[Path]:
     """Return roots from which model-emitted local media may be delivered."""
     roots = [Path(root) for root in MEDIA_DELIVERY_SAFE_ROOTS]
+    # Tests and profile-aware runtimes may switch HERMES_HOME after this module
+    # is imported; include the current home so generated cache files remain
+    # deliverable instead of relying on the import-time snapshot above.
+    try:
+        runtime_home = get_hermes_home()
+    except Exception:
+        runtime_home = None
+    if runtime_home is not None:
+        roots.extend(
+            Path(runtime_home) / "cache" / subdir
+            for subdir in _MEDIA_DELIVERY_CACHE_SUBDIRS
+        )
     roots.extend(_profile_cache_roots())
     roots.extend(_kanban_attachment_roots())
     extra_roots = os.environ.get(MEDIA_DELIVERY_ALLOW_DIRS_ENV, "")

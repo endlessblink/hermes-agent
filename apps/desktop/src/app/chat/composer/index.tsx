@@ -290,9 +290,10 @@ export function ChatBar({
         answer,
         copy: t.assistant.clarify,
         gateway: resolveClarifyGateway(gateway, activeGateway()),
-        request: clarifyRequest
+        request: clarifyRequest,
+        watchdogSessionId: activeQueueSessionKey
       }),
-    [clarifyRequest, gateway, t.assistant.clarify]
+    [activeQueueSessionKey, clarifyRequest, gateway, t.assistant.clarify]
   )
 
   // The submit engine — the orchestration seam where draft + queue meet. Owns
