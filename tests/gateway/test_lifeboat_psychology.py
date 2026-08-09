@@ -15,6 +15,8 @@ def test_classifies_current_turn_signals_without_diagnosis():
     ) == LifeBoatSignals(thought_loop=True, self_criticism=True)
     assert classify_lifeboat_signals("אין לי כוח להמשיך") .possible_crisis
     assert classify_lifeboat_signals("I feel hopeless and empty").depressive_thoughts
+    hebrew = classify_lifeboat_signals("אני תקוע בלופ של ביקורת עצמית")
+    assert hebrew.thought_loop and hebrew.self_criticism
 
 
 def test_signal_guidance_is_stance_specific_and_does_not_echo_user_text():

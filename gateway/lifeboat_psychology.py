@@ -31,13 +31,14 @@ _DEPRESSIVE_RE = re.compile(
 )
 _LOOP_RE = re.compile(
     r"(?:ruminat|overthink|stuck|same thought|can't stop thinking|thought loop|looping|"
-    r"מחשבות חוזרות|לולאה|תקוע|נתקע|לא מפסיק לחשוב|מסתובב)",
+    r"מחשבות חוזרות|מחשבות טורדניות|לולאה|לופ|תקוע|נתקע|לא מפסיק לחשוב|מסתובב)",
     re.IGNORECASE,
 )
 _SELF_CRITICISM_RE = re.compile(
     r"(?:hate myself|bad person|failure|useless|stupid|not good enough|"
     r"blame myself|self[- ]?criticism|שונא את עצמי|שונאת את עצמי|כישלון|"
-    r"אפס|דפוק|דפוקה|לא מספיק טוב|לא מספיק טובה|מאשים את עצמי|מאשימה את עצמי)",
+    r"ביקורת עצמית|ביקורת על עצמי|אפס|דפוק|דפוקה|לא מספיק טוב|לא מספיק טובה|"
+    r"מאשים את עצמי|מאשימה את עצמי)",
     re.IGNORECASE,
 )
 _TRAJECTORY_TTL = timedelta(hours=72)
