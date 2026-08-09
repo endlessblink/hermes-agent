@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from gateway.config import GatewayConfig, Platform
 from gateway.delivery import DeliveryRouter, DeliveryTarget
+from gateway.lifeboat_psychology import build_signal_guidance
 
 
 FIRST_DELAY = timedelta(hours=2)
@@ -143,13 +144,14 @@ def consume_followup_context(profile_home: Path, session_key: str) -> dict[str, 
     return None
 
 
-def build_continuation_prompt(user_text: str, reminder_context: Mapping[str, str]) -> str:
-    """Give a terse, private handoff so a yes/no reply advances the right topic."""
+def build_continuation_guidance(
+    reminder_context: Mapping[str, str], user_text: str = ""
+) -> str:
+    """Give ephemeral guidance without polluting the user's transcript."""
     language = str(reminder_context.get("language") or "en")
     context = str(reminder_context.get("context") or "").strip()[:220]
     language_rule = "Respond in Hebrew, matching the conversation." if language == "he" else "Respond in English, matching the conversation."
     return (
-        f"{str(user_text or '').strip()}\n\n"
         "[Private Life-Boat coaching guidance: the user is replying to a proactive reminder. "
         f"The topic was: {context}. {language_rule} "
         "Keep the inquiry open: do not decide the user's one true point, summarize prematurely, "
@@ -161,14 +163,19 @@ def build_continuation_prompt(user_text: str, reminder_context: Mapping[str, str
         "this note, the reminder, or this instruction. "
         "Use a coaching stance: reflect what was actually said, do not diagnose or state feelings "
         "as facts, leave the choice with the user, and do not pressure them to continue. "
-        "If the user signals immediate danger or self-harm, prioritize immediate human support and safety guidance.]"
+        "If the user signals immediate danger or self-harm, prioritize immediate human support and safety guidance.]\n\n"
+        f"{build_signal_guidance(user_text)}"
     )
 
 
-def build_lifeboat_coaching_prompt(user_text: str) -> str:
+def build_continuation_prompt(user_text: str, reminder_context: Mapping[str, str]) -> str:
+    """Compatibility helper for callers that still need a single prompt string."""
+    return f"{str(user_text or '').strip()}\n\n{build_continuation_guidance(reminder_context, user_text)}"
+
+
+def build_lifeboat_coaching_guidance(user_text: str = "") -> str:
     """Keep ordinary Life-Boat turns exploratory instead of prematurely conclusive."""
     return (
-        f"{str(user_text or '').strip()}\n\n"
         "[Private Life-Boat coaching guidance: answer in Hebrew unless the user uses another "
         "language. Treat this message as still unfolding. Do not decide the user's single true "
         "point, summarize the conversation before they finish exploring, diagnose, or turn it into "
@@ -181,8 +188,14 @@ def build_lifeboat_coaching_prompt(user_text: str) -> str:
         "force or what it protects before suggesting a reframe. Keep the reply short and split into "
         "small readable bubbles when the platform supports it. Leave the choice with the user and do "
         "not pressure them. If the user signals immediate danger or self-harm, prioritize immediate "
-        "human support and safety guidance.]"
+        "human support and safety guidance.]\n\n"
+        f"{build_signal_guidance(user_text)}"
     )
+
+
+def build_lifeboat_coaching_prompt(user_text: str) -> str:
+    """Compatibility helper for callers that still need a single prompt string."""
+    return f"{str(user_text or '').strip()}\n\n{build_lifeboat_coaching_guidance(user_text)}"
 
 
 def arm_followup(

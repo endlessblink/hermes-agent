@@ -9807,20 +9807,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _quick_key = self._session_key_for_source(source)
         try:
             from gateway.lifeboat_followups import (
-                build_continuation_prompt,
-                build_lifeboat_coaching_prompt,
+                build_continuation_guidance,
+                build_lifeboat_coaching_guidance,
                 consume_followup_context,
                 is_lifeboat_source,
             )
 
-            if is_lifeboat_source(source):
+            if is_lifeboat_source(source) and not event.get_command():
                 reminder_context = consume_followup_context(
                     self._resolve_profile_home_for_source(source), _quick_key
                 )
                 if reminder_context and (event.text or "").strip():
-                    event.text = build_continuation_prompt(event.text, reminder_context)
+                    coaching_guidance = build_continuation_guidance(reminder_context, event.text)
                 elif (event.text or "").strip():
-                    event.text = build_lifeboat_coaching_prompt(event.text)
+                    coaching_guidance = build_lifeboat_coaching_guidance(event.text)
+                else:
+                    coaching_guidance = ""
+                if coaching_guidance:
+                    event.channel_prompt = "\n\n".join(
+                        part for part in (event.channel_prompt or "", coaching_guidance) if part
+                    )
         except Exception:
             logger.debug("Life-Boat follow-up cancellation failed", exc_info=True)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
@@ -19611,6 +19617,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            # Channel and turn guidance is intentionally ephemeral.  Cached
+            # agents still need the current turn's guidance refreshed here;
+            # this only changes the API-call suffix and leaves the stable
+            # session system prompt and transcript untouched.
+            agent.ephemeral_system_prompt = combined_ephemeral or None
 
             # Refresh on every turn because a cached agent can outlive route
             # configuration changes. Only the Telegram credential explicitly

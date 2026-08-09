@@ -11,6 +11,8 @@ from gateway.lifeboat_followups import (
     arm_achievement_prompt,
     arm_followup,
     build_continuation_prompt,
+    build_continuation_guidance,
+    build_lifeboat_coaching_guidance,
     build_lifeboat_coaching_prompt,
     cancel_followup,
     consume_followup_context,
@@ -72,6 +74,9 @@ def test_continuation_prompt_requires_one_contextual_next_step():
     assert "exactly one concrete next-step question" in prompt
     assert "do not diagnose" in prompt
     assert "do not pressure" in prompt
+    assert "כן" not in build_continuation_guidance(
+        {"context": "רוצה לבחור את הצעד הבא?", "language": "he"}
+    )
 
 
 def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
@@ -81,6 +86,7 @@ def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     assert "ask exactly one concise question" in prompt
     assert "before suggesting a reframe" in prompt
     assert "polished conclusion" in prompt
+    assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
 
 def test_plain_completed_answer_does_not_arm(tmp_path):
