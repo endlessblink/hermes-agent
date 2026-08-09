@@ -9809,18 +9809,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from gateway.lifeboat_followups import (
                 build_continuation_guidance,
                 build_lifeboat_coaching_guidance,
+                cancel_followup,
                 consume_followup_context,
                 is_lifeboat_source,
             )
+            from gateway.lifeboat_psychology import (
+                clear_lifeboat_trajectory,
+                record_lifeboat_trajectory,
+            )
 
-            if is_lifeboat_source(source) and not event.get_command():
+            _lifeboat_command = event.get_command()
+            if is_lifeboat_source(source) and _lifeboat_command == "new":
+                _lifeboat_profile_home = self._resolve_profile_home_for_source(source)
+                clear_lifeboat_trajectory(_lifeboat_profile_home, _quick_key)
+                cancel_followup(_lifeboat_profile_home, _quick_key)
+            if (
+                is_lifeboat_source(source)
+                and not _lifeboat_command
+                and (event.text or "").strip()
+            ):
+                _lifeboat_profile_home = self._resolve_profile_home_for_source(source)
+                _lifeboat_trajectory = record_lifeboat_trajectory(
+                    _lifeboat_profile_home,
+                    _quick_key,
+                    event.text,
+                )
                 reminder_context = consume_followup_context(
-                    self._resolve_profile_home_for_source(source), _quick_key
+                    _lifeboat_profile_home, _quick_key
                 )
                 if reminder_context and (event.text or "").strip():
-                    coaching_guidance = build_continuation_guidance(reminder_context, event.text)
+                    coaching_guidance = build_continuation_guidance(
+                        reminder_context,
+                        event.text,
+                        _lifeboat_trajectory,
+                    )
                 elif (event.text or "").strip():
-                    coaching_guidance = build_lifeboat_coaching_guidance(event.text)
+                    coaching_guidance = build_lifeboat_coaching_guidance(
+                        event.text,
+                        _lifeboat_trajectory,
+                    )
                 else:
                     coaching_guidance = ""
                 if coaching_guidance:

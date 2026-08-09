@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from gateway.config import GatewayConfig, Platform
 from gateway.delivery import DeliveryRouter, DeliveryTarget
-from gateway.lifeboat_psychology import build_signal_guidance
+from gateway.lifeboat_psychology import LifeBoatTrajectory, build_signal_guidance
 
 
 FIRST_DELAY = timedelta(hours=2)
@@ -145,7 +145,9 @@ def consume_followup_context(profile_home: Path, session_key: str) -> dict[str, 
 
 
 def build_continuation_guidance(
-    reminder_context: Mapping[str, str], user_text: str = ""
+    reminder_context: Mapping[str, str],
+    user_text: str = "",
+    trajectory: LifeBoatTrajectory | None = None,
 ) -> str:
     """Give ephemeral guidance without polluting the user's transcript."""
     language = str(reminder_context.get("language") or "en")
@@ -164,7 +166,7 @@ def build_continuation_guidance(
         "Use a coaching stance: reflect what was actually said, do not diagnose or state feelings "
         "as facts, leave the choice with the user, and do not pressure them to continue. "
         "If the user signals immediate danger or self-harm, prioritize immediate human support and safety guidance.]\n\n"
-        f"{build_signal_guidance(user_text)}"
+        f"{build_signal_guidance(user_text, trajectory)}"
     )
 
 
@@ -173,7 +175,10 @@ def build_continuation_prompt(user_text: str, reminder_context: Mapping[str, str
     return f"{str(user_text or '').strip()}\n\n{build_continuation_guidance(reminder_context, user_text)}"
 
 
-def build_lifeboat_coaching_guidance(user_text: str = "") -> str:
+def build_lifeboat_coaching_guidance(
+    user_text: str = "",
+    trajectory: LifeBoatTrajectory | None = None,
+) -> str:
     """Keep ordinary Life-Boat turns exploratory instead of prematurely conclusive."""
     return (
         "[Private Life-Boat coaching guidance: answer in Hebrew unless the user uses another "
@@ -189,7 +194,7 @@ def build_lifeboat_coaching_guidance(user_text: str = "") -> str:
         "small readable bubbles when the platform supports it. Leave the choice with the user and do "
         "not pressure them. If the user signals immediate danger or self-harm, prioritize immediate "
         "human support and safety guidance.]\n\n"
-        f"{build_signal_guidance(user_text)}"
+        f"{build_signal_guidance(user_text, trajectory)}"
     )
 
 

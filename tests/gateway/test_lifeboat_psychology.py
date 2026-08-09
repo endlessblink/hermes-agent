@@ -1,7 +1,11 @@
+import json
+
 from gateway.lifeboat_psychology import (
     LifeBoatSignals,
     build_signal_guidance,
     classify_lifeboat_signals,
+    clear_lifeboat_trajectory,
+    record_lifeboat_trajectory,
 )
 
 
@@ -26,3 +30,31 @@ def test_possible_crisis_prioritizes_direct_safety_and_human_support():
     assert "immediate danger" in guidance
     assert "local emergency/crisis support" in guidance
     assert "abstract coaching alone" in guidance
+
+
+def test_trajectory_keeps_only_bounded_signal_state(tmp_path):
+    first = record_lifeboat_trajectory(
+        tmp_path,
+        "telegram:life-advisor:123",
+        "I want to hurt myself and I can't stop thinking",
+    )
+    assert first.recent_crisis_turns == 3
+    assert first.recent_loop_turns == 3
+
+    state = json.loads((tmp_path / "state" / "lifeboat-psychology.json").read_text())
+    serialized = json.dumps(state)
+    assert "I want to hurt myself" not in serialized
+    assert "crisis" in serialized
+
+
+def test_recent_crisis_context_survives_a_short_follow_up(tmp_path):
+    trajectory = record_lifeboat_trajectory(tmp_path, "session", "I want to kill myself")
+    guidance = build_signal_guidance("yes", trajectory)
+    assert "possible safety concern appeared recently" in guidance
+    assert "safe right now" in guidance
+
+
+def test_session_reset_erases_trajectory(tmp_path):
+    record_lifeboat_trajectory(tmp_path, "session", "I feel hopeless")
+    assert clear_lifeboat_trajectory(tmp_path, "session")
+    assert not clear_lifeboat_trajectory(tmp_path, "session")
