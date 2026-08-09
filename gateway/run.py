@@ -9158,6 +9158,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         await self._safe_adapter_disconnect(adapter, platform)
                         continue
+                    if profile_name not in self._profiles_referenced_by_routes(platform):
+                        logger.info(
+                            "Profile '%s' has an already-owned %s credential but no "
+                            "explicit profile route; skipping its duplicate adapter",
+                            profile_name,
+                            platform.value,
+                        )
+                        await self._safe_adapter_disconnect(adapter, platform)
+                        continue
                     logger.error(
                         "Profile '%s' and '%s' both configure %s with the same "
                         "credential — refusing to start the duplicate (a single "

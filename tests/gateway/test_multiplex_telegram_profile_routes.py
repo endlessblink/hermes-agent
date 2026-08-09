@@ -195,6 +195,39 @@ async def test_same_token_route_binds_one_physical_adapter(monkeypatch):
     runner._safe_adapter_disconnect.assert_awaited_once_with(duplicate, Platform.TELEGRAM)
 
 
+@pytest.mark.asyncio
+async def test_unrouted_same_token_profile_is_skipped_without_error(monkeypatch, caplog):
+    owner_adapter = SimpleNamespace(token="same-token")
+    duplicate = SimpleNamespace(
+        token="same-token",
+        connect=AsyncMock(side_effect=AssertionError("must not poll twice")),
+        disconnect=AsyncMock(),
+    )
+    runner = _runner()
+    runner.adapters = {Platform.TELEGRAM: owner_adapter}
+    runner._profile_adapters = {}
+    profile_cfg = GatewayConfig(
+        multiplex_profiles=True,
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="same-token")},
+    )
+    monkeypatch.setattr("gateway.config.load_gateway_config", lambda: profile_cfg)
+    monkeypatch.setattr(runner, "_create_adapter", lambda _platform, _config: duplicate)
+    monkeypatch.setattr(runner, "_safe_adapter_disconnect", AsyncMock())
+    claimed = {
+        (Platform.TELEGRAM, runner._adapter_credential_fingerprint(owner_adapter)): "default"
+    }
+
+    with caplog.at_level("INFO"):
+        connected = await runner._start_one_profile_adapters(
+            "unrouted-profile", Path("/profiles/unrouted-profile"), claimed
+        )
+
+    assert connected == 0
+    assert "skipping its duplicate adapter" in caplog.text
+    assert "refusing to start the duplicate" not in caplog.text
+    duplicate.connect.assert_not_awaited()
+
+
 def test_primary_adapter_is_bound_to_routed_profile_before_polling(monkeypatch):
     runner = _runner()
     runner._profile_adapters = {}
