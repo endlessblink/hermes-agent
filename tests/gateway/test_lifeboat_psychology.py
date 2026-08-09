@@ -31,6 +31,7 @@ def test_possible_crisis_prioritizes_direct_safety_and_human_support():
     guidance = build_signal_guidance("I want to kill myself")
     assert "immediate danger" in guidance
     assert "local emergency/crisis support" in guidance
+    assert "ERAN 1201" in guidance
     assert "abstract coaching alone" in guidance
 
 

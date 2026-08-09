@@ -207,7 +207,7 @@ def build_signal_guidance(
     ]
     if signals.possible_crisis:
         parts.append(
-            "A possible immediate-safety signal is present. Prioritize a calm, direct check of whether the user is in immediate danger or may act on thoughts of self-harm, encourage contacting a trusted person and local emergency/crisis support, and do not leave the user with abstract coaching alone. Do not interrogate, shame, promise secrecy, or imply the assistant can keep them safe."
+            "A possible immediate-safety signal is present. Prioritize a calm, direct check of whether the user is in immediate danger or may act on thoughts of self-harm, encourage contacting a trusted person and local emergency/crisis support, and do not leave the user with abstract coaching alone. For an Israel-based user, ERAN 1201 is a human crisis-support option; otherwise ask the user's location or use the correct local emergency/crisis resource. Do not interrogate, shame, promise secrecy, or imply the assistant can keep them safe."
         )
     elif trajectory.recent_crisis_turns:
         parts.append(
