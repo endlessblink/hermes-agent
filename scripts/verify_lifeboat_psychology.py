@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import tempfile
 
+import yaml
+
 from gateway.lifeboat_psychology import (
     build_signal_guidance,
     classify_lifeboat_signals,
@@ -32,6 +34,28 @@ def main() -> int:
         if not installed.is_file() or _sha256(source) != _sha256(installed):
             print(f"FAIL source/installed mismatch: {relative}")
             return 1
+
+    live_config_path = Path("/home/endlessblink/.hermes/config.yaml")
+    if not live_config_path.is_file():
+        print("FAIL live Hermes config is missing")
+        return 1
+    live_config = yaml.safe_load(live_config_path.read_text(encoding="utf-8")) or {}
+    gateway = live_config.get("gateway") or {}
+    served = gateway.get("multiplex_served_profiles") or []
+    routes = gateway.get("profile_routes") or {}
+    topic_route = ((routes.get("telegram") or {}).get("topics") or {}).get(
+        "-1004230590253", {}
+    )
+    if "life-advisor" not in served or topic_route.get("2") != "life-advisor":
+        print("FAIL live Telegram topic 2 is not mapped to life-advisor")
+        return 1
+
+    profile_config_path = Path("/home/endlessblink/.hermes/profiles/life-advisor/config.yaml")
+    profile_config = yaml.safe_load(profile_config_path.read_text(encoding="utf-8")) or {}
+    channel_prompts = ((profile_config.get("telegram") or {}).get("channel_prompts") or {})
+    if "-1004230590253" not in channel_prompts or "602196268" not in channel_prompts:
+        print("FAIL live Life-Boat channel prompts are incomplete")
+        return 1
 
     cases = {
         "loop": "אני תקוע בלופ של ביקורת עצמית",
