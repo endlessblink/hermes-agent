@@ -57,6 +57,13 @@ def main() -> int:
         print("FAIL live Life-Boat channel prompts are incomplete")
         return 1
 
+    contract = source_root / "docs" / "lifeboat-psychology-architecture.md"
+    contract_text = contract.read_text(encoding="utf-8") if contract.is_file() else ""
+    for marker in ("## Safety contract", "## Memory boundary", "## Evaluation contract"):
+        if marker not in contract_text:
+            print(f"FAIL architecture contract missing {marker}")
+            return 1
+
     cases = {
         "loop": "אני תקוע בלופ של ביקורת עצמית",
         "depressive": "I feel hopeless and have no energy",
