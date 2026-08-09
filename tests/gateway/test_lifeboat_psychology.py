@@ -27,6 +27,13 @@ def test_signal_guidance_is_stance_specific_and_does_not_echo_user_text():
     assert text not in guidance
 
 
+def test_neutral_guidance_offers_permissioned_daily_summary_without_self_prompting():
+    guidance = build_signal_guidance("I think I am done for today")
+    assert "optional daily summary" in guidance
+    assert "ask permission" in guidance
+    assert "never start the summary" in guidance
+
+
 def test_possible_crisis_prioritizes_direct_safety_and_human_support():
     guidance = build_signal_guidance("I want to kill myself")
     assert "immediate danger" in guidance

@@ -13800,6 +13800,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         user message that arrives simultaneously is handled by the same
         queue and takes priority naturally.
         """
+        # A Life-Boat conversation must never generate autonomous follow-up
+        # turns. Synthetic goal prompts make the assistant appear to talk to
+        # itself and can repeatedly reopen emotionally sensitive threads.
+        try:
+            from gateway.lifeboat_followups import is_lifeboat_source
+            if is_lifeboat_source(source):
+                logger.info("goal continuation: suppressed for Life-Boat source")
+                return
+        except Exception:
+            pass
         try:
             from hermes_cli.goals import GoalManager
         except Exception as exc:

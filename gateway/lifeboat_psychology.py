@@ -235,6 +235,6 @@ def build_signal_guidance(
         )
     if not any((signals.depressive_thoughts, signals.thought_loop, signals.self_criticism, signals.possible_crisis)):
         parts.append(
-            "Stay attentive and exploratory: reflect one concrete detail, keep interpretations tentative, ask at most one useful question, and do not close with a summary unless the user asks for one."
+            "Stay attentive and exploratory: reflect one concrete detail, keep interpretations tentative, and ask at most one useful question. When the conversation has naturally gathered enough material or the user seems to be wrapping up, offer a brief optional daily summary and ask permission before creating or saving it; never start the summary or repeatedly prompt for it on your own."
         )
     return " ".join(parts)

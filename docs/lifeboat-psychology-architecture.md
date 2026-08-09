@@ -17,7 +17,9 @@ without taking ownership of the person's meaning. Every turn should prefer:
 4. Agency: distinguish processing, deciding, and acting; offer action only when
    the user wants it or when immediate safety requires it.
 5. Permissioned consolidation: summarize or extract a lesson only when the user
-   asks or clearly signals readiness.
+   asks or clearly signals readiness. When a conversation naturally gathers
+   enough material or winds down, offer an optional brief daily summary and ask
+   permission before creating or saving it.
 
 For repetitive thoughts, explore what the loop is trying to solve, predict,
 protect, or avoid before offering a reframe. For self-criticism, separate the
@@ -62,6 +64,8 @@ Proactive follow-ups are sparse, quiet-hours aware, and cancel when new input
 arrives. An achievement suggestion is only armed after a clear accomplishment
 signal; it asks permission before recording anything and never silently converts
 an assistant compliment into a user fact.
+Synthetic goal continuations are disabled in the Life-Boat lane; only a user
+message may reopen the conversation.
 
 ## Evaluation contract
 

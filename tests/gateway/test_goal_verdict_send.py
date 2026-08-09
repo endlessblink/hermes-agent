@@ -34,13 +34,14 @@ def hermes_home(tmp_path, monkeypatch):
     goals._DB_CACHE.clear()
 
 
-def _make_source() -> SessionSource:
+def _make_source(*, profile: str | None = None) -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
         user_id="u1",
         chat_id="c1",
         user_name="tester",
         chat_type="dm",
+        profile=profile,
     )
 
 
@@ -189,6 +190,26 @@ async def test_goal_verdict_skipped_when_no_active_goal(hermes_home):
         session_entry=session_entry,
         source=src,
         final_response="anything",
+    )
+    await asyncio.sleep(0.05)
+
+    assert adapter.sends == []
+    assert adapter._pending_messages == {}
+
+
+@pytest.mark.asyncio
+async def test_lifeboat_goal_never_enqueues_autonomous_continuation(hermes_home):
+    """Sensitive coaching sessions only continue after an actual user turn."""
+    from hermes_cli.goals import GoalManager
+
+    runner, adapter, session_entry, _ = _make_runner_with_adapter()
+    src = _make_source(profile="life-advisor")
+    GoalManager(session_entry.session_id).set("keep working on the plan")
+
+    await runner._post_turn_goal_continuation(
+        session_entry=session_entry,
+        source=src,
+        final_response="I made some progress.",
     )
     await asyncio.sleep(0.05)
 
