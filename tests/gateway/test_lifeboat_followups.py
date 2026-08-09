@@ -16,6 +16,7 @@ from gateway.lifeboat_followups import (
     build_lifeboat_coaching_prompt,
     cancel_followup,
     consume_followup_context,
+    filter_lifeboat_toolsets,
     is_lifeboat_source,
 )
 
@@ -29,6 +30,19 @@ def source(thread_id="2", profile="life-advisor"):
         profile=profile,
         thread_id=thread_id,
         chat_id="-1004230590253",
+    )
+
+
+def test_lifeboat_turns_do_not_block_on_interactive_clarify():
+    assert filter_lifeboat_toolsets(source(), ["memory", "clarify", "web"]) == [
+        "memory",
+        "web",
+    ]
+
+
+def test_other_sources_keep_clarify_available():
+    assert "clarify" in filter_lifeboat_toolsets(
+        source(thread_id="695", profile="office-work"), ["clarify"]
     )
 
 

@@ -81,6 +81,14 @@ def is_lifeboat_source(source: Any) -> bool:
     return profile == "life-advisor" or thread_id == "2"
 
 
+def filter_lifeboat_toolsets(source: Any, toolsets: Any) -> list[str]:
+    """Keep Telegram coaching turns non-blocking by removing interactive clarify."""
+    values = [str(value) for value in (toolsets or [])]
+    if not is_lifeboat_source(source):
+        return values
+    return [value for value in values if value != "clarify"]
+
+
 def _language_and_context(response: str) -> tuple[str, str] | None:
     text = " ".join(str(response or "").split()).strip()
     if not text or len(text) > 2500 or _ERROR_RE.search(text):
