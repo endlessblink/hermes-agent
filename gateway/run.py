@@ -12825,6 +12825,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
 
+            # Enforce the Life-Boat response contract at the actual delivery
+            # boundary.  Topic/profile routing can be restored during the agent
+            # turn (for example after compression), so a gate that runs only
+            # inside _run_agent_inner can miss a real Life-Boat message.
+            try:
+                from gateway.lifeboat_followups import (
+                    finalize_lifeboat_response,
+                    is_lifeboat_source,
+                    lifeboat_response_issues,
+                )
+                if is_lifeboat_source(source) and response and not _intentional_silence:
+                    _lifeboat_before = str(response)
+                    _lifeboat_user_text = str(message_text or "")
+                    _lifeboat_issues = lifeboat_response_issues(
+                        _lifeboat_before,
+                        _lifeboat_user_text,
+                    )
+                    response = finalize_lifeboat_response(
+                        self._resolve_profile_home_for_source(source),
+                        session_key or _quick_key,
+                        _lifeboat_before,
+                        _lifeboat_user_text,
+                    )
+                    if response != _lifeboat_before:
+                        logger.info(
+                            "Life-Boat delivery gate repaired draft issues=%s chars=%s->%s",
+                            ",".join(_lifeboat_issues),
+                            len(_lifeboat_before),
+                            len(response),
+                        )
+            except Exception:
+                logger.warning("Life-Boat delivery gate failed", exc_info=True)
+
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
@@ -20318,38 +20351,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
-            if _is_lifeboat_turn and final_response:
-                try:
-                    from gateway.lifeboat_followups import (
-                        finalize_lifeboat_response,
-                        lifeboat_response_issues,
-                    )
-                    _lifeboat_user_text = str(getattr(event, "text", "") or "")
-                    _lifeboat_issues = lifeboat_response_issues(
-                        str(final_response), _lifeboat_user_text,
-                    )
-                    _lifeboat_profile_home = self._resolve_profile_home_for_source(source)
-                    _checked_response = finalize_lifeboat_response(
-                        _lifeboat_profile_home,
-                        _approval_session_key,
-                        str(final_response),
-                        _lifeboat_user_text,
-                    )
-                    if _checked_response != str(final_response):
-                        logger.info(
-                            "Life-Boat response quality gate repaired draft issues=%s chars=%s->%s",
-                            ",".join(_lifeboat_issues),
-                            len(str(final_response)),
-                            len(_checked_response),
-                        )
-                        final_response = _checked_response
-                        result["final_response"] = final_response
-                    if _checked_response != str(final_response):
-                        logger.info("Life-Boat duplicate response replaced with an open turn")
-                        final_response = _checked_response
-                        result["final_response"] = final_response
-                except Exception:
-                    logger.debug("Life-Boat response quality gate failed", exc_info=True)
 
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0
