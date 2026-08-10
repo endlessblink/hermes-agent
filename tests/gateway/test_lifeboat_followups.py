@@ -17,6 +17,7 @@ from gateway.lifeboat_followups import (
     cancel_followup,
     consume_followup_context,
     ensure_lifeboat_open_response,
+    finalize_lifeboat_response,
     filter_lifeboat_toolsets,
     is_lifeboat_source,
     lifeboat_response_issues,
@@ -171,6 +172,16 @@ def test_repeated_response_repair_is_accountable_and_stays_open():
     )
     assert "חוזר על עצמי" in repaired
     assert repaired.count("?") == 1
+
+
+def test_finalize_response_applies_duplicate_guard_across_turns(tmp_path):
+    draft = "נשמע שהכול נהיה פסק דין על הערך שלך. מה הכי חי אצלך עכשיו?"
+    first = finalize_lifeboat_response(tmp_path, "session", draft, "אני מרגיש שהכול נהיה פסק דין")
+    second = finalize_lifeboat_response(tmp_path, "session", draft, "אני מרגיש שהכול נהיה פסק דין")
+
+    assert first == draft
+    assert "חוזר על עצמי" in second
+    assert second.count("?") == 1
 
 
 def test_topic_two_in_another_chat_is_not_lifeboat():

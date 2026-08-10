@@ -208,6 +208,19 @@ def repair_repeated_lifeboat_response(response: str, user_text: str = "") -> str
     return "I notice I am repeating myself, so I will not add another interpretation. What has changed since then, if anything?"
 
 
+def finalize_lifeboat_response(
+    profile_home: Path,
+    session_key: str,
+    response: str,
+    user_text: str = "",
+) -> str:
+    """Apply the complete bounded-response contract for one Life-Boat turn."""
+    checked = ensure_lifeboat_open_response(response, user_text)
+    if record_lifeboat_response_fingerprint(profile_home, session_key, checked):
+        return repair_repeated_lifeboat_response(checked, user_text)
+    return checked
+
+
 def _now(value: datetime | None = None) -> datetime:
     result = value or datetime.now(timezone.utc)
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
