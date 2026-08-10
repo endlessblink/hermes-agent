@@ -19,6 +19,7 @@ from gateway.lifeboat_psychology import (
     LifeBoatTrajectory,
     build_signal_guidance,
     classify_lifeboat_signals,
+    record_lifeboat_response_fingerprint,
     record_lifeboat_trajectory,
     select_lifeboat_turn_policy,
 )
@@ -106,8 +107,11 @@ def is_lifeboat_source(source: Any) -> bool:
     if getattr(getattr(source, "platform", None), "value", source.platform) != Platform.TELEGRAM.value:
         return False
     profile = str(getattr(source, "profile", "") or "").strip().lower()
+    chat_id = str(getattr(source, "chat_id", "") or "").strip()
     thread_id = str(getattr(source, "thread_id", "") or "").strip()
-    return profile == "life-advisor" or thread_id == "2"
+    # Thread IDs are only unique inside one Telegram chat; never classify an
+    # unrelated profile's topic 2 as the user's private support instance.
+    return profile == "life-advisor" or (chat_id == "-1004230590253" and thread_id == "2")
 
 
 def filter_lifeboat_toolsets(source: Any, toolsets: Any) -> list[str]:
@@ -143,6 +147,9 @@ def lifeboat_response_issues(response: str, user_text: str = "") -> tuple[str, .
     issues: list[str] = []
     if len(text) > policy.max_chars:
         issues.append("too_long")
+    sentence_count = len([part for part in _SENTENCE_RE.findall(text) if part.strip()])
+    if sentence_count > policy.max_sentences:
+        issues.append("too_many_sentences")
     question_count = len(_QUESTION_RE.findall(text))
     if question_count > 1:
         issues.append("too_many_questions")
@@ -183,12 +190,35 @@ def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
         return text[: policy.max_chars].rstrip()
     sentences = [part.strip() for part in _SENTENCE_RE.findall(text) if part.strip()]
     usable_sentences = [part for part in sentences if not _CLOSURE_RE.search(part)]
-    base = " ".join(usable_sentences[:2]).strip()
+    base = " ".join(usable_sentences[: max(1, policy.max_sentences - 1)]).strip()
     if not base:
         base = "אני איתך בזה לרגע."
     door = _lifeboat_open_door(user_text)
     budget = max(120, policy.max_chars - len(door) - 2)
     return f"{base[:budget].rstrip()}\n\n{door}"
+
+
+def repair_repeated_lifeboat_response(response: str, user_text: str = "") -> str:
+    """Replace a repeated non-safety draft with a brief accountable opening."""
+    policy = select_lifeboat_turn_policy(user_text)
+    if policy.mode == "user-led-close" or classify_lifeboat_signals(user_text).possible_crisis:
+        return response
+    if _HEBREW_RE.search(user_text):
+        return "שמתי לב שאני חוזר על עצמי, אז לא אוסיף עוד פרשנות. מה השתנה מאז, אם בכלל?"
+    return "I notice I am repeating myself, so I will not add another interpretation. What has changed since then, if anything?"
+
+
+def finalize_lifeboat_response(
+    profile_home: Path,
+    session_key: str,
+    response: str,
+    user_text: str = "",
+) -> str:
+    """Apply the complete bounded-response contract for one Life-Boat turn."""
+    checked = ensure_lifeboat_open_response(response, user_text)
+    if record_lifeboat_response_fingerprint(profile_home, session_key, checked):
+        return repair_repeated_lifeboat_response(checked, user_text)
+    return checked
 
 
 def _now(value: datetime | None = None) -> datetime:
@@ -256,7 +286,7 @@ def build_continuation_guidance(
     wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
     return (
         f"[Private Life-Boat guidance: mode={policy.mode}; {language_rule}; "
-        f"keep it under about {policy.max_chars} characters. The topic was: {context}. "
+        f"keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. The topic was: {context}. "
         f"The user is replying to a reminder. Use one concrete detail from the user's new message, reflect it as a "
         "tentative hypothesis, and leave the user in control. "
         f"{question_rule} Do not diagnose, summarize the whole situation, give a lesson, list options, "
@@ -285,7 +315,7 @@ def build_lifeboat_coaching_guidance(
     wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
     return (
         f"[Private Life-Boat guidance: mode={policy.mode}, answer in Hebrew unless the user uses "
-        f"another language, and keep it under about {policy.max_chars} characters. Choose one concrete "
+        f"another language, and keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. Choose one concrete "
         "detail the user actually gave; reflect it tentatively, never as a verdict or diagnosis. "
         f"{question_rule} Do not close the meaning, give a lesson, list interpretations, use generic "
         "reassurance, or tell the user what they should feel. If the user asks for action, offer one "

@@ -55,13 +55,18 @@ The trajectory store may contain only:
 
 - an opaque session key;
 - bounded counters for recent crisis, depressive, loop, and self-criticism cues;
+- short-lived hashes of recent assistant drafts, used only to detect an exact
+  repeated reply within the same session;
 - an update timestamp.
 
 It must never contain the user's wording, transcript excerpts, diagnosis,
 personality judgment, or inferred identity. State expires after 72 hours, is
-bounded to a fixed number of sessions, and is erased when the user starts a new
-Life-Boat session. Durable memory requires separate, explicit consent for the
-exact fact or summary being saved.
+bounded to a fixed number of sessions, and the response-hash ledger expires
+after 24 hours and is bounded to 24 entries. Both are erased when the user
+starts a new Life-Boat session. If a non-safety draft repeats, the assistant
+acknowledges the repetition and opens a new turn; explicit pauses and crisis
+responses are not overwritten by this repair. Durable memory requires separate,
+explicit consent for the exact fact or summary being saved.
 
 Direct writes to Obsidian are blocked in the Life-Boat lane. The assistant must
 show the exact short summary, ask for explicit approval, and only then use an

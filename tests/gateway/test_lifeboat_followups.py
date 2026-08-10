@@ -17,10 +17,12 @@ from gateway.lifeboat_followups import (
     cancel_followup,
     consume_followup_context,
     ensure_lifeboat_open_response,
+    finalize_lifeboat_response,
     filter_lifeboat_toolsets,
     is_lifeboat_source,
     lifeboat_response_issues,
     prepare_lifeboat_inbound_guidance,
+    repair_repeated_lifeboat_response,
 )
 
 
@@ -32,12 +34,12 @@ def enable_delayed_followups_for_legacy_queue_tests(monkeypatch):
     monkeypatch.setenv("LIFEBOAT_PROACTIVE_FOLLOWUPS", "1")
 
 
-def source(thread_id="2", profile="life-advisor"):
+def source(thread_id="2", profile="life-advisor", chat_id="-1004230590253"):
     return SimpleNamespace(
         platform=SimpleNamespace(value="telegram"),
         profile=profile,
         thread_id=thread_id,
-        chat_id="-1004230590253",
+        chat_id=chat_id,
     )
 
 
@@ -143,9 +145,47 @@ def test_response_repair_keeps_one_thread_and_opens_the_door():
     assert "לופ" in repaired or "סטנדרט" in repaired
 
 
+def test_response_repair_trims_a_mountain_even_when_it_has_one_question():
+    draft = (
+        "אני שומע כמה זה כבד. אולי זה קשור לערך שלך. "
+        "זה מתחבר גם לעבודה וגם לזוגיות. אולי אתה נושא את זה לבד. "
+        "יכול להיות שכל תגובה נהיית פסק דין. אולי זה מפעיל פחד ישן. "
+        "מה הכי נוכח אצלך עכשיו?"
+    )
+    repaired = ensure_lifeboat_open_response(draft, "אני מרגיש קבור תחת מחשבות")
+
+    assert len(repaired) <= 720
+    assert repaired.count("?") == 1
+    assert len(repaired.split(".")) <= 5
+    assert "מה הכי חי אצלך עכשיו, אם בכלל" in repaired
+
+
 def test_response_repair_does_not_reopen_an_explicit_pause():
     draft = "שמחה שהצלחנו לגעת בזה. נעצור להיום."
     assert ensure_lifeboat_open_response(draft, "זה עזר לי, נעצור להיום") == draft
+
+
+def test_repeated_response_repair_is_accountable_and_stays_open():
+    repaired = repair_repeated_lifeboat_response(
+        "נשמע שהכול נהיה פסק דין על הערך שלך.",
+        "אני מרגיש שהכול נהיה פסק דין",
+    )
+    assert "חוזר על עצמי" in repaired
+    assert repaired.count("?") == 1
+
+
+def test_finalize_response_applies_duplicate_guard_across_turns(tmp_path):
+    draft = "נשמע שהכול נהיה פסק דין על הערך שלך. מה הכי חי אצלך עכשיו?"
+    first = finalize_lifeboat_response(tmp_path, "session", draft, "אני מרגיש שהכול נהיה פסק דין")
+    second = finalize_lifeboat_response(tmp_path, "session", draft, "אני מרגיש שהכול נהיה פסק דין")
+
+    assert first == draft
+    assert "חוזר על עצמי" in second
+    assert second.count("?") == 1
+
+
+def test_topic_two_in_another_chat_is_not_lifeboat():
+    assert not is_lifeboat_source(source(chat_id="-1009999999999", profile="office-work"))
 
 
 def test_inbound_guidance_updates_trajectory_and_consumes_pending_context(tmp_path):

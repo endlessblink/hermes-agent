@@ -5,6 +5,7 @@ from gateway.lifeboat_psychology import (
     build_signal_guidance,
     classify_lifeboat_signals,
     clear_lifeboat_trajectory,
+    record_lifeboat_response_fingerprint,
     record_lifeboat_trajectory,
     select_lifeboat_turn_policy,
 )
@@ -75,8 +76,21 @@ def test_recent_low_energy_guidance_does_not_present_a_support_menu(tmp_path):
 
 def test_session_reset_erases_trajectory(tmp_path):
     record_lifeboat_trajectory(tmp_path, "session", "I feel hopeless")
+    record_lifeboat_response_fingerprint(tmp_path, "session", "same reply")
     assert clear_lifeboat_trajectory(tmp_path, "session")
+    state = json.loads((tmp_path / "state" / "lifeboat-psychology.json").read_text())
+    assert not state.get("response_fingerprints")
     assert not clear_lifeboat_trajectory(tmp_path, "session")
+
+
+def test_response_ledger_detects_only_recent_same_session_duplicates(tmp_path):
+    assert not record_lifeboat_response_fingerprint(tmp_path, "session", "same reply")
+    assert record_lifeboat_response_fingerprint(tmp_path, "session", "same reply")
+    assert not record_lifeboat_response_fingerprint(tmp_path, "other", "same reply")
+    state = json.loads((tmp_path / "state" / "lifeboat-psychology.json").read_text())
+    serialized = json.dumps(state)
+    assert "same reply" not in serialized
+    assert len(state["response_fingerprints"]) <= 24
 
 
 def test_turn_policy_adapts_to_safety_action_sharing_and_pause():

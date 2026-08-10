@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -54,6 +55,8 @@ _ACTION_RE = re.compile(
 )
 _TRAJECTORY_TTL = timedelta(hours=72)
 _TRAJECTORY_MAX_SESSIONS = 256
+_RESPONSE_FINGERPRINT_TTL = timedelta(hours=24)
+_RESPONSE_FINGERPRINT_MAX = 24
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,7 @@ class LifeBoatTurnPolicy:
     mode: str
     max_chars: int
     ask_one_open_question: bool
+    max_sentences: int = 4
 
 
 def select_lifeboat_turn_policy(text: str | None) -> LifeBoatTurnPolicy:
@@ -90,14 +94,14 @@ def select_lifeboat_turn_policy(text: str | None) -> LifeBoatTurnPolicy:
     value = " ".join(str(text or "").split()).strip()
     signals = classify_lifeboat_signals(value)
     if signals.possible_crisis:
-        return LifeBoatTurnPolicy("safety", 700, True)
+        return LifeBoatTurnPolicy("safety", 700, True, 6)
     if _WRAP_RE.search(value):
-        return LifeBoatTurnPolicy("user-led-close", 420, False)
+        return LifeBoatTurnPolicy("user-led-close", 420, False, 3)
     if _ACTION_RE.search(value) or value.endswith(("?", "？")) and len(value) < 180:
-        return LifeBoatTurnPolicy("act-or-clarify", 800, True)
+        return LifeBoatTurnPolicy("act-or-clarify", 800, True, 5)
     if len(value) < 90:
-        return LifeBoatTurnPolicy("attune", 480, True)
-    return LifeBoatTurnPolicy("explore", 720, True)
+        return LifeBoatTurnPolicy("attune", 480, True, 3)
+    return LifeBoatTurnPolicy("explore", 720, True, 4)
 
 
 def _trajectory_path(profile_home: Path) -> Path:
@@ -214,9 +218,70 @@ def clear_lifeboat_trajectory(profile_home: Path, session_key: str) -> bool:
         state = _load_trajectory_state(path)
         sessions = state.setdefault("sessions", {})
         removed = sessions.pop(key, None) is not None
-        if removed:
+        fingerprints = state.get("response_fingerprints")
+        ledger_removed = False
+        if isinstance(fingerprints, list):
+            retained = [
+                entry for entry in fingerprints
+                if not isinstance(entry, dict) or entry.get("session_key") != key
+            ]
+            ledger_removed = len(retained) != len(fingerprints)
+            state["response_fingerprints"] = retained
+        if removed or ledger_removed:
             _save_trajectory_state(path, state)
-        return removed
+        return removed or ledger_removed
+
+
+def record_lifeboat_response_fingerprint(
+    profile_home: Path,
+    session_key: str,
+    response: str | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Remember only response hashes and report an exact recent duplicate.
+
+    The ledger prevents a model or delivery retry from repeating the same
+    emotional monologue while keeping both user and assistant wording out of
+    durable state.
+    """
+    value = " ".join(str(response or "").split()).strip().casefold()
+    if not value:
+        return False
+    checked_at = now or datetime.now(timezone.utc)
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    fingerprint = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    key = str(session_key)
+    with _trajectory_lock(profile_home) as path:
+        state = _load_trajectory_state(path)
+        entries = state.setdefault("response_fingerprints", [])
+        kept: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                updated_at = datetime.fromisoformat(str(entry.get("updated_at")))
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if checked_at - updated_at <= _RESPONSE_FINGERPRINT_TTL:
+                kept.append(entry)
+        duplicate = any(
+            entry.get("session_key") == key and entry.get("fingerprint") == fingerprint
+            for entry in kept
+        )
+        kept.append(
+            {
+                "updated_at": checked_at.isoformat(),
+                "session_key": key,
+                "fingerprint": fingerprint,
+            }
+        )
+        state["response_fingerprints"] = kept[-_RESPONSE_FINGERPRINT_MAX:]
+        _save_trajectory_state(path, state)
+    return duplicate
 
 
 def classify_lifeboat_signals(text: str | None) -> LifeBoatSignals:

@@ -20321,15 +20321,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _is_lifeboat_turn and final_response:
                 try:
                     from gateway.lifeboat_followups import (
-                        ensure_lifeboat_open_response,
+                        finalize_lifeboat_response,
                         lifeboat_response_issues,
                     )
                     _lifeboat_user_text = str(getattr(event, "text", "") or "")
                     _lifeboat_issues = lifeboat_response_issues(
                         str(final_response), _lifeboat_user_text,
                     )
-                    _checked_response = ensure_lifeboat_open_response(
-                        str(final_response), _lifeboat_user_text,
+                    _lifeboat_profile_home = self._resolve_profile_home_for_source(source)
+                    _checked_response = finalize_lifeboat_response(
+                        _lifeboat_profile_home,
+                        _approval_session_key,
+                        str(final_response),
+                        _lifeboat_user_text,
                     )
                     if _checked_response != str(final_response):
                         logger.info(
@@ -20338,6 +20342,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             len(str(final_response)),
                             len(_checked_response),
                         )
+                        final_response = _checked_response
+                        result["final_response"] = final_response
+                    if _checked_response != str(final_response):
+                        logger.info("Life-Boat duplicate response replaced with an open turn")
                         final_response = _checked_response
                         result["final_response"] = final_response
                 except Exception:
