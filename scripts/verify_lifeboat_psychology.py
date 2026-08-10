@@ -47,7 +47,7 @@ def main() -> int:
         "agent.lifeboat_mode = is_lifeboat_source(source)",
         "goal continuation: suppressed for Life-Boat source",
         "arm_lifeboat_prompts(",
-        "ensure_lifeboat_open_response",
+        "finalize_lifeboat_response",
         "record_lifeboat_response_fingerprint",
         "repair_repeated_lifeboat_response",
         "_streaming_enabled = False",
