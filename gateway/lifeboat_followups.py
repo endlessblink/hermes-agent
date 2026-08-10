@@ -14,7 +14,11 @@ from zoneinfo import ZoneInfo
 
 from gateway.config import GatewayConfig, Platform
 from gateway.delivery import DeliveryRouter, DeliveryTarget
-from gateway.lifeboat_psychology import LifeBoatTrajectory, build_signal_guidance
+from gateway.lifeboat_psychology import (
+    LifeBoatTrajectory,
+    build_signal_guidance,
+    classify_lifeboat_signals,
+)
 
 
 FIRST_DELAY = timedelta(hours=2)
@@ -289,10 +293,15 @@ def arm_lifeboat_prompts(
     source: Any,
     response: str,
     *,
+    user_text: str = "",
     now: datetime | None = None,
 ) -> dict[str, bool]:
     """Arm all proactive Life-Boat prompts and expose their outcomes for tests/logs."""
     if not is_lifeboat_source(source):
+        return {"followup": False, "achievement": False}
+    if classify_lifeboat_signals(user_text).possible_crisis:
+        # A safety-sensitive turn must not fall back into a routine reminder
+        # queue; any further contact should be an explicit safety decision.
         return {"followup": False, "achievement": False}
     return {
         "followup": arm_followup(profile_home, session_key, source, response, now=now),

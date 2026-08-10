@@ -11198,6 +11198,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 _quick_key,
                                 event.source,
                                 _final_text,
+                                user_text=event.text or "",
                             )
                             logger.info(
                                 "Life-Boat proactive scheduling followup=%s achievement=%s",

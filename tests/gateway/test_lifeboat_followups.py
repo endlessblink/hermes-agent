@@ -121,6 +121,19 @@ def test_proactive_scheduler_contract_arms_the_real_queue(tmp_path):
     assert '"kind": "achievement"' in (tmp_path / "state" / "lifeboat-followups.json").read_text()
 
 
+def test_crisis_turn_does_not_arm_routine_proactive_prompts(tmp_path):
+    outcomes = arm_lifeboat_prompts(
+        tmp_path,
+        "session",
+        source(),
+        "Are you safe right now? You can contact ERAN 1201.",
+        user_text="I might hurt myself tonight",
+        now=NOW,
+    )
+    assert outcomes == {"followup": False, "achievement": False}
+    assert not (tmp_path / "state" / "lifeboat-followups.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_bridge_sends_first_then_schedules_second(tmp_path):
     arm_followup(tmp_path, "session", source(), "Which option should I use?", now=NOW)

@@ -43,6 +43,7 @@ def main() -> int:
         "agent.lifeboat_mode = is_lifeboat_source(source)",
         "goal continuation: suppressed for Life-Boat source",
         "arm_lifeboat_prompts(",
+        "user_text=event.text or \"\"",
     ):
         if marker not in runtime_text:
             print(f"FAIL Life-Boat runtime integration missing {marker!r}")
