@@ -345,6 +345,8 @@ $activeGatewayProfile.subscribe(value => {
 export const $gatewaySwapTarget = atom<string | null>(null)
 
 let gatewaySwitch: Promise<void> | null = null
+const GATEWAY_SWITCH_TIMEOUT_MS = 15_000
+let connectionSyncGeneration = 0
 
 // Keep the renderer's $connection (mode / baseUrl / profile) in lockstep with
 // the profile the live gateway is now on. $connection seeds from the PRIMARY
@@ -358,7 +360,7 @@ let gatewaySwitch: Promise<void> | null = null
 // browser and /api/media fetches targeted the wrong machine (#46651).
 // Best-effort: a failed descriptor fetch leaves the prior connection intact for
 // boot/reconnect to resync.
-async function syncConnectionToActiveProfile(profile: string): Promise<void> {
+async function syncConnectionToActiveProfile(profile: string, generation: number): Promise<void> {
   const getConnection = window.hermesDesktop?.getConnection
 
   if (!getConnection) {
@@ -366,7 +368,14 @@ async function syncConnectionToActiveProfile(profile: string): Promise<void> {
   }
 
   try {
-    setConnection(await getConnection(profile))
+    const connection = await getConnection(profile)
+
+    if (
+      generation === connectionSyncGeneration &&
+      normalizeProfileKey($activeGatewayProfile.get()) === normalizeProfileKey(profile)
+    ) {
+      setConnection(connection)
+    }
   } catch {
     // Leave the prior connection in place; boot/reconnect resyncs it later.
   }
@@ -413,7 +422,24 @@ export async function ensureGatewayProfile(
   gatewaySwitch = (async () => {
     // ensureGatewayForProfile opens (or reuses) the target's socket and points
     // the active gateway at it — without closing the profile you came from.
-    await ensureGatewayForProfile(target)
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const activation = ensureGatewayForProfile(target)
+
+    const timedOut = await Promise.race([
+      activation.then(() => false),
+      new Promise<true>(resolve => {
+        timeout = setTimeout(() => resolve(true), GATEWAY_SWITCH_TIMEOUT_MS)
+      })
+    ])
+
+    if (timeout !== undefined) {
+      clearTimeout(timeout)
+    }
+
+    if (timedOut) {
+      void activation.catch(() => undefined)
+    }
+
     const priorPreservedActivation = preservedProfileScopeActivation
 
     if (options.preserveSelectedScope) {
@@ -426,9 +452,12 @@ export async function ensureGatewayProfile(
       preservedProfileScopeActivation = priorPreservedActivation
     }
 
-    // The active backend just changed; resync $connection so remote-aware
-    // paths (image.attach_bytes vs image.attach, /api/fs/*, /api/media) follow.
-    await syncConnectionToActiveProfile(target)
+    // The gateway is usable now. Descriptor sync is best-effort metadata and
+    // must not keep the user behind the waking overlay if its IPC call hangs.
+    // A generation guard also prevents a late response from an older profile
+    // from overwriting the descriptor for the profile now in view.
+    const generation = ++connectionSyncGeneration
+    void syncConnectionToActiveProfile(target, generation)
   })()
 
   try {

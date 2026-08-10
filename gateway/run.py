@@ -1539,11 +1539,18 @@ def _start_secondary_profile_cron_schedulers(
     )
     schedulers = []
     for profile_name, profile_home in profiles:
-        if profile_name == active or profile_name != "office-work":
+        # Named profiles keep their own cron state and delivery adapters.  The
+        # Life-Boat scheduler must run here as well as the legacy office-work
+        # scheduler; otherwise its job is visible and enabled but never ticks
+        # in the live multiplexed gateway.
+        if profile_name == active or profile_name not in {"office-work", "life-advisor"}:
             continue
         with _profile_runtime_scope(profile_home):
             provider = resolve_provider()
-        adapters = getattr(runner, "_profile_adapters", {}).get(profile_name) or {}
+        adapters = (
+            getattr(runner, "_profile_adapters", {}).get(profile_name)
+            or getattr(runner, "adapters", {})
+        )
         kwargs = {"adapters": adapters, "loop": loop}
         if isinstance(provider, InProcessCronScheduler):
             kwargs["can_dispatch"] = lambda: not (
@@ -1556,7 +1563,10 @@ def _start_secondary_profile_cron_schedulers(
             kwargs=kwargs,
         ):
             with _profile_runtime_scope(profile_home):
-                provider.start(stop_event, **kwargs)
+                from cron.jobs import use_cron_store
+
+                with use_cron_store(profile_home):
+                    provider.start(stop_event, **kwargs)
 
         thread = threading.Thread(
             target=run_scoped,
@@ -2971,6 +2981,15 @@ async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None
             getattr(adapter, "name", type(adapter).__name__),
             exc_info=True,
         )
+
+
+def _is_dedicated_personal_assistant_source(source: SessionSource) -> bool:
+    """Identify the Telegram credential route owned by the PA profile."""
+
+    return bool(
+        source.platform == Platform.TELEGRAM
+        and str(getattr(source, "profile", None) or "").strip() == "office-work"
+    )
 
 
 class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
@@ -5542,7 +5561,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # creating a session.  The busy path must enforce the same check;
         # otherwise unauthorized users in shared threads (Slack/Telegram/Discord)
         # can inject messages into an active session they don't own.
-        if not self._is_user_authorized(event.source):
+        if not self._is_user_authorized_in_event_scope(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
                 "user=%s (%s), platform=%s, session=%s",
@@ -7371,6 +7390,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
             adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
             adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
+            self._configure_personal_assistant_interview_commit(
+                adapter, self._active_profile_name()
+            )
             adapter._busy_text_mode = self._busy_text_mode
             
             # Try to connect
@@ -7574,6 +7596,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._running = True
         self._update_runtime_status("running")
         self._start_personal_assistant_telegram_monitor_bridge(_hermes_home)
+        self._start_lifeboat_followup_bridge(_hermes_home)
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -8157,6 +8180,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             return "default"
 
+    def _personal_assistant_interview_controller(self, profile_name: str):
+        """Resolve the one durable interview controller shared by PA clients."""
+        from agent.personal_assistant_interview import PlanningInterviewController
+        from agent.personal_assistant_state import PersonalAssistantStateStore
+        from hermes_cli.profiles import get_profile_dir
+
+        return PlanningInterviewController(
+            PersonalAssistantStateStore(get_profile_dir(profile_name))
+        )
+
+    def _make_personal_assistant_interview_commit_callback(
+        self,
+        default_profile: str | None,
+    ):
+        """Build a Telegram commit handler scoped to the office-work profile."""
+        async def commit(payload: dict[str, Any]) -> dict[str, Any]:
+            request = dict(payload)
+            profile = str(request.pop("profile", None) or default_profile or "").strip()
+            if profile != "office-work":
+                raise ValueError(
+                    "Personal Assistant interview commits require the office-work profile"
+                )
+            return self._personal_assistant_interview_controller(profile).respond(request)
+
+        return commit
+
+    def _configure_personal_assistant_interview_commit(
+        self,
+        adapter: Any,
+        default_profile: str | None,
+    ) -> None:
+        setter = getattr(adapter, "set_hermes_ui_commit_callback", None)
+        if callable(setter):
+            setter(
+                self._make_personal_assistant_interview_commit_callback(default_profile)
+            )
+
     def _start_personal_assistant_telegram_monitor_bridge(
         self,
         profile_home: "Path",
@@ -8220,6 +8280,53 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
         logger.info("Personal-assistant Telegram monitor bridge started")
+        return True
+
+    def _start_lifeboat_followup_bridge(self, profile_home: "Path") -> bool:
+        """Schedule durable follow-ups for the Life-Boat Telegram profile."""
+        owner_profile = self._active_profile_name()
+        owner_home = profile_home
+        if owner_profile != "life-advisor":
+            if not getattr(self.config, "multiplex_profiles", False):
+                return False
+            from hermes_cli.profiles import profiles_to_serve
+
+            served = profiles_to_serve(
+                multiplex=True,
+                served_profiles=getattr(self.config, "multiplex_served_profiles", None),
+            )
+            owner_home = next(
+                (home for name, home in served if name == "life-advisor"),
+                None,
+            )
+            if owner_home is None:
+                return False
+
+        followup_router = self.delivery_router
+        if Platform.TELEGRAM not in followup_router.adapters:
+            profile_adapters = getattr(self, "_profile_adapters", {})
+            shared_adapter = (
+                profile_adapters.get("life-advisor", {}).get(Platform.TELEGRAM)
+                or profile_adapters.get("office-work", {}).get(Platform.TELEGRAM)
+            )
+            if shared_adapter is None:
+                return False
+            followup_router = DeliveryRouter(
+                self.config,
+                adapters={Platform.TELEGRAM: shared_adapter},
+            )
+
+        from gateway.lifeboat_followups import LifeBoatFollowupBridge
+
+        bridge = LifeBoatFollowupBridge(owner_home, followup_router)
+        task = asyncio.create_task(bridge.run(lambda: self._running))
+        self._lifeboat_followup_bridge = bridge
+        self._lifeboat_followup_task = task
+        background_tasks = getattr(self, "_background_tasks", None)
+        if background_tasks is not None:
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
+        logger.info("Life-Boat Telegram follow-up bridge started")
         return True
 
     # ── Kanban board watchers ───────────────────────────────────────────
@@ -8303,6 +8410,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
                     adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
                     adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
+                    self._configure_personal_assistant_interview_commit(
+                        adapter, self._active_profile_name()
+                    )
                     adapter._busy_text_mode = self._busy_text_mode
 
                     # Reconnect after an outage: preserve the platform's
@@ -9058,6 +9168,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         await self._safe_adapter_disconnect(adapter, platform)
                         continue
+                    if profile_name not in self._profiles_referenced_by_routes(platform):
+                        logger.info(
+                            "Profile '%s' has an already-owned %s credential but no "
+                            "explicit profile route; skipping its duplicate adapter",
+                            profile_name,
+                            platform.value,
+                        )
+                        await self._safe_adapter_disconnect(adapter, platform)
+                        continue
                     logger.error(
                         "Profile '%s' and '%s' both configure %s with the same "
                         "credential — refusing to start the duplicate (a single "
@@ -9081,6 +9200,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_authorization_check(
                 self._make_adapter_auth_check(adapter.platform, profile_name=profile_name)
             )
+            self._configure_personal_assistant_interview_commit(adapter, profile_name)
             adapter._busy_text_mode = self._busy_text_mode
 
             try:
@@ -9276,6 +9396,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source.profile = profile
         with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
             return self._is_user_authorized(source)
+
+    def _is_user_authorized_in_event_scope(self, source: SessionSource) -> bool:
+        """Run user authorization inside the event profile scope when multiplexing."""
+        if getattr(self, "config", None) is not None and getattr(
+            self.config, "multiplex_profiles", False
+        ):
+            with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+                return self._is_user_authorized(source)
+        return self._is_user_authorized(source)
 
     async def _handle_routed_message(self, event: MessageEvent) -> Optional[str]:
         """Stamp and scope a shared-adapter event before hooks, auth, or sessions."""
@@ -9640,10 +9769,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # chat-scoped allowlist (e.g. TELEGRAM_GROUP_ALLOWED_CHATS
             # authorizes every member of the listed chat regardless of
             # sender). Defer to _is_user_authorized so that path runs.
-            if not self._is_user_authorized(source):
+            if not self._is_user_authorized_in_event_scope(source):
                 logger.debug("Ignoring message with no user_id from %s", source.platform.value)
                 return None
-        elif not self._is_user_authorized(source):
+        elif not self._is_user_authorized_in_event_scope(source):
             logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
             # In DMs: offer pairing code. In groups: silently ignore.
             if (
@@ -9695,6 +9824,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        try:
+            from gateway.lifeboat_followups import (
+                cancel_followup,
+                is_lifeboat_source,
+                prepare_lifeboat_inbound_guidance,
+            )
+            from gateway.lifeboat_psychology import clear_lifeboat_trajectory
+
+            _lifeboat_command = event.get_command()
+            if is_lifeboat_source(source) and _lifeboat_command == "new":
+                _lifeboat_profile_home = self._resolve_profile_home_for_source(source)
+                clear_lifeboat_trajectory(_lifeboat_profile_home, _quick_key)
+                cancel_followup(_lifeboat_profile_home, _quick_key)
+            if (
+                is_lifeboat_source(source)
+                and not _lifeboat_command
+                and (event.text or "").strip()
+            ):
+                _lifeboat_profile_home = self._resolve_profile_home_for_source(source)
+                _coaching_guidance = prepare_lifeboat_inbound_guidance(
+                    _lifeboat_profile_home,
+                    _quick_key,
+                    event.text,
+                )
+                if _coaching_guidance:
+                    event.channel_prompt = "\n\n".join(
+                        part for part in (event.channel_prompt or "", _coaching_guidance) if part
+                    )
+        except Exception:
+            logger.debug("Life-Boat follow-up cancellation failed", exc_info=True)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -11017,6 +11176,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             source=source,
                             final_response=_final_text,
                         )
+                    try:
+                        from gateway.lifeboat_followups import arm_lifeboat_prompts
+
+                        if getattr(event.source, "profile", "") == "life-advisor" or getattr(
+                            event.source, "thread_id", None
+                        ) == "2":
+                            outcomes = arm_lifeboat_prompts(
+                                self._resolve_profile_home_for_source(event.source),
+                                _quick_key,
+                                event.source,
+                                _final_text,
+                                user_text=event.text or "",
+                            )
+                            logger.info(
+                                "Life-Boat proactive scheduling followup=%s achievement=%s",
+                                outcomes["followup"],
+                                outcomes["achievement"],
+                            )
+                    except Exception:
+                        logger.debug("Life-Boat follow-up arming failed", exc_info=True)
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
             return _agent_result
@@ -13611,6 +13790,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         user message that arrives simultaneously is handled by the same
         queue and takes priority naturally.
         """
+        # A Life-Boat conversation must never generate autonomous follow-up
+        # turns. Synthetic goal prompts make the assistant appear to talk to
+        # itself and can repeatedly reopen emotionally sensitive threads.
+        try:
+            from gateway.lifeboat_followups import is_lifeboat_source
+            if is_lifeboat_source(source):
+                logger.info("goal continuation: suppressed for Life-Boat source")
+                return
+        except Exception:
+            pass
         try:
             from hermes_cli.goals import GoalManager
         except Exception as exc:
@@ -14213,6 +14402,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            from gateway.lifeboat_followups import filter_lifeboat_toolsets
+            enabled_toolsets = filter_lifeboat_toolsets(source, enabled_toolsets)
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
@@ -17959,6 +18150,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         routes = getattr(config, "profile_routes", None)
         if not routes:
             return None
+        if isinstance(routes, dict):
+            return self._resolve_inbound_profile(source)
         from gateway.profile_routing import match_profile_route
         try:
             matched = match_profile_route(
@@ -18094,6 +18287,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        from gateway.lifeboat_followups import filter_lifeboat_toolsets
+        enabled_toolsets = filter_lifeboat_toolsets(source, enabled_toolsets)
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
@@ -19462,6 +19657,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            # Channel and turn guidance is intentionally ephemeral.  Cached
+            # agents still need the current turn's guidance refreshed here;
+            # this only changes the API-call suffix and leaves the stable
+            # session system prompt and transcript untouched.
+            agent.ephemeral_system_prompt = combined_ephemeral or None
+
+            # Refresh on every turn because a cached agent can outlive route
+            # configuration changes. Only the Telegram credential explicitly
+            # owned by the office-work profile receives PA workflow semantics.
+            _personal_assistant_mode = _is_dedicated_personal_assistant_source(source)
+            agent.personal_assistant_mode = _personal_assistant_mode
+            try:
+                from gateway.lifeboat_followups import is_lifeboat_source
+                agent.lifeboat_mode = is_lifeboat_source(source)
+            except Exception:
+                agent.lifeboat_mode = False
+            agent.personal_assistant_state_store = None
+            if _personal_assistant_mode:
+                try:
+                    from agent.personal_assistant_state import PersonalAssistantStateStore
+
+                    agent.personal_assistant_state_store = PersonalAssistantStateStore(
+                        self._resolve_profile_home_for_source(source)
+                    )
+                except (FileNotFoundError, OSError, ValueError):
+                    logger.warning(
+                        "Personal Assistant state store is unavailable for Telegram route",
+                        exc_info=True,
+                    )
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
