@@ -162,6 +162,14 @@ class HolographicMemoryProvider(MemoryProvider):
         """Effective project: an explicit model declaration wins over the lane."""
         return self._declared_project or self._resolved_project
 
+    def _filter_recall_origins(self, facts: list[dict]) -> list[dict]:
+        """Apply an optional profile-level consent boundary to recalled facts."""
+        allowed = self._config.get("recall_origins")
+        if not isinstance(allowed, (list, tuple, set)):
+            return facts
+        allowed_origins = {str(origin).strip() for origin in allowed if str(origin).strip()}
+        return [fact for fact in facts if str(fact.get("origin") or "") in allowed_origins]
+
     @property
     def name(self) -> str:
         return "holographic"
@@ -277,6 +285,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=6, min_trust=0.0, project_id=self._active_project,
                     categories=list(_AUTHORITATIVE_CATEGORIES),
                 )
+                decisions = self._filter_recall_origins(decisions)
             except Exception as e:
                 logger.debug("latest-decisions fetch failed: %s", e)
                 decisions = []
@@ -289,15 +298,16 @@ class HolographicMemoryProvider(MemoryProvider):
                     query, min_trust=self._min_trust, limit=5,
                     project_id=self._active_project,
                 )
+                results = self._filter_recall_origins(results)
             relevant = [r for r in results if r.get("fact_id") not in seen]
             for r in relevant:
                 seen.add(r.get("fact_id"))
             # ...filled with general recents so a vague continuation still gets
             # the recent subject/task facts. Capped separately from decisions.
             try:
-                for r in self._store.recent_facts(
+                for r in self._filter_recall_origins(self._store.recent_facts(
                     limit=5, min_trust=self._min_trust, project_id=self._active_project
-                ):
+                )):
                     if r.get("fact_id") not in seen and len(relevant) < 6:
                         seen.add(r.get("fact_id"))
                         relevant.append(r)
@@ -505,7 +515,7 @@ class HolographicMemoryProvider(MemoryProvider):
         if action == "add" and self._store and content:
             try:
                 category = "user_pref" if target == "user" else "general"
-                self._store.add_fact(content, category=category)
+                self._store.add_fact(content, category=category, origin="explicit")
             except Exception as e:
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
@@ -549,6 +559,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     args["content"],
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
+                    origin="explicit",
                     projects=_projects,
                 )
                 logger.info("[MEM] fact_store ADD id=%s cat=%s: %s",
