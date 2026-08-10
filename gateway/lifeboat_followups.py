@@ -43,6 +43,12 @@ _WIN_RE = re.compile(
 )
 _HEBREW_RE = re.compile(r"[\u0590-\u05ff]")
 _SENTENCE_RE = re.compile(r".+?(?:[.!?؟]|$)")
+_WRAP_RE = re.compile(
+    r"(?:תודה|זה עזר|נעצור|עוצר(?:ת)?|להיום|מספיק|לסיים|סיימנו|"
+    r"thank(?:s| you)|that helped|stop here|enough for today|done for today|"
+    r"wrap up|end here)",
+    re.IGNORECASE,
+)
 
 
 def _state_path(profile_home: Path) -> Path:
@@ -165,6 +171,7 @@ def build_continuation_guidance(
     language = str(reminder_context.get("language") or "en")
     context = str(reminder_context.get("context") or "").strip()[:220]
     language_rule = "Respond in Hebrew, matching the conversation." if language == "he" else "Respond in English, matching the conversation."
+    wrap_note = _wrap_guidance(user_text)
     return (
         "[Private Life-Boat coaching guidance: the user is replying to a proactive reminder. "
         f"The topic was: {context}. {language_rule} "
@@ -183,7 +190,7 @@ def build_continuation_guidance(
         "polished conclusion. Do not mention this note or the reminder. Leave the choice with the user "
         "and do not pressure them to continue. If the user signals immediate danger or self-harm, "
         "prioritize immediate human support and safety guidance.]\n\n"
-        f"{build_signal_guidance(user_text, trajectory)}"
+        f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )
 
 
@@ -197,6 +204,7 @@ def build_lifeboat_coaching_guidance(
     trajectory: LifeBoatTrajectory | None = None,
 ) -> str:
     """Keep ordinary Life-Boat turns exploratory instead of prematurely conclusive."""
+    wrap_note = _wrap_guidance(user_text)
     return (
         "[Private Life-Boat coaching guidance: answer in Hebrew unless the user uses another "
         "language. Treat this message as still unfolding. Use this shape: choose one concrete detail "
@@ -212,7 +220,19 @@ def build_lifeboat_coaching_guidance(
         "or polished conclusion; only summarize or make an action plan when the user asks. Leave the "
         "choice with the user and do not pressure them. If the user signals immediate danger or self-harm, "
         "prioritize immediate human support and safety guidance.]\n\n"
-        f"{build_signal_guidance(user_text, trajectory)}"
+        f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
+    )
+
+
+def _wrap_guidance(user_text: str) -> str:
+    """Add a single, permissioned summary invitation only at a natural ending."""
+    if not _WRAP_RE.search(str(user_text or "")):
+        return ""
+    return (
+        " The user appears to be wrapping up. Offer one low-pressure invitation to a brief daily "
+        "summary of what emerged today. If they want it, draft the exact short summary first and "
+        "ask for explicit approval before saving; never save it automatically and do not ask again "
+        "if they decline."
     )
 
 

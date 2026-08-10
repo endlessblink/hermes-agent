@@ -106,6 +106,19 @@ def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
 
+def test_natural_wrap_offers_one_permissioned_daily_summary(tmp_path):
+    prompt = build_lifeboat_coaching_prompt("זה עזר לי, אפשר לעצור להיום")
+    assert "The user appears to be wrapping up" in prompt
+    assert "brief daily" in prompt
+    assert "explicit approval before saving" in prompt
+    assert "do not ask again" in prompt
+
+
+def test_ordinary_turn_does_not_force_daily_summary():
+    prompt = build_lifeboat_coaching_prompt("אני עדיין מנסה להבין מה קרה")
+    assert "The user appears to be wrapping up" not in prompt
+
+
 def test_plain_completed_answer_does_not_arm(tmp_path):
     assert not arm_followup(tmp_path, "session", source(), "Done — I updated it.", now=NOW)
 
