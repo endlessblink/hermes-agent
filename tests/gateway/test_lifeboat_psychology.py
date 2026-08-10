@@ -76,7 +76,10 @@ def test_recent_low_energy_guidance_does_not_present_a_support_menu(tmp_path):
 
 def test_session_reset_erases_trajectory(tmp_path):
     record_lifeboat_trajectory(tmp_path, "session", "I feel hopeless")
+    record_lifeboat_response_fingerprint(tmp_path, "session", "same reply")
     assert clear_lifeboat_trajectory(tmp_path, "session")
+    state = json.loads((tmp_path / "state" / "lifeboat-psychology.json").read_text())
+    assert not state.get("response_fingerprints")
     assert not clear_lifeboat_trajectory(tmp_path, "session")
 
 

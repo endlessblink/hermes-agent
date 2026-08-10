@@ -218,9 +218,18 @@ def clear_lifeboat_trajectory(profile_home: Path, session_key: str) -> bool:
         state = _load_trajectory_state(path)
         sessions = state.setdefault("sessions", {})
         removed = sessions.pop(key, None) is not None
-        if removed:
+        fingerprints = state.get("response_fingerprints")
+        ledger_removed = False
+        if isinstance(fingerprints, list):
+            retained = [
+                entry for entry in fingerprints
+                if not isinstance(entry, dict) or entry.get("session_key") != key
+            ]
+            ledger_removed = len(retained) != len(fingerprints)
+            state["response_fingerprints"] = retained
+        if removed or ledger_removed:
             _save_trajectory_state(path, state)
-    return removed
+        return removed or ledger_removed
 
 
 def record_lifeboat_response_fingerprint(
