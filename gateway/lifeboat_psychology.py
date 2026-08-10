@@ -227,7 +227,7 @@ def build_signal_guidance(
         )
     if trajectory.recent_depressive_turns and not signals.depressive_thoughts:
         parts.append(
-            "Low energy or hopelessness may still be part of the recent context. Do not abruptly switch to productivity advice; first check whether the user wants understanding, a tiny action, or simply company."
+            "Low energy or hopelessness may still be part of the recent context. Do not abruptly switch to productivity advice; ask what feels most present or least burdensome without presenting a menu of support options."
         )
     if trajectory.recent_loop_turns and not signals.thought_loop:
         parts.append(

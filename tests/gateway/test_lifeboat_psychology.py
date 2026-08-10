@@ -64,6 +64,14 @@ def test_recent_crisis_context_survives_a_short_follow_up(tmp_path):
     assert "safe right now" in guidance
 
 
+def test_recent_low_energy_guidance_does_not_present_a_support_menu(tmp_path):
+    trajectory = record_lifeboat_trajectory(tmp_path, "session", "אין לי כוח היום")
+    guidance = build_signal_guidance("אני עדיין תקוע", trajectory)
+
+    assert "without presenting a menu" in guidance
+    assert "understanding, a tiny action, or simply company" not in guidance
+
+
 def test_session_reset_erases_trajectory(tmp_path):
     record_lifeboat_trajectory(tmp_path, "session", "I feel hopeless")
     assert clear_lifeboat_trajectory(tmp_path, "session")

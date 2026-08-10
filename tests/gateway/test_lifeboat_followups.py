@@ -94,6 +94,8 @@ def test_continuation_prompt_requires_one_contextual_next_step():
     assert "The reflection is a hypothesis, not the answer" in prompt
     assert "אולי הקריטריון הוא" in prompt
     assert "one real question" in prompt
+    assert "Do not enumerate interpretations or alternatives" in prompt
+    assert "name them as possibilities" not in prompt
     assert "כן" not in build_continuation_guidance(
         {"context": "רוצה לבחור את הצעד הבא?", "language": "he"}
     )
@@ -110,6 +112,8 @@ def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     assert "The reflection must remain a hypothesis" in prompt
     assert "אולי הקריטריון הוא" in prompt
     assert "one genuine question" in prompt
+    assert "Do not turn multiple threads into a menu" in prompt
+    assert "name at most two possibilities" not in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
 
