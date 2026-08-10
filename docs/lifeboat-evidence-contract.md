@@ -15,6 +15,9 @@ prompt and it is not permission to train on private Life-Boat conversations.
 The full review target is 100 high-quality sources. Each source must record its
 population, intervention, outcome, limitations, and the specific Life-Boat
 behavior it can justify. A source cannot justify a runtime rule by itself.
+Report directly screened sources separately from the larger corpus covered by a
+systematic or umbrella review; broad coverage must not be presented as 100
+individually read sources.
 
 ## Current anchor evidence
 

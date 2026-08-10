@@ -31,6 +31,9 @@ actual conversation goal and testing against the accepted baseline.
    question. Prefer systematic reviews, meta-analyses, randomized trials,
    official guidance, peer-reviewed datasets, human evaluations, and
    longitudinal usability studies. Mark lower-quality sources as context only.
+   Preserve source-count integrity: report directly screened sources separately
+   from the larger corpus covered by a systematic or umbrella review. Do not
+   present a review's screened corpus as individually read sources.
 3. For every source, record: population, intervention or dataset, outcome,
    limitations, evidence tier, and the exact Life-Boat behavior it can or cannot
    justify. One source never justifies a runtime rule by itself.
