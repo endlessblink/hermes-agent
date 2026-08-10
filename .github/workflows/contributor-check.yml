@@ -9,16 +9,13 @@ permissions:
 jobs:
   check-attribution:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 20  # Enough for the short PR range; avoid an unbounded history fetch
+          fetch-depth: 0  # Full history needed for git log
 
       - name: Check for unmapped contributor emails
         run: |
-          git fetch origin main --no-tags --depth=20
-
           # Get the merge base between this PR and main
           MERGE_BASE=$(git merge-base origin/main HEAD)
 
