@@ -48,6 +48,7 @@ _WIN_RE = re.compile(
 )
 _HEBREW_RE = re.compile(r"[\u0590-\u05ff]")
 _SENTENCE_RE = re.compile(r".+?(?:[.!?؟]|$)")
+_LIST_MARKER_RE = re.compile(r"(?:^|\s)(?:[-•*]|\d+[.)])\s+")
 _CLOSURE_RE = re.compile(
     r"(?:לסיכום|מכאן ש|זה אומר ש|אין פלא|לא פלא|הדבר החשוב הוא|"
     r"in conclusion|this means|the important thing is|therefore)",
@@ -153,6 +154,8 @@ def lifeboat_response_issues(response: str, user_text: str = "") -> tuple[str, .
     question_count = len(_QUESTION_RE.findall(text))
     if question_count > 1:
         issues.append("too_many_questions")
+    if len(_LIST_MARKER_RE.findall(text)) >= 2:
+        issues.append("list_heavy")
     has_open_door = bool(
         _QUESTION_RE.search(text)
         or re.search(r"מעניין אם|איך זה פוגש|what happens next|I wonder if|notice what", text, re.IGNORECASE)
@@ -189,7 +192,12 @@ def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
     if policy.mode == "user-led-close":
         return text[: policy.max_chars].rstrip()
     sentences = [part.strip() for part in _SENTENCE_RE.findall(text) if part.strip()]
-    usable_sentences = [part for part in sentences if not _CLOSURE_RE.search(part)]
+    usable_sentences = [
+        _LIST_MARKER_RE.sub(" ", part, count=1).strip()
+        for part in sentences
+        if not _CLOSURE_RE.search(part)
+        and not re.fullmatch(r"(?:[-•*]|\d+[.)])", part.strip())
+    ]
     base = " ".join(usable_sentences[: max(1, policy.max_sentences - 1)]).strip()
     if not base:
         base = "אני איתך בזה לרגע."
