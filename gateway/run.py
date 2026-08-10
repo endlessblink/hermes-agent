@@ -1551,6 +1551,30 @@ def _start_secondary_profile_cron_schedulers(
             getattr(runner, "_profile_adapters", {}).get(profile_name)
             or getattr(runner, "adapters", {})
         )
+        # A same-token secondary profile can retain a profile-scoped adapter
+        # object after the shared primary adapter has reconnected.  Prefer the
+        # connected primary Telegram adapter in that case; otherwise cron sees
+        # ``Not connected`` and needlessly falls back to standalone delivery.
+        profile_telegram = adapters.get(Platform.TELEGRAM)
+        if (
+            profile_telegram is not None
+            and hasattr(profile_telegram, "_bot")
+            and getattr(profile_telegram, "_bot", None) is None
+        ):
+            primary_telegram = (getattr(runner, "adapters", {}) or {}).get(
+                Platform.TELEGRAM
+            )
+            if (
+                primary_telegram is not None
+                and getattr(primary_telegram, "_bot", None) is not None
+            ):
+                adapters = dict(adapters)
+                adapters[Platform.TELEGRAM] = primary_telegram
+                logger.warning(
+                    "Profile '%s' cron reused the connected primary Telegram "
+                    "adapter after its scoped adapter was stale",
+                    profile_name,
+                )
         kwargs = {"adapters": adapters, "loop": loop}
         if isinstance(provider, InProcessCronScheduler):
             kwargs["can_dispatch"] = lambda: not (
