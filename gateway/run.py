@@ -19327,9 +19327,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
+            try:
+                from gateway.lifeboat_followups import is_lifeboat_source as _is_lifeboat_source
+                _is_lifeboat_turn = _is_lifeboat_source(source)
+            except Exception:
+                _is_lifeboat_turn = False
+            # Buffer Life-Boat replies so the response-quality gate can inspect
+            # the complete draft before Telegram sees it. Streaming a bad draft
+            # first and repairing it afterward would still feel like a closure
+            # or a flood to the user.
+            if _is_lifeboat_turn:
+                _streaming_enabled = False
             _want_stream_deltas = _streaming_enabled
             _want_interim_messages = interim_assistant_messages_enabled
             _want_interim_consumer = _want_interim_messages
+            if _is_lifeboat_turn:
+                _want_interim_consumer = False
             if _want_stream_deltas or _want_interim_consumer:
                 try:
                     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
@@ -20305,6 +20318,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
+            if _is_lifeboat_turn and final_response:
+                try:
+                    from gateway.lifeboat_followups import (
+                        ensure_lifeboat_open_response,
+                        lifeboat_response_issues,
+                    )
+                    _lifeboat_user_text = str(getattr(event, "text", "") or "")
+                    _lifeboat_issues = lifeboat_response_issues(
+                        str(final_response), _lifeboat_user_text,
+                    )
+                    _checked_response = ensure_lifeboat_open_response(
+                        str(final_response), _lifeboat_user_text,
+                    )
+                    if _checked_response != str(final_response):
+                        logger.info(
+                            "Life-Boat response quality gate repaired draft issues=%s chars=%s->%s",
+                            ",".join(_lifeboat_issues),
+                            len(str(final_response)),
+                            len(_checked_response),
+                        )
+                        final_response = _checked_response
+                        result["final_response"] = final_response
+                except Exception:
+                    logger.debug("Life-Boat response quality gate failed", exc_info=True)
 
             # Extract actual token counts from the agent instance used for this run
             _last_prompt_toks = 0

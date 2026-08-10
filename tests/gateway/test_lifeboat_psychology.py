@@ -6,6 +6,7 @@ from gateway.lifeboat_psychology import (
     classify_lifeboat_signals,
     clear_lifeboat_trajectory,
     record_lifeboat_trajectory,
+    select_lifeboat_turn_policy,
 )
 
 
@@ -76,3 +77,10 @@ def test_session_reset_erases_trajectory(tmp_path):
     record_lifeboat_trajectory(tmp_path, "session", "I feel hopeless")
     assert clear_lifeboat_trajectory(tmp_path, "session")
     assert not clear_lifeboat_trajectory(tmp_path, "session")
+
+
+def test_turn_policy_adapts_to_safety_action_sharing_and_pause():
+    assert select_lifeboat_turn_policy("I may hurt myself tonight").mode == "safety"
+    assert select_lifeboat_turn_policy("מה לעשות עכשיו?").mode == "act-or-clarify"
+    assert select_lifeboat_turn_policy("אני מרגיש שהכול כבד ואני לא יודע למה").mode == "attune"
+    assert select_lifeboat_turn_policy("זה עזר לי, נעצור להיום").mode == "user-led-close"

@@ -41,6 +41,17 @@ _SELF_CRITICISM_RE = re.compile(
     r"מאשים את עצמי|מאשימה את עצמי)",
     re.IGNORECASE,
 )
+_WRAP_RE = re.compile(
+    r"(?:תודה|זה עזר|נעצור|עוצר(?:ת)?|להיום|מספיק|לסיים|סיימנו|"
+    r"thank(?:s| you)|that helped|stop here|enough for today|done for today|"
+    r"wrap up|end here)",
+    re.IGNORECASE,
+)
+_ACTION_RE = re.compile(
+    r"(?:what should i do|how do i|what can i do|next step|advice|plan|"
+    r"מה לעשות|איך אני|מה אפשר לעשות|צעד הבא|עצה|תוכנית)",
+    re.IGNORECASE,
+)
 _TRAJECTORY_TTL = timedelta(hours=72)
 _TRAJECTORY_MAX_SESSIONS = 256
 
@@ -63,6 +74,30 @@ class LifeBoatTrajectory:
     recent_depressive_turns: int = 0
     recent_loop_turns: int = 0
     recent_self_criticism_turns: int = 0
+
+
+@dataclass(frozen=True)
+class LifeBoatTurnPolicy:
+    """Bounded, current-turn response policy; not a diagnosis or profile."""
+
+    mode: str
+    max_chars: int
+    ask_one_open_question: bool
+
+
+def select_lifeboat_turn_policy(text: str | None) -> LifeBoatTurnPolicy:
+    """Choose the conversational stance from the user's current message only."""
+    value = " ".join(str(text or "").split()).strip()
+    signals = classify_lifeboat_signals(value)
+    if signals.possible_crisis:
+        return LifeBoatTurnPolicy("safety", 700, True)
+    if _WRAP_RE.search(value):
+        return LifeBoatTurnPolicy("user-led-close", 420, False)
+    if _ACTION_RE.search(value) or value.endswith(("?", "？")) and len(value) < 180:
+        return LifeBoatTurnPolicy("act-or-clarify", 800, True)
+    if len(value) < 90:
+        return LifeBoatTurnPolicy("attune", 480, True)
+    return LifeBoatTurnPolicy("explore", 720, True)
 
 
 def _trajectory_path(profile_home: Path) -> Path:

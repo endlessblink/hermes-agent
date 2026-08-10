@@ -16,8 +16,10 @@ from gateway.lifeboat_followups import (
     build_lifeboat_coaching_prompt,
     cancel_followup,
     consume_followup_context,
+    ensure_lifeboat_open_response,
     filter_lifeboat_toolsets,
     is_lifeboat_source,
+    lifeboat_response_issues,
     prepare_lifeboat_inbound_guidance,
 )
 
@@ -91,16 +93,10 @@ def test_continuation_prompt_requires_one_contextual_next_step():
     )
     assert "רוצה לבחור את הצעד הבא?" in prompt
     assert "Respond in Hebrew" in prompt
-    assert "at most one useful question" in prompt
+    assert "mode=attune" in prompt
     assert "Do not diagnose" in prompt
-    assert "do not pressure" in prompt
-    assert "stay with one concrete detail" in prompt
-    assert "leave one open door" in prompt
-    assert "The reflection is a hypothesis, not the answer" in prompt
-    assert "אולי הקריטריון הוא" in prompt
-    assert "one real question" in prompt
-    assert "Do not enumerate interpretations or alternatives" in prompt
-    assert "name them as possibilities" not in prompt
+    assert "one open question" in prompt
+    assert "tentative" in prompt
     assert "כן" not in build_continuation_guidance(
         {"context": "רוצה לבחור את הצעד הבא?", "language": "he"}
     )
@@ -108,17 +104,10 @@ def test_continuation_prompt_requires_one_contextual_next_step():
 
 def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     prompt = build_lifeboat_coaching_prompt("אני מרגיש שאני שוב נתקע באותו מקום")
-    assert "choose one concrete detail" in prompt
-    assert "open one door for further exploration" in prompt
-    assert "Emotions are real experiences, not commands" in prompt
-    assert "thought loop" in prompt
-    assert "self-criticism" in prompt
-    assert "only summarize or make an action plan when the user asks" in prompt
-    assert "The reflection must remain a hypothesis" in prompt
-    assert "אולי הקריטריון הוא" in prompt
-    assert "one genuine question" in prompt
-    assert "Do not turn multiple threads into a menu" in prompt
-    assert "name at most two possibilities" not in prompt
+    assert "mode=attune" in prompt
+    assert "one concrete" in prompt
+    assert "tentatively" in prompt
+    assert "Only summarize or save anything when the user asks" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
 
@@ -133,6 +122,30 @@ def test_natural_wrap_offers_one_permissioned_daily_summary(tmp_path):
 def test_ordinary_turn_does_not_force_daily_summary():
     prompt = build_lifeboat_coaching_prompt("אני עדיין מנסה להבין מה קרה")
     assert "The user appears to be wrapping up" not in prompt
+
+
+def test_response_contract_detects_long_closed_and_multiple_question_drafts():
+    draft = "זה אומר שהערך שלך נקבע מבחוץ. אין פלא שזה מרגיש כבד. מה קורה? למה זה קורה?"
+    issues = lifeboat_response_issues(draft, "אני מרגיש שהכול נהיה פסק דין על הערך שלי")
+    assert "too_many_questions" in issues
+    assert "premature_conclusion" not in issues
+
+
+def test_response_repair_keeps_one_thread_and_opens_the_door():
+    draft = "לסיכום, כל מה שקורה בעבודה ובזוגיות מוכיח שאתה לא מספיק טוב. אין פלא שזה כואב."
+    repaired = ensure_lifeboat_open_response(
+        draft,
+        "אני נתקע בלופ של ביקורת עצמית על העבודה והזוגיות",
+    )
+    assert len(repaired) < len(draft) + 80
+    assert repaired.count("?") == 1
+    assert "לסיכום" not in repaired
+    assert "לופ" in repaired or "סטנדרט" in repaired
+
+
+def test_response_repair_does_not_reopen_an_explicit_pause():
+    draft = "שמחה שהצלחנו לגעת בזה. נעצור להיום."
+    assert ensure_lifeboat_open_response(draft, "זה עזר לי, נעצור להיום") == draft
 
 
 def test_inbound_guidance_updates_trajectory_and_consumes_pending_context(tmp_path):
