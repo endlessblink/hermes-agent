@@ -483,7 +483,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     )
 
                     block_message = durable_personal_assistant_write_gate_message(
-                        function_name, function_args
+                        function_name,
+                        function_args,
+                        lifeboat_mode=bool(getattr(agent, "lifeboat_mode", False)),
                     )
                 except Exception:
                     pass
@@ -1193,9 +1195,11 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     durable_personal_assistant_write_gate_message,
                 )
 
-                _block_msg = durable_personal_assistant_write_gate_message(
-                    function_name, function_args
-                )
+            _block_msg = durable_personal_assistant_write_gate_message(
+                function_name,
+                function_args,
+                lifeboat_mode=bool(getattr(agent, "lifeboat_mode", False)),
+            )
                 if _block_msg:
                     _block_error_type = "personal_assistant_durable_write_block"
             except Exception:

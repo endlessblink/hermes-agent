@@ -19679,6 +19679,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # owned by the office-work profile receives PA workflow semantics.
             _personal_assistant_mode = _is_dedicated_personal_assistant_source(source)
             agent.personal_assistant_mode = _personal_assistant_mode
+            try:
+                from gateway.lifeboat_followups import is_lifeboat_source
+                agent.lifeboat_mode = is_lifeboat_source(source)
+            except Exception:
+                agent.lifeboat_mode = False
             agent.personal_assistant_state_store = None
             if _personal_assistant_mode:
                 try:

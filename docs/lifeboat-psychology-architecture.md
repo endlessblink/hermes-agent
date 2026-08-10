@@ -58,6 +58,11 @@ bounded to a fixed number of sessions, and is erased when the user starts a new
 Life-Boat session. Durable memory requires separate, explicit consent for the
 exact fact or summary being saved.
 
+Direct writes to Obsidian are blocked in the Life-Boat lane. The assistant must
+show the exact short summary, ask for explicit approval, and only then use an
+approved capture path; emotional processing must not silently become a journal
+entry.
+
 ## Growth and proactive support
 
 Proactive follow-ups are sparse, quiet-hours aware, and cancel when new input
@@ -66,6 +71,15 @@ signal; it asks permission before recording anything and never silently converts
 an assistant compliment into a user fact.
 Synthetic goal continuations are disabled in the Life-Boat lane; only a user
 message may reopen the conversation.
+
+## Optional morning flow
+
+A morning flow can be useful, but it must be opt-in and lightweight rather than
+an alarm, productivity scorecard, or unsolicited therapy session. When enabled,
+ask at most three things: current capacity, the one load-bearing pressure or
+priority, and what support or boundary would help. Reflect the answer, offer one
+realistic next step, and leave room for “not today.” Never start with a demand to
+report achievements, and never save the check-in without explicit approval.
 
 ## Evaluation contract
 

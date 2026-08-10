@@ -19,6 +19,7 @@ _FILE_MUTATION_TOOLS = frozenset(
 )
 _PROTECTED_BASENAME = NOTE_PATH.rsplit("/", 1)[-1].casefold()
 _PROTECTED_SUFFIX = NOTE_PATH.replace("\\", "/").casefold()
+_OBSIDIAN_MARKERS = ("obsidian_synced", "main vult", ".obsidian")
 
 
 def _string_values(value: Any):
@@ -40,14 +41,30 @@ def _targets_personal_assistant_note(args: Mapping[str, Any] | None) -> bool:
     return False
 
 
+def _targets_obsidian_vault(args: Mapping[str, Any] | None) -> bool:
+    return any(
+        marker in value.replace("\\", "/").casefold()
+        for value in _string_values(args or {})
+        for marker in _OBSIDIAN_MARKERS
+    )
+
+
 def durable_personal_assistant_write_gate_message(
     function_name: str,
     args: Mapping[str, Any] | None,
+    *,
+    lifeboat_mode: bool = False,
 ) -> str | None:
     """Return a model-facing error for direct writes to the durable PA note."""
 
     if function_name not in _FILE_MUTATION_TOOLS:
         return None
+    if lifeboat_mode and _targets_obsidian_vault(args):
+        return (
+            "Direct writes to the Obsidian vault are blocked in the Life-Boat lane. "
+            "First show the user the exact short summary and ask for explicit approval; "
+            "do not patch a journal or personal pattern note during emotional processing."
+        )
     if not _targets_personal_assistant_note(args):
         return None
     return (

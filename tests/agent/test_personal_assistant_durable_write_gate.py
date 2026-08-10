@@ -76,3 +76,17 @@ def test_blocks_move_or_delete_targeting_the_protected_note() -> None:
         )
         is not None
     )
+
+
+def test_lifeboat_blocks_any_direct_obsidian_write_until_user_approves() -> None:
+    message = durable_personal_assistant_write_gate_message(
+        "patch",
+        {
+            "mode": "replace",
+            "path": "/vault/MAIN VULT/_System/Hermes Knowledge Graph/Projects/Daily Evidence Journal/2026-08-10.md",
+        },
+        lifeboat_mode=True,
+    )
+    assert message is not None
+    assert "exact short summary" in message
+    assert "explicit approval" in message
