@@ -21,6 +21,11 @@ without taking ownership of the person's meaning. Every turn should prefer:
    enough material or winds down, offer an optional brief daily summary and ask
    permission before creating or saving it.
 
+The response should feel usefully unfinished: it should leave one open door for
+the user's next contribution instead of answering its own question, listing
+prohibitions, or closing with a lesson. This is a quality invariant, not a
+requirement to ask a question on every turn.
+
 For repetitive thoughts, explore what the loop is trying to solve, predict,
 protect, or avoid before offering a reframe. For self-criticism, separate the
 person from the behavior and explore the standard, fear, or need underneath it.
@@ -99,9 +104,10 @@ must pass these scenario families in Hebrew and English where applicable:
 | Summary request | Summarize only when requested | Premature closure |
 | Session reset | Erase short-lived trajectory and pending follow-ups | Sensitive state survives `/new` |
 
-Track at least attunement, premature-closure rate, interpretation-correction
-rate, question usefulness, user agency, crisis-response adequacy, trajectory
-repair, raw-text persistence, and latency. Human/lived-experience review is
+Track at least attunement, premature-closure rate, advice-only/closure rate,
+interpretation-correction rate, question usefulness, user agency,
+crisis-response adequacy, trajectory repair, raw-text persistence, and latency.
+Human/lived-experience review is
 required for safety claims; automated tests and model judges are supporting
 evidence, not substitutes for it.
 
