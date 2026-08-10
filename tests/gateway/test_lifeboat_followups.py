@@ -21,6 +21,7 @@ from gateway.lifeboat_followups import (
     is_lifeboat_source,
     lifeboat_response_issues,
     prepare_lifeboat_inbound_guidance,
+    repair_repeated_lifeboat_response,
 )
 
 
@@ -161,6 +162,15 @@ def test_response_repair_trims_a_mountain_even_when_it_has_one_question():
 def test_response_repair_does_not_reopen_an_explicit_pause():
     draft = "שמחה שהצלחנו לגעת בזה. נעצור להיום."
     assert ensure_lifeboat_open_response(draft, "זה עזר לי, נעצור להיום") == draft
+
+
+def test_repeated_response_repair_is_accountable_and_stays_open():
+    repaired = repair_repeated_lifeboat_response(
+        "נשמע שהכול נהיה פסק דין על הערך שלך.",
+        "אני מרגיש שהכול נהיה פסק דין",
+    )
+    assert "חוזר על עצמי" in repaired
+    assert repaired.count("?") == 1
 
 
 def test_topic_two_in_another_chat_is_not_lifeboat():

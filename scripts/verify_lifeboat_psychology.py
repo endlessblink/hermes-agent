@@ -48,6 +48,8 @@ def main() -> int:
         "goal continuation: suppressed for Life-Boat source",
         "arm_lifeboat_prompts(",
         "ensure_lifeboat_open_response",
+        "record_lifeboat_response_fingerprint",
+        "repair_repeated_lifeboat_response",
         "_streaming_enabled = False",
         "user_text=event.text or \"\"",
         "with use_cron_store(profile_home):",

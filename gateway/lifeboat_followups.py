@@ -19,6 +19,7 @@ from gateway.lifeboat_psychology import (
     LifeBoatTrajectory,
     build_signal_guidance,
     classify_lifeboat_signals,
+    record_lifeboat_response_fingerprint,
     record_lifeboat_trajectory,
     select_lifeboat_turn_policy,
 )
@@ -195,6 +196,16 @@ def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
     door = _lifeboat_open_door(user_text)
     budget = max(120, policy.max_chars - len(door) - 2)
     return f"{base[:budget].rstrip()}\n\n{door}"
+
+
+def repair_repeated_lifeboat_response(response: str, user_text: str = "") -> str:
+    """Replace a repeated non-safety draft with a brief accountable opening."""
+    policy = select_lifeboat_turn_policy(user_text)
+    if policy.mode == "user-led-close" or classify_lifeboat_signals(user_text).possible_crisis:
+        return response
+    if _HEBREW_RE.search(user_text):
+        return "שמתי לב שאני חוזר על עצמי, אז לא אוסיף עוד פרשנות. מה השתנה מאז, אם בכלל?"
+    return "I notice I am repeating myself, so I will not add another interpretation. What has changed since then, if anything?"
 
 
 def _now(value: datetime | None = None) -> datetime:
