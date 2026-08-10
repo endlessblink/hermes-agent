@@ -56,6 +56,34 @@ def main() -> int:
     if "-1004230590253" not in channel_prompts or "602196268" not in channel_prompts:
         print("FAIL live Life-Boat channel prompts are incomplete")
         return 1
+    private_prompt = str(channel_prompts.get("602196268") or "")
+    for marker in (
+        "emotions are not directly voluntary",
+        "Do not use a fixed three-part structure",
+        "explicitly approves",
+    ):
+        if marker not in private_prompt:
+            print(f"FAIL Life-Boat prompt missing {marker!r}")
+            return 1
+
+    cron_path = Path("/home/endlessblink/.hermes/profiles/life-advisor/cron/jobs.json")
+    cron_state = json.loads(cron_path.read_text(encoding="utf-8")) if cron_path.is_file() else {}
+    morning_jobs = [
+        job for job in cron_state.get("jobs", [])
+        if isinstance(job, dict) and job.get("name") == "lifeboat-morning-check-in"
+    ]
+    if not morning_jobs:
+        print("FAIL Life-Boat morning check-in is missing")
+        return 1
+    morning_job = morning_jobs[0]
+    if (
+        not morning_job.get("enabled")
+        or morning_job.get("state") != "scheduled"
+        or (morning_job.get("schedule") or {}).get("expr") != "0 9 * * 1,3,5"
+        or morning_job.get("deliver") != "telegram:-1004230590253:2"
+    ):
+        print("FAIL Life-Boat morning check-in is not enabled for the intended topic and cadence")
+        return 1
 
     contract = source_root / "docs" / "lifeboat-psychology-architecture.md"
     contract_text = contract.read_text(encoding="utf-8") if contract.is_file() else ""
