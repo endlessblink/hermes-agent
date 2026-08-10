@@ -50,12 +50,6 @@ _WRAP_RE = re.compile(
     r"wrap up|end here)",
     re.IGNORECASE,
 )
-_CLOSING_INSIGHT_RE = re.compile(
-    r"(?:אולי\s+הקריטריון\s+הוא|אין\s+צורך\s+להרגיש|אז\s+המסקנה\s+היא|"
-    r"אין\s+צורך\s+ל|you\s+do(?:n't| not)\s+need\s+to|the\s+criterion\s+is|"
-    r"the\s+answer\s+is|so\s+the\s+conclusion\s+is)",
-    re.IGNORECASE,
-)
 
 
 def _state_path(profile_home: Path) -> Path:
@@ -255,22 +249,6 @@ def _wrap_guidance(user_text: str) -> str:
 def build_lifeboat_coaching_prompt(user_text: str) -> str:
     """Compatibility helper for callers that still need a single prompt string."""
     return f"{str(user_text or '').strip()}\n\n{build_lifeboat_coaching_guidance(user_text)}"
-
-
-def repair_lifeboat_closure(response: str, user_text: str = "") -> str:
-    """Keep a Life-Boat turn open when the model has prematurely concluded it.
-
-    This is a narrow delivery guard, not a replacement for the coaching prompt:
-    it only acts on a non-crisis turn that has no question/open invitation and
-    contains a recognizable declarative closure. The added line returns meaning
-    to the user instead of asserting an interpretation on their behalf.
-    """
-    text = str(response or "").strip()
-    if not text or _WRAP_RE.search(str(user_text or "")):
-        return text
-    if _QUESTION_RE.search(text) or not _CLOSING_INSIGHT_RE.search(text):
-        return text
-    return f"{text}\n\nאני לא רוצה לקבוע את זה במקומך — איך זה פוגש אותך?"
 
 
 def prepare_lifeboat_inbound_guidance(

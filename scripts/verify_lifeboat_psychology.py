@@ -14,6 +14,7 @@ from gateway.lifeboat_psychology import (
     classify_lifeboat_signals,
     record_lifeboat_trajectory,
 )
+from gateway.lifeboat_evaluation import build_multiturn_gold_scenarios, scenario_count_by_category
 
 
 def _sha256(path: Path) -> str:
@@ -27,6 +28,7 @@ def main() -> int:
         Path("gateway/run.py"),
         Path("gateway/lifeboat_followups.py"),
         Path("gateway/lifeboat_psychology.py"),
+        Path("gateway/lifeboat_evaluation.py"),
         Path("gateway/session_context.py"),
         Path("cron/jobs.py"),
         Path("cron/scheduler.py"),
@@ -87,6 +89,10 @@ def main() -> int:
     coaching_text = (source_root / "gateway" / "lifeboat_followups.py").read_text(
         encoding="utf-8"
     )
+    for forbidden in ("repair_lifeboat_closure", "_CLOSING_INSIGHT_RE"):
+        if forbidden in runtime_text or forbidden in coaching_text:
+            print(f"FAIL brittle Life-Boat phrase repair remains: {forbidden!r}")
+            return 1
     for marker in (
         "Use this conversational shape",
         "one open door for the user",
@@ -140,6 +146,19 @@ def main() -> int:
         return 1
     if not signals["depressive"].depressive_thoughts or not signals["crisis"].possible_crisis:
         print("FAIL depressive/crisis routing")
+        return 1
+
+    gold_set = build_multiturn_gold_scenarios()
+    if len(gold_set) != 60 or scenario_count_by_category(item.scenario for item in gold_set) != {
+        "thought_loop": 12,
+        "self_criticism": 10,
+        "depressive_low_energy": 10,
+        "explicit_safety": 8,
+        "proactive_reply": 8,
+        "premature_closure": 6,
+        "mixed_hebrew_rtl": 6,
+    }:
+        print("FAIL Life-Boat multi-turn gold-set shape")
         return 1
 
     with tempfile.TemporaryDirectory() as directory:

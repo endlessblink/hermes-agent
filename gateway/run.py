@@ -12698,13 +12698,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     agent_result, response, history_len=len(history),
                 )
                 response = _sanitize_gateway_final_response(source.platform, response)
-                try:
-                    from gateway.lifeboat_followups import is_lifeboat_source, repair_lifeboat_closure
-
-                    if is_lifeboat_source(source):
-                        response = repair_lifeboat_closure(response, event.text or "")
-                except Exception:
-                    logger.debug("Life-Boat closure repair failed", exc_info=True)
 
             # Ordering contract: the agent thread already updated the contextvar
             # in conversation_compression.py; propagate to SessionEntry + _save().

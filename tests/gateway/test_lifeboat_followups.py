@@ -14,7 +14,6 @@ from gateway.lifeboat_followups import (
     build_continuation_guidance,
     build_lifeboat_coaching_guidance,
     build_lifeboat_coaching_prompt,
-    repair_lifeboat_closure,
     cancel_followup,
     consume_followup_context,
     filter_lifeboat_toolsets,
@@ -125,20 +124,6 @@ def test_natural_wrap_offers_one_permissioned_daily_summary(tmp_path):
 def test_ordinary_turn_does_not_force_daily_summary():
     prompt = build_lifeboat_coaching_prompt("אני עדיין מנסה להבין מה קרה")
     assert "The user appears to be wrapping up" not in prompt
-
-
-def test_closure_repair_returns_agency_to_a_locked_insight():
-    repaired = repair_lifeboat_closure(
-        "אז אולי הקריטריון הוא: אין צורך להרגיש לבד.",
-        "אבל אם אני לא יודע מראש איך היום ייראה?",
-    )
-    assert repaired.endswith("אני לא רוצה לקבוע את זה במקומך — איך זה פוגש אותך?")
-
-
-def test_closure_repair_does_not_touch_open_or_wrapping_turns():
-    assert repair_lifeboat_closure("מה הכי חי בזה עכשיו?", "אני עדיין בודק") == "מה הכי חי בזה עכשיו?"
-    wrapped = "אין צורך להרגיש לבד."
-    assert repair_lifeboat_closure(wrapped, "תודה, אפשר לעצור להיום") == wrapped
 
 
 def test_inbound_guidance_updates_trajectory_and_consumes_pending_context(tmp_path):

@@ -484,9 +484,9 @@ def _ensure_current_event_loop(request):
     Ensure they always have a usable loop without interfering with pytest-asyncio's
     own loop management for @pytest.mark.asyncio tests.
 
-    On Python 3.12+, ``asyncio.get_event_loop_policy().get_event_loop()`` with no
-    *running* loop emits DeprecationWarning; skip that path and install a fresh
-    loop via ``new_event_loop()`` instead.
+    Always create and own a fresh loop for a synchronous test that has no running
+    loop; this prevents policy-created loop socketpairs from leaking between
+    tests and makes teardown deterministic across Python versions.
     """
     if request.node.get_closest_marker("asyncio") is not None:
         yield
@@ -497,12 +497,6 @@ def _ensure_current_event_loop(request):
         loop = asyncio.get_running_loop()
     except RuntimeError:
         pass
-
-    if loop is None and sys.version_info < (3, 12):
-        try:
-            loop = asyncio.get_event_loop_policy().get_event_loop()
-        except RuntimeError:
-            loop = None
 
     created = loop is None or loop.is_closed()
     if created:
