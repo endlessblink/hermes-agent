@@ -20,6 +20,7 @@ from gateway.lifeboat_psychology import (
     build_signal_guidance,
     classify_lifeboat_signals,
     record_lifeboat_trajectory,
+    select_lifeboat_turn_policy,
 )
 
 
@@ -46,6 +47,11 @@ _WIN_RE = re.compile(
 )
 _HEBREW_RE = re.compile(r"[\u0590-\u05ff]")
 _SENTENCE_RE = re.compile(r".+?(?:[.!?؟]|$)")
+_CLOSURE_RE = re.compile(
+    r"(?:לסיכום|מכאן ש|זה אומר ש|אין פלא|לא פלא|הדבר החשוב הוא|"
+    r"in conclusion|this means|the important thing is|therefore)",
+    re.IGNORECASE,
+)
 _WRAP_RE = re.compile(
     r"(?:תודה|זה עזר|נעצור|עוצר(?:ת)?|להיום|מספיק|לסיים|סיימנו|"
     r"thank(?:s| you)|that helped|stop here|enough for today|done for today|"
@@ -128,6 +134,63 @@ def _followup_text(response: str) -> str | None:
     return result[1] if result is not None else None
 
 
+def lifeboat_response_issues(response: str, user_text: str = "") -> tuple[str, ...]:
+    """Find only high-confidence failures of the Life-Boat reply contract."""
+    text = " ".join(str(response or "").split()).strip()
+    if not text:
+        return ("empty",)
+    policy = select_lifeboat_turn_policy(user_text)
+    issues: list[str] = []
+    if len(text) > policy.max_chars:
+        issues.append("too_long")
+    question_count = len(_QUESTION_RE.findall(text))
+    if question_count > 1:
+        issues.append("too_many_questions")
+    has_open_door = bool(
+        _QUESTION_RE.search(text)
+        or re.search(r"מעניין אם|איך זה פוגש|what happens next|I wonder if|notice what", text, re.IGNORECASE)
+    )
+    if policy.ask_one_open_question and not has_open_door:
+        issues.append("closed")
+    if _CLOSURE_RE.search(text) and not has_open_door:
+        issues.append("premature_conclusion")
+    return tuple(issues)
+
+
+def _lifeboat_open_door(user_text: str) -> str:
+    signals = classify_lifeboat_signals(user_text)
+    if signals.possible_crisis:
+        return "אתה בטוח שאתה בטוח עכשיו, או שיש סכנה שתפעל על זה?"
+    if signals.thought_loop:
+        return "מה הלופ הזה מנסה לפתור או למנוע כרגע?"
+    if signals.self_criticism:
+        return "איזה סטנדרט או פחד יושב מתחת למשפט הזה על עצמך?"
+    if signals.depressive_thoughts:
+        return "מה הכי כבד או הכי נוכח אצלך עכשיו?"
+    if select_lifeboat_turn_policy(user_text).mode == "act-or-clarify":
+        return "רוצה שנחשוב על צעד אחד קטן, או שעדיף להישאר רגע עם מה שזה מעורר?"
+    return "מה הכי חי אצלך עכשיו, אם בכלל?"
+
+
+def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
+    """Bound a failed draft without inventing a summary or a support menu."""
+    text = " ".join(str(response or "").split()).strip()
+    issues = lifeboat_response_issues(text, user_text)
+    if not issues:
+        return text
+    policy = select_lifeboat_turn_policy(user_text)
+    if policy.mode == "user-led-close":
+        return text[: policy.max_chars].rstrip()
+    sentences = [part.strip() for part in _SENTENCE_RE.findall(text) if part.strip()]
+    usable_sentences = [part for part in sentences if not _CLOSURE_RE.search(part)]
+    base = " ".join(usable_sentences[:2]).strip()
+    if not base:
+        base = "אני איתך בזה לרגע."
+    door = _lifeboat_open_door(user_text)
+    budget = max(120, policy.max_chars - len(door) - 2)
+    return f"{base[:budget].rstrip()}\n\n{door}"
+
+
 def _now(value: datetime | None = None) -> datetime:
     result = value or datetime.now(timezone.utc)
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)
@@ -183,31 +246,22 @@ def build_continuation_guidance(
     """Give ephemeral guidance without polluting the user's transcript."""
     language = str(reminder_context.get("language") or "en")
     context = str(reminder_context.get("context") or "").strip()[:220]
-    language_rule = "Respond in Hebrew, matching the conversation." if language == "he" else "Respond in English, matching the conversation."
-    wrap_note = _wrap_guidance(user_text)
+    language_rule = "Respond in Hebrew" if language == "he" else "Respond in the user's language"
+    policy = select_lifeboat_turn_policy(user_text)
+    question_rule = (
+        "End with one open question or unfinished invitation."
+        if policy.ask_one_open_question
+        else "Honor the user's wish to pause; do not reopen the topic."
+    )
+    wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
     return (
-        "[Private Life-Boat coaching guidance: the user is replying to a proactive reminder. "
-        f"The topic was: {context}. {language_rule} "
-        "Use this conversational shape: stay with one concrete detail the user just gave; "
-        "reflect it tentatively in ordinary language; then leave one open door for the user—"
-        "at most one useful question about what still has force, or a gentle invitation to notice "
-        "what happens next—and stop so they can answer. The reflection is a hypothesis, not the "
-        "answer: do not turn it into a verdict, lesson, diagnosis, or polished conclusion. Do not "
-        "say what the user does not need to do or feel (for example, ‘אין צורך להרגיש לבד’), do not "
-        "announce a criterion or final meaning (for example, ‘אולי הקריטריון הוא’), and do not close "
-        "with reassurance that leaves nothing to explore. End with the user's choice: one real question "
-        "or an unfinished invitation such as ‘מעניין אם זה פוגש אותך כך’. Do not enumerate interpretations "
-        "or alternatives; offer one tentative reading and make correction or redirection easy. When an emotion is present, treat it as a "
-        "real experience rather than a command: explore what it may be signaling or protecting, "
-        "and locate agency in what the user can choose next, not in forcing the emotion to disappear. "
-        "If the user is looping, explore what the loop is trying to solve or prevent. If self-criticism "
-        "appears, separate the verdict from the event and gently explore the standard or need underneath. "
-        "Do not diagnose. "
-        "Suggest a small next action only when the user is asking for action. Keep the reply unfinished "
-        "in a useful way; do not turn it into a generic reflection, lesson, premature summary, or "
-        "polished conclusion. Do not mention this note or the reminder. Leave the choice with the user "
-        "and do not pressure them to continue. If the user signals immediate danger or self-harm, "
-        "prioritize immediate human support and safety guidance.]\n\n"
+        f"[Private Life-Boat guidance: mode={policy.mode}; {language_rule}; "
+        f"keep it under about {policy.max_chars} characters. The topic was: {context}. "
+        f"The user is replying to a reminder. Use one concrete detail from the user's new message, reflect it as a "
+        "tentative hypothesis, and leave the user in control. "
+        f"{question_rule} Do not diagnose, summarize the whole situation, give a lesson, list options, "
+        "tell the user what to feel, or imply the topic is resolved. If the user asks for action, "
+        "offer one small optional next step; otherwise stay with understanding. Do not mention this guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )
 
@@ -222,26 +276,21 @@ def build_lifeboat_coaching_guidance(
     trajectory: LifeBoatTrajectory | None = None,
 ) -> str:
     """Keep ordinary Life-Boat turns exploratory instead of prematurely conclusive."""
-    wrap_note = _wrap_guidance(user_text)
+    policy = select_lifeboat_turn_policy(user_text)
+    question_rule = (
+        "End with one open question or unfinished invitation."
+        if policy.ask_one_open_question
+        else "Honor the user's wish to pause; do not reopen the topic."
+    )
+    wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
     return (
-        "[Private Life-Boat coaching guidance: answer in Hebrew unless the user uses another "
-        "language. Treat this message as still unfolding. Use this shape: choose one concrete detail "
-        "the user actually said, reflect it tentatively, and open one door for further exploration—"
-        "at most one useful question or a gentle invitation to notice what happens next—then stop and "
-        "let the user answer. The reflection must remain a hypothesis, never a verdict, lesson, diagnosis, "
-        "or polished conclusion. Do not tell the user what they do not need to do or feel (for example, "
-        "‘אין צורך להרגיש לבד’), announce a final criterion (for example, ‘אולי הקריטריון הוא’), or "
-        "end with reassurance that closes the subject. End with the user's choice: one genuine question "
-        "or an unfinished invitation such as ‘מעניין אם זה פוגש אותך כך’. Do not turn multiple threads into a menu; "
-        "offer one tentative reading and let the user redirect. Emotions are real experiences, not commands; explore what a "
-        "painful feeling may be signaling or protecting, and focus agency on the next choice rather "
-        "than on controlling the feeling. For a recurring thought loop, explore what it is trying to "
-        "solve or prevent. For self-criticism, separate the verdict from the event and explore the "
-        "standard or need underneath. Keep the reply short and use small readable bubbles when supported. "
-        "Leave the conversation open rather than delivering a lesson, generic advice, premature summary, "
-        "or polished conclusion; only summarize or make an action plan when the user asks. Leave the "
-        "choice with the user and do not pressure them. If the user signals immediate danger or self-harm, "
-        "prioritize immediate human support and safety guidance.]\n\n"
+        f"[Private Life-Boat guidance: mode={policy.mode}, answer in Hebrew unless the user uses "
+        f"another language, and keep it under about {policy.max_chars} characters. Choose one concrete "
+        "detail the user actually gave; reflect it tentatively, never as a verdict or diagnosis. "
+        f"{question_rule} Do not close the meaning, give a lesson, list interpretations, use generic "
+        "reassurance, or tell the user what they should feel. If the user asks for action, offer one "
+        "small optional next step; otherwise keep exploring. Only summarize or save anything when the "
+        "user asks. Do not mention this guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )
 
