@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -54,6 +55,8 @@ _ACTION_RE = re.compile(
 )
 _TRAJECTORY_TTL = timedelta(hours=72)
 _TRAJECTORY_MAX_SESSIONS = 256
+_RESPONSE_FINGERPRINT_TTL = timedelta(hours=24)
+_RESPONSE_FINGERPRINT_MAX = 24
 
 
 @dataclass(frozen=True)
@@ -217,7 +220,59 @@ def clear_lifeboat_trajectory(profile_home: Path, session_key: str) -> bool:
         removed = sessions.pop(key, None) is not None
         if removed:
             _save_trajectory_state(path, state)
-        return removed
+    return removed
+
+
+def record_lifeboat_response_fingerprint(
+    profile_home: Path,
+    session_key: str,
+    response: str | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Remember only response hashes and report an exact recent duplicate.
+
+    The ledger prevents a model or delivery retry from repeating the same
+    emotional monologue while keeping both user and assistant wording out of
+    durable state.
+    """
+    value = " ".join(str(response or "").split()).strip().casefold()
+    if not value:
+        return False
+    checked_at = now or datetime.now(timezone.utc)
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    fingerprint = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    key = str(session_key)
+    with _trajectory_lock(profile_home) as path:
+        state = _load_trajectory_state(path)
+        entries = state.setdefault("response_fingerprints", [])
+        kept: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                updated_at = datetime.fromisoformat(str(entry.get("updated_at")))
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            if checked_at - updated_at <= _RESPONSE_FINGERPRINT_TTL:
+                kept.append(entry)
+        duplicate = any(
+            entry.get("session_key") == key and entry.get("fingerprint") == fingerprint
+            for entry in kept
+        )
+        kept.append(
+            {
+                "updated_at": checked_at.isoformat(),
+                "session_key": key,
+                "fingerprint": fingerprint,
+            }
+        )
+        state["response_fingerprints"] = kept[-_RESPONSE_FINGERPRINT_MAX:]
+        _save_trajectory_state(path, state)
+    return duplicate
 
 
 def classify_lifeboat_signals(text: str | None) -> LifeBoatSignals:
