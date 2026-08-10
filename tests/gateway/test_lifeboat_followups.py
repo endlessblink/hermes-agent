@@ -85,7 +85,7 @@ def test_continuation_prompt_requires_one_contextual_next_step():
     )
     assert "רוצה לבחור את הצעד הבא?" in prompt
     assert "Respond in Hebrew" in prompt
-    assert "exactly one concrete next-step question" in prompt
+    assert "at most one concrete opening question" in prompt
     assert "do not diagnose" in prompt
     assert "do not pressure" in prompt
     assert "כן" not in build_continuation_guidance(
@@ -97,7 +97,7 @@ def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     prompt = build_lifeboat_coaching_prompt("אני מרגיש שאני שוב נתקע באותו מקום")
     assert "Do not decide the user's single true point" in prompt
     assert "multiple threads or interpretations" in prompt
-    assert "ask exactly one concise question" in prompt
+    assert "ask at most one concise question" in prompt
     assert "before suggesting a reframe" in prompt
     assert "polished conclusion" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
