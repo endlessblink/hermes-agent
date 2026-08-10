@@ -3,6 +3,7 @@ import json
 import threading
 from types import SimpleNamespace
 
+from gateway.platforms.base import Platform
 from gateway.run import _start_secondary_profile_cron_schedulers
 from hermes_constants import get_hermes_home
 
@@ -52,10 +53,11 @@ def test_secondary_profile_cron_runs_in_profile_scope(monkeypatch, tmp_path):
         "hermes_cli.profiles.get_active_profile_name", lambda: "default"
     )
 
+    loop = asyncio.new_event_loop()
     schedulers = _start_secondary_profile_cron_schedulers(
         runner,
         stop,
-        asyncio.new_event_loop(),
+        loop,
         resolve_provider=lambda: Provider(),
     )
     try:
@@ -70,6 +72,7 @@ def test_secondary_profile_cron_runs_in_profile_scope(monkeypatch, tmp_path):
         stop.set()
         for _provider, thread in schedulers:
             thread.join(timeout=1)
+        loop.close()
 
 
 def test_secondary_profile_cron_is_disabled_without_multiplexing():
@@ -77,11 +80,13 @@ def test_secondary_profile_cron_is_disabled_without_multiplexing():
         config=SimpleNamespace(multiplex_profiles=False),
     )
 
+    loop = asyncio.new_event_loop()
     assert _start_secondary_profile_cron_schedulers(
         runner,
         threading.Event(),
-        asyncio.new_event_loop(),
+        loop,
     ) == []
+    loop.close()
 
 
 def test_secondary_profile_cron_activates_lifeboat_profile(
@@ -122,10 +127,11 @@ def test_secondary_profile_cron_activates_lifeboat_profile(
         "hermes_cli.profiles.get_active_profile_name", lambda: "default"
     )
 
+    loop = asyncio.new_event_loop()
     schedulers = _start_secondary_profile_cron_schedulers(
         runner,
         stop,
-        asyncio.new_event_loop(),
+        loop,
         resolve_provider=lambda: Provider(),
     )
     try:
@@ -135,3 +141,62 @@ def test_secondary_profile_cron_activates_lifeboat_profile(
         stop.set()
         for _provider, thread in schedulers:
             thread.join(timeout=1)
+        loop.close()
+
+
+def test_secondary_profile_cron_reuses_connected_primary_telegram_adapter(
+    monkeypatch, tmp_path
+):
+    life_home = tmp_path / "profiles" / "life-advisor"
+    life_home.mkdir(parents=True)
+    started = threading.Event()
+    stop = threading.Event()
+
+    class Adapter:
+        def __init__(self, bot):
+            self._bot = bot
+
+    class Provider:
+        name = "fake"
+
+        def start(self, stop_event, **kwargs):
+            assert kwargs["adapters"][Platform.TELEGRAM]._bot == "primary-bot"
+            started.set()
+            stop_event.wait(1)
+
+        def stop(self):
+            pass
+
+    runner = SimpleNamespace(
+        config=SimpleNamespace(
+            multiplex_profiles=True,
+            multiplex_served_profiles=["life-advisor"],
+        ),
+        adapters={Platform.TELEGRAM: Adapter("primary-bot")},
+        _profile_adapters={"life-advisor": {Platform.TELEGRAM: Adapter(None)}},
+        _draining=False,
+        _external_drain_active=False,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.profiles_to_serve",
+        lambda **_kwargs: [("default", tmp_path), ("life-advisor", life_home)],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_active_profile_name", lambda: "default"
+    )
+
+    loop = asyncio.new_event_loop()
+    schedulers = _start_secondary_profile_cron_schedulers(
+        runner,
+        stop,
+        loop,
+        resolve_provider=lambda: Provider(),
+    )
+    try:
+        assert started.wait(1)
+        assert len(schedulers) == 1
+    finally:
+        stop.set()
+        for _provider, thread in schedulers:
+            thread.join(timeout=1)
+        loop.close()
