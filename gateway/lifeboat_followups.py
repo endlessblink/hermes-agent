@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable, Iterator, Mapping
@@ -29,6 +30,7 @@ RETRY_DELAY = timedelta(minutes=10)
 QUIET_START = 23
 QUIET_END = 8
 MAX_ATTEMPTS = 3
+PROACTIVE_FOLLOWUPS_ENV = "LIFEBOAT_PROACTIVE_FOLLOWUPS"
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
 _QUESTION_RE = re.compile(r"[?？]")
 _REQUEST_RE = re.compile(
@@ -81,6 +83,16 @@ def _save(path: Path, value: Mapping[str, Any]) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+def proactive_followups_enabled() -> bool:
+    """Delayed Life-Boat contact is opt-in; open-ended replies remain default."""
+    return os.environ.get(PROACTIVE_FOLLOWUPS_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def is_lifeboat_source(source: Any) -> bool:
@@ -352,6 +364,11 @@ def arm_lifeboat_prompts(
     """Arm all proactive Life-Boat prompts and expose their outcomes for tests/logs."""
     if not is_lifeboat_source(source):
         return {"followup": False, "achievement": False}
+    if not proactive_followups_enabled():
+        # A normal answer may leave an open door, but it must not create a
+        # future demand on the user. The separate, user-enabled morning cron
+        # remains available without enabling these delayed nudges.
+        return {"followup": False, "achievement": False}
     if classify_lifeboat_signals(user_text).possible_crisis:
         # A safety-sensitive turn must not fall back into a routine reminder
         # queue; any further contact should be an explicit safety decision.
@@ -441,6 +458,15 @@ class LifeBoatFollowupBridge:
         self.poll_interval = max(5.0, float(poll_interval))
 
     async def deliver_once(self, *, now: datetime | None = None) -> bool:
+        if not proactive_followups_enabled():
+            # Drop stale queues created before the opt-in boundary so an
+            # upgrade cannot suddenly replay old emotional prompts.
+            with _locked(self.profile_home) as path:
+                state = _load(path)
+                if state.get("items"):
+                    state["items"] = {}
+                    _save(path, state)
+            return False
         item = _claim_due(self.profile_home, now=now)
         if item is None:
             return False
