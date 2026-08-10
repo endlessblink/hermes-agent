@@ -1435,6 +1435,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         logger.warning("Job '%s': %s", job["id"], msg)
         return msg
 
+    is_lifeboat_target = any(
+        str(target.get("platform") or "").lower() == "telegram"
+        and str(target.get("chat_id") or "") == "-1004230590253"
+        and str(target.get("thread_id") or "") == "2"
+        for target in targets
+    )
+    if is_lifeboat_target and str(job.get("name") or "") != "lifeboat-morning-check-in":
+        logger.warning(
+            "Job '%s' blocked: only the user-enabled Life-Boat morning flow may deliver scheduled contact",
+            job.get("name", job.get("id", "?")),
+        )
+        return None
+
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
@@ -1453,12 +1466,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     # surface. The generic wrapper leaks internal job IDs and English control
     # instructions into the user's emotional-support conversation. Keep the
     # wrapper for ordinary destinations, but deliver Life-Boat content cleanly.
-    is_lifeboat_target = any(
-        str(target.get("platform") or "").lower() == "telegram"
-        and str(target.get("chat_id") or "") == "-1004230590253"
-        and str(target.get("thread_id") or "") == "2"
-        for target in targets
-    )
     if wrap_response and not is_lifeboat_target:
         task_name = job.get("name", job["id"])
         job_id = job.get("id", "")
