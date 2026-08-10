@@ -81,9 +81,6 @@ priority, and what support or boundary would help. Reflect the answer, offer one
 realistic next step, and leave room for “not today.” Never start with a demand to
 report achievements, and never save the check-in without explicit approval.
 
-The same emotional-processing contract applies when the personal-assistant topic
-is used for vulnerable reflection: task assistance must not replace attunement,
-and a checklist of prohibitions is not an adequate coaching response.
 
 ## Evaluation contract
 
