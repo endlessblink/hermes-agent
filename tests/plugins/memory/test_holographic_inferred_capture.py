@@ -68,3 +68,32 @@ def test_inferred_skipped_when_disabled(tmp_path, monkeypatch):
     p.on_session_end([{"role": "user", "content": "hello"}])
     assert called["n"] == 0  # infer_facts defaults off
     p.shutdown()
+
+
+def test_automatic_capture_can_be_disabled_while_recall_stays_available(tmp_path, monkeypatch):
+    p = HolographicMemoryProvider(
+        config={
+            "db_path": str(tmp_path / "m.db"),
+            "hrr_dim": 64,
+            "infer_facts": True,
+            "auto_capture": False,
+        }
+    )
+    p.initialize(session_id="s")
+    called = {"n": 0}
+
+    def _spy(messages):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr("agent.memory_extraction.extract_inferred_facts", _spy)
+    monkeypatch.setattr(
+        "agent.memory_capture.mechanical_facts",
+        lambda messages: (_ for _ in ()).throw(AssertionError("automatic mechanical capture ran")),
+    )
+    p.sync_turn("I prefer quiet mornings", "Understood")
+    p.on_session_end([{"role": "user", "content": "I feel vulnerable"}])
+
+    assert called["n"] == 0
+    assert p._store._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0] == 0
+    p.shutdown()
