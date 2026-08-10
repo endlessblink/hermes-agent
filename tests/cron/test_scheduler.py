@@ -615,6 +615,31 @@ class TestDeliverResultWrapping:
         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
         assert "Cronjob Response: abc-123" in sent_content
 
+    def test_lifeboat_delivery_suppresses_cron_control_wrapper(self):
+        """Life-Boat receives support text, never job IDs or management instructions."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            job = {
+                "id": "lifeboat-job",
+                "name": "lifeboat-morning-check-in",
+                "deliver": "telegram:-1004230590253:2",
+            }
+            _deliver_result(job, "בוקר טוב. איך הקיבולת שלך הבוקר?")
+
+        send_mock.assert_called_once()
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content == "בוקר טוב. איך הקיבולת שלך הבוקר?"
+        assert "Cronjob Response" not in sent_content
+        assert "job_id" not in sent_content
+        assert "stop or manage" not in sent_content
+
     def test_delivery_skips_wrapping_when_config_disabled(self):
         """When cron.wrap_response is false, deliver raw content without header/footer."""
         from gateway.config import Platform
@@ -999,6 +1024,45 @@ class TestDeliverResultErrorReturns:
 
 
 class TestRunJobSessionPersistence:
+    def test_lifeboat_prompt_uses_bounded_thread_context_without_persisting(self, tmp_path):
+        from cron.scheduler import _build_job_prompt
+
+        fake_db = MagicMock()
+        fake_db.find_latest_gateway_session_for_peer.return_value = {"id": "life-session"}
+        fake_db.get_messages.return_value = [
+            {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] stale instructions"},
+            {"role": "user", "content": "אני שוב נתקע בלופ של ביקורת עצמית"},
+            {"role": "assistant", "content": "אפשר לבדוק יחד מה הלופ מנסה לפתור"},
+        ]
+        job = {
+            "id": "life-job",
+            "name": "lifeboat-morning-check-in",
+            "prompt": "Write one brief check-in.",
+            "deliver": "telegram:-1004230590253:2",
+        }
+        with patch("cron.scheduler._hermes_home", tmp_path / "life-advisor"):
+            prompt = _build_job_prompt(job, session_db=fake_db)
+
+        assert "Recent Life-Boat thread context (transient, not memory)" in prompt
+        assert "נתקע בלופ של ביקורת עצמית" in prompt
+        assert "stale instructions" not in prompt
+        fake_db.get_messages.assert_called_once_with("life-session", limit=12)
+
+    def test_lifeboat_context_is_not_loaded_for_other_profiles(self, tmp_path):
+        from cron.scheduler import _build_job_prompt
+
+        fake_db = MagicMock()
+        job = {
+            "id": "other-job",
+            "prompt": "Write one brief check-in.",
+            "deliver": "telegram:-1004230590253:2",
+        }
+        with patch("cron.scheduler._hermes_home", tmp_path / "default"):
+            prompt = _build_job_prompt(job, session_db=fake_db)
+
+        assert "Recent Life-Boat thread context" not in prompt
+        fake_db.find_latest_gateway_session_for_peer.assert_not_called()
+
     def test_run_job_passes_session_db_and_cron_platform(self, tmp_path):
         job = {
             "id": "test-job",

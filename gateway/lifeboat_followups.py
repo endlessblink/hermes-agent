@@ -50,6 +50,12 @@ _WRAP_RE = re.compile(
     r"wrap up|end here)",
     re.IGNORECASE,
 )
+_CLOSING_INSIGHT_RE = re.compile(
+    r"(?:אולי\s+הקריטריון\s+הוא|אין\s+צורך\s+להרגיש|אז\s+המסקנה\s+היא|"
+    r"אין\s+צורך\s+ל|you\s+do(?:n't| not)\s+need\s+to|the\s+criterion\s+is|"
+    r"the\s+answer\s+is|so\s+the\s+conclusion\s+is)",
+    re.IGNORECASE,
+)
 
 
 def _state_path(profile_home: Path) -> Path:
@@ -179,7 +185,12 @@ def build_continuation_guidance(
         "Use this conversational shape: stay with one concrete detail the user just gave; "
         "reflect it tentatively in ordinary language; then leave one open door for the user—"
         "at most one useful question about what still has force, or a gentle invitation to notice "
-        "what happens next—and stop so they can answer. If two interpretations are plausible, name "
+        "what happens next—and stop so they can answer. The reflection is a hypothesis, not the "
+        "answer: do not turn it into a verdict, lesson, diagnosis, or polished conclusion. Do not "
+        "say what the user does not need to do or feel (for example, ‘אין צורך להרגיש לבד’), do not "
+        "announce a criterion or final meaning (for example, ‘אולי הקריטריון הוא’), and do not close "
+        "with reassurance that leaves nothing to explore. End with the user's choice: one real question "
+        "or an unfinished invitation such as ‘מעניין אם זה פוגש אותך כך’. If two interpretations are plausible, name "
         "them as possibilities and let the user choose. When an emotion is present, treat it as a "
         "real experience rather than a command: explore what it may be signaling or protecting, "
         "and locate agency in what the user can choose next, not in forcing the emotion to disappear. "
@@ -211,7 +222,11 @@ def build_lifeboat_coaching_guidance(
         "language. Treat this message as still unfolding. Use this shape: choose one concrete detail "
         "the user actually said, reflect it tentatively, and open one door for further exploration—"
         "at most one useful question or a gentle invitation to notice what happens next—then stop and "
-        "let the user answer. If multiple threads are present, name at most two possibilities and let "
+        "let the user answer. The reflection must remain a hypothesis, never a verdict, lesson, diagnosis, "
+        "or polished conclusion. Do not tell the user what they do not need to do or feel (for example, "
+        "‘אין צורך להרגיש לבד’), announce a final criterion (for example, ‘אולי הקריטריון הוא’), or "
+        "end with reassurance that closes the subject. End with the user's choice: one genuine question "
+        "or an unfinished invitation such as ‘מעניין אם זה פוגש אותך כך’. If multiple threads are present, name at most two possibilities and let "
         "the user choose which matters. Emotions are real experiences, not commands; explore what a "
         "painful feeling may be signaling or protecting, and focus agency on the next choice rather "
         "than on controlling the feeling. For a recurring thought loop, explore what it is trying to "
@@ -240,6 +255,22 @@ def _wrap_guidance(user_text: str) -> str:
 def build_lifeboat_coaching_prompt(user_text: str) -> str:
     """Compatibility helper for callers that still need a single prompt string."""
     return f"{str(user_text or '').strip()}\n\n{build_lifeboat_coaching_guidance(user_text)}"
+
+
+def repair_lifeboat_closure(response: str, user_text: str = "") -> str:
+    """Keep a Life-Boat turn open when the model has prematurely concluded it.
+
+    This is a narrow delivery guard, not a replacement for the coaching prompt:
+    it only acts on a non-crisis turn that has no question/open invitation and
+    contains a recognizable declarative closure. The added line returns meaning
+    to the user instead of asserting an interpretation on their behalf.
+    """
+    text = str(response or "").strip()
+    if not text or _WRAP_RE.search(str(user_text or "")):
+        return text
+    if _QUESTION_RE.search(text) or not _CLOSING_INSIGHT_RE.search(text):
+        return text
+    return f"{text}\n\nאני לא רוצה לקבוע את זה במקומך — איך זה פוגש אותך?"
 
 
 def prepare_lifeboat_inbound_guidance(

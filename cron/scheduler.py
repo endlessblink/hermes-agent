@@ -1449,7 +1449,17 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     except Exception:
         pass
 
-    if wrap_response:
+    # Life-Boat is a conversational support lane, not a cron-management
+    # surface. The generic wrapper leaks internal job IDs and English control
+    # instructions into the user's emotional-support conversation. Keep the
+    # wrapper for ordinary destinations, but deliver Life-Boat content cleanly.
+    is_lifeboat_target = any(
+        str(target.get("platform") or "").lower() == "telegram"
+        and str(target.get("chat_id") or "") == "-1004230590253"
+        and str(target.get("thread_id") or "") == "2"
+        for target in targets
+    )
+    if wrap_response and not is_lifeboat_target:
         task_name = job.get("name", job["id"])
         job_id = job.get("id", "")
         delivery_content = (
@@ -1934,7 +1944,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 try:
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
-                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
+                        # Create the coroutine inside the worker so a mocked or
+                        # rejected submit cannot leave it unawaited.
+                        future = pool.submit(
+                            lambda: asyncio.run(_send_to_platform(
+                                platform, pconfig, chat_id, cleaned_delivery_content,
+                                thread_id=thread_id, media_files=media_files,
+                            ))
+                        )
                         result = future.result(timeout=30)
                     finally:
                         pool.shutdown(wait=False)
@@ -2232,7 +2249,83 @@ def _parse_wake_gate(script_output: str) -> bool:
     return gate.get("wakeAgent", True) is not False
 
 
-def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
+def _lifeboat_recent_context(job: dict, session_db) -> str:
+    """Load a small, transient Life-Boat context window for proactive turns.
+
+    Cron agents normally run in fresh sessions, which makes a proactive message
+    generic even when the destination thread has a real conversation. This
+    narrow bridge is enabled only inside the life-advisor profile and only for
+    the configured Life-Boat Telegram topic. It reads the canonical session
+    row, bounds the window, and returns prompt text without writing anything.
+    """
+    if session_db is None or _get_hermes_home().name != "life-advisor":
+        return ""
+    try:
+        targets = _resolve_delivery_targets(job)
+        target = next(
+            (
+                item for item in targets
+                if str(item.get("platform") or "").lower() == "telegram"
+                and str(item.get("thread_id") or "") == "2"
+            ),
+            None,
+        )
+        if target is None:
+            return ""
+
+        from gateway.config import Platform
+        from gateway.session import SessionSource, build_session_key
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id=str(target.get("chat_id") or ""),
+            chat_type="group",
+            thread_id="2",
+            profile="life-advisor",
+        )
+        session_key = build_session_key(source, profile="life-advisor")
+        row = session_db.find_latest_gateway_session_for_peer(
+            source="telegram",
+            session_key=session_key,
+            chat_id=source.chat_id,
+            chat_type=source.chat_type,
+            thread_id=source.thread_id,
+        )
+        if not row or not row.get("id"):
+            return ""
+        messages = session_db.get_messages(str(row["id"]), limit=12)
+        turns = []
+        for message in messages:
+            role = str(message.get("role") or "").lower()
+            content = str(message.get("content") or "").strip()
+            if role not in {"user", "assistant"} or not content:
+                continue
+            # Compaction rows contain stale instructions and historical task
+            # snapshots; they are not conversational context and may steer a
+            # fresh proactive turn away from the current thread.
+            if "[CONTEXT COMPACTION" in content or "## Historical Task Snapshot" in content:
+                continue
+            turns.append(f"{role}: {content[:700]}")
+        if not turns:
+            return ""
+        return (
+            "## Recent Life-Boat thread context (transient, not memory)\n"
+            "Use this only to stay continuous with the user's actual recent thread. "
+            "Do not quote it, expose old private details, or claim that an old feeling "
+            "is still present. Refer to it only when it genuinely helps, and leave the "
+            "user free to correct or change direction.\n\n"
+            + "\n".join(turns[-8:])
+        )
+    except Exception:
+        logger.debug("Life-Boat proactive context lookup failed", exc_info=True)
+        return ""
+
+
+def _build_job_prompt(
+    job: dict,
+    prerun_script: Optional[tuple] = None,
+    session_db=None,
+) -> str:
     """Build the effective prompt for a cron job, optionally loading one or more skills first.
 
     Args:
@@ -2252,6 +2345,11 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     # pastes `rm -rf /`), so it must not be scanned with the strict
     # user-prompt pattern set — see _scan_assembled_cron_prompt.
     has_injected_data = False
+
+    recent_lifeboat_context = _lifeboat_recent_context(job, session_db)
+    if recent_lifeboat_context:
+        prompt = f"{recent_lifeboat_context}\n\n{prompt}"
+        has_injected_data = True
 
     # Run data-collection script if configured, inject output as context.
     script_path = job.get("script")
@@ -2787,7 +2885,11 @@ def run_job(
             return True, silent_doc, SILENT_MARKER, None
 
     try:
-        prompt = _build_job_prompt(job, prerun_script=prerun_script)
+        prompt = _build_job_prompt(
+            job,
+            prerun_script=prerun_script,
+            session_db=_session_db,
+        )
     except CronPromptInjectionBlocked as block_exc:
         # Assembled prompt (user prompt + loaded skill content) tripped the
         # injection scanner. Refuse to run the agent this tick and surface
