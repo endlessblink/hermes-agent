@@ -35,6 +35,19 @@ def main() -> int:
             print(f"FAIL source/installed mismatch: {relative}")
             return 1
 
+    runtime_text = (source_root / "gateway" / "run.py").read_text(encoding="utf-8")
+    for marker in (
+        "record_lifeboat_trajectory(",
+        "consume_followup_context(",
+        "event.channel_prompt =",
+        "agent.lifeboat_mode = is_lifeboat_source(source)",
+        "goal continuation: suppressed for Life-Boat source",
+        "arm_lifeboat_prompts(",
+    ):
+        if marker not in runtime_text:
+            print(f"FAIL Life-Boat runtime integration missing {marker!r}")
+            return 1
+
     live_config_path = Path("/home/endlessblink/.hermes/config.yaml")
     if not live_config_path.is_file():
         print("FAIL live Hermes config is missing")
