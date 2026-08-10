@@ -97,3 +97,22 @@ def test_automatic_capture_can_be_disabled_while_recall_stays_available(tmp_path
     assert called["n"] == 0
     assert p._store._conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0] == 0
     p.shutdown()
+
+
+def test_recall_origin_policy_hides_unapproved_facts(tmp_path):
+    p = HolographicMemoryProvider(
+        config={
+            "db_path": str(tmp_path / "m.db"),
+            "hrr_dim": 64,
+            "recall_origins": ["explicit", "obsidian"],
+        }
+    )
+    p.initialize(session_id="s")
+    p._store.add_fact("Private inferred feeling", origin="inferred")
+    p._store.add_fact("Approved morning preference", origin="explicit")
+
+    recalled = p.prefetch("morning preference feeling")
+
+    assert "Approved morning preference" in recalled
+    assert "Private inferred feeling" not in recalled
+    p.shutdown()
