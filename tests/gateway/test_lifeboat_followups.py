@@ -18,6 +18,7 @@ from gateway.lifeboat_followups import (
     consume_followup_context,
     filter_lifeboat_toolsets,
     is_lifeboat_source,
+    prepare_lifeboat_inbound_guidance,
 )
 
 
@@ -117,6 +118,20 @@ def test_natural_wrap_offers_one_permissioned_daily_summary(tmp_path):
 def test_ordinary_turn_does_not_force_daily_summary():
     prompt = build_lifeboat_coaching_prompt("אני עדיין מנסה להבין מה קרה")
     assert "The user appears to be wrapping up" not in prompt
+
+
+def test_inbound_guidance_updates_trajectory_and_consumes_pending_context(tmp_path):
+    arm_followup(tmp_path, "session", source(), "רוצה להמשיך מכאן?", now=NOW)
+    guidance = prepare_lifeboat_inbound_guidance(
+        tmp_path,
+        "session",
+        "זה עזר לי, אפשר לעצור להיום",
+    )
+    assert "The topic was: רוצה להמשיך מכאן?" in guidance
+    assert "The user appears to be wrapping up" in guidance
+    assert consume_followup_context(tmp_path, "session") is None
+    trajectory_state = (tmp_path / "state" / "lifeboat-psychology.json").read_text()
+    assert "זה עזר לי" not in trajectory_state
 
 
 def test_plain_completed_answer_does_not_arm(tmp_path):

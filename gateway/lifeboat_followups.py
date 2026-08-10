@@ -18,6 +18,7 @@ from gateway.lifeboat_psychology import (
     LifeBoatTrajectory,
     build_signal_guidance,
     classify_lifeboat_signals,
+    record_lifeboat_trajectory,
 )
 
 
@@ -239,6 +240,25 @@ def _wrap_guidance(user_text: str) -> str:
 def build_lifeboat_coaching_prompt(user_text: str) -> str:
     """Compatibility helper for callers that still need a single prompt string."""
     return f"{str(user_text or '').strip()}\n\n{build_lifeboat_coaching_guidance(user_text)}"
+
+
+def prepare_lifeboat_inbound_guidance(
+    profile_home: Path,
+    session_key: str,
+    user_text: str,
+) -> str:
+    """Build ephemeral guidance for one real Life-Boat inbound turn.
+
+    This is deliberately the integration seam between the gateway and the
+    short-lived psychology layer: trajectory counters are updated, a pending
+    proactive context is consumed once, and the resulting guidance is returned
+    without persisting the user's wording.
+    """
+    trajectory = record_lifeboat_trajectory(profile_home, session_key, user_text)
+    reminder_context = consume_followup_context(profile_home, session_key)
+    if reminder_context:
+        return build_continuation_guidance(reminder_context, user_text, trajectory)
+    return build_lifeboat_coaching_guidance(user_text, trajectory)
 
 
 def arm_followup(

@@ -9826,16 +9826,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _quick_key = self._session_key_for_source(source)
         try:
             from gateway.lifeboat_followups import (
-                build_continuation_guidance,
-                build_lifeboat_coaching_guidance,
                 cancel_followup,
-                consume_followup_context,
                 is_lifeboat_source,
+                prepare_lifeboat_inbound_guidance,
             )
-            from gateway.lifeboat_psychology import (
-                clear_lifeboat_trajectory,
-                record_lifeboat_trajectory,
-            )
+            from gateway.lifeboat_psychology import clear_lifeboat_trajectory
 
             _lifeboat_command = event.get_command()
             if is_lifeboat_source(source) and _lifeboat_command == "new":
@@ -9848,30 +9843,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and (event.text or "").strip()
             ):
                 _lifeboat_profile_home = self._resolve_profile_home_for_source(source)
-                _lifeboat_trajectory = record_lifeboat_trajectory(
+                _coaching_guidance = prepare_lifeboat_inbound_guidance(
                     _lifeboat_profile_home,
                     _quick_key,
                     event.text,
                 )
-                reminder_context = consume_followup_context(
-                    _lifeboat_profile_home, _quick_key
-                )
-                if reminder_context and (event.text or "").strip():
-                    coaching_guidance = build_continuation_guidance(
-                        reminder_context,
-                        event.text,
-                        _lifeboat_trajectory,
-                    )
-                elif (event.text or "").strip():
-                    coaching_guidance = build_lifeboat_coaching_guidance(
-                        event.text,
-                        _lifeboat_trajectory,
-                    )
-                else:
-                    coaching_guidance = ""
-                if coaching_guidance:
+                if _coaching_guidance:
                     event.channel_prompt = "\n\n".join(
-                        part for part in (event.channel_prompt or "", coaching_guidance) if part
+                        part for part in (event.channel_prompt or "", _coaching_guidance) if part
                     )
         except Exception:
             logger.debug("Life-Boat follow-up cancellation failed", exc_info=True)

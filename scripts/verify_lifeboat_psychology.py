@@ -40,8 +40,7 @@ def main() -> int:
 
     runtime_text = (source_root / "gateway" / "run.py").read_text(encoding="utf-8")
     for marker in (
-        "record_lifeboat_trajectory(",
-        "consume_followup_context(",
+        "prepare_lifeboat_inbound_guidance(",
         "event.channel_prompt =",
         "agent.lifeboat_mode = is_lifeboat_source(source)",
         "goal continuation: suppressed for Life-Boat source",
