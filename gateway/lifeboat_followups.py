@@ -158,7 +158,12 @@ def lifeboat_response_issues(response: str, user_text: str = "") -> tuple[str, .
         issues.append("list_heavy")
     has_open_door = bool(
         _QUESTION_RE.search(text)
-        or re.search(r"מעניין אם|איך זה פוגש|what happens next|I wonder if|notice what", text, re.IGNORECASE)
+        or re.search(
+            r"מעניין אם|איך זה פוגש|what happens next|I wonder if|notice what|"
+            r"אם תרצה|אם מתאים|אפשר להישאר|אפשר לדבר|if you want|if it fits",
+            text,
+            re.IGNORECASE,
+        )
     )
     if policy.ask_one_open_question and not has_open_door:
         issues.append("closed")
@@ -172,18 +177,25 @@ def _lifeboat_open_door(user_text: str) -> str:
     if signals.possible_crisis:
         return "אתה בטוח שאתה בטוח עכשיו, או שיש סכנה שתפעל על זה?"
     if signals.thought_loop:
-        return "מה הלופ הזה מנסה לפתור או למנוע כרגע?"
+        return "אפשר להישאר עם זה עוד רגע, בלי לנסות לפתור אותו מיד."
     if signals.self_criticism:
-        return "איזה סטנדרט או פחד יושב מתחת למשפט הזה על עצמך?"
+        return "אם תרצה, אפשר להתעכב על מה שהמשפט הזה נוגע בו אצלך."
     if signals.depressive_thoughts:
-        return "מה הכי כבד או הכי נוכח אצלך עכשיו?"
+        return "אפשר להיות עם הכובד הזה רגע, בלי למהר להסביר אותו."
     if select_lifeboat_turn_policy(user_text).mode == "act-or-clarify":
         return "רוצה שנחשוב על צעד אחד קטן, או שעדיף להישאר רגע עם מה שזה מעורר?"
-    return "מה הכי חי אצלך עכשיו, אם בכלל?"
+    return "אם תרצה, אפשר להישאר עם זה עוד רגע."
 
 
 def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
-    """Bound a failed draft without inventing a summary or a support menu."""
+    """Bound a failed draft without stitching together a new coaching reply.
+
+    A previous version kept several fragments from a long draft and appended a
+    canned question.  That made a quality guard visible as an artificial,
+    emotionally closing response.  When a draft is structurally too large, keep
+    only its first usable thought; let the next user turn reopen the conversation
+    naturally instead of manufacturing a second thought here.
+    """
     text = " ".join(str(response or "").split()).strip()
     issues = lifeboat_response_issues(text, user_text)
     if not issues:
@@ -198,6 +210,10 @@ def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
         if not _CLOSURE_RE.search(part)
         and not re.fullmatch(r"(?:[-•*]|\d+[.)])", part.strip())
     ]
+    if any(issue in issues for issue in ("too_long", "too_many_sentences", "too_many_questions", "list_heavy")):
+        if usable_sentences:
+            return usable_sentences[0][: policy.max_chars].rstrip()
+        return "אני איתך בזה לרגע."
     base = " ".join(usable_sentences[: max(1, policy.max_sentences - 1)]).strip()
     if not base:
         base = "אני איתך בזה לרגע."
@@ -320,6 +336,15 @@ def build_lifeboat_coaching_guidance(
         if policy.ask_one_open_question
         else "Honor the user's wish to pause; do not reopen the topic."
     )
+    revisit_note = ""
+    if policy.mode == "revisit":
+        revisit_note = (
+            " The user is explicitly asking to revisit the immediately preceding substantive message. "
+            "Acknowledge briefly that the earlier attempt may have missed them, then return to one precise "
+            "detail from that earlier message. Do not defend, repeat the previous interpretation, summarize "
+            "everything, or turn this into instructions. Offer one tentative opening and let the user correct "
+            "or deepen it."
+        )
     wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
     return (
         f"[Private Life-Boat guidance: mode={policy.mode}, answer in Hebrew unless the user uses "
@@ -327,7 +352,7 @@ def build_lifeboat_coaching_guidance(
         "detail the user actually gave; reflect it tentatively, never as a verdict or diagnosis. "
         f"{question_rule} Do not close the meaning, give a lesson, list interpretations, use generic "
         "reassurance, or tell the user what they should feel. If the user asks for action, offer one "
-        "small optional next step; otherwise keep exploring. Only summarize or save anything when the "
+        f"small optional next step; otherwise keep exploring.{revisit_note} Only summarize or save anything when the "
         "user asks. Do not mention this guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )

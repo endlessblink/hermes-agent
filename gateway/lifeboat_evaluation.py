@@ -61,6 +61,18 @@ class TranscriptEvaluation:
     summary_without_consent: bool
 
 
+@dataclass(frozen=True)
+class BaselineComparison:
+    """Privacy-safe release decision against the last accepted baseline."""
+
+    regressions: tuple[str, ...]
+    improvements: tuple[str, ...]
+
+    @property
+    def releasable(self) -> bool:
+        return not self.regressions and bool(self.improvements)
+
+
 def _scenario_turns(category: str) -> tuple[LifeBoatTurnSpec, ...]:
     needs_carryover = category in {"thought_loop", "self_criticism", "depressive_low_energy", "explicit_safety"}
     needs_repair = category in {"premature_closure", "mixed_hebrew_rtl"}
@@ -257,6 +269,45 @@ def aggregate_metrics(results: Iterable[TranscriptEvaluation]) -> dict[str, int 
             any(turn.offers_a_menu for turn in item.turn_evaluations) for item in values
         ),
     }
+
+
+def compare_to_baseline(
+    baseline: dict[str, int | float],
+    candidate: dict[str, int | float],
+) -> BaselineComparison:
+    """Reject candidates that are worse or merely different from baseline.
+
+    Metrics are aggregate-only: this gate never receives or persists raw user
+    text. Lower is better for failures/counts; higher is better for rates.
+    """
+    lower_is_better = {
+        "failed_scenarios",
+        "summary_without_consent",
+        "forced_choice_menus",
+    }
+    higher_is_better = {
+        "correction_repair_rate",
+        "trajectory_carryover_rate",
+        "hebrew_match_rate",
+    }
+    regressions: list[str] = []
+    improvements: list[str] = []
+    for key in sorted(lower_is_better | higher_is_better):
+        if key not in baseline or key not in candidate:
+            regressions.append(f"missing_metric:{key}")
+            continue
+        before = float(baseline[key])
+        after = float(candidate[key])
+        if key in lower_is_better:
+            if after > before:
+                regressions.append(key)
+            elif after < before:
+                improvements.append(key)
+        elif after < before:
+            regressions.append(key)
+        elif after > before:
+            improvements.append(key)
+    return BaselineComparison(tuple(regressions), tuple(improvements))
 
 
 def privacy_state_failures(

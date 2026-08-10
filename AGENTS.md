@@ -1,5 +1,24 @@
 # Hermes Agent - Development Guide
 
+## Life-Boat goal loop
+
+When working on the Life-Boat support experience, keep the goal active until
+the requested outcome is genuinely verified. Before each implementation or
+release step, run the `$sure` gate and state the root cause, confidence, proof
+needed, scope, and regression risks. If confidence is not HIGH, continue with
+targeted research, code/runtime inspection, and local tests, then rerun the gate
+automatically; do not stop to ask the user whether to continue.
+
+Use the preserved Life-Boat baseline as the rollback authority. Reject or roll
+back any candidate that is not clearly better, or that introduces a severe
+regression in naturalness, relevance, openness, safety, privacy, consent,
+message volume, or user agency. Do not invoke CI/CD or GitHub Actions unless a
+specific required verification cannot be performed locally or through the
+authenticated Life-Boat runtime; a CI result is never production proof. Do
+not spend money or consume paid inference/API quota unless it is strictly
+necessary for proof that cannot be obtained locally; record the reason before
+any paid call.
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 **Never give up on the right solution.**
