@@ -332,7 +332,12 @@ class HolographicMemoryProvider(MemoryProvider):
         # model call, so it's cheap and fits the no-cloud / low-VRAM rules — and
         # the manager already runs sync_turn off the main loop. Scoped to the
         # active project so projects don't cross-contaminate.
-        if not self._store or not isinstance(user_content, str) or not user_content.strip():
+        if (
+            not self._config.get("auto_capture", True)
+            or not self._store
+            or not isinstance(user_content, str)
+            or not user_content.strip()
+        ):
             return
         try:
             from agent.memory_capture import mechanical_facts
@@ -381,6 +386,9 @@ class HolographicMemoryProvider(MemoryProvider):
         # Mechanical capture always runs -- it's deterministic ground truth
         # (repo, commands, explicit user statements), not model inference, so
         # there's nothing to gate.
+        if not self._config.get("auto_capture", True):
+            logger.info("[MEM] automatic capture disabled by profile policy")
+            return
         self._capture_mechanical(messages)
         # Model-inferred capture (the substance: what we're working on, lessons
         # to remember, requested changes, decisions, rejected approaches,
