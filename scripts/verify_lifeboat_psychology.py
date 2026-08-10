@@ -27,6 +27,9 @@ def main() -> int:
         Path("gateway/run.py"),
         Path("gateway/lifeboat_followups.py"),
         Path("gateway/lifeboat_psychology.py"),
+        Path("gateway/session_context.py"),
+        Path("cron/jobs.py"),
+        Path("cron/scheduler.py"),
     )
     for relative in relative_files:
         source = source_root / relative
@@ -44,6 +47,8 @@ def main() -> int:
         "goal continuation: suppressed for Life-Boat source",
         "arm_lifeboat_prompts(",
         "user_text=event.text or \"\"",
+        "with use_cron_store(profile_home):",
+        "getattr(runner, \"adapters\", {})",
     ):
         if marker not in runtime_text:
             print(f"FAIL Life-Boat runtime integration missing {marker!r}")

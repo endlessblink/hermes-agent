@@ -788,13 +788,14 @@ def record_ticker_heartbeat(success: bool = False) -> None:
 
     Best-effort: a write failure must never disrupt the tick loop.
     """
+    store = _current_cron_store()
     try:
-        _atomic_write_epoch(TICKER_HEARTBEAT_FILE)
+        _atomic_write_epoch(store.cron_dir / "ticker_heartbeat")
     except Exception:
         pass
     if success:
         try:
-            _atomic_write_epoch(TICKER_SUCCESS_FILE)
+            _atomic_write_epoch(store.cron_dir / "ticker_last_success")
         except Exception:
             pass
 
@@ -813,12 +814,12 @@ def get_ticker_heartbeat_age() -> Optional[float]:
     None = heartbeat file missing/unreadable (older build, never ran, or a
     torn read). Callers treat None as "cannot determine", not "dead".
     """
-    return _epoch_file_age(TICKER_HEARTBEAT_FILE)
+    return _epoch_file_age(_current_cron_store().cron_dir / "ticker_heartbeat")
 
 
 def get_ticker_success_age() -> Optional[float]:
     """Seconds since the ticker last completed a tick WITHOUT raising, or None."""
-    return _epoch_file_age(TICKER_SUCCESS_FILE)
+    return _epoch_file_age(_current_cron_store().cron_dir / "ticker_last_success")
 
 
 # =============================================================================

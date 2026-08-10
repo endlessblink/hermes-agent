@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 
@@ -9,6 +10,11 @@ from hermes_constants import get_hermes_home
 def test_secondary_profile_cron_runs_in_profile_scope(monkeypatch, tmp_path):
     office_home = tmp_path / "profiles" / "office-work"
     office_home.mkdir(parents=True)
+    (office_home / "cron").mkdir()
+    (office_home / "cron" / "jobs.json").write_text(
+        json.dumps({"jobs": [{"name": "office-scoped"}]}),
+        encoding="utf-8",
+    )
     started = threading.Event()
     stop = threading.Event()
     seen = {}
@@ -17,8 +23,11 @@ def test_secondary_profile_cron_runs_in_profile_scope(monkeypatch, tmp_path):
         name = "fake"
 
         def start(self, stop_event, **kwargs):
+            from cron.jobs import load_jobs
+
             seen["home"] = get_hermes_home()
             seen["adapters"] = kwargs["adapters"]
+            seen["jobs"] = [job["name"] for job in load_jobs()]
             started.set()
             stop_event.wait(1)
 
@@ -53,8 +62,9 @@ def test_secondary_profile_cron_runs_in_profile_scope(monkeypatch, tmp_path):
         assert started.wait(1)
         assert len(schedulers) == 1
         assert seen == {
-            "home": office_home,
-            "adapters": {"telegram": "office-adapter"},
+        "home": office_home,
+        "adapters": {"telegram": "office-adapter"},
+        "jobs": ["office-scoped"],
         }
     finally:
         stop.set()
@@ -74,28 +84,54 @@ def test_secondary_profile_cron_is_disabled_without_multiplexing():
     ) == []
 
 
-def test_secondary_profile_cron_does_not_activate_unrelated_profiles(
+def test_secondary_profile_cron_activates_lifeboat_profile(
     monkeypatch, tmp_path
 ):
+    life_home = tmp_path / "profiles" / "life-advisor"
+    life_home.mkdir(parents=True)
+    started = threading.Event()
+    stop = threading.Event()
+
+    class Provider:
+        name = "fake"
+
+        def start(self, stop_event, **kwargs):
+            started.set()
+            stop_event.wait(1)
+
+        def stop(self):
+            pass
+
     runner = SimpleNamespace(
         config=SimpleNamespace(
             multiplex_profiles=True,
             multiplex_served_profiles=["life-advisor"],
         ),
+        _profile_adapters={"life-advisor": {"telegram": "life-adapter"}},
+        _draining=False,
+        _external_drain_active=False,
     )
     monkeypatch.setattr(
         "hermes_cli.profiles.profiles_to_serve",
         lambda **_kwargs: [
             ("default", tmp_path),
-            ("life-advisor", tmp_path / "profiles" / "life-advisor"),
+            ("life-advisor", life_home),
         ],
     )
     monkeypatch.setattr(
         "hermes_cli.profiles.get_active_profile_name", lambda: "default"
     )
 
-    assert _start_secondary_profile_cron_schedulers(
+    schedulers = _start_secondary_profile_cron_schedulers(
         runner,
-        threading.Event(),
+        stop,
         asyncio.new_event_loop(),
-    ) == []
+        resolve_provider=lambda: Provider(),
+    )
+    try:
+        assert started.wait(1)
+        assert len(schedulers) == 1
+    finally:
+        stop.set()
+        for _provider, thread in schedulers:
+            thread.join(timeout=1)

@@ -948,6 +948,47 @@ class TestDeliverResultErrorReturns:
         assert result is not None
         assert "not configured" in result
 
+    def test_live_adapter_can_deliver_when_profile_config_is_disabled(self):
+        """A multiplexed profile can use the gateway-owned Telegram adapter."""
+        from concurrent.futures import Future
+        from gateway.config import Platform
+
+        adapter = AsyncMock()
+        adapter.send.return_value = MagicMock(success=True)
+        pconfig = MagicMock()
+        pconfig.enabled = False
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
+
+            future = Future()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as error:  # noqa: BLE001
+                future.set_exception(error)
+            return future
+
+        job = {
+            "id": "profile-live-adapter",
+            "deliver": "telegram:123:2",
+        }
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro):
+            result = _deliver_result(
+                job,
+                "A brief check-in.",
+                adapters={Platform.TELEGRAM: adapter},
+                loop=loop,
+            )
+
+        assert result is None or "not configured" not in result
+        adapter.send.assert_called_once()
+
     def test_returns_error_for_unresolved_target(self, monkeypatch):
         """Non-local delivery with no resolvable target should return an error."""
         monkeypatch.delenv("TELEGRAM_HOME_CHANNEL", raising=False)

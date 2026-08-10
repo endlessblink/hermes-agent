@@ -1530,7 +1530,13 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             continue
 
         pconfig = config.platforms.get(platform)
-        if not pconfig or not pconfig.enabled:
+        # A profile-scoped scheduler may intentionally have no platform token
+        # in its private config while the multiplexed gateway owns the live
+        # adapter and routes this profile through it.  The adapter is the
+        # authoritative capability for that in-process delivery path; a
+        # standalone runner still fails closed because it has no adapter.
+        runtime_adapter = (adapters or {}).get(platform)
+        if (not pconfig or not pconfig.enabled) and runtime_adapter is None:
             msg = f"platform '{platform_name}' not configured/enabled"
             logger.warning("Job '%s': %s", job["id"], msg)
             delivery_errors.append(msg)
@@ -1538,7 +1544,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
         # Prefer the live adapter when the gateway is running — this supports E2EE
         # rooms (e.g. Matrix) where the standalone HTTP path cannot encrypt.
-        runtime_adapter = (adapters or {}).get(platform)
         delivered = False
         target_errors = []
 

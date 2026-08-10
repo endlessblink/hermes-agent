@@ -1539,11 +1539,18 @@ def _start_secondary_profile_cron_schedulers(
     )
     schedulers = []
     for profile_name, profile_home in profiles:
-        if profile_name == active or profile_name != "office-work":
+        # Named profiles keep their own cron state and delivery adapters.  The
+        # Life-Boat scheduler must run here as well as the legacy office-work
+        # scheduler; otherwise its job is visible and enabled but never ticks
+        # in the live multiplexed gateway.
+        if profile_name == active or profile_name not in {"office-work", "life-advisor"}:
             continue
         with _profile_runtime_scope(profile_home):
             provider = resolve_provider()
-        adapters = getattr(runner, "_profile_adapters", {}).get(profile_name) or {}
+        adapters = (
+            getattr(runner, "_profile_adapters", {}).get(profile_name)
+            or getattr(runner, "adapters", {})
+        )
         kwargs = {"adapters": adapters, "loop": loop}
         if isinstance(provider, InProcessCronScheduler):
             kwargs["can_dispatch"] = lambda: not (
@@ -1556,7 +1563,10 @@ def _start_secondary_profile_cron_schedulers(
             kwargs=kwargs,
         ):
             with _profile_runtime_scope(profile_home):
-                provider.start(stop_event, **kwargs)
+                from cron.jobs import use_cron_store
+
+                with use_cron_store(profile_home):
+                    provider.start(stop_event, **kwargs)
 
         thread = threading.Thread(
             target=run_scoped,
