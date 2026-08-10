@@ -85,6 +85,19 @@ def main() -> int:
             print(f"FAIL Life-Boat prompt missing {marker!r}")
             return 1
 
+    coaching_text = (source_root / "gateway" / "lifeboat_followups.py").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "Use this conversational shape",
+        "one open door for the user",
+        "Emotions are real experiences, not commands",
+        "For self-criticism, separate the verdict from the event",
+    ):
+        if marker not in coaching_text:
+            print(f"FAIL Life-Boat coaching contract missing {marker!r}")
+            return 1
+
     cron_path = Path("/home/endlessblink/.hermes/profiles/life-advisor/cron/jobs.json")
     cron_state = json.loads(cron_path.read_text(encoding="utf-8")) if cron_path.is_file() else {}
     morning_jobs = [
@@ -106,7 +119,13 @@ def main() -> int:
 
     contract = source_root / "docs" / "lifeboat-psychology-architecture.md"
     contract_text = contract.read_text(encoding="utf-8") if contract.is_file() else ""
-    for marker in ("## Safety contract", "## Memory boundary", "## Evaluation contract"):
+    for marker in (
+        "## Safety contract",
+        "## Memory boundary",
+        "## Evaluation contract",
+        "usefully unfinished",
+        "advice-only/closure rate",
+    ):
         if marker not in contract_text:
             print(f"FAIL architecture contract missing {marker}")
             return 1
