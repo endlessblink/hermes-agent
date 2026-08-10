@@ -615,6 +615,21 @@ class TestDeliverResultWrapping:
         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
         assert "Cronjob Response: abc-123" in sent_content
 
+    def test_lifeboat_delivery_blocks_unapproved_scheduled_jobs(self):
+        """Diagnostics and renamed jobs must not create unsolicited Life-Boat contact."""
+        with patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = _deliver_result(
+                {
+                    "id": "diagnostic-job",
+                    "name": "lifeboat-delivery-verification",
+                    "deliver": "telegram:-1004230590253:2",
+                },
+                "Internal delivery check.",
+            )
+
+        assert result is None
+        send_mock.assert_not_called()
+
     def test_delivery_skips_wrapping_when_config_disabled(self):
         """When cron.wrap_response is false, deliver raw content without header/footer."""
         from gateway.config import Platform
