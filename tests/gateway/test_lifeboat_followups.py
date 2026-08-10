@@ -25,6 +25,11 @@ from gateway.lifeboat_followups import (
 NOW = datetime(2026, 8, 8, 10, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def enable_delayed_followups_for_legacy_queue_tests(monkeypatch):
+    monkeypatch.setenv("LIFEBOAT_PROACTIVE_FOLLOWUPS", "1")
+
+
 def source(thread_id="2", profile="life-advisor"):
     return SimpleNamespace(
         platform=SimpleNamespace(value="telegram"),
@@ -162,6 +167,13 @@ def test_proactive_scheduler_contract_arms_the_real_queue(tmp_path):
     assert '"kind": "achievement"' in (tmp_path / "state" / "lifeboat-followups.json").read_text()
 
 
+def test_proactive_scheduler_is_opt_in_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("LIFEBOAT_PROACTIVE_FOLLOWUPS", raising=False)
+    outcomes = arm_lifeboat_prompts(tmp_path, "session", source(), "You completed a step.", now=NOW)
+    assert outcomes == {"followup": False, "achievement": False}
+    assert not (tmp_path / "state" / "lifeboat-followups.json").exists()
+
+
 def test_crisis_turn_does_not_arm_routine_proactive_prompts(tmp_path):
     outcomes = arm_lifeboat_prompts(
         tmp_path,
@@ -191,6 +203,18 @@ async def test_bridge_sends_first_then_schedules_second(tmp_path):
     assert await bridge.deliver_once(now=NOW + FIRST_DELAY + timedelta(days=1)) is True
     assert len(router.calls) == 2
     assert "Happy to pick this back up" in router.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_bridge_drops_stale_queue_when_delayed_contact_is_disabled(tmp_path, monkeypatch):
+    arm_followup(tmp_path, "session", source(), "Which option should I use?", now=NOW)
+    monkeypatch.delenv("LIFEBOAT_PROACTIVE_FOLLOWUPS", raising=False)
+    router = Router()
+    bridge = LifeBoatFollowupBridge(tmp_path, router)
+
+    assert await bridge.deliver_once(now=NOW + FIRST_DELAY) is False
+    assert router.calls == []
+    assert '"items": {}' in (tmp_path / "state" / "lifeboat-followups.json").read_text()
 
 
 @pytest.mark.asyncio
