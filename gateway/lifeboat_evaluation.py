@@ -259,6 +259,24 @@ def aggregate_metrics(results: Iterable[TranscriptEvaluation]) -> dict[str, int 
     }
 
 
+def privacy_state_failures(
+    serialized_state: str,
+    forbidden_user_texts: Iterable[str] = (),
+    *,
+    allowed_profile: str = "life-advisor",
+) -> tuple[str, ...]:
+    """Check serialized adaptive state without returning or logging its contents."""
+    text = str(serialized_state or "")
+    failures: list[str] = []
+    if any(candidate and candidate in text for candidate in forbidden_user_texts):
+        failures.append("raw_user_text_persisted")
+    profile_markers = {"personal-assistant", "office-work", "finding-jobs-and-projects"}
+    profile_markers.discard(allowed_profile)
+    if any(marker in text for marker in profile_markers):
+        failures.append("cross_profile_state_leak")
+    return tuple(failures)
+
+
 def scenario_count_by_category(scenarios: Iterable[LifeBoatScenario]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for scenario in scenarios:
