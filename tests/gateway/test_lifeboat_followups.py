@@ -160,6 +160,26 @@ def test_response_repair_trims_a_mountain_even_when_it_has_one_question():
     assert "מה הכי חי אצלך עכשיו, אם בכלל" in repaired
 
 
+def test_response_contract_detects_and_reduces_numbered_mini_essay():
+    draft = (
+        "1. זה נוגע בערך שלך. 2. זה מתחבר לעבודה. "
+        "3. זה מפעיל פחד מדחייה. 4. אתה נשאר עם זה לבד."
+    )
+    issues = lifeboat_response_issues(draft, "אני מרגיש שהכול נסגר עליי")
+    repaired = ensure_lifeboat_open_response(draft, "אני מרגיש שהכול נסגר עליי")
+
+    assert "list_heavy" in issues
+    assert "1." not in repaired
+    assert "2." not in repaired
+    assert repaired.count("?") == 1
+    assert len(repaired.split(".")) <= 5
+
+
+def test_response_contract_does_not_flag_one_inline_hyphen():
+    draft = "יש כאן כאב - לא מסקנה על מי שאני. מה הכי חי אצלך עכשיו?"
+    assert "list_heavy" not in lifeboat_response_issues(draft, "כואב לי")
+
+
 def test_response_repair_does_not_reopen_an_explicit_pause():
     draft = "שמחה שהצלחנו לגעת בזה. נעצור להיום."
     assert ensure_lifeboat_open_response(draft, "זה עזר לי, נעצור להיום") == draft
