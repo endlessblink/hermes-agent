@@ -83,6 +83,7 @@ class LifeBoatTurnPolicy:
     mode: str
     max_chars: int
     ask_one_open_question: bool
+    max_sentences: int = 4
 
 
 def select_lifeboat_turn_policy(text: str | None) -> LifeBoatTurnPolicy:
@@ -90,14 +91,14 @@ def select_lifeboat_turn_policy(text: str | None) -> LifeBoatTurnPolicy:
     value = " ".join(str(text or "").split()).strip()
     signals = classify_lifeboat_signals(value)
     if signals.possible_crisis:
-        return LifeBoatTurnPolicy("safety", 700, True)
+        return LifeBoatTurnPolicy("safety", 700, True, 6)
     if _WRAP_RE.search(value):
-        return LifeBoatTurnPolicy("user-led-close", 420, False)
+        return LifeBoatTurnPolicy("user-led-close", 420, False, 3)
     if _ACTION_RE.search(value) or value.endswith(("?", "？")) and len(value) < 180:
-        return LifeBoatTurnPolicy("act-or-clarify", 800, True)
+        return LifeBoatTurnPolicy("act-or-clarify", 800, True, 5)
     if len(value) < 90:
-        return LifeBoatTurnPolicy("attune", 480, True)
-    return LifeBoatTurnPolicy("explore", 720, True)
+        return LifeBoatTurnPolicy("attune", 480, True, 3)
+    return LifeBoatTurnPolicy("explore", 720, True, 4)
 
 
 def _trajectory_path(profile_home: Path) -> Path:
