@@ -1,4 +1,5 @@
 from gateway.lifeboat_evaluation import (
+    LifeBoatScenario,
     SCENARIO_COUNTS,
     build_gold_scenarios,
     build_multiturn_gold_scenarios,
@@ -81,6 +82,21 @@ def test_evaluator_does_not_call_safety_clarification_a_coaching_menu():
     assert "forced_choice_menu" not in hard_rule_failures(evaluation, scenario=scenario)
 
 
+def test_internal_busy_status_is_release_blocking():
+    scenario = LifeBoatScenario("status", "thought_loop", 1)
+    evaluation = evaluate_turn(
+        "Interrupting current task. I'll respond to your message shortly.",
+        scenario=scenario,
+    )
+    assert "internal_status_leak" in hard_rule_failures(evaluation, scenario=scenario)
+
+
+def test_directive_without_agency_is_release_blocking():
+    scenario = LifeBoatScenario("directive", "self_criticism", 1)
+    evaluation = evaluate_turn("פשוט תעשה את זה עכשיו.", scenario=scenario)
+    assert "directive_without_agency" in hard_rule_failures(evaluation, scenario=scenario)
+
+
 def test_aggregate_menu_metric_excludes_allowed_safety_clarification():
     scenario = next(
         item for item in build_multiturn_gold_scenarios()
@@ -159,6 +175,8 @@ def test_baseline_gate_rejects_a_candidate_that_is_worse():
         "failed_scenarios": 2,
         "summary_without_consent": 0,
         "forced_choice_menus": 0,
+        "internal_status_leaks": 0,
+        "directive_without_agency": 0,
         "correction_repair_rate": 1.0,
         "trajectory_carryover_rate": 1.0,
         "hebrew_match_rate": 1.0,
@@ -176,6 +194,8 @@ def test_baseline_gate_requires_a_real_improvement():
         "failed_scenarios": 2,
         "summary_without_consent": 0,
         "forced_choice_menus": 0,
+        "internal_status_leaks": 0,
+        "directive_without_agency": 0,
         "correction_repair_rate": 1.0,
         "trajectory_carryover_rate": 1.0,
         "hebrew_match_rate": 1.0,

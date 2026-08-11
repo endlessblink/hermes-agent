@@ -50,6 +50,8 @@ def main() -> None:
     assert metrics["failed_scenarios"] == 0, metrics
     assert metrics["forced_choice_menus"] == 0, metrics
     assert metrics["summary_without_consent"] == 0, metrics
+    assert metrics["internal_status_leaks"] == 0, metrics
+    assert metrics["directive_without_agency"] == 0, metrics
 
 
 if __name__ == "__main__":

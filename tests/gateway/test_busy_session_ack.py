@@ -99,6 +99,37 @@ class TestBusySessionAck:
     """User sends a message while agent is running — should get acknowledgment."""
 
     @pytest.mark.asyncio
+    async def test_lifeboat_busy_followup_is_silent_and_queued(self):
+        """Life-Boat must not expose the gateway's task-status bubble."""
+        from gateway.run import GatewayRunner
+
+        runner, _sentinel = _make_runner()
+        adapter = _make_adapter()
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1004230590253",
+            chat_type="private",
+            user_id="user1",
+            thread_id="2",
+        )
+        event = MessageEvent(
+            text="אני רוצה להמשיך לדבר על זה",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id="lifeboat-msg",
+        )
+        session_key = build_session_key(source)
+        runner.adapters[source.platform] = adapter
+        runner._running_agents[session_key] = MagicMock()
+
+        result = await GatewayRunner._handle_active_session_busy_message(runner, event, session_key)
+
+        assert result is True
+        assert adapter._pending_messages[session_key] is event
+        adapter._send_with_retry.assert_not_awaited()
+        runner._running_agents[session_key].interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_handle_message_queue_mode_queues_without_interrupt(self):
         """Runner queue mode must not interrupt an active agent for text follow-ups."""
         from gateway.run import GatewayRunner

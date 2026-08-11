@@ -79,6 +79,11 @@ reported separately and is not counted as individually screened papers.
 | 68 | [Internet behavioral-activation meta-analysis](https://pubmed.ncbi.nlm.nih.gov/37227760/) | meta-analysis | small, actionable steps without overloading the user |
 | 69 | [Digital behavioral-activation systematic review](https://pubmed.ncbi.nlm.nih.gov/40526910/) | systematic review | engagement dose, long-term limits and personalization gaps |
 | 70 | [Digital depression treatment randomized trial](https://jamanetwork.com/journals/jamainternalmedicine/fullarticle/2832779) | randomized trial | engagement and outcome evidence for structured digital support |
+| 71 | [LangGraph interrupt and resume guidance](https://langchain-ai.github.io/langgraph/concepts/breakpoints/) | official framework guidance | persist state and expose interrupts as structured control events |
+| 72 | [LangGraph event-streaming guidance](https://langchain-ai.github.io/langgraph/cloud/concepts/streaming/) | official framework guidance | separate task/debug streams from user message streams |
+| 73 | [Conversational breakdown and repair study](https://doi.org/10.1145/3690383) | peer-reviewed HCI study | repair failures explicitly to preserve trust and continued use |
+| 74 | [Unified dialogue-system evaluation survey](https://aclanthology.org/2020.sigdial-1.29/) | peer-reviewed survey | combine automatic checks with human conversation evaluation |
+| 75 | [Reliable human assessment of open-domain dialogue](https://arxiv.org/abs/2203.05899) | research preprint | human ratings are required because automatic metrics miss quality failures |
 
 ## Corpus coverage, not direct-source count
 

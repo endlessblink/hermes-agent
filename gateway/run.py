@@ -5704,6 +5704,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not adapter:
             return False  # let default path handle it
 
+        # Life-Boat is a conversational support surface, not a task console.
+        # A visible busy/interrupt status bubble breaks the user's emotional
+        # thread and makes an internal lifecycle event look like part of the
+        # support response. Queue the message silently and let the normal next
+        # turn answer it after the current run finishes.
+        try:
+            from gateway.lifeboat_followups import is_lifeboat_source
+
+            if is_lifeboat_source(event.source):
+                self._queue_or_replace_pending_event(session_key, event)
+                logger.debug("Life-Boat busy follow-up queued silently for %s", session_key)
+                return True
+        except Exception:
+            logger.debug("Life-Boat busy-session classification unavailable", exc_info=True)
+
         # --- Internal synthetic events must never interrupt/steer ---
         # Async-delegation completions (delegate_task(background=true)) and
         # background-process completions (terminal notify_on_complete) re-enter
