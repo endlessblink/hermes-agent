@@ -109,6 +109,7 @@ def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     assert "mode=attune" in prompt
     assert "one concrete" in prompt
     assert "tentatively" in prompt
+    assert "exactly two short sentences" in prompt
     assert "Only summarize or save anything when the user asks" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
@@ -155,9 +156,10 @@ def test_response_repair_trims_a_mountain_even_when_it_has_one_question():
     repaired = ensure_lifeboat_open_response(draft, "אני מרגיש קבור תחת מחשבות")
 
     assert len(repaired) <= 720
-    assert repaired.count("?") == 0
-    assert len(repaired.split(".")) <= 2
-    assert repaired == "אני שומע כמה זה כבד."
+    assert repaired.count("?") == 1
+    assert len(repaired.split(".")) <= 3
+    assert repaired.startswith("אני שומע כמה זה כבד.")
+    assert repaired.endswith("מה הכי נוכח אצלך עכשיו?")
 
 
 def test_response_contract_detects_and_reduces_numbered_mini_essay():

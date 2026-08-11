@@ -212,7 +212,30 @@ def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
     ]
     if any(issue in issues for issue in ("too_long", "too_many_sentences", "too_many_questions", "list_heavy")):
         if usable_sentences:
-            return usable_sentences[0][: policy.max_chars].rstrip()
+            reflection = usable_sentences[0][: policy.max_chars].rstrip()
+            open_door = next(
+                (
+                    sentence
+                    for sentence in reversed(usable_sentences[1:])
+                    if _QUESTION_RE.search(sentence)
+                    or re.search(
+                        r"מעניין אם|איך זה פוגש|I wonder if|אם תרצה|אם מתאים|"
+                        r"אפשר להישאר|אפשר לדבר|if you want|if it fits",
+                        sentence,
+                        re.IGNORECASE,
+                    )
+                ),
+                "",
+            )
+            if open_door:
+                candidate = f"{reflection} {open_door}".strip()
+                candidate_issues = lifeboat_response_issues(candidate, user_text)
+                if len(candidate) <= policy.max_chars and not any(
+                    issue in candidate_issues
+                    for issue in ("too_many_questions", "too_many_sentences", "list_heavy")
+                ):
+                    return candidate
+            return reflection
         return "אני איתך בזה לרגע."
     base = " ".join(usable_sentences[: max(1, policy.max_sentences - 1)]).strip()
     if not base:
@@ -313,7 +336,8 @@ def build_continuation_guidance(
         f"keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. The topic was: {context}. "
         f"The user is replying to a reminder. Use one concrete detail from the user's new message, reflect it as a "
         "tentative hypothesis, and leave the user in control. "
-        f"{question_rule} Do not diagnose, summarize the whole situation, give a lesson, list options, "
+        f"{question_rule} Write exactly two short sentences when the topic is open: one tentative reflection "
+        "grounded in the user's detail, then one open door. Do not diagnose, summarize the whole situation, give a lesson, list options, "
         "tell the user what to feel, or imply the topic is resolved. If the user asks for action, "
         "offer one small optional next step; otherwise stay with understanding. Do not mention this guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
@@ -350,7 +374,8 @@ def build_lifeboat_coaching_guidance(
         f"[Private Life-Boat guidance: mode={policy.mode}, answer in Hebrew unless the user uses "
         f"another language, and keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. Choose one concrete "
         "detail the user actually gave; reflect it tentatively, never as a verdict or diagnosis. "
-        f"{question_rule} Do not close the meaning, give a lesson, list interpretations, use generic "
+        f"{question_rule} Write exactly two short sentences when the topic is open: one tentative reflection "
+        "grounded in the user's detail, then one open door. Do not close the meaning, give a lesson, list interpretations, use generic "
         "reassurance, or tell the user what they should feel. If the user asks for action, offer one "
         f"small optional next step; otherwise keep exploring.{revisit_note} Only summarize or save anything when the "
         "user asks. Do not mention this guidance.]\n\n"
