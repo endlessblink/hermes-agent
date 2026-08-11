@@ -84,6 +84,31 @@ reported separately and is not counted as individually screened papers.
 | 73 | [Conversational breakdown and repair study](https://doi.org/10.1145/3690383) | peer-reviewed HCI study | repair failures explicitly to preserve trust and continued use |
 | 74 | [Unified dialogue-system evaluation survey](https://aclanthology.org/2020.sigdial-1.29/) | peer-reviewed survey | combine automatic checks with human conversation evaluation |
 | 75 | [Reliable human assessment of open-domain dialogue](https://arxiv.org/abs/2203.05899) | research preprint | human ratings are required because automatic metrics miss quality failures |
+| 76 | [EmoAgent mental-health safety evaluation](https://aclanthology.org/2025.emnlp-main.594/) | peer-reviewed safety framework | simulate vulnerable users, measure deterioration, and add an independent safety monitor |
+| 77 | [AI-chatbot suicide-risk safety review](https://pubmed.ncbi.nlm.nih.gov/42466259/) | narrative review | current systems under-detect intermediate risk and require clinical validation and cultural testing |
+| 78 | [NICE depression recommendations](https://www.nice.org.uk/guidance/NG222/chapter/recommendations) | official clinical guidance | guided self-help needs support, monitoring, and urgent escalation for immediate risk |
+| 79 | [NICE digitally enabled depression therapies](https://www.nice.org.uk/guidance/htg675/chapter/2-The-technology) | official clinical guidance | digital support should remain guided, structured, and monitored rather than treated as autonomous care |
+| 80 | [Conversational agents in symptom management review](https://pubmed.ncbi.nlm.nih.gov/39799832/) | systematic review | CBT is common, but rule-based and NLP systems need stronger evidence across outcomes |
+| 81 | [Conversational agents in mental-health treatment review](https://pubmed.ncbi.nlm.nih.gov/31628789/) | mixed-method systematic review | feasibility evidence is broader than proof of durable benefit or general well-being |
+| 82 | [Offline mobile conversational agent](https://aclanthology.org/2025.ijcnlp-long.191/) | peer-reviewed system study | evaluates safety, empathy, reassurance, and response quality as separate dimensions |
+| 83 | [Psychological health chatbot recovery system](https://aclanthology.org/2025.abjadnlp-1.8/) | peer-reviewed system study | combines emotional support with detection and response evaluation rather than generic advice |
+| 84 | [CBT conversational-agent meta-analysis](https://pubmed.ncbi.nlm.nih.gov/42286191/) | systematic review and meta-analysis | current efficacy evidence is promising but heterogeneous and requires careful interpretation |
+| 85 | [LLM suicide-intervention chatbot evaluation](https://pubmed.ncbi.nlm.nih.gov/40838251/) | intervention evaluation | crisis support requires explicit safety, privacy, emotional-support, and satisfaction checks |
+| 86 | [IEC 82304-1 health-software safety](https://www.iso.org/standard/59543.html) | international standard | safety lifecycle covers design, validation, installation, maintenance, and disposal |
+| 87 | [Health conversational-agent evaluation framework](https://pubmed.ncbi.nlm.nih.gov/38070173/) | systematic scoping review | evaluate functionality, safety, experience, outcomes, uptake, cost, and implementation separately |
+| 88 | [LLM versus expert suicide-risk ratings](https://pubmed.ncbi.nlm.nih.gov/41213985/) | empirical evaluation | prompting and temperature materially change agreement; model output cannot be assumed stable |
+| 89 | [Real-conversation mental-health AI safety study](https://pubmed.ncbi.nlm.nih.gov/41646386/) | empirical safety study | simulated benchmarks are insufficient without checking behavior in real conversations |
+| 90 | [Empathetic response generation for distress](https://aclanthology.org/2023.sigdial-1.59/) | peer-reviewed dialogue study | emotional and cognitive empathy are distinct response functions requiring human evaluation |
+| 91 | [CogEmp cognitive-empathy dialogue system](https://aclanthology.org/2026.findings-acl.1484/) | peer-reviewed dialogue study | structured empathy needs safeguards, calibrated uncertainty, and explicit limits |
+| 92 | [ISO/TS 82304-2 wellness-app quality](https://www.iso.org/news/ref2704.html) | international guidance | reliability, safety, privacy, and evidence must be considered together for wellness software |
+| 93 | [Conversational agent for safety-planning training](https://pubmed.ncbi.nlm.nih.gov/42378141/) | feasibility study | safety planning is structured, collaborative work; conversational tools should support training and not replace care |
+| 94 | [Digital alliance and guided-app engagement](https://pubmed.ncbi.nlm.nih.gov/40274125/) | observational analysis | alliance predicts later engagement, so continuity and user control are product outcomes |
+| 95 | [Digital mental-health engagement meta-analysis](https://pubmed.ncbi.nlm.nih.gov/40857362/) | meta-analysis | guidance, therapeutic relationship, and positive expectations correlate with sustained use |
+| 96 | [Digital therapeutic alliance diary study](https://pubmed.ncbi.nlm.nih.gov/41072011/) | longitudinal qualitative study | flexible input, colloquial fit, care, privacy, and context continuity shape whether bonds form |
+| 97 | [AI plus human mental-health support study](https://pubmed.ncbi.nlm.nih.gov/40152000/) | comparative intervention study | human oversight and support are part of safe scalable deployment, not optional polish |
+| 98 | [Predictors of digital-treatment engagement](https://pubmed.ncbi.nlm.nih.gov/39509696/) | longitudinal study | engagement depends on modality, access, and user context; it cannot be forced by reminders |
+| 99 | [WHO mental-health monitoring and evaluation framework](https://applications.emro.who.int/docs/9789292740986-eng.pdf) | official framework | define outcomes, monitor implementation, and evaluate effects rather than relying on launch metrics |
+| 100 | [FDA GenAI-enabled mental-health device considerations](https://www.fda.gov/media/189844/download) | official regulatory guidance | clinical context, patient-provider boundaries, safety, and transparency must be explicit |
 
 ## Corpus coverage, not direct-source count
 
@@ -99,9 +124,10 @@ reported separately and is not counted as individually screened papers.
 
 ## Remaining review work
 
-The 60 anchors above are the current directly screened register, not a claim that
-the 100-source target is complete. The remaining 40 sources must be screened and
-coded with the same fields before the evidence gate is closed. Findings already
+The 100 anchors above are the current directly screened register. This meets the
+source-count target, but source count alone does not close the evidence gate: the
+anchors still need to be translated into product requirements and verified against
+Life-Boat's rendered behavior. Findings already
 converge on: specific reflection over generic paraphrase, user control over
 forced structure, adaptive multi-turn state, explicit crisis escalation, strict
 privacy/consent, and human review of naturalness and safety.
