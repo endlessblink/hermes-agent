@@ -69,6 +69,16 @@ reported separately and is not counted as individually screened papers.
 | 58 | [Digital therapeutic alliance qualitative study](https://pubmed.ncbi.nlm.nih.gov/40660205/) | qualitative study | alliance, adherence and user control |
 | 59 | [Companion robot alliance study](https://pubmed.ncbi.nlm.nih.gov/38751573/) | longitudinal study | companionship versus instructive coaching |
 | 60 | [CanRelax working-alliance study](https://pubmed.ncbi.nlm.nih.gov/41868778/) | alliance study | bond, goals and treatment outcomes |
+| 61 | [SAMHSA trauma-informed care principles](https://www.samhsa.gov/mental-health/trauma-violence/trauma-informed-care) | official guidance | safety, trust, choice, collaboration and empowerment |
+| 62 | [SAMHSA trauma-informed implementation guide](https://store.samhsa.gov/sites/default/files/pep23-06-05-005.pdf) | official guidance | avoid retraumatization and coercive interaction patterns |
+| 63 | [WHO mhGAP intervention guide](https://iris.who.int/bitstream/handle/10665/374250/9789240084278-eng.pdf) | official guidance | stepped support, assessment and referral boundaries |
+| 64 | [WHO national suicide-prevention strategies](https://iris.who.int/bitstream/handle/10665/279765/9789241515016-eng.pdf) | official guidance | crisis response, continuity and coordinated human care |
+| 65 | [NCBI motivational-interviewing counseling style](https://www.ncbi.nlm.nih.gov/books/NBK571068/) | clinical reference | reflection before questions and support for self-exploration |
+| 66 | [Motivational-interviewing style generation study](https://arxiv.org/abs/2402.01051) | peer-reviewed preprint | human-rated reflection appropriateness, specificity and naturalness |
+| 67 | [Online peer-counseling MI strategy study](https://arxiv.org/abs/2211.05182) | peer-reviewed preprint | adaptive use of reflections and open questions |
+| 68 | [Internet behavioral-activation meta-analysis](https://pubmed.ncbi.nlm.nih.gov/37227760/) | meta-analysis | small, actionable steps without overloading the user |
+| 69 | [Digital behavioral-activation systematic review](https://pubmed.ncbi.nlm.nih.gov/40526910/) | systematic review | engagement dose, long-term limits and personalization gaps |
+| 70 | [Digital depression treatment randomized trial](https://jamanetwork.com/journals/jamainternalmedicine/fullarticle/2832779) | randomized trial | engagement and outcome evidence for structured digital support |
 
 ## Corpus coverage, not direct-source count
 
