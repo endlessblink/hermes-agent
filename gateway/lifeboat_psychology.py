@@ -24,6 +24,13 @@ _CRISIS_RE = re.compile(
     r"עדיף לי למות|אין לי כוח להמשיך)",
     re.IGNORECASE,
 )
+
+_REVISIT_RE = re.compile(
+    r"(?:ננסה\s+שוב|בוא\s+ננסה|תנסה\s+שוב|לעבוד\s+יחד|"
+    r"הודעה\s+הקודמת|מה\s+שכתבתי\s+קודם|try\s+again|"
+    r"previous\s+message|work\s+with\s+me)",
+    re.IGNORECASE,
+)
 _DEPRESSIVE_RE = re.compile(
     r"(?:depress|hopeless|empty|numb|no energy|can't get out of bed|"
     r"no point|worthless|דיכא|חסר תקווה|ריק|אין לי כוח|אין טעם|חסר ערך|"
@@ -95,6 +102,8 @@ def select_lifeboat_turn_policy(text: str | None) -> LifeBoatTurnPolicy:
     signals = classify_lifeboat_signals(value)
     if signals.possible_crisis:
         return LifeBoatTurnPolicy("safety", 700, True, 6)
+    if _REVISIT_RE.search(value):
+        return LifeBoatTurnPolicy("revisit", 600, True, 4)
     if _WRAP_RE.search(value):
         return LifeBoatTurnPolicy("user-led-close", 420, False, 3)
     if _ACTION_RE.search(value) or value.endswith(("?", "？")) and len(value) < 180:
