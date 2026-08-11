@@ -109,6 +109,7 @@ def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     assert "mode=attune" in prompt
     assert "one concrete" in prompt
     assert "tentatively" in prompt
+    assert "exactly two short sentences" in prompt
     assert "Only summarize or save anything when the user asks" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
@@ -140,9 +141,9 @@ def test_response_repair_keeps_one_thread_and_opens_the_door():
         "אני נתקע בלופ של ביקורת עצמית על העבודה והזוגיות",
     )
     assert len(repaired) < len(draft) + 80
-    assert repaired.count("?") == 1
+    assert repaired.count("?") == 0
+    assert "אפשר להישאר עם זה עוד רגע" in repaired
     assert "לסיכום" not in repaired
-    assert "לופ" in repaired or "סטנדרט" in repaired
 
 
 def test_response_repair_trims_a_mountain_even_when_it_has_one_question():
@@ -156,8 +157,9 @@ def test_response_repair_trims_a_mountain_even_when_it_has_one_question():
 
     assert len(repaired) <= 720
     assert repaired.count("?") == 1
-    assert len(repaired.split(".")) <= 5
-    assert "מה הכי חי אצלך עכשיו, אם בכלל" in repaired
+    assert len(repaired.split(".")) <= 3
+    assert repaired.startswith("אני שומע כמה זה כבד.")
+    assert repaired.endswith("מה הכי נוכח אצלך עכשיו?")
 
 
 def test_response_contract_detects_and_reduces_numbered_mini_essay():
@@ -171,8 +173,8 @@ def test_response_contract_detects_and_reduces_numbered_mini_essay():
     assert "list_heavy" in issues
     assert "1." not in repaired
     assert "2." not in repaired
-    assert repaired.count("?") == 1
-    assert len(repaired.split(".")) <= 5
+    assert repaired.count("?") == 0
+    assert len(repaired.split(".")) <= 2
 
 
 def test_response_contract_does_not_flag_one_inline_hyphen():
@@ -180,9 +182,29 @@ def test_response_contract_does_not_flag_one_inline_hyphen():
     assert "list_heavy" not in lifeboat_response_issues(draft, "כואב לי")
 
 
+def test_explicit_revisit_request_keeps_the_previous_message_open():
+    guidance = build_lifeboat_coaching_guidance(
+        "בוא ננסה שוב לעבוד יחד עם ההודעה הקודמת, הפעם לאט וביחד"
+    )
+    assert "mode=revisit" in guidance
+    assert "immediately preceding substantive message" in guidance
+    assert "Do not defend" in guidance
+
+
 def test_response_repair_does_not_reopen_an_explicit_pause():
     draft = "שמחה שהצלחנו לגעת בזה. נעצור להיום."
     assert ensure_lifeboat_open_response(draft, "זה עזר לי, נעצור להיום") == draft
+
+
+def test_thought_loop_opening_does_not_force_a_question():
+    repaired = ensure_lifeboat_open_response(
+        "לסיכום, אתה צריך לפתור את זה עכשיו.",
+        "אני נתקע שוב בלופ הזה ולא מצליח לצאת ממנו",
+    )
+
+    assert "?" not in repaired
+    assert "אפשר להישאר עם זה עוד רגע" in repaired
+    assert lifeboat_response_issues(repaired, "אני נתקע שוב בלופ הזה ולא מצליח לצאת ממנו") == ()
 
 
 def test_repeated_response_repair_is_accountable_and_stays_open():

@@ -1,0 +1,23 @@
+{
+  "skill_name": "lifeboat-evidence-research",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Research how a Life-Boat-style support bot should respond to a user caught in a repetitive self-critical thought loop. Use high-quality evidence, distinguish reflection from forced questioning, and turn findings into regression tests without using private user text.",
+      "expected_output": "A tiered evidence report with uncertainty, behavior implications, baseline checks, and testable regressions.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Review a proposed change to the Life-Boat bot that adds a question to every reply and sends progress messages while reading skills. Decide whether it is an improvement, using evidence and the accepted baseline.",
+      "expected_output": "Reject the change as a likely regression unless evidence and replay show a clear user-facing improvement; include rollback and cost checks.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Design a research plan for making Life-Boat adaptive over months while respecting consent, memory privacy, crisis safety, Hebrew/RTL context, and a strict no-paid-work default.",
+      "expected_output": "A staged plan with source-quality tiers, cross-validation, aggregate evaluation, and explicit proof gaps.",
+      "files": []
+    }
+  ]
+}
