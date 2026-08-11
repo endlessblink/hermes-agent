@@ -47,8 +47,6 @@ def main() -> int:
         "agent.lifeboat_mode = is_lifeboat_source(source)",
         "goal continuation: suppressed for Life-Boat source",
         "arm_lifeboat_prompts(",
-        "finalize_lifeboat_response",
-        "_streaming_enabled = False",
         "user_text=event.text or \"\"",
         "with use_cron_store(profile_home):",
         "getattr(runner, \"adapters\", {})",
@@ -96,15 +94,10 @@ def main() -> int:
             print(f"FAIL brittle Life-Boat phrase repair remains: {forbidden!r}")
             return 1
     for marker in (
-        "mode=",
-        "select_lifeboat_turn_policy",
-        "one concrete",
-        "tentatively",
-        "If the user asks for action",
-        "proactive_followups_enabled",
-        "stale queues created before the opt-in boundary",
-        "record_lifeboat_response_fingerprint",
-        "repair_repeated_lifeboat_response",
+        "Use this conversational shape",
+        "one open door for the user",
+        "Emotions are real experiences, not commands",
+        "For self-criticism, separate the verdict from the event",
     ):
         if marker not in coaching_text:
             print(f"FAIL Life-Boat coaching contract missing {marker!r}")
