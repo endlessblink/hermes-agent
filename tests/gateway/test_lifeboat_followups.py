@@ -62,9 +62,9 @@ class Router:
         return {targets[0].to_string(): {"success": self.success}}
 
 
-def test_lifeboat_source_is_profile_or_topic_scoped():
+def test_lifeboat_source_is_profile_scoped():
     assert is_lifeboat_source(source())
-    assert is_lifeboat_source(source(thread_id="2", profile=None))
+    assert not is_lifeboat_source(source(thread_id="2", profile="film-maker"))
     assert not is_lifeboat_source(source(thread_id="695", profile="office-work"))
 
 
@@ -104,7 +104,12 @@ def test_continuation_prompt_requires_one_contextual_next_step():
     assert "at most one useful question" not in prompt
     assert "hypothesis" in prompt
     assert "אולי הקריטריון הוא" in prompt
-    assert "Do not offer a menu of support options" in prompt
+    assert "Never offer a menu of support options" in prompt
+    # Reworded 2026-08-15: the bare prohibition left the assistant resolving a
+    # collision ("stay with several threads" vs "no either/or") by asking him to
+    # pick, measured at 4/8 replies. The instruction now says what to do instead.
+    assert "reflect the several things" in prompt
+    assert "Do not ask them which one to take" in prompt
     assert "כן" not in build_continuation_guidance(
         {"context": "רוצה לבחור את הצעד הבא?", "language": "he"}
     )
@@ -123,8 +128,13 @@ def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     # And it must not script the reply's moves.
     assert "trying to solve" not in prompt
     assert "separate the verdict from the event" not in prompt
-    assert "Do not offer a menu of support options" in prompt
-    assert "either/or question that forces a choice" in prompt
+    assert "Never offer a menu of support options" in prompt
+    # Reworded 2026-08-15: the bare prohibition left the assistant resolving a
+    # collision ("stay with several threads" vs "no either/or") by asking him to
+    # pick, measured at 4/8 replies. The instruction now says what to do instead.
+    assert "reflect the several things" in prompt
+    assert "Do not ask them which one to take" in prompt
+    assert "names no alternatives" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
 

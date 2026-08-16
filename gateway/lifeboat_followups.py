@@ -100,8 +100,24 @@ def is_lifeboat_source(source: Any) -> bool:
     if getattr(getattr(source, "platform", None), "value", source.platform) != Platform.TELEGRAM.value:
         return False
     profile = str(getattr(source, "profile", "") or "").strip().lower()
+    chat_id = str(getattr(source, "chat_id", "") or "").strip()
     thread_id = str(getattr(source, "thread_id", "") or "").strip()
-    return profile == "life-advisor" or thread_id == "2"
+    # The gateway process runs the root profile, so ``source.profile`` is often
+    # not "life-advisor" for a real Life-Boat turn; the chat/thread pair is what
+    # actually identifies it.  Thread IDs are only unique inside one Telegram
+    # chat, so both halves are required - never classify an unrelated profile's
+    # topic 2 as the user's private support instance.
+    if profile == "life-advisor":
+        return True
+    # The gateway process runs the root profile, so ``source.profile`` is usually
+    # empty or "default" on a real Life-Boat turn and the chat/thread pair is the
+    # only reliable identifier - a profile-name-only check silently disables every
+    # Life-Boat behaviour while looking correct in tests. Thread ids are unique only
+    # inside one chat, so both halves are required, and an explicitly different
+    # persona is still never treated as his private support instance.
+    if profile not in {"", "default"}:
+        return False
+    return chat_id == "-1004230590253" and thread_id == "2"
 
 
 def filter_lifeboat_toolsets(source: Any, toolsets: Any) -> list[str]:

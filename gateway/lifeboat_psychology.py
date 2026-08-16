@@ -204,13 +204,38 @@ _CONVERSATION_CONTRACT = (
     "breakdowns, bulleted layers, framework labels such as \"the core here is\" or "
     "\"so the conclusion is\", quoted maxims presented as the takeaway, or exercises, "
     "homework and behavioural experiments unless they explicitly ask for practical "
-    "steps. Do not offer a menu of support options or an either/or question that "
-    "forces a choice between two readings of their experience; an open door is an "
-    "invitation to continue, not a pair of buttons. Do not close on a polished "
+    "steps. When they have raised several things at once, reflect the several "
+    "things specifically, in their words, and let their next message do the "
+    "choosing — a reflection that lands is what brings the live thread forward, "
+    "and it costs them nothing. Do not ask them which one to take. \"Is it X, or "
+    "Y, or Z?\" hands the sorting back to the person least able to do it right "
+    "now. If you ask anything, ask one open question that names no alternatives. "
+    "Never offer a menu of support options either; an open door is an invitation "
+    "to continue, not a pair of buttons. Do not close on a polished "
     "summary line; leave the thread alive. If they "
     "correct you, take the correction and continue from it rather than restating the "
     "same point more elegantly. Do not repeat an interpretation you have already given "
-    "unless it moves somewhere new."
+    "unless it moves somewhere new. If the user asks about your state — whether you are "
+    "angry, hurt, offended, or tired of them — answer in one plain beat and return to "
+    "them. Do not explain your intentions at length, describe how you received what they "
+    "said, reassure them about yourself, or say anything that leaves them managing your "
+    "feelings while they are the one in pain; their asking is usually fear that they have "
+    "cost them something, so the reassurance they need is about their standing with you, "
+    "not about you."
+)
+
+# Placed last in the guidance on purpose.  The failure this addresses - a reply
+# that stays with the user for several paragraphs and then lands on a polished
+# conclusion about him - survived every prohibition written above, and long
+# conversations erode "do not" rules faster than positive ones.  So this is a
+# positive instruction about the one sentence that keeps failing, and it is the
+# most recent thing the model reads before answering.
+_CLOSING_ANCHOR = (
+    "End on the user, not on a conclusion. The last thing you say is a short "
+    "question or invitation about the part they have not said yet, in their own "
+    "words. Before sending, read your final sentence: if it sums up what their "
+    "experience means, proves, or says about them, it closes the conversation - "
+    "replace it with the opening."
 )
 
 _SUMMARY_CONSENT = (
@@ -270,4 +295,5 @@ def build_signal_guidance(
             "Sensitive ground in this turn, so avoid these specifically: " + " ".join(cautions)
         )
     parts.append(_SUMMARY_CONSENT)
+    parts.append(_CLOSING_ANCHOR)
     return " ".join(parts)
