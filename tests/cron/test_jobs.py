@@ -92,6 +92,19 @@ class TestParseSchedule:
         assert result["kind"] == "interval"
         assert result["minutes"] == 30
 
+    def test_random_weekly_window(self):
+        result = parse_schedule("random weekly 10:00-22:00")
+        assert result == {
+            "kind": "random_weekly",
+            "start_minute": 600,
+            "end_minute": 1320,
+            "display": "random weekly 10:00-22:00",
+        }
+
+    def test_random_weekly_rejects_reversed_window(self):
+        with pytest.raises(ValueError, match="end must be after start"):
+            parse_schedule("random weekly 22:00-10:00")
+
     def test_cron_expression(self):
         pytest.importorskip("croniter")
         result = parse_schedule("0 9 * * *")
@@ -111,6 +124,24 @@ class TestParseSchedule:
         pytest.importorskip("croniter")
         with pytest.raises(ValueError):
             parse_schedule("99 99 99 99 99")
+
+    def test_random_weekly_persists_one_future_occurrence(self, monkeypatch):
+        configured_now = datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: configured_now)
+        monkeypatch.setattr("cron.jobs.random.choice", lambda values: values[2])
+        monkeypatch.setattr("cron.jobs.random.randint", lambda start, end: start)
+
+        schedule = parse_schedule("random weekly 10:00-22:00")
+        result = compute_next_run(schedule)
+        next_run = datetime.fromisoformat(result)
+
+        assert next_run == datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+        assert next_run > configured_now
+
+        later = datetime(2026, 8, 20, 10, 5, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: later)
+        next_week = datetime.fromisoformat(compute_next_run(schedule, result))
+        assert next_week == datetime(2026, 8, 23, 10, 0, tzinfo=timezone.utc)
 
     def test_naive_iso_anchors_to_configured_tz_not_server_local(self, monkeypatch):
         """A naive ISO timestamp must be interpreted in the CONFIGURED Hermes
