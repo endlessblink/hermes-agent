@@ -12,7 +12,8 @@ the profile.
   `-1004230590253`.
 - Confirm delayed follow-ups are disabled unless the user explicitly enabled
   them with `LIFEBOAT_PROACTIVE_FOLLOWUPS=1`; the bridge may run inertly.
-- Confirm the only unsolicited schedule is the user-enabled morning flow.
+- Confirm the unsolicited schedules are limited to the user-enabled morning
+  flow and the user-enabled random weekly daytime flow.
 - Run the Life-Boat verifier, strict focused tests, and a real cron delivery.
 - Keep the raw response out of aggregate reports; inspect only bounded shape
   metrics and delivery status.
@@ -24,6 +25,8 @@ gateways with the same Telegram token.
 ## Contact boundary
 
 Life-Boat answers when the user writes and may run the separately enabled
-morning check-in. Ordinary answers must not arm delayed follow-ups or
-achievement nudges. The environment switch above is an explicit operational
-opt-in for testing or a future user-facing preference; it is off by default.
+morning check-in plus one randomly selected weekly check-in between 10:00 and
+22:00 in the profile timezone. Ordinary answers must not arm delayed
+follow-ups or achievement nudges. The environment switch above is an explicit
+operational opt-in for testing or a future user-facing preference; it is off by
+default.
