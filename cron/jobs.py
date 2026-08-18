@@ -512,11 +512,12 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             "display": f"every {minutes}m"
         }
 
-    # "random weekly HH:MM-HH:MM" -> one persisted occurrence in the
-    # requested local-time window every seven days. The actual weekday/time is
-    # selected when next_run_at is computed, not when the job is dispatched.
+    # "random weekly [N] HH:MM-HH:MM" -> one or N persisted occurrences in the
+    # requested local-time window every seven days. N distinct calendar dates
+    # are selected for each rolling week so several occurrences cannot cluster
+    # on the same day.
     random_weekly = re.match(
-        r"^random\s+weekly\s+(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$",
+        r"^random\s+weekly\s+(?:(\d+)\s+)?(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$",
         schedule_lower,
     )
     if random_weekly:
@@ -527,22 +528,34 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             return hour * 60 + minute
 
         try:
-            start_minute = _clock_minutes(random_weekly.group(1))
-            end_minute = _clock_minutes(random_weekly.group(2))
+            count = int(random_weekly.group(1) or 1)
+            start_minute = _clock_minutes(random_weekly.group(2))
+            end_minute = _clock_minutes(random_weekly.group(3))
         except ValueError:
             raise ValueError(
-                f"Invalid random weekly window '{schedule}'. Use HH:MM-HH:MM."
+                f"Invalid random weekly window '{schedule}'. Use [N] HH:MM-HH:MM."
+            )
+        if not 1 <= count <= 7:
+            raise ValueError(
+                f"Invalid random weekly count '{count}': use between 1 and 7."
             )
         if start_minute >= end_minute:
             raise ValueError(
                 f"Invalid random weekly window '{schedule}': end must be after start."
             )
-        return {
+        result = {
             "kind": "random_weekly",
             "start_minute": start_minute,
             "end_minute": end_minute,
-            "display": f"random weekly {random_weekly.group(1)}-{random_weekly.group(2)}",
+            "display": (
+                f"random weekly {count} {random_weekly.group(2)}-{random_weekly.group(3)}"
+                if random_weekly.group(1)
+                else f"random weekly {random_weekly.group(2)}-{random_weekly.group(3)}"
+            ),
         }
+        if random_weekly.group(1):
+            result["count"] = count
+        return result
     
     # Check for cron expression (5 or 6 space-separated fields)
     # Cron fields: minute hour day month weekday [year]
@@ -760,14 +773,45 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         try:
             start_minute = int(schedule["start_minute"])
             end_minute = int(schedule["end_minute"])
+            count = int(schedule.get("count", 1))
             if not 0 <= start_minute < end_minute <= 24 * 60 - 1:
+                return None
+            if not 1 <= count <= 7:
                 return None
             base = now
             if last_run_at:
                 base = _ensure_aware(datetime.fromisoformat(last_run_at))
-            # Select from the next seven local calendar dates. This guarantees
-            # one occurrence in each rolling week while never scheduling a
-            # first occurrence in the past or immediately on job creation.
+            if count > 1:
+                persisted = []
+                for value in schedule.get("occurrences", []):
+                    try:
+                        occurrence = _ensure_aware(datetime.fromisoformat(value))
+                    except (TypeError, ValueError):
+                        continue
+                    if occurrence > base:
+                        persisted.append(occurrence)
+                if not persisted:
+                    candidate_dates = [
+                        (base + timedelta(days=offset)).date()
+                        for offset in range(1, 8)
+                    ]
+                    selected_dates = sorted(random.sample(candidate_dates, count))
+                    persisted = [
+                        datetime.combine(
+                            candidate_date,
+                            datetime.min.time().replace(
+                                hour=(minute := random.randint(start_minute, end_minute)) // 60,
+                                minute=minute % 60,
+                            ),
+                            tzinfo=now.tzinfo,
+                        )
+                        for candidate_date in selected_dates
+                    ]
+                    schedule["occurrences"] = [value.isoformat() for value in persisted]
+                return min(persisted).isoformat()
+
+            # Select from the next seven local calendar dates for the legacy
+            # single-occurrence form.
             candidate_dates = [
                 (base + timedelta(days=offset)).date()
                 for offset in range(1, 8)
