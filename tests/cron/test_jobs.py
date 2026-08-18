@@ -105,6 +105,29 @@ class TestParseSchedule:
         with pytest.raises(ValueError, match="end must be after start"):
             parse_schedule("random weekly 22:00-10:00")
 
+    def test_random_weekly_accepts_multiple_distinct_days(self):
+        result = parse_schedule("random weekly 4 10:00-22:00")
+        assert result["count"] == 4
+        assert result["display"] == "random weekly 4 10:00-22:00"
+
+    def test_random_weekly_multiple_occurrences_are_on_distinct_days(self, monkeypatch):
+        configured_now = datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: configured_now)
+        monkeypatch.setattr("cron.jobs.random.sample", lambda values, count: values[:count])
+        monkeypatch.setattr("cron.jobs.random.randint", lambda start, end: start)
+
+        schedule = parse_schedule("random weekly 4 10:00-22:00")
+        first = datetime.fromisoformat(compute_next_run(schedule))
+        occurrences = [datetime.fromisoformat(value) for value in schedule["occurrences"]]
+
+        assert first == datetime(2026, 8, 18, 10, 0, tzinfo=timezone.utc)
+        assert len(occurrences) == 4
+        assert len({value.date() for value in occurrences}) == 4
+
+        later = datetime(2026, 8, 18, 10, 5, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: later)
+        assert datetime.fromisoformat(compute_next_run(schedule, first.isoformat())) == occurrences[1]
+
     def test_cron_expression(self):
         pytest.importorskip("croniter")
         result = parse_schedule("0 9 * * *")
