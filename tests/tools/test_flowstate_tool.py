@@ -311,6 +311,39 @@ def test_create_task_omits_empty_project_id(monkeypatch):
     }
 
 
+def test_create_task_forwards_planning_fields_when_explicit(monkeypatch):
+    seen = {}
+    normalized_payload = {
+        "title": "Plan the release",
+        "description": "",
+        "status": "planned",
+        "priority": None,
+        "dueDate": None,
+        "projectId": "project-1",
+        "dueTime": "09:30",
+        "estimatedDuration": 45,
+    }
+    preview = _lifecycle_preview_payload(
+        action="create",
+        task_id=_LIFECYCLE_TASK_ID,
+        base_revision=0,
+        payload=normalized_payload,
+    )
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, preview))
+
+    result = json.loads(fst._handle_create_task({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "operationId": _LIFECYCLE_OPERATION_ID,
+        "title": "Plan the release",
+        "dueTime": "09:30",
+        "estimatedDuration": 45,
+        "projectId": "project-1",
+    }))
+
+    assert result["result"] == preview
+    assert seen["body"]["payload"] == normalized_payload
+
+
 _CANONICAL_DIGEST = "a" * 64
 _CANONICAL_REQUEST_HASH = "c" * 64
 _CANONICAL_PREVIEW_EXPIRY = "2026-07-13T18:30:00.000Z"
@@ -576,6 +609,9 @@ def test_update_task_schema_is_preview_first_and_locks_nested_patch_shape():
         "description",
         "priority",
         "dueDate",
+        "dueTime",
+        "estimatedDuration",
+        "projectId",
         "progress",
     }
     assert "status" not in patch_schema["properties"]
@@ -618,6 +654,56 @@ def test_update_task_defaults_to_preview_and_forwards_exact_contract(monkeypatch
         "patch": {"title": "Clarified task"},
         "preview": True,
     }
+
+
+def test_update_task_forwards_planning_fields_in_canonical_patch(monkeypatch):
+    seen = {}
+    preview = _canonical_preview_payload(
+        normalizedPayload={
+            "dueTime": "09:30",
+            "estimatedDuration": 45,
+            "projectId": "project-1",
+        }
+    )
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, preview))
+
+    result = json.loads(
+        fst._handle_update_task(
+            _valid_update_args(
+                patch={"dueTime": "09:30", "estimatedDuration": 45, "projectId": "project-1"}
+            )
+        )
+    )
+
+    assert result["result"] == preview
+    assert seen["body"]["patch"] == {
+        "dueTime": "09:30",
+        "estimatedDuration": 45,
+        "projectId": "project-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "patch,error_fragment",
+    [
+        ({"dueTime": "9:30"}, "dueTime"),
+        ({"dueTime": "24:00"}, "dueTime"),
+        ({"estimatedDuration": -1}, "estimatedDuration"),
+        ({"estimatedDuration": True}, "estimatedDuration"),
+        ({"projectId": ""}, "projectId"),
+        ({"projectId": 123}, "projectId"),
+    ],
+)
+def test_update_task_validates_planning_fields_before_io(monkeypatch, patch, error_fragment):
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid request reached Local Task API"),
+    )
+
+    result = json.loads(fst._handle_update_task(_valid_update_args(patch=patch)))
+
+    assert error_fragment in result["error"]
 
 
 @pytest.mark.parametrize(

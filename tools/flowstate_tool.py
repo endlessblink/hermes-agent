@@ -44,7 +44,16 @@ _SUBTASK_BATCH_CONTRACT = "subtask-batch-v1"
 _WORK_BLOCK_CONTRACT = "work-block-v1"
 _LIFECYCLE_CREATE_STATUSES = {"planned", "in_progress", "backlog", "on_hold"}
 _LIFECYCLE_STATUSES = _LIFECYCLE_CREATE_STATUSES | {"done"}
-_CANONICAL_PATCH_FIELDS = {"title", "description", "priority", "dueDate", "progress"}
+_CANONICAL_PATCH_FIELDS = {
+    "title",
+    "description",
+    "priority",
+    "dueDate",
+    "dueTime",
+    "estimatedDuration",
+    "projectId",
+    "progress",
+}
 _CANONICAL_UPDATE_FIELDS = {
     "id",
     "operationId",
@@ -910,7 +919,7 @@ def _valid_lifecycle_read_back(
     ):
         return False
     if action == "create":
-        return (
+        valid = (
             read_back.get("title") == payload["title"]
             and read_back.get("description") == payload["description"]
             and read_back.get("status") == payload["status"]
@@ -920,6 +929,10 @@ def _valid_lifecycle_read_back(
             and read_back.get("isDeleted") is False
             and read_back.get("tombstone") is False
         )
+        for field in ("dueTime", "estimatedDuration"):
+            if field in payload:
+                valid = valid and read_back.get(field) == payload[field]
+        return valid
     if action == "soft_delete":
         return read_back.get("isDeleted") is True and read_back.get("tombstone") is True
     if action == "restore":
@@ -1059,7 +1072,8 @@ def _handle_lifecycle(
 def _handle_create_task(args: dict, **kw) -> str:
     allowed = {
         "taskId", "operationId", "title", "description", "status", "priority",
-        "dueDate", "projectId", "preview", "previewDigest", "previewExpiresAt", "requestHash",
+        "dueDate", "dueTime", "estimatedDuration", "projectId", "preview", "previewDigest",
+        "previewExpiresAt", "requestHash",
     }
     unknown = sorted(set(args) - allowed)
     if unknown:
@@ -1087,6 +1101,22 @@ def _handle_create_task(args: dict, **kw) -> str:
     project_id = args.get("projectId")
     if project_id in ("", None):
         project_id = None
+    elif not isinstance(project_id, str) or not project_id.strip():
+        return _tool_error("projectId must be a non-empty string or null")
+
+    due_time = args.get("dueTime")
+    if due_time in ("", None):
+        due_time = None
+    elif not isinstance(due_time, str) or not _TIME_ONLY_RE.fullmatch(due_time):
+        return _tool_error("dueTime must be HH:MM or null")
+
+    estimated_duration = args.get("estimatedDuration")
+    if estimated_duration is not None and (
+        not isinstance(estimated_duration, int)
+        or isinstance(estimated_duration, bool)
+        or estimated_duration < 0
+    ):
+        return _tool_error("estimatedDuration must be a non-negative integer number of minutes or null")
 
     payload = {
         "title": title,
@@ -1096,6 +1126,10 @@ def _handle_create_task(args: dict, **kw) -> str:
         "dueDate": due_date,
         "projectId": project_id,
     }
+    if "dueTime" in args:
+        payload["dueTime"] = due_time
+    if "estimatedDuration" in args:
+        payload["estimatedDuration"] = estimated_duration
     return _handle_lifecycle(args, action="create", payload=payload, base_revision=0)
 
 
@@ -1185,6 +1219,16 @@ def _validate_canonical_patch(patch: Any) -> Optional[str]:
     if "dueDate" in patch and patch["dueDate"] is not None:
         if not isinstance(patch["dueDate"], str) or not _DATE_ONLY_RE.fullmatch(patch["dueDate"]):
             return "patch.dueDate must be YYYY-MM-DD or null"
+    if "dueTime" in patch and patch["dueTime"] is not None:
+        if not isinstance(patch["dueTime"], str) or not _TIME_ONLY_RE.fullmatch(patch["dueTime"]):
+            return "patch.dueTime must be HH:MM or null"
+    if "estimatedDuration" in patch and patch["estimatedDuration"] is not None:
+        duration = patch["estimatedDuration"]
+        if not isinstance(duration, int) or isinstance(duration, bool) or duration < 0:
+            return "patch.estimatedDuration must be a non-negative integer number of minutes or null"
+    if "projectId" in patch and patch["projectId"] is not None:
+        if not isinstance(patch["projectId"], str) or not patch["projectId"].strip():
+            return "patch.projectId must be a non-empty string or null"
     if "progress" in patch:
         progress = patch["progress"]
         if not isinstance(progress, int) or isinstance(progress, bool) or not 0 <= progress <= 100:
@@ -2733,6 +2777,8 @@ FLOWSTATE_CREATE_TASK_SCHEMA = {
             "status": {"type": "string", "enum": ["planned", "in_progress", "backlog", "on_hold"]},
             "priority": {"type": ["string", "null"], "enum": ["low", "medium", "high", None]},
             "dueDate": {"type": "string", "description": "Optional YYYY-MM-DD due date."},
+            "dueTime": {"type": ["string", "null"], "description": "Optional local HH:MM due time."},
+            "estimatedDuration": {"type": ["integer", "null"], "minimum": 0, "description": "Estimated effort in minutes, not a scheduled work block."},
             "projectId": {"type": "string", "description": "Optional known Flow State project id."},
             "preview": {"type": "boolean", "description": "Defaults true; false applies the approved preview."},
             "previewDigest": {"type": "string", "description": "Server-issued digest required for apply."},
@@ -2765,6 +2811,9 @@ FLOWSTATE_UPDATE_TASK_SCHEMA = {
                     "description": {"type": "string"},
                     "priority": {"type": ["string", "null"]},
                     "dueDate": {"type": ["string", "null"]},
+                    "dueTime": {"type": ["string", "null"], "description": "Local task due time in HH:MM format."},
+                    "estimatedDuration": {"type": ["integer", "null"], "minimum": 0, "description": "Estimated effort in minutes, not a scheduled work block."},
+                    "projectId": {"type": ["string", "null"], "description": "Known Flow State project id, or null to unassign."},
                     "progress": {"type": "integer", "minimum": 0, "maximum": 100},
                 },
                 "additionalProperties": False,
