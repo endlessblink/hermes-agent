@@ -297,6 +297,27 @@ class TestNonDiscordProfileRouting:
 
         assert mock_runner._profile_name_for_source(telegram_source) == "tg-profile"
 
+    def test_profile_home_resolution_does_not_authorize_before_scope(
+        self, mock_runner, telegram_source
+    ):
+        """Profile-home lookup must be route-only before secret scoping."""
+        mock_runner.config.profile_routes = [
+            ProfileRoute(name="tg", platform="telegram", profile="tg-profile",
+                         chat_id="-1001234567890"),
+        ]
+        telegram_source.profile = None
+        telegram_source.user_id = "123"
+        mock_runner._is_user_authorized = MagicMock(
+            side_effect=AssertionError("authorization ran before profile scope")
+        )
+
+        with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
+            with patch("hermes_cli.profiles.profile_exists", return_value=True):
+                mock_get_dir.return_value = Path("/hermes/profiles/tg-profile")
+                result = mock_runner._resolve_profile_home_for_source(telegram_source)
+
+        assert result == Path("/hermes/profiles/tg-profile")
+
     def test_telegram_no_route_returns_none(self, mock_runner, telegram_source):
         """With no matching Telegram route, resolution returns None (caller
         falls back to the default/active profile)."""

@@ -18199,7 +18199,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
             )
 
-    def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
+    def _profile_name_for_source(
+        self,
+        source: SessionSource,
+        *,
+        authorize_telegram: bool = True,
+    ) -> Optional[str]:
         """Resolve the profile name for an inbound source via configured routes.
 
         Returns ``None`` when multiplexing is off, no routes are configured, or
@@ -18220,33 +18225,53 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not getattr(config, "multiplex_profiles", False):
             return None
         routes = getattr(config, "profile_routes", None)
-        if not routes:
-            return None
-        if isinstance(routes, dict):
-            return self._resolve_inbound_profile(source)
-        from gateway.profile_routing import match_profile_route
-        try:
-            matched = match_profile_route(
-                routes,
-                platform=source.platform.value,
-                guild_id=getattr(source, "guild_id", None),
-                chat_id=source.chat_id,
-                thread_id=getattr(source, "thread_id", None),
-                parent_chat_id=getattr(source, "parent_chat_id", None),
+        if routes:
+            if isinstance(routes, dict):
+                matched_profile = self._resolve_inbound_profile(source)
+            else:
+                from gateway.profile_routing import match_profile_route
+                try:
+                    matched = match_profile_route(
+                        routes,
+                        platform=source.platform.value,
+                        guild_id=getattr(source, "guild_id", None),
+                        chat_id=source.chat_id,
+                        thread_id=getattr(source, "thread_id", None),
+                        parent_chat_id=getattr(source, "parent_chat_id", None),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Profile route matching failed for %s/%s, falling back to default",
+                        source.platform, source.chat_id, exc_info=True,
+                    )
+                    return None
+                matched_profile = matched.profile if matched else None
+            if matched_profile:
+                return matched_profile
+
+            logger.debug(
+                "No profile route matched: platform=%s chat_id=%s thread_id=%s parent_chat_id=%s",
+                source.platform.value, source.chat_id,
+                getattr(source, "thread_id", None), getattr(source, "parent_chat_id", None),
             )
-        except Exception:
-            logger.warning(
-                "Profile route matching failed for %s/%s, falling back to default",
-                source.platform, source.chat_id, exc_info=True,
+
+        # User-profile assignment is a fallback for Telegram sources without
+        # an explicit route. It must run only after route matching so a routed
+        # source does not get a generated user profile instead of its topic/
+        # chat profile, and never during pre-scope profile-home resolution.
+        if (
+            authorize_telegram
+            and source.platform.value == "telegram"
+            and source.user_id
+            and self._is_user_authorized(source)
+        ):
+            from gateway.user_profiles import resolve_user_profile
+
+            return resolve_user_profile(
+                source.platform.value,
+                str(source.user_id),
+                approved=True,
             )
-            return None
-        if matched:
-            return matched.profile
-        logger.debug(
-            "No profile route matched: platform=%s chat_id=%s thread_id=%s parent_chat_id=%s",
-            source.platform.value, source.chat_id,
-            getattr(source, "thread_id", None), getattr(source, "parent_chat_id", None),
-        )
         return None
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
@@ -18273,7 +18298,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if name:
                 explicit_profile = name  # User explicitly set this profile
             if not name:
-                name = self._profile_name_for_source(source)
+                # Profile-home resolution runs before a profile secret scope
+                # exists. Route-only resolution must therefore not authorize
+                # the Telegram sender here: authorization reads scoped secrets
+                # and is performed after this home has been selected.
+                if source.platform.value == "telegram":
+                    name = self._profile_name_for_source(
+                        source, authorize_telegram=False
+                    )
+                else:
+                    name = self._profile_name_for_source(source)
                 if name:
                     explicit_profile = name  # Routing explicitly set this profile
             if not name:
