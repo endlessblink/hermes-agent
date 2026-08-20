@@ -53,7 +53,7 @@ alone do not close an entry.
 - Installed Telegram UI gate: manual `/new` is present; four Hebrew energy
   choices, `להמשיך`, and control creation passed.
 - Installed Life-Boat profile contracts: P-005 through P-008, P-014 through
-  P-017, and P-019 through P-022 passed the structural skill checks.
+  P-017, and P-019 through P-022 passed both file and policy-content checks.
 - P-005 through P-008 remain pending because authenticated live testing of
   sensitive synthetic prompts was not authorized; P-009 through P-010 remain
   pending until the actual Telegram surface receives the required human/runtime
