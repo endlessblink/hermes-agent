@@ -39,3 +39,23 @@ alone do not close an entry.
 - aggregate-only human review for Life-Boat conversation cases, with no raw
   psychological text in artifacts;
 - rollback path and explicit reason if the entry remains pending.
+
+## Evidence snapshot — 2026-08-20
+
+- Focused regression suite: `571 passed, 4 skipped`; the skips are opt-in
+  external live tests, not failures.
+- Privacy-safe adversarial replay: `60` synthetic scenarios, `0` failures,
+  with no forced-choice menus, internal status leaks, or consentless summaries.
+- Authenticated installed CLI gate: P-001 through P-004 passed with synthetic
+  Hebrew scenarios; no raw conversation text was retained.
+- Installed runtime overlay: gateway process, deployed Life-Boat modules, and
+  Telegram adapter all matched successfully.
+- Installed Telegram UI gate: manual `/new` is present; four Hebrew energy
+  choices, `להמשיך`, and control creation passed.
+- Installed Life-Boat profile contracts: P-005 through P-008, P-014 through
+  P-017, and P-019 through P-022 passed the structural skill checks.
+- P-005 through P-008 remain pending because authenticated live testing of
+  sensitive synthetic prompts was not authorized; P-009 through P-010 remain
+  pending until the actual Telegram surface receives the required human/runtime
+  review. All other pending entries likewise require the authenticated
+  conversation gate before release status can change.
