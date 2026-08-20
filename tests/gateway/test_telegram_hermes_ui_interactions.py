@@ -91,6 +91,42 @@ def test_single_choice_uses_value_and_terminal_submit_is_idempotent(tmp_path):
     assert replay.outcome in {"stale", "resolved"}
 
 
+def test_hebrew_energy_choices_render_continue_and_submit(tmp_path):
+    artifact = {
+        "type": "form",
+        "id": "energy",
+        "direction": "rtl",
+        "fields": [{
+            "id": "energy",
+            "label": "רמת אנרגיה",
+            "type": "single-choice",
+            "required": True,
+            "options": [
+                {"label": "נמוכה", "value": "low"},
+                {"label": "בינונית", "value": "medium"},
+                {"label": "גבוהה", "value": "high"},
+                {"label": "משתנה", "value": "variable"},
+            ],
+        }],
+    }
+    state = prepare_interaction(artifact, chat_id="123", root=tmp_path)
+    labels = [control["text"] for control in state["controls"]]
+    assert labels[:4] == ["○ נמוכה", "○ בינונית", "○ גבוהה", "○ משתנה"]
+
+    selected = apply_control(
+        state["token"], state["revision"], _control(state, "select-option", option_index=2), root=tmp_path
+    )
+    assert any(control["text"] == "שליחה / Submit" for control in selected.state["controls"])
+    submitted = apply_control(
+        selected.state["token"],
+        selected.state["revision"],
+        _control(selected.state, "submit-form"),
+        root=tmp_path,
+    )
+    assert submitted.outcome == "submit"
+    assert '"energy":"high"' in submitted.payload
+
+
 def test_typed_mixed_form_uses_persistent_prompt_anchor_and_advances(tmp_path):
     artifact = {
         "type": "form",

@@ -99,8 +99,14 @@ class TestBusySessionAck:
     """User sends a message while agent is running — should get acknowledgment."""
 
     @pytest.mark.asyncio
-    async def test_lifeboat_busy_followup_is_silent_and_queued(self):
-        """Life-Boat must not expose the gateway's task-status bubble."""
+    async def test_lifeboat_busy_followup_is_queued_and_acknowledged(self):
+        """Life-Boat queues the message and still shows the busy acknowledgement.
+
+        Suppressing the bubble was reverted at Noam's explicit request on
+        2026-08-11: the status notices are his only visibility into what the
+        assistant is doing, and he asked for them to stay.  What must not happen
+        is losing the message — it is queued and answered on the next turn.
+        """
         from gateway.run import GatewayRunner
 
         runner, _sentinel = _make_runner()
@@ -126,7 +132,7 @@ class TestBusySessionAck:
 
         assert result is True
         assert adapter._pending_messages[session_key] is event
-        adapter._send_with_retry.assert_not_awaited()
+        adapter._send_with_retry.assert_awaited()
         runner._running_agents[session_key].interrupt.assert_not_called()
 
     @pytest.mark.asyncio

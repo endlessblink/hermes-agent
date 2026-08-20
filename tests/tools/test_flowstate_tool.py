@@ -1757,6 +1757,93 @@ def test_timer_diagnostics_reads_safe_leader_and_sync_state(monkeypatch):
     assert seen["body"] is None
 
 
+def test_timer_lifecycle_defaults_to_preview_and_preserves_canonical_fields(monkeypatch):
+    seen = {}
+    session_id = "123e4567-e89b-12d3-a456-426614174000"
+    payload = {
+        "ok": True,
+        "result": "preview",
+        "action": "start",
+        "sessionId": session_id,
+    }
+    monkeypatch.setattr(fst.urllib.request, "urlopen", _capturing_urlopen(seen, payload))
+
+    result = json.loads(fst._handle_timer_lifecycle({
+        "operationId": "timer-preview-1",
+        "sessionId": session_id,
+        "baseRevision": 0,
+        "action": "start",
+        "taskId": "task-1",
+        "duration": 1500,
+        "isBreak": False,
+    }))
+
+    assert result["result"] == payload
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://127.0.0.1:5577/api/timer/lifecycle"
+    assert seen["body"]["preview"] is True
+    assert seen["body"]["payload"] == {"taskId": "task-1", "duration": 1500, "isBreak": False}
+
+
+def test_timer_lifecycle_apply_requires_approval_metadata_and_verifies_receipt(monkeypatch):
+    seen = {}
+    session_id = "123e4567-e89b-12d3-a456-426614174000"
+    receipt = {
+        "entityType": "timer_session",
+        "entityId": session_id,
+        "action": "stop",
+        "readBack": {"id": session_id, "isActive": False},
+    }
+    monkeypatch.setattr(
+        fst.urllib.request,
+        "urlopen",
+        _capturing_urlopen(seen, {"ok": True, "result": "committed", "receipt": receipt}),
+    )
+
+    result = json.loads(fst._handle_timer_lifecycle({
+        "operationId": "timer-apply-1",
+        "sessionId": session_id,
+        "baseRevision": 2,
+        "action": "stop",
+        "preview": False,
+        "previewDigest": "a" * 64,
+        "previewExpiresAt": "2026-08-19T18:30:00Z",
+        "requestHash": "b" * 64,
+    }))
+
+    assert result["result"]["result"] == "committed"
+    assert seen["body"]["preview"] is False
+    assert seen["body"]["requestHash"] == "b" * 64
+
+
+def test_work_block_apply_forwards_request_hash_to_canonical_api(monkeypatch):
+    seen = {}
+
+    def capture(method, path, body, **kwargs):
+        seen.update({"method": method, "path": path, "body": body})
+        return {}
+
+    monkeypatch.setattr(fst, "_request", capture)
+    result = json.loads(fst._handle_create_work_block({
+        "taskId": _LIFECYCLE_TASK_ID,
+        "workBlockId": _SUBTASK_UUID,
+        "operationId": "work-block-apply-1",
+        "baseRevision": 3,
+        "workBlockRevision": 0,
+        "scheduledDate": "2026-08-20",
+        "scheduledTime": "10:00",
+        "duration": 25,
+        "timezone": "Asia/Jerusalem",
+        "preview": False,
+        "previewDigest": "a" * 64,
+        "previewExpiresAt": "2026-08-19T18:30:00Z",
+        "requestHash": "b" * 64,
+    }))
+
+    assert "Canonical work-block receipt" in result["error"]
+    assert seen["body"]["requestHash"] == "b" * 64
+
+
 def test_list_subtasks_uses_parent_task_route(monkeypatch):
     seen = {}
     monkeypatch.setattr(
@@ -1941,6 +2028,7 @@ def test_toolset_registration_maps_all_flowstate_tools():
         "flowstate_delete_task",
         "flowstate_get_current_timer",
         "flowstate_get_timer_diagnostics",
+        "flowstate_timer_lifecycle",
         "flowstate_list_task_instances",
         "flowstate_done_for_now",
         "flowstate_merge_tasks",

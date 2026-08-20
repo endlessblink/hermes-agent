@@ -16,13 +16,9 @@ from gateway.lifeboat_followups import (
     build_lifeboat_coaching_prompt,
     cancel_followup,
     consume_followup_context,
-    ensure_lifeboat_open_response,
-    finalize_lifeboat_response,
     filter_lifeboat_toolsets,
     is_lifeboat_source,
-    lifeboat_response_issues,
     prepare_lifeboat_inbound_guidance,
-    repair_repeated_lifeboat_response,
 )
 
 
@@ -34,12 +30,12 @@ def enable_delayed_followups_for_legacy_queue_tests(monkeypatch):
     monkeypatch.setenv("LIFEBOAT_PROACTIVE_FOLLOWUPS", "1")
 
 
-def source(thread_id="2", profile="life-advisor", chat_id="-1004230590253"):
+def source(thread_id="2", profile="life-advisor"):
     return SimpleNamespace(
         platform=SimpleNamespace(value="telegram"),
         profile=profile,
         thread_id=thread_id,
-        chat_id=chat_id,
+        chat_id="-1004230590253",
     )
 
 
@@ -79,12 +75,18 @@ def test_question_arms_and_new_message_cancels(tmp_path):
     assert not cancel_followup(tmp_path, "telegram:-100:2")
 
 
-def test_pending_reply_consumes_context_for_continuation(tmp_path):
+def test_pending_reply_carries_language_but_never_the_old_reply(tmp_path):
+    """A check-in must not replay any part of the assistant's earlier message.
+
+    Storing an excerpt is how the 2026-08-09 22:30 check-in re-sent the fragment
+    "כי אני כנראה עושה שלושה דברים שתוקעים: 1." — the sentence splitter cut on the
+    period inside an enumerated list.  Language is the only thing worth keeping.
+    """
     arm_followup(tmp_path, "session", source(), "רוצה לבחור את הצעד הבא?", now=NOW)
-    assert consume_followup_context(tmp_path, "session") == {
-        "context": "רוצה לבחור את הצעד הבא?",
-        "language": "he",
-    }
+    pending = consume_followup_context(tmp_path, "session")
+    assert pending is not None
+    assert pending == {"language": "he"}
+    assert "context" not in pending
     assert consume_followup_context(tmp_path, "session") is None
 
 
@@ -93,12 +95,16 @@ def test_continuation_prompt_requires_one_contextual_next_step():
         "כן",
         {"context": "רוצה לבחור את הצעד הבא?", "language": "he"},
     )
-    assert "רוצה לבחור את הצעד הבא?" in prompt
+    assert "רוצה לבחור את הצעד הבא?" not in prompt
     assert "Respond in Hebrew" in prompt
-    assert "mode=attune" in prompt
-    assert "Do not diagnose" in prompt
-    assert "one open question" in prompt
-    assert "tentative" in prompt
+    assert "do not pressure" in prompt
+    assert "Do not reconstruct or restate what was said before the check-in" in prompt
+    # The narrowing instructions that made it pick one angle and drop the rest.
+    assert "stay with one concrete detail" not in prompt
+    assert "at most one useful question" not in prompt
+    assert "hypothesis" in prompt
+    assert "אולי הקריטריון הוא" in prompt
+    assert "Do not offer a menu of support options" in prompt
     assert "כן" not in build_continuation_guidance(
         {"context": "רוצה לבחור את הצעד הבא?", "language": "he"}
     )
@@ -106,11 +112,19 @@ def test_continuation_prompt_requires_one_contextual_next_step():
 
 def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     prompt = build_lifeboat_coaching_prompt("אני מרגיש שאני שוב נתקע באותו מקום")
-    assert "mode=attune" in prompt
-    assert "one concrete" in prompt
-    assert "tentatively" in prompt
-    assert "exactly two short sentences" in prompt
-    assert "Only summarize or save anything when the user asks" in prompt
+    assert "Emotions are real experiences, not commands" in prompt
+    assert "hypothesis" in prompt
+    assert "אולי הקריטריון הוא" in prompt
+    # It must ask for engagement with everything raised, not a single detail.
+    assert "more than one" in prompt
+    assert "dropping the rest" in prompt
+    assert "choose one concrete detail" not in prompt
+    assert "at most one useful question" not in prompt
+    # And it must not script the reply's moves.
+    assert "trying to solve" not in prompt
+    assert "separate the verdict from the event" not in prompt
+    assert "Do not offer a menu of support options" in prompt
+    assert "either/or question that forces a choice" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
 
@@ -127,109 +141,6 @@ def test_ordinary_turn_does_not_force_daily_summary():
     assert "The user appears to be wrapping up" not in prompt
 
 
-def test_response_contract_detects_long_closed_and_multiple_question_drafts():
-    draft = "זה אומר שהערך שלך נקבע מבחוץ. אין פלא שזה מרגיש כבד. מה קורה? למה זה קורה?"
-    issues = lifeboat_response_issues(draft, "אני מרגיש שהכול נהיה פסק דין על הערך שלי")
-    assert "too_many_questions" in issues
-    assert "premature_conclusion" not in issues
-
-
-def test_response_repair_keeps_one_thread_and_opens_the_door():
-    draft = "לסיכום, כל מה שקורה בעבודה ובזוגיות מוכיח שאתה לא מספיק טוב. אין פלא שזה כואב."
-    repaired = ensure_lifeboat_open_response(
-        draft,
-        "אני נתקע בלופ של ביקורת עצמית על העבודה והזוגיות",
-    )
-    assert len(repaired) < len(draft) + 80
-    assert repaired.count("?") == 0
-    assert "אפשר להישאר עם זה עוד רגע" in repaired
-    assert "לסיכום" not in repaired
-
-
-def test_response_repair_trims_a_mountain_even_when_it_has_one_question():
-    draft = (
-        "אני שומע כמה זה כבד. אולי זה קשור לערך שלך. "
-        "זה מתחבר גם לעבודה וגם לזוגיות. אולי אתה נושא את זה לבד. "
-        "יכול להיות שכל תגובה נהיית פסק דין. אולי זה מפעיל פחד ישן. "
-        "מה הכי נוכח אצלך עכשיו?"
-    )
-    repaired = ensure_lifeboat_open_response(draft, "אני מרגיש קבור תחת מחשבות")
-
-    assert len(repaired) <= 720
-    assert repaired.count("?") == 1
-    assert len(repaired.split(".")) <= 3
-    assert repaired.startswith("אני שומע כמה זה כבד.")
-    assert repaired.endswith("מה הכי נוכח אצלך עכשיו?")
-
-
-def test_response_contract_detects_and_reduces_numbered_mini_essay():
-    draft = (
-        "1. זה נוגע בערך שלך. 2. זה מתחבר לעבודה. "
-        "3. זה מפעיל פחד מדחייה. 4. אתה נשאר עם זה לבד."
-    )
-    issues = lifeboat_response_issues(draft, "אני מרגיש שהכול נסגר עליי")
-    repaired = ensure_lifeboat_open_response(draft, "אני מרגיש שהכול נסגר עליי")
-
-    assert "list_heavy" in issues
-    assert "1." not in repaired
-    assert "2." not in repaired
-    assert repaired.count("?") == 0
-    assert len(repaired.split(".")) <= 2
-
-
-def test_response_contract_does_not_flag_one_inline_hyphen():
-    draft = "יש כאן כאב - לא מסקנה על מי שאני. מה הכי חי אצלך עכשיו?"
-    assert "list_heavy" not in lifeboat_response_issues(draft, "כואב לי")
-
-
-def test_explicit_revisit_request_keeps_the_previous_message_open():
-    guidance = build_lifeboat_coaching_guidance(
-        "בוא ננסה שוב לעבוד יחד עם ההודעה הקודמת, הפעם לאט וביחד"
-    )
-    assert "mode=revisit" in guidance
-    assert "immediately preceding substantive message" in guidance
-    assert "Do not defend" in guidance
-
-
-def test_response_repair_does_not_reopen_an_explicit_pause():
-    draft = "שמחה שהצלחנו לגעת בזה. נעצור להיום."
-    assert ensure_lifeboat_open_response(draft, "זה עזר לי, נעצור להיום") == draft
-
-
-def test_thought_loop_opening_does_not_force_a_question():
-    repaired = ensure_lifeboat_open_response(
-        "לסיכום, אתה צריך לפתור את זה עכשיו.",
-        "אני נתקע שוב בלופ הזה ולא מצליח לצאת ממנו",
-    )
-
-    assert "?" not in repaired
-    assert "אפשר להישאר עם זה עוד רגע" in repaired
-    assert lifeboat_response_issues(repaired, "אני נתקע שוב בלופ הזה ולא מצליח לצאת ממנו") == ()
-
-
-def test_repeated_response_repair_is_accountable_and_stays_open():
-    repaired = repair_repeated_lifeboat_response(
-        "נשמע שהכול נהיה פסק דין על הערך שלך.",
-        "אני מרגיש שהכול נהיה פסק דין",
-    )
-    assert "חוזר על עצמי" in repaired
-    assert repaired.count("?") == 1
-
-
-def test_finalize_response_applies_duplicate_guard_across_turns(tmp_path):
-    draft = "נשמע שהכול נהיה פסק דין על הערך שלך. מה הכי חי אצלך עכשיו?"
-    first = finalize_lifeboat_response(tmp_path, "session", draft, "אני מרגיש שהכול נהיה פסק דין")
-    second = finalize_lifeboat_response(tmp_path, "session", draft, "אני מרגיש שהכול נהיה פסק דין")
-
-    assert first == draft
-    assert "חוזר על עצמי" in second
-    assert second.count("?") == 1
-
-
-def test_topic_two_in_another_chat_is_not_lifeboat():
-    assert not is_lifeboat_source(source(chat_id="-1009999999999", profile="office-work"))
-
-
 def test_inbound_guidance_updates_trajectory_and_consumes_pending_context(tmp_path):
     arm_followup(tmp_path, "session", source(), "רוצה להמשיך מכאן?", now=NOW)
     guidance = prepare_lifeboat_inbound_guidance(
@@ -237,7 +148,7 @@ def test_inbound_guidance_updates_trajectory_and_consumes_pending_context(tmp_pa
         "session",
         "זה עזר לי, אפשר לעצור להיום",
     )
-    assert "The topic was: רוצה להמשיך מכאן?" in guidance
+    assert "רוצה להמשיך מכאן?" not in guidance
     assert "The user appears to be wrapping up" in guidance
     assert consume_followup_context(tmp_path, "session") is None
     trajectory_state = (tmp_path / "state" / "lifeboat-psychology.json").read_text()
@@ -283,7 +194,7 @@ def test_crisis_turn_does_not_arm_routine_proactive_prompts(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_bridge_sends_first_then_schedules_second(tmp_path):
+async def test_bridge_sends_one_optional_invitation_without_retrying(tmp_path):
     arm_followup(tmp_path, "session", source(), "Which option should I use?", now=NOW)
     router = Router()
     bridge = LifeBoatFollowupBridge(tmp_path, router)
@@ -294,10 +205,8 @@ async def test_bridge_sends_first_then_schedules_second(tmp_path):
     assert router.calls[0][1][0].chat_id == "-1004230590253"
     assert router.calls[0][1][0].thread_id == "2"
 
-    assert await bridge.deliver_once(now=NOW + FIRST_DELAY + timedelta(hours=23)) is False
-    assert await bridge.deliver_once(now=NOW + FIRST_DELAY + timedelta(days=1)) is True
-    assert len(router.calls) == 2
-    assert "Happy to pick this back up" in router.calls[1][0]
+    assert await bridge.deliver_once(now=NOW + FIRST_DELAY + timedelta(days=1)) is False
+    assert len(router.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -313,15 +222,18 @@ async def test_bridge_drops_stale_queue_when_delayed_contact_is_disabled(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_bridge_matches_hebrew_and_keeps_context(tmp_path):
+async def test_bridge_checks_in_in_hebrew_without_replaying_the_old_reply(tmp_path):
     arm_followup(tmp_path, "session", source(), "רוצה לבחור את הצעד הבא? נדבר על התוכנית מחר.", now=NOW)
     router = Router()
     bridge = LifeBoatFollowupBridge(tmp_path, router)
 
     assert await bridge.deliver_once(now=NOW + FIRST_DELAY) is True
-    assert "רוצה להמשיך מכאן" in router.calls[0][0]
-    assert "רוצה לבחור את הצעד הבא?" in router.calls[0][0]
-    assert "Just checking in" not in router.calls[0][0]
+    delivered = router.calls[0][0]
+    assert "רוצה להמשיך מכאן" in delivered
+    assert "Just checking in" not in delivered
+    # No fragment of the assistant's own earlier message may reappear.
+    assert "רוצה לבחור את הצעד הבא" not in delivered
+    assert "נדבר על התוכנית מחר" not in delivered
 
 
 @pytest.mark.asyncio

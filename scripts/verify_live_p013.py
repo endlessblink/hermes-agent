@@ -75,7 +75,11 @@ def main() -> int:
         revision = int(create_commit["receipt"]["readBack"]["canonicalRevision"])
         results["create_receipt"] = create_commit["receipt"].get("status") == "committed"
 
-        patch = {"dueTime": "10:30", "estimatedDuration": 60}
+        patch = {
+            "title": f"{prefix} renamed",
+            "dueTime": "10:30",
+            "estimatedDuration": 60,
+        }
         update_base = {
             "id": task_id,
             "operationId": f"p013-update-{task_id}",
@@ -85,6 +89,14 @@ def main() -> int:
         }
         update_preview = require_ok(_handle_update_task(update_base), "update preview")
         results["update_preview"] = update_preview.get("result") == "preview"
+        before_apply = require_ok(_handle_get_task({"taskId": task_id}), "pre-apply read-back")
+        before_task = before_apply.get("task", before_apply.get("result", {}))
+        results["preview_did_not_mutate"] = (
+            isinstance(before_task, dict)
+            and before_task.get("title") == prefix
+            and before_task.get("dueTime") == "09:15"
+            and before_task.get("estimatedDuration") == 45
+        )
         update_commit_args = {
             **update_base,
             "preview": False,
@@ -126,6 +138,7 @@ def main() -> int:
         task = read_back.get("task", read_back.get("result", {}))
         results["read_back"] = (
             isinstance(task, dict)
+            and task.get("title") == f"{prefix} renamed"
             and task.get("dueTime") == "10:30"
             and task.get("estimatedDuration") == 60
             and task.get("canonicalRevision") == revision
