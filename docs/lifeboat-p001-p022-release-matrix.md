@@ -39,4 +39,3 @@ alone do not close an entry.
 - aggregate-only human review for Life-Boat conversation cases, with no raw
   psychological text in artifacts;
 - rollback path and explicit reason if the entry remains pending.
-
