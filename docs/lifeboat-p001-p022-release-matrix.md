@@ -52,6 +52,8 @@ alone do not close an entry.
   Telegram adapter all matched successfully.
 - Installed Telegram UI gate: manual `/new` is present; four Hebrew energy
   choices, `להמשיך`, and control creation passed.
+- Release-line safety check: the known-broken directive-validation harness is
+  not enabled; the recovery checkout and its disabled backup remain untouched.
 - Installed Life-Boat profile contracts: P-005 through P-008, P-014 through
   P-017, and P-019 through P-022 passed both file and policy-content checks.
 - P-005 through P-008 remain pending because authenticated live testing of
