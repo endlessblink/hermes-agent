@@ -42,6 +42,7 @@ alone do not close an entry.
 
 ## Evidence snapshot — 2026-08-20
 
+- Main-based release source revision: `d6ab68c60d35eac4c419a7b7528b8102ab8fcd3e`.
 - Focused regression suite: `565 passed, 4 skipped`; the skips are opt-in
   external live tests, not failures.
 - Privacy-safe adversarial replay: `60` synthetic scenarios, `0` failures,
