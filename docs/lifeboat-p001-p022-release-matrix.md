@@ -42,7 +42,7 @@ alone do not close an entry.
 
 ## Evidence snapshot — 2026-08-20
 
-- Focused regression suite: `571 passed, 4 skipped`; the skips are opt-in
+- Focused regression suite: `565 passed, 4 skipped`; the skips are opt-in
   external live tests, not failures.
 - Privacy-safe adversarial replay: `60` synthetic scenarios, `0` failures,
   with no forced-choice menus, internal status leaks, or consentless summaries.
