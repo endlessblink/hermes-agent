@@ -700,6 +700,51 @@ class GatewaySlashCommandsMixin:
 
         return "\n".join(lines)
 
+    async def _handle_auth_command(self, event: MessageEvent) -> str:
+        """Manage credentials in the current user's private profile."""
+        from gateway.user_profiles import (
+            new_oauth_state,
+            read_user_auth_state,
+            revoke_user_api_key,
+            set_user_api_key,
+            user_api_key_configured,
+            user_profile_dir,
+            write_user_auth_state,
+        )
+
+        if getattr(event.source, "chat_type", "") not in {"dm", "private"}:
+            return "For safety, /auth can only be used in a private chat with the bot."
+        if not event.source.user_id:
+            return "I could not identify your Telegram account."
+        if not self._is_user_authorized(event.source):
+            return "This Telegram account is not approved for Lifeboat yet."
+        profile_dir = user_profile_dir("telegram", str(event.source.user_id), approved=True)
+        if profile_dir is None:
+            return "Your private profile is not available yet."
+        args = (event.get_command_args() or "").strip().split(None, 1)
+        action = args[0].lower() if args else "status"
+        if action == "status":
+            state = read_user_auth_state(profile_dir)
+            oauth = state.get("provider") if state.get("status") else "not connected"
+            return f"Private auth status: OpenAI API key={'configured' if user_api_key_configured(profile_dir) else 'not configured'}; ChatGPT/Codex OAuth={oauth}."
+        if action == "key":
+            if len(args) != 2 or not args[1].strip():
+                return "Usage: /auth key <OpenAI API key> (private chat only)"
+            set_user_api_key(profile_dir, "OPENAI_API_KEY", args[1])
+            return "Your OpenAI API key is stored only in your private Lifeboat profile."
+        if action == "revoke":
+            removed = revoke_user_api_key(profile_dir)
+            state = read_user_auth_state(profile_dir)
+            if state:
+                state["status"] = "revoked"
+                write_user_auth_state(profile_dir, state)
+            return "Your private credentials were revoked." if removed or state else "No private credentials were configured."
+        if action == "codex":
+            state = new_oauth_state()
+            write_user_auth_state(profile_dir, state)
+            return "ChatGPT/Codex OAuth setup is reserved in your private profile. Complete the browser link from the Lifeboat account settings, then use /auth status."
+        return "Usage: /auth status | /auth key <OpenAI API key> | /auth revoke | /auth codex"
+
     @staticmethod
     def _redact_matrix_session_key(session_key: str) -> str:
         """Return a stable Matrix session-key fingerprint for shared room status."""

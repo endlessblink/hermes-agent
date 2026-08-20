@@ -4444,6 +4444,13 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id=initial_thread_id,
             profile=str((metadata or {}).get("profile") or "") or None,
         )
+        if hermes_ui_token:
+            logger.info(
+                "telegram_hermes_ui_render control_kind=%s control_count=%d submit=%s",
+                form_choices.kind,
+                len(form_choices.labels),
+                bool(form_choices.submit_label),
+            )
 
         # getattr() — tests build adapters via object.__new__() (no __init__).
         if getattr(self, "_send_path_degraded", False):
@@ -6445,6 +6452,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
         await query.answer()
         result = apply_control(token, revision, control_index)
+        logger.info(
+            "telegram_hermes_ui_callback outcome=%s control_kind=%s",
+            result.outcome or ("error" if result.error else "none"),
+            str((result.state or {}).get("artifact_type") or "unknown"),
+        )
         if result.outcome == "edit":
             try:
                 await query.edit_message_reply_markup(

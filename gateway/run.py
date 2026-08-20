@@ -5704,21 +5704,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not adapter:
             return False  # let default path handle it
 
-        # Life-Boat is a conversational support surface, not a task console.
-        # A visible busy/interrupt status bubble breaks the user's emotional
-        # thread and makes an internal lifecycle event look like part of the
-        # support response. Queue the message silently and let the normal next
-        # turn answer it after the current run finishes.
-        try:
-            from gateway.lifeboat_followups import is_lifeboat_source
-
-            if is_lifeboat_source(event.source):
-                self._queue_or_replace_pending_event(session_key, event)
-                logger.debug("Life-Boat busy follow-up queued silently for %s", session_key)
-                return True
-        except Exception:
-            logger.debug("Life-Boat busy-session classification unavailable", exc_info=True)
-
         # --- Internal synthetic events must never interrupt/steer ---
         # Async-delegation completions (delegate_task(background=true)) and
         # background-process completions (terminal notify_on_complete) re-enter
@@ -5778,6 +5763,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key,
             )
             effective_mode = "queue"
+        # Life-Boat is a support conversation, not a task console.  Aborting an
+        # in-flight reply mid-sentence is what produced the truncated, unclosed
+        # replies on 2026-08-11 when several messages arrived in quick
+        # succession.  Demote to queue so the current reply finishes and the new
+        # message is answered next.  The busy acknowledgement itself is kept
+        # deliberately: Noam asked for the status notices to stay, since they are
+        # his only visibility into what the assistant is doing.
+        if effective_mode == "interrupt":
+            try:
+                from gateway.lifeboat_followups import is_lifeboat_source
+
+                if is_lifeboat_source(event.source):
+                    logger.info(
+                        "Demoting busy_input_mode 'interrupt' to 'queue' for Life-Boat "
+                        "session %s so an in-flight support reply is never cut off",
+                        session_key,
+                    )
+                    effective_mode = "queue"
+            except Exception:
+                logger.debug("Life-Boat busy classification unavailable", exc_info=True)
         steered = False
         if effective_mode == "steer":
             steer_text = (event.text or "").strip()
@@ -10361,6 +10366,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_commands_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
+                if _cmd_def_inner.name == "auth":
+                    return await self._handle_auth_command(event)
                 if _cmd_def_inner.name == "update":
                     return await self._handle_update_command(event)
                 if _cmd_def_inner.name == "version":
@@ -10638,6 +10645,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         if canonical == "profile":
             return await self._handle_profile_command(event)
+
+        if canonical == "auth":
+            return await self._handle_auth_command(event)
 
         if canonical == "whoami":
             return await self._handle_whoami_command(event)
@@ -12839,39 +12849,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _footer_line = ""
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
-
-            # Enforce the Life-Boat response contract at the actual delivery
-            # boundary.  Topic/profile routing can be restored during the agent
-            # turn (for example after compression), so a gate that runs only
-            # inside _run_agent_inner can miss a real Life-Boat message.
-            try:
-                from gateway.lifeboat_followups import (
-                    finalize_lifeboat_response,
-                    is_lifeboat_source,
-                    lifeboat_response_issues,
-                )
-                if is_lifeboat_source(source) and response and not _intentional_silence:
-                    _lifeboat_before = str(response)
-                    _lifeboat_user_text = str(message_text or "")
-                    _lifeboat_issues = lifeboat_response_issues(
-                        _lifeboat_before,
-                        _lifeboat_user_text,
-                    )
-                    response = finalize_lifeboat_response(
-                        self._resolve_profile_home_for_source(source),
-                        session_key or _quick_key,
-                        _lifeboat_before,
-                        _lifeboat_user_text,
-                    )
-                    if response != _lifeboat_before:
-                        logger.info(
-                            "Life-Boat delivery gate repaired draft issues=%s chars=%s->%s",
-                            ",".join(_lifeboat_issues),
-                            len(_lifeboat_before),
-                            len(response),
-                        )
-            except Exception:
-                logger.warning("Life-Boat delivery gate failed", exc_info=True)
 
             # Emit agent:end hook
             await self.hooks.emit("agent:end", {
@@ -19409,22 +19386,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _plat_streaming is None
                 else bool(_plat_streaming)
             )
-            try:
-                from gateway.lifeboat_followups import is_lifeboat_source as _is_lifeboat_source
-                _is_lifeboat_turn = _is_lifeboat_source(source)
-            except Exception:
-                _is_lifeboat_turn = False
-            # Buffer Life-Boat replies so the response-quality gate can inspect
-            # the complete draft before Telegram sees it. Streaming a bad draft
-            # first and repairing it afterward would still feel like a closure
-            # or a flood to the user.
-            if _is_lifeboat_turn:
-                _streaming_enabled = False
             _want_stream_deltas = _streaming_enabled
             _want_interim_messages = interim_assistant_messages_enabled
             _want_interim_consumer = _want_interim_messages
-            if _is_lifeboat_turn:
-                _want_interim_consumer = False
             if _want_stream_deltas or _want_interim_consumer:
                 try:
                     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig

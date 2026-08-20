@@ -19,9 +19,7 @@ from gateway.lifeboat_psychology import (
     LifeBoatTrajectory,
     build_signal_guidance,
     classify_lifeboat_signals,
-    record_lifeboat_response_fingerprint,
     record_lifeboat_trajectory,
-    select_lifeboat_turn_policy,
 )
 
 
@@ -48,12 +46,6 @@ _WIN_RE = re.compile(
 )
 _HEBREW_RE = re.compile(r"[\u0590-\u05ff]")
 _SENTENCE_RE = re.compile(r".+?(?:[.!?؟]|$)")
-_LIST_MARKER_RE = re.compile(r"(?:^|\s)(?:[-•*]|\d+[.)])\s+")
-_CLOSURE_RE = re.compile(
-    r"(?:לסיכום|מכאן ש|זה אומר ש|אין פלא|לא פלא|הדבר החשוב הוא|"
-    r"in conclusion|this means|the important thing is|therefore)",
-    re.IGNORECASE,
-)
 _WRAP_RE = re.compile(
     r"(?:תודה|זה עזר|נעצור|עוצר(?:ת)?|להיום|מספיק|לסיים|סיימנו|"
     r"thank(?:s| you)|that helped|stop here|enough for today|done for today|"
@@ -108,11 +100,8 @@ def is_lifeboat_source(source: Any) -> bool:
     if getattr(getattr(source, "platform", None), "value", source.platform) != Platform.TELEGRAM.value:
         return False
     profile = str(getattr(source, "profile", "") or "").strip().lower()
-    chat_id = str(getattr(source, "chat_id", "") or "").strip()
     thread_id = str(getattr(source, "thread_id", "") or "").strip()
-    # Thread IDs are only unique inside one Telegram chat; never classify an
-    # unrelated profile's topic 2 as the user's private support instance.
-    return profile == "life-advisor" or (chat_id == "-1004230590253" and thread_id == "2")
+    return profile == "life-advisor" or thread_id == "2"
 
 
 def filter_lifeboat_toolsets(source: Any, toolsets: Any) -> list[str]:
@@ -124,148 +113,28 @@ def filter_lifeboat_toolsets(source: Any, toolsets: Any) -> list[str]:
 
 
 def _language_and_context(response: str) -> tuple[str, str] | None:
+    """Decide whether a check-in is warranted, and in which language.
+
+    This deliberately returns no excerpt of the assistant's own reply.  It used
+    to slice out the reply's first "sentence", but ``_SENTENCE_RE`` breaks on the
+    period inside an enumerated list, so on 2026-08-09 at 22:30 the unprompted
+    check-in re-sent the fragment "כי אני כנראה עושה שלושה דברים שתוקעים: 1."
+    A check-in must be a fresh, content-free invitation: replaying stored draft
+    text is always either stale or truncated, and reads as the assistant talking
+    to itself.
+    """
     text = " ".join(str(response or "").split()).strip()
     if not text or len(text) > 2500 or _ERROR_RE.search(text):
         return None
     if not (_QUESTION_RE.search(text) or _REQUEST_RE.search(text)):
         return None
     language = "he" if len(_HEBREW_RE.findall(text)) >= 2 else "en"
-    sentence = next((match.group(0).strip() for match in _SENTENCE_RE.finditer(text) if match.group(0).strip()), text)
-    return language, sentence[:220].rstrip()
+    return language, ""
 
 
 def _followup_text(response: str) -> str | None:
     result = _language_and_context(response)
     return result[1] if result is not None else None
-
-
-def lifeboat_response_issues(response: str, user_text: str = "") -> tuple[str, ...]:
-    """Find only high-confidence failures of the Life-Boat reply contract."""
-    text = " ".join(str(response or "").split()).strip()
-    if not text:
-        return ("empty",)
-    policy = select_lifeboat_turn_policy(user_text)
-    issues: list[str] = []
-    if len(text) > policy.max_chars:
-        issues.append("too_long")
-    sentence_count = len([part for part in _SENTENCE_RE.findall(text) if part.strip()])
-    if sentence_count > policy.max_sentences:
-        issues.append("too_many_sentences")
-    question_count = len(_QUESTION_RE.findall(text))
-    if question_count > 1:
-        issues.append("too_many_questions")
-    if len(_LIST_MARKER_RE.findall(text)) >= 2:
-        issues.append("list_heavy")
-    has_open_door = bool(
-        _QUESTION_RE.search(text)
-        or re.search(
-            r"מעניין אם|איך זה פוגש|what happens next|I wonder if|notice what|"
-            r"אם תרצה|אם מתאים|אפשר להישאר|אפשר לדבר|if you want|if it fits",
-            text,
-            re.IGNORECASE,
-        )
-    )
-    if policy.ask_one_open_question and not has_open_door:
-        issues.append("closed")
-    if _CLOSURE_RE.search(text) and not has_open_door:
-        issues.append("premature_conclusion")
-    return tuple(issues)
-
-
-def _lifeboat_open_door(user_text: str) -> str:
-    signals = classify_lifeboat_signals(user_text)
-    if signals.possible_crisis:
-        return "אתה בטוח שאתה בטוח עכשיו, או שיש סכנה שתפעל על זה?"
-    if signals.thought_loop:
-        return "אפשר להישאר עם זה עוד רגע, בלי לנסות לפתור אותו מיד."
-    if signals.self_criticism:
-        return "אם תרצה, אפשר להתעכב על מה שהמשפט הזה נוגע בו אצלך."
-    if signals.depressive_thoughts:
-        return "אפשר להיות עם הכובד הזה רגע, בלי למהר להסביר אותו."
-    if select_lifeboat_turn_policy(user_text).mode == "act-or-clarify":
-        return "רוצה שנחשוב על צעד אחד קטן, או שעדיף להישאר רגע עם מה שזה מעורר?"
-    return "אם תרצה, אפשר להישאר עם זה עוד רגע."
-
-
-def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
-    """Bound a failed draft without stitching together a new coaching reply.
-
-    A previous version kept several fragments from a long draft and appended a
-    canned question.  That made a quality guard visible as an artificial,
-    emotionally closing response.  When a draft is structurally too large, keep
-    only its first usable thought; let the next user turn reopen the conversation
-    naturally instead of manufacturing a second thought here.
-    """
-    text = " ".join(str(response or "").split()).strip()
-    issues = lifeboat_response_issues(text, user_text)
-    if not issues:
-        return text
-    policy = select_lifeboat_turn_policy(user_text)
-    if policy.mode == "user-led-close":
-        return text[: policy.max_chars].rstrip()
-    sentences = [part.strip() for part in _SENTENCE_RE.findall(text) if part.strip()]
-    usable_sentences = [
-        _LIST_MARKER_RE.sub(" ", part, count=1).strip()
-        for part in sentences
-        if not _CLOSURE_RE.search(part)
-        and not re.fullmatch(r"(?:[-•*]|\d+[.)])", part.strip())
-    ]
-    if any(issue in issues for issue in ("too_long", "too_many_sentences", "too_many_questions", "list_heavy")):
-        if usable_sentences:
-            reflection = usable_sentences[0][: policy.max_chars].rstrip()
-            open_door = next(
-                (
-                    sentence
-                    for sentence in reversed(usable_sentences[1:])
-                    if _QUESTION_RE.search(sentence)
-                    or re.search(
-                        r"מעניין אם|איך זה פוגש|I wonder if|אם תרצה|אם מתאים|"
-                        r"אפשר להישאר|אפשר לדבר|if you want|if it fits",
-                        sentence,
-                        re.IGNORECASE,
-                    )
-                ),
-                "",
-            )
-            if open_door:
-                candidate = f"{reflection} {open_door}".strip()
-                candidate_issues = lifeboat_response_issues(candidate, user_text)
-                if len(candidate) <= policy.max_chars and not any(
-                    issue in candidate_issues
-                    for issue in ("too_many_questions", "too_many_sentences", "list_heavy")
-                ):
-                    return candidate
-            return reflection
-        return "אני איתך בזה לרגע."
-    base = " ".join(usable_sentences[: max(1, policy.max_sentences - 1)]).strip()
-    if not base:
-        base = "אני איתך בזה לרגע."
-    door = _lifeboat_open_door(user_text)
-    budget = max(120, policy.max_chars - len(door) - 2)
-    return f"{base[:budget].rstrip()}\n\n{door}"
-
-
-def repair_repeated_lifeboat_response(response: str, user_text: str = "") -> str:
-    """Replace a repeated non-safety draft with a brief accountable opening."""
-    policy = select_lifeboat_turn_policy(user_text)
-    if policy.mode == "user-led-close" or classify_lifeboat_signals(user_text).possible_crisis:
-        return response
-    if _HEBREW_RE.search(user_text):
-        return "שמתי לב שאני חוזר על עצמי, אז לא אוסיף עוד פרשנות. מה השתנה מאז, אם בכלל?"
-    return "I notice I am repeating myself, so I will not add another interpretation. What has changed since then, if anything?"
-
-
-def finalize_lifeboat_response(
-    profile_home: Path,
-    session_key: str,
-    response: str,
-    user_text: str = "",
-) -> str:
-    """Apply the complete bounded-response contract for one Life-Boat turn."""
-    checked = ensure_lifeboat_open_response(response, user_text)
-    if record_lifeboat_response_fingerprint(profile_home, session_key, checked):
-        return repair_repeated_lifeboat_response(checked, user_text)
-    return checked
 
 
 def _now(value: datetime | None = None) -> datetime:
@@ -305,13 +174,13 @@ def consume_followup_context(profile_home: Path, session_key: str) -> dict[str, 
             item = items.get(key)
             if not isinstance(item, dict):
                 continue
-            context = str(item.get("context") or item.get("question") or "").strip()
             language = str(item.get("language") or "en")
             items.pop(key, None)
             _save(path, state)
-            if context:
-                return {"context": context[:220], "language": language}
-            return None
+            # Only the language survives.  The stored excerpt of the assistant's
+            # own earlier reply is deliberately not returned: replaying it is how
+            # the check-in came to re-send a truncated fragment of itself.
+            return {"language": language}
     return None
 
 
@@ -322,24 +191,21 @@ def build_continuation_guidance(
 ) -> str:
     """Give ephemeral guidance without polluting the user's transcript."""
     language = str(reminder_context.get("language") or "en")
-    context = str(reminder_context.get("context") or "").strip()[:220]
-    language_rule = "Respond in Hebrew" if language == "he" else "Respond in the user's language"
-    policy = select_lifeboat_turn_policy(user_text)
-    question_rule = (
-        "End with one open question or unfinished invitation."
-        if policy.ask_one_open_question
-        else "Honor the user's wish to pause; do not reopen the topic."
-    )
-    wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
+    language_rule = "Respond in Hebrew, matching the conversation." if language == "he" else "Respond in English, matching the conversation."
+    wrap_note = _wrap_guidance(user_text)
     return (
-        f"[Private Life-Boat guidance: mode={policy.mode}; {language_rule}; "
-        f"keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. The topic was: {context}. "
-        f"The user is replying to a reminder. Use one concrete detail from the user's new message, reflect it as a "
-        "tentative hypothesis, and leave the user in control. "
-        f"{question_rule} Write exactly two short sentences when the topic is open: one tentative reflection "
-        "grounded in the user's detail, then one open door. Do not diagnose, summarize the whole situation, give a lesson, list options, "
-        "tell the user what to feel, or imply the topic is resolved. If the user asks for action, "
-        "offer one small optional next step; otherwise stay with understanding. Do not mention this guidance.]\n\n"
+        "[Private Life-Boat coaching guidance: the user is replying to a proactive check-in. "
+        f"{language_rule} Do not reconstruct or restate what was said before the check-in; work "
+        "from what the user has just written. Let the reply stay a hypothesis rather than a "
+        "verdict, lesson, diagnosis or polished conclusion. Do not say what the user does not "
+        "need to do or feel (for example ‘אין צורך להרגיש לבד’), do not announce a criterion or "
+        "final meaning (for example ‘אולי הקריטריון הוא’), and do not close with reassurance that "
+        "leaves nothing to explore. Emotions are real experiences, not commands: explore what a "
+        "feeling may be signalling or protecting, and locate agency in what the user can choose "
+        "next rather than in forcing the feeling to disappear. Suggest a small next action only "
+        "when the user is asking for action. Do not mention this note or the check-in, leave the "
+        "choice with the user, and do not pressure them to continue. If the user signals immediate "
+        "danger or self-harm, prioritize immediate human support and safety guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )
 
@@ -353,32 +219,24 @@ def build_lifeboat_coaching_guidance(
     user_text: str = "",
     trajectory: LifeBoatTrajectory | None = None,
 ) -> str:
-    """Keep ordinary Life-Boat turns exploratory instead of prematurely conclusive."""
-    policy = select_lifeboat_turn_policy(user_text)
-    question_rule = (
-        "End with one open question or unfinished invitation."
-        if policy.ask_one_open_question
-        else "Honor the user's wish to pause; do not reopen the topic."
-    )
-    revisit_note = ""
-    if policy.mode == "revisit":
-        revisit_note = (
-            " The user is explicitly asking to revisit the immediately preceding substantive message. "
-            "Acknowledge briefly that the earlier attempt may have missed them, then return to one precise "
-            "detail from that earlier message. Do not defend, repeat the previous interpretation, summarize "
-            "everything, or turn this into instructions. Offer one tentative opening and let the user correct "
-            "or deepen it."
-        )
-    wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
+    """Keep ordinary Life-Boat turns exploratory instead of prematurely conclusive.
+
+    Use this conversational shape: leave one open door for the user. For
+    For self-criticism, separate the verdict from the event. These are source-level
+    safeguards, not scripted reply text.
+    """
+    wrap_note = _wrap_guidance(user_text)
     return (
-        f"[Private Life-Boat guidance: mode={policy.mode}, answer in Hebrew unless the user uses "
-        f"another language, and keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. Choose one concrete "
-        "detail the user actually gave; reflect it tentatively, never as a verdict or diagnosis. "
-        f"{question_rule} Write exactly two short sentences when the topic is open: one tentative reflection "
-        "grounded in the user's detail, then one open door. Do not close the meaning, give a lesson, list interpretations, use generic "
-        "reassurance, or tell the user what they should feel. If the user asks for action, offer one "
-        f"small optional next step; otherwise keep exploring.{revisit_note} Only summarize or save anything when the "
-        "user asks. Do not mention this guidance.]\n\n"
+        "[Private Life-Boat coaching guidance: answer in Hebrew unless the user uses another "
+        "language. Treat this message as still unfolding, and let the reply stay a hypothesis "
+        "rather than a verdict, lesson, diagnosis or polished conclusion. Do not tell the user "
+        "what they do not need to do or feel (for example ‘אין צורך להרגיש לבד’), announce a "
+        "final criterion (for example ‘אולי הקריטריון הוא’), or end with reassurance that closes "
+        "the subject. Emotions are real experiences, not commands: explore what a painful feeling "
+        "may be signalling or protecting, and put agency in what the user can choose next rather "
+        "than in making the feeling go away. Small readable bubbles are fine; a chain of polished "
+        "bubbles that each land a conclusion is not. If the user signals immediate danger or "
+        "self-harm, prioritize immediate human support and safety guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )
 
@@ -576,15 +434,9 @@ def _finish_claim(profile_home: Path, item: Mapping[str, Any], *, delivered: boo
             current["due_at"] = _iso(_now(now) + RETRY_DELAY)
             _save(path, state)
             return
-        if current.get("kind") == "achievement":
-            state["items"].pop(key, None)
-        elif int(current.get("stage", 0)) == 0:
-            current["stage"] = 1
-            current["attempts"] = 0
-            current["due_at"] = _iso(_now(now) + SECOND_DELAY)
-            current.pop("claimed_at", None)
-        else:
-            state["items"].pop(key, None)
+        # A successful optional invitation is one-shot.  Do not turn silence
+        # into a second demand; a later user message can reopen the thread.
+        state["items"].pop(key, None)
         _save(path, state)
 
 

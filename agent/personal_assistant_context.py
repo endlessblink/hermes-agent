@@ -19,6 +19,7 @@ _CAPABILITY_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("flowstate_get_assistant_context", "read assistant context"),
             ("flowstate_list_tasks", "list tasks"),
             ("flowstate_get_current_timer", "see the current focus session"),
+            ("flowstate_timer_lifecycle", "preview or apply an approved timer transition"),
         ),
     ),
     (

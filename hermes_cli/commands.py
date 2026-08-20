@@ -120,6 +120,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("status", "Show session, model, token, and context info", "Session"),
     CommandDef("whoami", "Show your slash command access (admin / user)", "Info"),
     CommandDef("profile", "Show active profile name and home directory", "Info"),
+    CommandDef("auth", "Manage your private API key or ChatGPT/Codex login", "Configuration",
+               args_hint="[status|key <OPENAI_API_KEY>|revoke|codex]"),
     CommandDef("sethome", "Set this chat as the home channel", "Session",
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
@@ -368,6 +370,7 @@ def is_gateway_known_command(name: str | None) -> bool:
 ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
     {
         "agents",
+        "auth",
         "approve",
         "background",
         "commands",

@@ -95,6 +95,7 @@ _REGISTERED_ROUTE_REQUIREMENTS = (
     ("PATCH", "/api/tasks/:id", "task-v1"),
     ("GET", "/api/timer/current", "timer-current-v1"),
     ("GET", "/api/timer/diagnostics", "timer-diagnostics-v1"),
+    ("POST", "/api/timer/lifecycle", "timer-lifecycle-v1"),
     ("GET", "/api/tasks/:id/instances", "task-instances-v1"),
     ("POST", "/api/tasks/:id/work-blocks", "work-block-v1"),
     ("POST", "/api/tasks/:id/done-for-now", "task-v1"),
@@ -122,6 +123,7 @@ _FLOWSTATE_TOOL_REQUIREMENTS = {
     "flowstate_set_task_status": (("POST", "/api/tasks/lifecycle", "task-lifecycle-v1"),),
     "flowstate_get_current_timer": (("GET", "/api/timer/current", "timer-current-v1"),),
     "flowstate_get_timer_diagnostics": (("GET", "/api/timer/diagnostics", "timer-diagnostics-v1"),),
+    "flowstate_timer_lifecycle": (("POST", "/api/timer/lifecycle", "timer-lifecycle-v1"),),
     "flowstate_list_task_instances": (("GET", "/api/tasks/:id/instances", "task-instances-v1"),),
     "flowstate_create_work_block": (("POST", "/api/tasks/:id/work-blocks", "work-block-v1"),),
     "flowstate_move_work_block": (("POST", "/api/tasks/:id/work-blocks", "work-block-v1"),),
@@ -1028,6 +1030,7 @@ def _handle_lifecycle(
             return _tool_error("requestHash is required when preview is false")
         body["previewDigest"] = digest
         body["previewExpiresAt"] = expiry
+        body["requestHash"] = request_hash
 
     try:
         response = _request("POST", "/api/tasks/lifecycle", body)
@@ -1358,6 +1361,88 @@ def _handle_timer_diagnostics(args: dict, **kw) -> str:
         return _tool_result(_request("GET", "/api/timer/diagnostics"))
     except Exception as exc:
         logger.error("flowstate_get_timer_diagnostics error: %s", exc)
+        return _tool_error(str(exc))
+
+
+def _handle_timer_lifecycle(args: dict, **kw) -> str:
+    """Preview/apply one canonical signed-user timer transition and verify its receipt."""
+    allowed = {
+        "operationId", "sessionId", "baseRevision", "action", "taskId", "duration",
+        "isBreak", "preview", "previewDigest", "previewExpiresAt", "requestHash",
+    }
+    unknown = sorted(set(args) - allowed)
+    if unknown:
+        return _tool_error(f"unsupported timer fields: {', '.join(unknown)}")
+    session_id = args.get("sessionId")
+    operation_id = args.get("operationId")
+    action = args.get("action")
+    base_revision = args.get("baseRevision")
+    if not isinstance(session_id, str) or not _UUID_RE.fullmatch(session_id):
+        return _tool_error("sessionId must be a stable UUID")
+    if not isinstance(operation_id, str) or not operation_id.strip() or len(operation_id) > 160:
+        return _tool_error("operationId is required")
+    if action not in {"start", "pause", "resume", "stop"}:
+        return _tool_error("action must be start|pause|resume|stop")
+    if not isinstance(base_revision, int) or isinstance(base_revision, bool) or base_revision < 0:
+        return _tool_error("baseRevision must be a non-negative integer")
+    if action != "start" and base_revision < 1:
+        return _tool_error("baseRevision must be positive for an existing timer")
+
+    payload: dict[str, Any] = {}
+    if action == "start":
+        task_id = args.get("taskId")
+        duration = args.get("duration")
+        is_break = args.get("isBreak")
+        if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 160:
+            return _tool_error("taskId is required for start")
+        if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= 86400:
+            return _tool_error("duration must be an integer from 1 to 86400 seconds")
+        if not isinstance(is_break, bool) or (is_break and task_id != "break") or (not is_break and task_id == "break"):
+            return _tool_error("isBreak must match taskId=break")
+        payload = {"taskId": task_id, "duration": duration, "isBreak": is_break}
+    elif any(key in args for key in ("taskId", "duration", "isBreak")):
+        return _tool_error(f"{action} does not accept taskId, duration, or isBreak")
+
+    preview = args.get("preview", True)
+    if not isinstance(preview, bool):
+        return _tool_error("preview must be boolean")
+    body: dict[str, Any] = {
+        "operationId": operation_id,
+        "sessionId": session_id,
+        "baseRevision": base_revision,
+        "action": action,
+        "payload": payload,
+        "preview": preview,
+    }
+    for key in ("previewDigest", "previewExpiresAt", "requestHash"):
+        if key in args:
+            body[key] = args[key]
+    if not preview and any(not isinstance(body.get(key), str) or not body[key] for key in ("previewDigest", "previewExpiresAt", "requestHash")):
+        return _tool_error("approved previewDigest, previewExpiresAt, and requestHash are required")
+    try:
+        response = _request("POST", "/api/timer/lifecycle", body, allow_stale_cache=False)
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            return _tool_error("Flow State returned an invalid timer response")
+        if preview:
+            if response.get("result") != "preview" or response.get("action") != action or response.get("sessionId") != session_id:
+                return _tool_error("Flow State timer preview could not be verified")
+        else:
+            receipt = response.get("receipt")
+            if (
+                response.get("result") != "committed"
+                or not isinstance(receipt, dict)
+                or receipt.get("entityType") != "timer_session"
+                or receipt.get("entityId") != session_id
+                or receipt.get("action") != action
+                or not isinstance(receipt.get("readBack"), dict)
+            ):
+                return _tool_error("Flow State timer receipt could not be verified")
+        return _tool_result(response)
+    except _FlowStateApiError as exc:
+        logger.error("flowstate_timer_lifecycle typed error: code=%s status=%s", exc.code, exc.status)
+        return _typed_tool_error(exc)
+    except Exception as exc:
+        logger.error("flowstate_timer_lifecycle error: %s", type(exc).__name__)
         return _tool_error(str(exc))
 
 
@@ -1875,6 +1960,7 @@ def _handle_work_block(args: dict, *, action: str) -> str:
             return _tool_error("requestHash is required when preview is false")
         body["previewDigest"] = digest
         body["previewExpiresAt"] = expiry
+        body["requestHash"] = request_hash
     try:
         response = _request(
             "POST", f"/api/tasks/{urllib.parse.quote(task_id, safe='')}/work-blocks", body
@@ -2919,6 +3005,35 @@ FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA = {
 }
 
 
+FLOWSTATE_TIMER_LIFECYCLE_SCHEMA = {
+    "name": "flowstate_timer_lifecycle",
+    "description": (
+        "Preview or apply one signed-user Flow State timer transition: start, pause, resume, or stop. "
+        "Defaults to a non-mutating preview. Apply only the exact approved preview metadata and accept "
+        "success only when the canonical timer receipt includes authoritative read-back. This tool never "
+        "changes task fields or creates a calendar work block."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "operationId": {"type": "string", "description": "Stable idempotency key reused for preview/apply/retry."},
+            "sessionId": {"type": "string", "description": "Stable timer-session UUID; use a new UUID for start."},
+            "baseRevision": {"type": "integer", "minimum": 0},
+            "action": {"type": "string", "enum": ["start", "pause", "resume", "stop"]},
+            "taskId": {"type": "string", "description": "Required only for start; use break for a break timer."},
+            "duration": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "Start duration in seconds."},
+            "isBreak": {"type": "boolean", "description": "Required only for start; must match taskId=break."},
+            "preview": {"type": "boolean", "description": "Defaults true; false applies only the exact approved preview."},
+            "previewDigest": {"type": "string", "description": "Server-issued preview digest required for apply."},
+            "previewExpiresAt": {"type": "string", "description": "Server-issued preview expiry required for apply."},
+            "requestHash": {"type": "string", "description": "Server-issued request hash required for apply."},
+        },
+        "required": ["operationId", "sessionId", "baseRevision", "action"],
+        "additionalProperties": False,
+    },
+}
+
+
 FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA = {
     "name": "flowstate_list_task_instances",
     "description": (
@@ -3387,6 +3502,7 @@ for _name, _schema, _handler in [
     ("flowstate_set_task_status", FLOWSTATE_SET_TASK_STATUS_SCHEMA, _handle_set_task_status),
     ("flowstate_get_current_timer", FLOWSTATE_CURRENT_TIMER_SCHEMA, _handle_current_timer),
     ("flowstate_get_timer_diagnostics", FLOWSTATE_TIMER_DIAGNOSTICS_SCHEMA, _handle_timer_diagnostics),
+    ("flowstate_timer_lifecycle", FLOWSTATE_TIMER_LIFECYCLE_SCHEMA, _handle_timer_lifecycle),
     ("flowstate_list_task_instances", FLOWSTATE_LIST_TASK_INSTANCES_SCHEMA, _handle_list_task_instances),
     ("flowstate_create_work_block", FLOWSTATE_CREATE_WORK_BLOCK_SCHEMA, _handle_create_work_block),
     ("flowstate_move_work_block", FLOWSTATE_MOVE_WORK_BLOCK_SCHEMA, _handle_move_work_block),
