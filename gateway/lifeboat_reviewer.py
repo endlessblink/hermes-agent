@@ -30,9 +30,31 @@ _ABSTRACT_STAGE_RE = re.compile(r"עתיד זוגי|השלב הבא|מה זה מ
 _ACTION_EVIDENCE_RE = re.compile(r"להתרחק|להימנע|לשלוח|להתקשר|לבטל|להסתגר|withdraw|avoid|send|call|cancel|isolate", re.IGNORECASE)
 _REENTRY_REQUEST_RE = re.compile(r"(?:לחזור|לעבור)\s+(?:חזרה\s+)?(?:לרגשי|לשיחה הרגשית)|back to (?:the )?(?:emotional|feelings?)", re.IGNORECASE)
 _GENERIC_REENTRY_RE = re.compile(r"מה חי בך כרגע|מה נוכח עכשיו|מה אתה מרגיש עכשיו|what is alive for you|what feels present now", re.IGNORECASE)
+# A feared reading restated as a settled fact about the other person. Covers
+# the conditional forms, the future tense, and the flat assertion of
+# utility-only worth -- the shapes the original pattern let through.
 _FEARED_FUNCTION_RE = re.compile(
-    r"(?:אם|when|because)\s+(?:היא|הוא|they|she|he)\s+(?:כבר\s+)?(?:לא\s+)?צריכ(?:ה|ים|ות)|"
-    r"if\s+(?:she|he|they)\s+no\s+longer\s+need(?:s)?\s+you",
+    r"(?:אם|כש|כאשר|ברגע ש|when|because)\s*(?:היא|הוא|they|she|he)?\s*"
+    r"(?:כבר\s+)?(?:לא\s+)?(?:צריכ(?:ה|ים|ות)|תצטרך|יצטרך|תהיה לה תועלת|תועלת)"
+    r"|if\s+(?:she|he|they)\s+no\s+longer\s+need(?:s)?\s+you"
+    r"|because\s+(?:she|he|they)\s+no\s+longer\s+needs?\s+you"
+    r"|(?:היא|הוא)\s+מעריכ(?:ה|ים)\s+אותך\s+רק\s+(?:בגלל|על)"
+    r"|(?:רק\s+)?בגלל\s+ה?תועלת\s+ש(?:אתה|את)\s+מביא",
+    re.IGNORECASE,
+)
+
+# Asking the person to produce a justification for being wanted.
+_WORTH_JUSTIFICATION_RE = re.compile(
+    r"(?:איזה|מה)\s+(?:ה)?(?:ערך|סיבה|טעם)\s+(?:נשאר|יש|נותר)"
+    r"|what\s+(?:value|reason)\s+(?:is\s+)?(?:left|remains)",
+    re.IGNORECASE,
+)
+
+# Treating an absence of communicated care as proof that care is absent.
+_ABSENCE_AS_PROOF_RE = re.compile(
+    r"(?:אם|כש)\s+לא\s+קיבלת.{0,40}(?:סימן|אכפתיות|הערכה).{0,20}"
+    r"(?:סימן ש|אז\s+)?(?:אין|היא לא)"
+    r"|לא\s+קיבלת.{0,30}(?:אכפתיות|הערכה).{0,30}סימן\s+שאין",
     re.IGNORECASE,
 )
 _FEAR_OR_HYPOTHESIS_RE = re.compile(
@@ -128,6 +150,10 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
         return _safety_fallback(user, "missing_human_safety_support")
     if _FEARED_FUNCTION_RE.search(text) and _FEAR_OR_HYPOTHESIS_RE.search(user):
         return _plain_reality_fallback(user, "feared_interpretation_as_fact")
+    if _ABSENCE_AS_PROOF_RE.search(text):
+        return _plain_reality_fallback(user, "absence_of_care_treated_as_proof")
+    if _WORTH_JUSTIFICATION_RE.search(text):
+        return _fallback(user, "asked_user_to_justify_their_worth")
     if _SUPPLIED_RELATIONSHIP_RE.search(user) and _REDUNDANT_RELATIONSHIP_QUESTION_RE.search(text):
         return _fallback(user, "reasked_supplied_relationship_evidence")
     if _EPISTEMIC_ERASURE_RE.search(text) and not _THIRD_PARTY_UNKNOWN_RE.search(text):

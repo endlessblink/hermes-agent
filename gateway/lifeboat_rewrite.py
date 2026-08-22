@@ -51,6 +51,8 @@ _REASON_GUIDANCE = {
     "missing_human_safety_support": "There are danger signs and the draft offers no route to human support.",
     "contextless_reentry": "The draft re-enters with a question that names nothing from this conversation.",
     "feared_interpretation_as_fact": "The draft states the user's fear as established fact.",
+    "absence_of_care_treated_as_proof": "The draft treats not having received care as proof that none exists. Those are different claims.",
+    "asked_user_to_justify_their_worth": "The draft asks the user to produce a reason they deserve connection.",
     "reasked_supplied_relationship_evidence": "The draft asks again for something the user already supplied.",
     "epistemic_caution_erased_grounded_knowledge": "The draft treats what is genuinely known as unknowable.",
     "therapeutic_gibberish_in_repair": "The draft is abstract therapeutic language instead of plain speech.",
