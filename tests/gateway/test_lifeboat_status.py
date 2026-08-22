@@ -14,6 +14,7 @@ def test_restart_only_is_the_only_blocker():
 def test_telegram_verification_only_final_delivery_is_completed():
     rendered = format_lifeboat_technical_status("Final delivered Telegram verification")
     assert "אימות Telegram הושלם במסירת ההודעה הזו." in rendered
+    assert "אין חסימה" not in rendered
     assert "חסום" not in rendered
     assert "הצעד הבא" not in rendered
     assert "התור נקלט" not in rendered

@@ -57,8 +57,11 @@ def render_lifeboat_technical_status(
     blocked_values = tuple(_clean(value) for value in blocked if _clean(value))
     upcoming = tuple(_clean(value) for value in next_steps if _clean(value))
     detail = tuple(_clean(value) for value in technical_detail if _clean(value))
+    bottom_line = "נדרשת פעולה נוספת." if blocked_values else "ההכנה הושלמה ואין חסימה." if done else "הבדיקה עדיין מתקדמת."
+    if done and any("Telegram" in value for value in done):
+        bottom_line = "אימות Telegram הושלם; אין צורך בפעולה נוספת."
     sections = [
-        "שורה תחתונה: " + ("נדרשת פעולה נוספת." if blocked_values else "ההכנה הושלמה ואין חסימה." if done else "הבדיקה עדיין מתקדמת."),
+        "שורה תחתונה: " + bottom_line,
         _render_section("הושלם", done or ("אין עדיין השלמה לדווח.",)),
     ]
     if blocked_values:
