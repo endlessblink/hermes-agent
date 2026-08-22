@@ -17,6 +17,7 @@ Covers three layers of the fix:
 """
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -378,6 +379,67 @@ class TestStaleSessionLockSelfHeal:
 
 
 class TestRunnerSessionGenerationGuard:
+    @pytest.mark.asyncio
+    async def test_newer_interrupt_turn_invalidates_stale_completion(self, monkeypatch):
+        """A correction arriving during an in-flight turn must close its output gate."""
+        runner = _make_runner()
+        sk = "agent:main:telegram:dm:12345"
+        old_generation = runner._begin_session_run_generation(sk)
+        agent = MagicMock()
+        runner._running_agents[sk] = agent
+        runner._busy_input_mode = "interrupt"
+        runner._busy_text_mode = "interrupt"
+        runner._draining = False
+        runner._busy_ack_ts = {}
+        runner._is_user_authorized_in_event_scope = lambda source: True
+        runner._adapter_for_source = lambda source: MagicMock()
+        runner._agent_has_active_subagents = lambda active: False
+        runner._session_has_compression_in_flight = lambda key: asyncio.sleep(0, result=False)
+        runner._queue_or_replace_pending_event = MagicMock()
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm")
+        event = MessageEvent(text="new correction", message_type=MessageType.TEXT, source=source)
+        monkeypatch.setenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", "false")
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        assert runner._is_session_run_current(sk, old_generation) is False
+        agent.interrupt.assert_called_once_with("new correction")
+        runner._queue_or_replace_pending_event.assert_called_once_with(sk, event)
+
+    @pytest.mark.asyncio
+    async def test_startup_user_turn_cancels_resume_backlog_without_content_logging(self, caplog):
+        """A real post-restart message supersedes its synthetic resume before delivery."""
+        caplog.set_level(logging.INFO)
+        runner = _make_runner()
+        runner.config.extra = {"group_sessions_per_user": True, "thread_sessions_per_user": False}
+        runner._startup_restore_queue = []
+        runner._startup_restore_tasks_by_session = {}
+        runner._startup_restore_superseded_sessions = set()
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm")
+        event = MessageEvent(
+            text="private correction that must not enter a receipt",
+            message_type=MessageType.TEXT,
+            source=source,
+        )
+        release = asyncio.Event()
+
+        async def _resume():
+            await release.wait()
+
+        resume_task = asyncio.create_task(_resume())
+        session_key = build_session_key(source)
+        runner._startup_restore_tasks_by_session[session_key] = resume_task
+
+        runner._queue_startup_restore_event(event)
+        await asyncio.sleep(0)
+
+        assert resume_task.cancelled()
+        assert runner._startup_restore_queue == [event]
+        assert runner._is_session_run_current(session_key, 0) is False
+        assert "private correction" not in caplog.text
+        assert "message_content=redacted" in caplog.text
+
     def test_release_without_generation_behaves_as_before(self):
         runner = _make_runner()
         sk = "agent:main:telegram:dm:12345"

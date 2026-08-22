@@ -3192,6 +3192,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._startup_restore_in_progress = False
         self._startup_restore_queue: List[MessageEvent] = []
         self._startup_restore_tasks: List[asyncio.Task] = []
+        self._startup_restore_tasks_by_session: Dict[str, asyncio.Task] = {}
+        self._startup_restore_superseded_sessions: set[str] = set()
         # LRU cache of live SessionSources keyed by session_key. Used by
         # fallback routing paths (shutdown notifications, synthetic
         # background-process events) when the persisted origin is missing
@@ -5807,6 +5809,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # This aborts in-flight tool calls and causes the agent loop to exit
         # at the next check point.
         if effective_mode == "interrupt" and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+            superseded_generation = self._invalidate_session_run_generation(
+                session_key,
+                reason="new_user_turn_superseded_inflight_run",
+            )
+            logger.info(
+                "run cancellation receipt: session=%s generation=%s "
+                "reason=new_user_turn message_content=redacted",
+                session_key,
+                superseded_generation,
+            )
             try:
                 running_agent.interrupt(event.text)
             except Exception:
@@ -6800,6 +6812,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # otherwise the real run's normal cleanup owns the slot.
             if self._running_agents.get(session_key) is _AGENT_PENDING_SENTINEL:
                 self._release_running_agent_state(session_key)
+            getattr(self, "_startup_restore_tasks_by_session", {}).pop(session_key, None)
+
+    def _startup_restore_session_key(self, source: SessionSource) -> str:
+        """Build the same session key used by inbound dispatch during startup."""
+        return build_session_key(
+            source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            profile=getattr(source, "profile", None),
+        )
 
     def _queue_startup_restore_event(self, event: MessageEvent) -> None:
         queue = getattr(self, "_startup_restore_queue", None)
@@ -6809,6 +6831,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         queue.append(event)
         try:
             source = event.source
+            session_key = self._startup_restore_session_key(source)
+            self._startup_restore_superseded_sessions.add(session_key)
+            superseded_generation = self._invalidate_session_run_generation(
+                session_key,
+                reason="new_user_turn_superseded_startup_resume",
+            )
+            resume_task = self._startup_restore_tasks_by_session.pop(session_key, None)
+            if resume_task is not None and not resume_task.done():
+                resume_task.cancel()
+            logger.info(
+                "run cancellation receipt: session=%s generation=%s "
+                "reason=startup_resume_superseded message_content=redacted",
+                session_key,
+                superseded_generation,
+            )
             logger.info(
                 "Queued inbound message during gateway startup restore: platform=%s chat=%s",
                 source.platform.value if source and source.platform else "unknown",
@@ -6855,6 +6892,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         exc_info=(type(result), result, result.__traceback__),
                     )
         self._startup_restore_tasks = []
+        self._startup_restore_tasks_by_session = {}
+        self._startup_restore_superseded_sessions = set()
         drained = await self._drain_startup_restore_queue()
         self._startup_restore_in_progress = False
         if drained:
@@ -6930,6 +6969,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # in-flight) — don't synthesize a second continuation turn.
             if entry.session_key in self._running_agents:
                 continue
+            if entry.session_key in getattr(self, "_startup_restore_superseded_sessions", set()):
+                logger.info(
+                    "Skipping startup resume for superseded session=%s "
+                    "reason=new_user_turn message_content=redacted",
+                    entry.session_key,
+                )
+                continue
 
             source = entry.origin
             adapter = self._adapter_for_source(source)
@@ -6983,6 +7029,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             task = asyncio.create_task(
                 self._run_startup_resume_event(adapter, event, entry.session_key)
             )
+            tasks_by_session = getattr(self, "_startup_restore_tasks_by_session", None)
+            if tasks_by_session is None:
+                tasks_by_session = {}
+                self._startup_restore_tasks_by_session = tasks_by_session
+            tasks_by_session[entry.session_key] = task
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
             if getattr(self, "_startup_restore_in_progress", False):
@@ -7351,6 +7402,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._startup_restore_in_progress = True
         self._startup_restore_queue = []
         self._startup_restore_tasks = []
+        self._startup_restore_tasks_by_session = {}
+        self._startup_restore_superseded_sessions = set()
 
         connected_count = 0
         enabled_platform_count = 0
