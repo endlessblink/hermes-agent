@@ -74,9 +74,25 @@ def main() -> int:
             produced_by=_producers("Weekly", jobs),
             consumed_by=_consumers("Weekly"),
         ),
-        Artifact("Monthly rollup", exists=(JOURNAL / "Monthly").is_dir()),
-        Artifact("Quarterly rollup", exists=(JOURNAL / "Quarterly").is_dir()),
-        Artifact("Yearly rollup", exists=(JOURNAL / "Yearly").is_dir()),
+        Artifact(
+            "Monthly rollup",
+            exists=(JOURNAL / "Monthly").is_dir(),
+            produced_by=_producers("Monthly/", jobs),
+            consumed_by=_consumers("Monthly/") or _producers("Monthly/", jobs) and ("quarterly rollup",) or (),
+        ),
+        Artifact(
+            "Quarterly rollup",
+            exists=(JOURNAL / "Quarterly").is_dir(),
+            produced_by=_producers("Quarterly/", jobs),
+            consumed_by=_consumers("Quarterly/") or _producers("Quarterly/", jobs) and ("yearly rollup",) or (),
+        ),
+        Artifact(
+            "Yearly rollup",
+            exists=(JOURNAL / "Yearly").is_dir(),
+            produced_by=_producers("Yearly/", jobs),
+            # The top of the chain: read by a person, not by another job.
+            consumed_by=("Noam",) if (JOURNAL / "Yearly").is_dir() else (),
+        ),
         Artifact(
             "Emotional Processing Queue",
             exists=(PROJECTS / "Emotional Processing Queue.md").is_file(),
