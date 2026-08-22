@@ -5581,6 +5581,63 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._enqueue_fifo(session_key, event, adapter)
 
+    def _remember_steer_event(self, agent: Any, event: MessageEvent) -> None:
+        """Keep the newest steer's platform identity until delivery is decided."""
+        if agent is None or event is None:
+            return
+        try:
+            lock = getattr(agent, "_pending_steer_lock", None)
+            if lock is None:
+                agent._pending_steer_event = dataclasses.replace(event)
+            else:
+                with lock:
+                    agent._pending_steer_event = dataclasses.replace(event)
+        except Exception:
+            logger.debug("Could not retain steer routing metadata", exc_info=True)
+
+    def _handoff_pending_steer(
+        self,
+        event: MessageEvent,
+        source: SessionSource,
+        session_key: str,
+        result: Dict[str, Any],
+    ) -> bool:
+        """Turn an unconsumed steer into one queued, routable follow-up turn."""
+        pending_text = str(result.get("pending_steer") or "").strip()
+        if not pending_text or not session_key:
+            return False
+
+        pending_event = result.pop("pending_steer_event", None)
+        if isinstance(pending_event, MessageEvent):
+            follow_up = dataclasses.replace(pending_event, text=pending_text)
+        else:
+            follow_up = dataclasses.replace(
+                event,
+                text=pending_text,
+                message_id=None,
+                platform_update_id=None,
+                reply_to_text=None,
+                reply_to_author_id=None,
+                reply_to_author_name=None,
+                metadata={**(getattr(event, "metadata", {}) or {}), "steer_followup": True},
+            )
+
+        if self._adapter_for_source(follow_up.source) is None:
+            logger.warning(
+                "Dropping unconsumed steer handoff for session=%s: adapter unavailable",
+                session_key,
+            )
+            return False
+        self._queue_or_replace_pending_event(session_key, follow_up)
+        result["final_response"] = None
+        logger.info(
+            "steer completion handoff: session=%s message_id=%s "
+            "message_content=redacted; stale final suppressed",
+            session_key,
+            getattr(follow_up, "message_id", None),
+        )
+        return True
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -5777,6 +5834,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if can_steer:
                 try:
                     steered = bool(running_agent.steer(steer_text))
+                    if steered:
+                        self._remember_steer_event(running_agent, event)
                 except Exception as exc:
                     logger.warning("Gateway steer failed for session %s: %s", session_key, exc)
                     steered = False
@@ -10499,6 +10558,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.warning("PRIORITY steer failed for session %s: %s", _quick_key, exc)
                         steered = False
                 if steered:
+                    self._remember_steer_event(running_agent, event)
                     logger.debug("PRIORITY steer for session %s", _quick_key)
                     return None
                 logger.debug("PRIORITY steer-fallback-to-queue for session %s", _quick_key)
@@ -12703,6 +12763,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
+                return None
+
+            if agent_result.get("pending_steer"):
+                self._handoff_pending_steer(event, source, _quick_key, agent_result)
                 return None
 
             response = agent_result.get("final_response") or ""

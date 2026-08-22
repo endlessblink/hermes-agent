@@ -2892,6 +2892,18 @@ class AIAgent:
             self._pending_steer = None
         return text
 
+    def _drain_pending_steer_event(self):
+        """Return and clear the newest platform event associated with a steer."""
+        _lock = getattr(self, "_pending_steer_lock", None)
+        if _lock is None:
+            event = getattr(self, "_pending_steer_event", None)
+            self._pending_steer_event = None
+            return event
+        with _lock:
+            event = getattr(self, "_pending_steer_event", None)
+            self._pending_steer_event = None
+        return event
+
     def _record_file_mutation_result(
         self,
         tool_name: str,

@@ -689,6 +689,16 @@ def finalize_turn(
     _leftover_steer = agent._drain_pending_steer()
     if _leftover_steer:
         result["pending_steer"] = _leftover_steer
+        _drain_event = getattr(agent, "_drain_pending_steer_event", None)
+        _steer_event = (
+            _drain_event()
+            if callable(_drain_event)
+            else getattr(agent, "_pending_steer_event", None)
+        )
+        if _steer_event is not None:
+            result["pending_steer_event"] = _steer_event
+    elif hasattr(agent, "_drain_pending_steer_event"):
+        agent._drain_pending_steer_event()
     agent._response_was_previewed = False
 
     # Include interrupt message if one triggered the interrupt
