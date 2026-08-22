@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from tests.gateway.telegram_mock import attach_telegram_errors
+from telegram.constants import ParseMode as _ParseMode
 
 _repo = str(Path(__file__).resolve().parents[2])
 if _repo not in sys.path:
@@ -72,7 +73,7 @@ class TestSendSlashConfirm:
         )
 
         assert result.success is True
-        assert "MARKDOWN_V2" in repr(sent["parse_mode"])
+        assert sent["parse_mode"] == _ParseMode.MARKDOWN_V2
         # Underscores and dots must be escaped by format_message
         assert "script\\_name" in sent["text"]
         assert "\\." in sent["text"]
