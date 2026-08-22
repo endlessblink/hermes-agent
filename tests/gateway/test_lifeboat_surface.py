@@ -173,3 +173,26 @@ def test_a_reply_mentioning_compression_in_prose_is_not_a_notice() -> None:
     reply = "דיברנו על זה שהזיכרון מתמלא. איך זה מרגיש לך?"
 
     assert should_suppress_notice(reply, mode="support") is False
+
+
+SKILLS_WARNING = "⚠️ הסקילים personal-coaching, obsidian ו־personal-context-governance לא נמצאו ולכן דולגו."
+SKILLS_WARNING_EN = "⚠️ Skills personal-coaching, obsidian were not found and were skipped."
+
+
+def test_a_skills_warning_is_suppressed_in_support() -> None:
+    """Delivered live on 2026-08-22 above the nightly summary."""
+    assert should_suppress_notice(SKILLS_WARNING, mode="support") is True
+
+
+def test_an_english_skills_warning_is_suppressed_in_support() -> None:
+    assert should_suppress_notice(SKILLS_WARNING_EN, mode="support") is True
+
+
+def test_a_skills_warning_is_visible_in_work_mode() -> None:
+    assert should_suppress_notice(SKILLS_WARNING, mode="work") is False
+
+
+def test_prose_mentioning_a_skill_is_not_a_warning() -> None:
+    reply = "דיברנו על זה שאתה מנסה לפתח מיומנות חדשה. איך זה הולך?"
+
+    assert should_suppress_notice(reply, mode="support") is False

@@ -115,3 +115,34 @@ def proactive_delivery_problems(
                 f"{job.get('name')!r} delivers to {deliver!r} rather than the Life-Boat topic"
             )
     return tuple(problems)
+
+
+def job_residency_problems(jobs: Any, *, store: str, topic: str) -> tuple[str, ...]:
+    """Return Life-Boat jobs sitting in the wrong profile's cron store.
+
+    A job runs as the profile whose store it lives in, and inherits that
+    profile's skills and credentials. The nightly evidence summary asked for
+    three skills that exist only under the Life-Boat profile while sitting in
+    the base store, so it ran as the default profile, found none of them, and
+    announced that in the middle of a support conversation.
+
+    Judged by destination as well as by name: anything delivering into the
+    Life-Boat topic belongs to the Life-Boat profile whatever it is called.
+    """
+    if str(store) == "life-advisor":
+        return ()
+
+    problems: list[str] = []
+    for job in jobs or ():
+        if not isinstance(job, Mapping):
+            continue
+        # Judged by name only. A job from another subsystem that happens to
+        # alert into this topic needs its own profile's skills, so relocating
+        # it would break it; whether it should be aimed here at all is a
+        # separate question, and one for the user rather than a checker.
+        if _is_lifeboat_job(job):
+            problems.append(
+                f"{job.get('name')!r} lives in the {store} cron store but belongs to "
+                "the Life-Boat profile, whose skills and topic it uses"
+            )
+    return tuple(problems)

@@ -22,6 +22,11 @@ from tests.gateway.telegram_mock import attach_telegram_errors
 
 
 def _ensure_telegram_mock():
+    # Defer to the real python-telegram-bot when it is installed: a
+    # stand-in that shadows the real library is worse than no mock.
+    if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
+        return
+
     telegram_mod = MagicMock()
     telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
 

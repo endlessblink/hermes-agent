@@ -159,3 +159,51 @@ def test_every_misrouted_job_is_named() -> None:
     ]
 
     assert len(proactive_delivery_problems(jobs, topic=TOPIC)) == 2
+
+
+# --- A job must live in the profile whose skills and topic it uses ----------
+
+from gateway.lifeboat_morning import job_residency_problems  # noqa: E402
+
+
+def test_a_lifeboat_job_in_its_own_profile_is_fine() -> None:
+    jobs = [{"name": "lifeboat-morning-check-in", "enabled": True,
+             "deliver": TOPIC, "skills": ["personal-coaching"]}]
+
+    assert job_residency_problems(jobs, store="life-advisor", topic=TOPIC) == ()
+
+
+def test_a_lifeboat_job_in_the_base_store_is_reported() -> None:
+    """Found live: the nightly summary ran as the default profile, so the
+    three skills it asked for did not exist and it said so mid-conversation."""
+    jobs = [{"name": "סיכום ראיות יומי — Life-Boat", "enabled": True,
+             "deliver": TOPIC,
+             "skills": ["personal-coaching", "obsidian", "personal-context-governance"]}]
+
+    problems = job_residency_problems(jobs, store="base", topic=TOPIC)
+
+    assert problems
+    assert "סיכום ראיות יומי — Life-Boat" in problems[0]
+
+
+def test_a_non_lifeboat_job_in_the_base_store_is_fine() -> None:
+    jobs = [{"name": "daily-freelance-lead-prep", "enabled": True, "deliver": "local"}]
+
+    assert job_residency_problems(jobs, store="base", topic=TOPIC) == ()
+
+
+def test_a_disabled_lifeboat_job_in_the_base_store_is_still_reported() -> None:
+    """It will start delivering the moment it is switched on."""
+    jobs = [{"name": "lifeboat-spontaneous-check-in", "enabled": False, "deliver": TOPIC}]
+
+    assert job_residency_problems(jobs, store="base", topic=TOPIC)
+
+
+def test_another_subsystems_job_aimed_here_is_not_a_residency_problem() -> None:
+    """It needs its own profile's skills; moving it would break it. Whether it
+    should alert into a support topic at all is the user's call, not a
+    checker's."""
+    jobs = [{"name": "agent-ops monitor-of-monitor watchdog", "enabled": False,
+             "deliver": TOPIC}]
+
+    assert job_residency_problems(jobs, store="base", topic=TOPIC) == ()

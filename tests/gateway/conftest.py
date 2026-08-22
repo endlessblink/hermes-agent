@@ -32,6 +32,7 @@ incident.
 """
 
 import ast
+import importlib.util
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -57,7 +58,19 @@ def _ensure_telegram_mock() -> None:
     already cached a module with ``ChatType = None``.
     """
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
-        return  # Real library is installed — nothing to mock
+        return  # Real library is already imported — nothing to mock
+
+    # Prefer the real package whenever it is installed. Asking only whether it
+    # had already been imported meant the stand-in shadowed an installed
+    # library, and a stand-in that disagrees with the real one is worse than no
+    # test at all: this session had three failures caused by exactly that.
+    if importlib.util.find_spec("telegram") is not None:
+        import telegram  # noqa: F401  (registers the real modules)
+        import telegram.constants  # noqa: F401
+        import telegram.error  # noqa: F401
+        import telegram.ext  # noqa: F401
+
+        return
 
     mod = MagicMock()
     mod.ext.ContextTypes.DEFAULT_TYPE = type(None)

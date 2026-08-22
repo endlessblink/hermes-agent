@@ -134,6 +134,7 @@ def main() -> int:
         if isinstance(job, dict) and job.get("name") == "lifeboat-morning-check-in"
     ]
     from gateway.lifeboat_morning import (
+        job_residency_problems,
         morning_job_problems,
         proactive_delivery_problems,
         resolve_morning_policy,
@@ -156,6 +157,18 @@ def main() -> int:
     base_state = json.loads(base_cron.read_text(encoding="utf-8")) if base_cron.is_file() else {}
     all_jobs = list(cron_state.get("jobs", [])) + list(base_state.get("jobs", []))
     for problem in proactive_delivery_problems(all_jobs, topic="telegram:-1004230590253:2"):
+        print(f"FAIL {problem}")
+        return 1
+
+    # A job runs as the profile whose store it lives in and inherits that
+    # profile's skills. A Life-Boat job in the base store cannot see the
+    # Life-Boat skills, which is how the nightly summary announced three
+    # missing skills in the middle of a support conversation.
+    for problem in job_residency_problems(
+        base_state.get("jobs", []),
+        store="base",
+        topic="telegram:-1004230590253:2",
+    ):
         print(f"FAIL {problem}")
         return 1
 

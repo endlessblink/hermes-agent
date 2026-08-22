@@ -92,6 +92,8 @@ NOTICE_MARKERS: tuple[str, ...] = (
     "Pre-API compression",
     "Compacting before the next model call",
     "Approved for session",
+    "לא נמצאו ולכן דולגו",
+    "were not found and were skipped",
     "מעבד את ההודעות",
 )
 
