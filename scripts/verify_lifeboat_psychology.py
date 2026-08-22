@@ -133,17 +133,16 @@ def main() -> int:
         job for job in cron_state.get("jobs", [])
         if isinstance(job, dict) and job.get("name") == "lifeboat-morning-check-in"
     ]
-    if not morning_jobs:
-        print("FAIL Life-Boat morning check-in is missing")
-        return 1
-    morning_job = morning_jobs[0]
-    if (
-        not morning_job.get("enabled")
-        or morning_job.get("state") != "scheduled"
-        or (morning_job.get("schedule") or {}).get("expr") != "0 9 * * 1,3,5"
-        or morning_job.get("deliver") != "telegram:-1004230590253:2"
+    from gateway.lifeboat_morning import morning_job_problems, resolve_morning_policy
+
+    morning_policy = resolve_morning_policy()
+    morning_job = morning_jobs[0] if morning_jobs else None
+    for problem in morning_job_problems(
+        morning_job,
+        morning_policy,
+        topic="telegram:-1004230590253:2",
     ):
-        print("FAIL Life-Boat morning check-in is not enabled for the intended topic and cadence")
+        print(f"FAIL {problem}")
         return 1
 
     contract = source_root / "docs" / "lifeboat-psychology-architecture.md"
