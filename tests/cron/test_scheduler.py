@@ -627,8 +627,12 @@ class TestDeliverResultWrapping:
                 "Internal delivery check.",
             )
 
-        assert result is None
+        # Nothing is sent, and the refusal states why rather than looking
+        # like a job that silently did nothing.
         send_mock.assert_not_called()
+        assert result is not None
+        assert "blocked" in result
+        assert "authorization" in result
 
     def test_delivery_skips_wrapping_when_config_disabled(self):
         """When cron.wrap_response is false, deliver raw content without header/footer."""

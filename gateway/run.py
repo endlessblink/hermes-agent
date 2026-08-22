@@ -6035,7 +6035,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     return True
         except Exception:
-            logger.debug("Life-Boat notice gate failed", exc_info=True)
+            logger.error("Life-Boat notice gate failed", exc_info=True)
 
         reply_anchor = self._reply_anchor_for_event(event)
         thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
@@ -8443,6 +8443,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _start_lifeboat_followup_bridge(self, profile_home: "Path") -> bool:
         """Schedule durable follow-ups for the Life-Boat Telegram profile."""
+        # Ask once, out loud, whether this runtime can still enforce the
+        # Life-Boat gates.  Each gate is wrapped in a try/except so a Life-Boat
+        # fault cannot break delivery for other profiles, which means a broken
+        # gate is otherwise indistinguishable from a healthy one.
+        try:
+            from gateway.lifeboat_runtime_check import lifeboat_runtime_problems
+
+            _lb_problems = lifeboat_runtime_problems()
+            if _lb_problems:
+                for _problem in _lb_problems:
+                    logger.error("Life-Boat runtime cannot enforce its gates: %s", _problem)
+            else:
+                logger.info("Life-Boat runtime check passed; delivery gates are enforced")
+        except Exception:
+            logger.error("Life-Boat runtime check itself failed", exc_info=True)
+
         owner_profile = self._active_profile_name()
         owner_home = profile_home
         if owner_profile != "life-advisor":
@@ -19472,7 +19488,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         return
             except Exception:
-                logger.debug("Life-Boat status gate failed", exc_info=True)
+                logger.error("Life-Boat status gate failed", exc_info=True)
             _fut = safe_schedule_threadsafe(
                 _send_or_update_status_coro(_status_adapter, _status_chat_id, event_type, prepared_message, _status_thread_metadata),
                 _loop_for_step,

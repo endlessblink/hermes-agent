@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import logging
+import random
 import shutil
 import tempfile
 import threading
@@ -376,6 +377,21 @@ def _coerce_job_text(value: Any, fallback: str = "") -> str:
     return str(value)
 
 
+def _normalize_user_authorized_delivery(value: Any) -> Optional[Dict[str, str]]:
+    """Validate durable, destination-scoped consent for scheduled contact."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("user_authorized_delivery must be an object")
+    destination = str(value.get("destination") or "").strip()
+    scope = str(value.get("scope") or "").strip()
+    if not destination or scope != "scheduled-contact":
+        raise ValueError(
+            "user_authorized_delivery requires destination and scope='scheduled-contact'"
+        )
+    return {"destination": destination, "scope": scope}
+
+
 def _schedule_display_for_job(job: Dict[str, Any]) -> str:
     display = _coerce_job_text(job.get("schedule_display")).strip()
     if display:
@@ -484,7 +500,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     Parse schedule string into structured format.
     
     Returns dict with:
-        - kind: "once" | "interval" | "cron"
+        - kind: "once" | "interval" | "cron" | "random_weekly"
         - For "once": "run_at" (ISO timestamp)
         - For "interval": "minutes" (int)
         - For "cron": "expr" (cron expression)
@@ -510,6 +526,51 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             "minutes": minutes,
             "display": f"every {minutes}m"
         }
+
+    # "random weekly [N] HH:MM-HH:MM" -> one or N persisted occurrences in the
+    # requested local-time window every seven days. N distinct calendar dates
+    # are selected for each rolling week so several occurrences cannot cluster
+    # on the same day.
+    random_weekly = re.match(
+        r"^random\s+weekly\s+(?:(\d+)\s+)?(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$",
+        schedule_lower,
+    )
+    if random_weekly:
+        def _clock_minutes(value: str) -> int:
+            hour, minute = (int(part) for part in value.split(":", 1))
+            if hour > 23 or minute > 59:
+                raise ValueError
+            return hour * 60 + minute
+
+        try:
+            count = int(random_weekly.group(1) or 1)
+            start_minute = _clock_minutes(random_weekly.group(2))
+            end_minute = _clock_minutes(random_weekly.group(3))
+        except ValueError:
+            raise ValueError(
+                f"Invalid random weekly window '{schedule}'. Use [N] HH:MM-HH:MM."
+            )
+        if not 1 <= count <= 7:
+            raise ValueError(
+                f"Invalid random weekly count '{count}': use between 1 and 7."
+            )
+        if start_minute >= end_minute:
+            raise ValueError(
+                f"Invalid random weekly window '{schedule}': end must be after start."
+            )
+        result = {
+            "kind": "random_weekly",
+            "start_minute": start_minute,
+            "end_minute": end_minute,
+            "display": (
+                f"random weekly {count} {random_weekly.group(2)}-{random_weekly.group(3)}"
+                if random_weekly.group(1)
+                else f"random weekly {random_weekly.group(2)}-{random_weekly.group(3)}"
+            ),
+        }
+        if random_weekly.group(1):
+            result["count"] = count
+        return result
     
     # Check for cron expression (5 or 6 space-separated fields)
     # Cron fields: minute hour day month weekday [year]
@@ -574,6 +635,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         f"Invalid schedule '{original}'. Use:\n"
         f"  - Duration: '30m', '2h', '1d' (one-shot)\n"
         f"  - Interval: 'every 30m', 'every 2h' (recurring)\n"
+        f"  - Random weekly: 'random weekly 10:00-22:00'\n"
         f"  - Cron: '0 9 * * *' (cron expression)\n"
         f"  - Timestamp: '2026-02-03T14:00:00' (one-shot at time)"
     )
@@ -670,6 +732,9 @@ def _compute_grace_seconds(schedule: dict) -> int:
         grace = period_seconds // 2
         return max(MIN_GRACE, min(grace, MAX_GRACE))
 
+    if kind == "random_weekly":
+        return MAX_GRACE
+
     if kind == "cron" and HAS_CRONITER:
         expr = schedule.get("expr")
         if expr:
@@ -718,6 +783,67 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             # First run is now + interval
             next_run = now + timedelta(minutes=minutes)
         return next_run.isoformat()
+
+    elif kind == "random_weekly":
+        try:
+            start_minute = int(schedule["start_minute"])
+            end_minute = int(schedule["end_minute"])
+            count = int(schedule.get("count", 1))
+            if not 0 <= start_minute < end_minute <= 24 * 60 - 1:
+                return None
+            if not 1 <= count <= 7:
+                return None
+            base = now
+            if last_run_at:
+                base = _ensure_aware(datetime.fromisoformat(last_run_at))
+            if count > 1:
+                persisted = []
+                for value in schedule.get("occurrences", []):
+                    try:
+                        occurrence = _ensure_aware(datetime.fromisoformat(value))
+                    except (TypeError, ValueError):
+                        continue
+                    if occurrence > base:
+                        persisted.append(occurrence)
+                if not persisted:
+                    candidate_dates = [
+                        (base + timedelta(days=offset)).date()
+                        for offset in range(1, 8)
+                    ]
+                    selected_dates = sorted(random.sample(candidate_dates, count))
+                    persisted = [
+                        datetime.combine(
+                            candidate_date,
+                            datetime.min.time().replace(
+                                hour=(minute := random.randint(start_minute, end_minute)) // 60,
+                                minute=minute % 60,
+                            ),
+                            tzinfo=now.tzinfo,
+                        )
+                        for candidate_date in selected_dates
+                    ]
+                    schedule["occurrences"] = [value.isoformat() for value in persisted]
+                return min(persisted).isoformat()
+
+            # Select from the next seven local calendar dates for the legacy
+            # single-occurrence form.
+            candidate_dates = [
+                (base + timedelta(days=offset)).date()
+                for offset in range(1, 8)
+            ]
+            candidate_date = random.choice(candidate_dates)
+            minute = random.randint(start_minute, end_minute)
+            candidate = datetime.combine(
+                candidate_date,
+                datetime.min.time().replace(
+                    hour=minute // 60,
+                    minute=minute % 60,
+                ),
+                tzinfo=now.tzinfo,
+            )
+            return candidate.isoformat()
+        except (TypeError, ValueError, KeyError):
+            return None
 
     elif kind == "cron":
         expr = schedule.get("expr")
@@ -1055,6 +1181,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    user_authorized_delivery: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1131,6 +1258,7 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    normalized_authorization = _normalize_user_authorized_delivery(user_authorized_delivery)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1218,6 +1346,7 @@ def create_job(
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
+        "user_authorized_delivery": normalized_authorization,
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
     }
@@ -1315,6 +1444,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updates["workdir"] = None
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
+            if "user_authorized_delivery" in updates:
+                updates["user_authorized_delivery"] = _normalize_user_authorized_delivery(
+                    updates["user_authorized_delivery"]
+                )
 
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
@@ -1540,7 +1673,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 # schedule quietly goes off. See issue #16265.
                 if job["next_run_at"] is None:
                     kind = job.get("schedule", {}).get("kind")
-                    if kind in {"cron", "interval"}:
+                    if kind in {"cron", "interval", "random_weekly"}:
                         job["state"] = "error"
                         if not job.get("last_error"):
                             job["last_error"] = (
@@ -1679,7 +1812,7 @@ def advance_next_run(job_id: str) -> bool:
         for job in jobs:
             if job["id"] == job_id:
                 kind = job.get("schedule", {}).get("kind")
-                if kind not in {"cron", "interval"}:
+                if kind not in {"cron", "interval", "random_weekly"}:
                     return False
                 now = _hermes_now().isoformat()
                 new_next = compute_next_run(job["schedule"], now)
@@ -1752,15 +1885,83 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
                         return False  # someone holds a fresh claim
                 except Exception:
                     pass  # malformed claim → overwrite
-            job["fire_claim"] = {"at": now.isoformat(), "by": _machine_id()}
+            job["fire_claim"] = {
+                "at": now.isoformat(),
+                "by": _machine_id(),
+                "run_id": f"{job_id}:{job.get('next_run_at') or now.isoformat()}",
+            }
             kind = job.get("schedule", {}).get("kind")
-            if kind in {"cron", "interval"}:
+            if kind in {"cron", "interval", "random_weekly"}:
                 nxt = compute_next_run(job["schedule"], now.isoformat())
                 if nxt:
                     job["next_run_at"] = nxt
             save_jobs(jobs)
             return True
         return False
+
+
+def claim_delivery_run(job_id: str, run_id: str, *, claim_ttl_seconds: int = 300) -> bool:
+    """Claim one logical job run before its user-visible delivery.
+
+    The scheduler may reach the shared firing body through both the built-in
+    tick and an external/forced fire.  This durable claim makes that fan-in
+    idempotent while keeping later scheduled occurrences distinct by run ID.
+    Missing legacy records are allowed through because they cannot persist a
+    claim and are handled by the existing in-memory scheduler guards.
+    """
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return True
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] != job_id:
+                continue
+            if job.get("last_delivery_run_id") == run_id:
+                return False
+            existing = job.get("delivery_claim")
+            if isinstance(existing, dict) and existing.get("run_id"):
+                try:
+                    age = (_hermes_now() - _ensure_aware(datetime.fromisoformat(existing["at"]))).total_seconds()
+                    if 0 <= age < claim_ttl_seconds:
+                        return False
+                except (KeyError, TypeError, ValueError):
+                    pass
+            job["delivery_claim"] = {
+                "run_id": run_id,
+                "at": _hermes_now().isoformat(),
+                "by": _machine_id(),
+            }
+            save_jobs(jobs)
+            return True
+        return True
+
+
+def complete_delivery_run(job_id: str, run_id: str) -> None:
+    """Record a successfully delivered logical run and release its claim."""
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] != job_id:
+                continue
+            job["last_delivery_run_id"] = str(run_id)
+            job.pop("delivery_claim", None)
+            save_jobs(jobs)
+            return
+
+
+def release_delivery_run(job_id: str, run_id: str) -> None:
+    """Release a failed delivery claim so the same run can safely retry."""
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if job["id"] != job_id:
+                continue
+            claim = job.get("delivery_claim")
+            if isinstance(claim, dict) and claim.get("run_id") == str(run_id):
+                job.pop("delivery_claim", None)
+                save_jobs(jobs)
+            return
 
 
 def get_due_jobs() -> List[Dict[str, Any]]:
@@ -1933,7 +2134,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 # next_run_at unset.  Without this branch, such jobs are
                 # silently skipped forever; recompute next_run_at from the
                 # schedule so they pick up at their next scheduled tick.
-                if not recovered_next and kind in {"cron", "interval"}:
+                if not recovered_next and kind in {"cron", "interval", "random_weekly"}:
                     recovered_next = compute_next_run(schedule, now.isoformat())
                     if recovered_next:
                         recovery_kind = kind
@@ -2004,7 +2205,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                 # (gateway was down and missed the window). Fast-forward to
                 # the next future occurrence instead of firing a stale run.
                 grace = _compute_grace_seconds(schedule)
-                if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
+                if kind in {"cron", "interval", "random_weekly"} and (now - next_run_dt).total_seconds() > grace:
                     # Job is past its catch-up grace window — skip accumulated
                     # missed runs but still execute once now to avoid deferring
                     # indefinitely (e.g. a long-running job just finished).

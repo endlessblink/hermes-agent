@@ -238,7 +238,17 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
     "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
 }
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run, claim_dispatch, heartbeat_run_claim
+from cron.jobs import (
+    advance_next_run,
+    claim_delivery_run,
+    claim_dispatch,
+    complete_delivery_run,
+    get_due_jobs,
+    heartbeat_run_claim,
+    mark_job_run,
+    release_delivery_run,
+    save_job_output,
+)
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -1402,6 +1412,14 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _delivery_target_key(target: dict) -> str:
+    """Return the canonical string form used by consent metadata."""
+    platform = str(target.get("platform") or "").strip().lower()
+    chat_id = str(target.get("chat_id") or "").strip()
+    thread_id = str(target.get("thread_id") or "").strip()
+    return f"{platform}:{chat_id}:{thread_id}" if thread_id else f"{platform}:{chat_id}"
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -1441,12 +1459,21 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         and str(target.get("thread_id") or "") == "2"
         for target in targets
     )
-    if is_lifeboat_target and str(job.get("name") or "") != "lifeboat-morning-check-in":
+    authorized_delivery = job.get("user_authorized_delivery")
+    consent_matches = (
+        isinstance(authorized_delivery, dict)
+        and authorized_delivery.get("scope") == "scheduled-contact"
+        and str(authorized_delivery.get("destination") or "").strip().lower()
+        in {_delivery_target_key(target) for target in targets}
+    )
+    if is_lifeboat_target and not (
+        str(job.get("name") or "") == "lifeboat-morning-check-in" or consent_matches
+    ):
         logger.warning(
-            "Job '%s' blocked: only the user-enabled Life-Boat morning flow may deliver scheduled contact",
+            "Job '%s' blocked: scheduled contact requires explicit destination-scoped user authorization",
             job.get("name", job.get("id", "?")),
         )
-        return None
+        return "scheduled delivery blocked: explicit destination-scoped user authorization required"
 
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
@@ -1462,27 +1489,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     except Exception:
         pass
 
-    # Life-Boat is a conversational support lane, not a cron-management
-    # surface. The generic wrapper leaks internal job IDs and English control
-    # instructions into the user's emotional-support conversation. Keep the
-    # wrapper for ordinary destinations, but deliver Life-Boat content cleanly.
-    if wrap_response and not is_lifeboat_target:
-        task_name = job.get("name", job["id"])
-        job_id = job.get("id", "")
-        delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
-            f"-------------\n\n"
-            f"{content}\n\n"
-            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
-        )
-    else:
-        delivery_content = content
-
-    # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
-    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
-    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
     # Resolve the delivery-mirror gate ONCE (default off). When on, each
     # successful delivery is also appended to the target chat's gateway session
@@ -1516,6 +1523,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             and str(thread_id or "") == "2"
         )
 
+        # Keep the Life-Boat projection scoped to its authorized destination;
+        # fan-out targets retain the ordinary cron contract.
         if target_is_lifeboat_target:
             from gateway.lifeboat_status import format_lifeboat_technical_status
 
@@ -1535,6 +1544,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             )
         else:
             delivery_content = content
+
+        # Extract MEDIA: tags so attachments are forwarded as files, not raw text.
+        media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
+        media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}
@@ -2008,14 +2021,23 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 delivery_errors.extend(target_errors)
                 continue
 
-            if result and result.get("error"):
-                msg = f"delivery error: {result['error']}"
+            if not isinstance(result, dict) or result.get("success") is not True:
+                detail = result.get("error") if isinstance(result, dict) else None
+                detail = detail or "sender returned an unconfirmed result"
+                msg = f"delivery error: {detail}"
                 logger.error("Job '%s': %s", job["id"], msg)
                 target_errors.extend([msg])
                 delivery_errors.extend(target_errors)
                 continue
 
-            logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
+            logger.info(
+                "Job '%s': delivered to %s:%s thread_id=%s message_id=%s",
+                job["id"],
+                platform_name,
+                chat_id,
+                thread_id or "",
+                result.get("message_id") or "",
+            )
             _maybe_mirror_cron_delivery(
                 job, platform_name, chat_id, mirror_text,
                 thread_id=thread_id, user_id=origin_user_id,
@@ -3706,6 +3728,18 @@ def _teardown_cron_agent(agent, job_id: str) -> None:
         logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
+def _logical_delivery_run_id(job: dict) -> str:
+    """Return the stable occurrence key shared by forced and scheduled fires."""
+    explicit = job.get("_logical_delivery_run_id")
+    if explicit:
+        return str(explicit)
+    fire_claim = job.get("fire_claim")
+    if isinstance(fire_claim, dict) and fire_claim.get("run_id"):
+        return str(fire_claim["run_id"])
+    occurrence = job.get("next_run_at") or job.get("last_run_at") or "manual"
+    return f"{job.get('id', '?')}:{occurrence}"
+
+
 def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -> bool:
     """Run ONE due job end-to-end: execute → save output → deliver → mark.
 
@@ -3721,7 +3755,14 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     Returns True if the job was processed (even if the job itself failed —
     failure is recorded via ``mark_job_run``), False only if processing raised.
     """
+    delivery_run_id = _logical_delivery_run_id(job)
+    delivery_claimed = False
     try:
+        delivery_claimed = claim_delivery_run(job["id"], delivery_run_id)
+        if not delivery_claimed:
+            logger.info("Job '%s': logical delivery run already claimed or delivered — skipping", job["id"])
+            return True
+
         # Pre-run dispatch claim (issue #38758): atomically commit a finite
         # one-shot's dispatch BEFORE its side effect runs, so a tick that dies
         # mid-execution (gateway kill, OOM, segfault, hard-timeout) cannot
@@ -3823,9 +3864,18 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             if should_deliver:
                 try:
                     delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                    if delivery_error is None:
+                        complete_delivery_run(job["id"], delivery_run_id)
+                    else:
+                        release_delivery_run(job["id"], delivery_run_id)
                 except Exception as de:
                     delivery_error = str(de)
+                    release_delivery_run(job["id"], delivery_run_id)
                     logger.error("Delivery failed for job %s: %s", job["id"], de)
+            elif not should_deliver:
+                # Silence is an intentional completed run, not a delivered
+                # message, but it must still consume the logical run key.
+                complete_delivery_run(job["id"], delivery_run_id)
         finally:
             # Tear down the deferred agent(s) now that save + delivery have run
             # (or raised). Must happen on every path so cron agents never leak
@@ -3846,6 +3896,8 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
 
     except Exception as e:
         logger.error("Error processing job %s: %s", job['id'], e)
+        if delivery_claimed:
+            release_delivery_run(job["id"], delivery_run_id)
         if not _consume_interrupted_flag(job["id"]):
             mark_job_run(job["id"], False, str(e))
         return False
@@ -3930,6 +3982,7 @@ def tick(
         # bumping next_run_at forward so the grace window never expires.
         # mark_job_run() overwrites next_run_at on completion.
         for job in due_jobs:
+            job["_logical_delivery_run_id"] = _logical_delivery_run_id(job)
             advance_next_run(job["id"])
 
         # Resolve max parallel workers: env var > config.yaml > unbounded.
