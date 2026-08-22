@@ -26,11 +26,20 @@ MAX_LINE_CHARS = 240
 #: Journal headings worth opening from. Things done and good moments are real
 #: but they are records, not threads; a pattern the user named and a sentence
 #: he balanced are the parts still in motion.
-_OPENABLE_HEADINGS = (
-    "דפוס ששמתי לב אליו",
-    "משפט מאוזן",
-    "מחשבת מפולת",
-    "דברים קשים",
+#: Matched by concept, not by exact text. Any of these words appearing in a
+#: heading identifies the section, which survives rewording and translation.
+_OPENABLE_MARKERS = (
+    "דפוס", "pattern",
+    "מאוזן", "balanced", "useful sentence", "useful working frame",
+    "מפולת", "פסק דין", "avalanche", "verdict",
+    "קשים", "difficult", "hard",
+)
+
+#: Things done and good moments are real, but they are records of a day rather
+#: than threads still in motion, so they are not offered as an opening.
+_RECORD_MARKERS = (
+    "שנעשו", "שעשיתי", "things done", "challenges taken",
+    "רגעים", "moments",
 )
 
 _HEADING_RE = re.compile(r"^##\s*(.+?)\s*$", re.M)
@@ -90,7 +99,10 @@ def recent_journal_lines(entries) -> tuple[str, ...]:
     for date, entry in entries or ():
         sections = _sections(str(entry or ""))
         for heading, body in sections.items():
-            if not any(openable in heading for openable in _OPENABLE_HEADINGS):
+            lowered = heading.casefold()
+            if any(marker.casefold() in lowered for marker in _RECORD_MARKERS):
+                continue
+            if not any(marker.casefold() in lowered for marker in _OPENABLE_MARKERS):
                 continue
             for line in body.splitlines():
                 value = " ".join(line.split()).strip("-• ").strip()
@@ -128,3 +140,33 @@ def build_context_block(*, queue_text=None, journal_entries=None) -> str:
         out.append("Recent lines from his journal:")
         out.extend(f"  {line}" for line in lines)
     return "\n".join(out)
+
+
+#: The one heading worth reading across months rather than days. A pattern the
+#: user named himself is the thread; a hard afternoon is a record of one.
+_PATTERN_MARKERS = ("דפוס", "pattern")
+
+
+def pattern_evidence(entries) -> tuple[tuple[str, str], ...]:
+    """Return every dated line the user wrote under the pattern heading.
+
+    Deliberately not truncated to a recent window: whether something is
+    recurring is only visible across months, and that judgement needs the
+    evidence, not a sample of it. Ordered oldest first so a reader can see
+    what came before what.
+    """
+    collected: list[tuple[str, str]] = []
+    for date, entry in entries or ():
+        try:
+            sections = _sections(str(entry or ""))
+        except Exception:  # noqa: BLE001
+            continue
+        for heading, body in sections.items():
+            lowered = heading.casefold()
+            if not any(marker.casefold() in lowered for marker in _PATTERN_MARKERS):
+                continue
+            for line in body.splitlines():
+                value = " ".join(line.split()).strip("-• ").strip()
+                if value:
+                    collected.append((str(date), value[:MAX_LINE_CHARS]))
+    return tuple(sorted(collected, key=lambda pair: pair[0]))

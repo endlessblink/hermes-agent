@@ -149,3 +149,103 @@ def test_the_block_states_that_material_may_be_stale() -> None:
 
 def test_a_broken_source_yields_no_block_rather_than_an_error() -> None:
     assert build_context_block(queue_text=None, journal_entries=None) == ""
+
+
+# --- pattern evidence -------------------------------------------------------
+
+from gateway.lifeboat_context_sources import pattern_evidence  # noqa: E402
+
+
+SECOND = """# Daily Evidence Journal — 2026-08-21
+## דפוס ששמתי לב אליו
+the same self-criticism showed up after the group post
+## דברים קשים
+a hard afternoon
+"""
+
+
+def test_pattern_lines_are_collected_with_their_dates() -> None:
+    evidence = pattern_evidence([("2026-08-21", SECOND), ("2026-08-22", JOURNAL)])
+
+    assert [date for date, _ in evidence] == ["2026-08-21", "2026-08-22"]
+
+
+def test_only_the_pattern_heading_is_used() -> None:
+    """Hard days and things done are records; a named pattern is the thread."""
+    evidence = pattern_evidence([("2026-08-21", SECOND)])
+
+    assert all("hard afternoon" not in line for _, line in evidence)
+
+
+def test_evidence_keeps_his_wording() -> None:
+    evidence = pattern_evidence([("2026-08-22", JOURNAL)])
+
+    assert any("both directions" in line for _, line in evidence)
+
+
+def test_entries_without_a_pattern_contribute_nothing() -> None:
+    assert pattern_evidence([("2026-08-20", "# Daily\n## דברים קשים\nsomething\n")]) == ()
+
+
+def test_evidence_is_ordered_oldest_first() -> None:
+    evidence = pattern_evidence([("2026-08-22", JOURNAL), ("2026-08-21", SECOND)])
+
+    assert [date for date, _ in evidence] == ["2026-08-21", "2026-08-22"]
+
+
+def test_evidence_survives_malformed_entries() -> None:
+    assert pattern_evidence([("bad", None), ("2026-08-22", JOURNAL)]) is not None
+
+
+def test_evidence_is_not_truncated_to_the_recent_window() -> None:
+    """Patterns are the one thing worth reading across months."""
+    many = [(f"2026-0{month}-01", JOURNAL) for month in range(1, 9)]
+
+    assert len(pattern_evidence(many)) == 8
+
+
+# --- heading drift ----------------------------------------------------------
+# The journal accumulated 20 distinct headings for about six sections, in two
+# languages. Reading it by exact heading text silently returned nothing for
+# most entries. These are the real variants found in the vault.
+
+PATTERN_HEADINGS = ["Pattern noticed", "דפוס ששמתי לב אליו"]
+BALANCED_HEADINGS = [
+    "Useful sentence",
+    "More balanced sentence",
+    "Useful working frame",
+    "משפט מאוזן / שימושי יותר",
+    "משפט מאוזן או שימושי שנועם עצמו ניסח או אישר",
+]
+HARD_HEADINGS = ["דברים קשים", "דברים קשים שהיו היום"]
+AVALANCHE_HEADINGS = ["Avalanche / verdict thought", "מחשבת מפולת / פסק דין"]
+
+
+def _entry(heading: str, body: str = "the line he wrote") -> str:
+    return f"# Daily Evidence Journal — 2026-08-22\n## {heading}\n{body}\n"
+
+
+@pytest.mark.parametrize("heading", PATTERN_HEADINGS)
+def test_every_pattern_heading_variant_is_recognised(heading: str) -> None:
+    evidence = pattern_evidence([("2026-08-22", _entry(heading))])
+
+    assert evidence, f"pattern heading not recognised: {heading}"
+
+
+@pytest.mark.parametrize("heading", BALANCED_HEADINGS + HARD_HEADINGS + AVALANCHE_HEADINGS)
+def test_every_openable_heading_variant_is_recognised(heading: str) -> None:
+    lines = recent_journal_lines([("2026-08-22", _entry(heading))])
+
+    assert lines, f"openable heading not recognised: {heading}"
+
+
+@pytest.mark.parametrize("heading", ["Things done / challenges taken", "דברים שנעשו / שניגשתי אליהם"])
+def test_records_are_still_not_treated_as_threads(heading: str) -> None:
+    """Things done stay excluded whichever language they are written in."""
+    assert recent_journal_lines([("2026-08-22", _entry(heading))]) == ()
+
+
+def test_a_pattern_heading_is_not_confused_with_a_balanced_sentence() -> None:
+    evidence = pattern_evidence([("2026-08-22", _entry("Useful sentence"))])
+
+    assert evidence == ()
