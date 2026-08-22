@@ -1510,6 +1510,31 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         platform_name = target["platform"]
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
+        target_is_lifeboat_target = (
+            platform_name.lower() == "telegram"
+            and str(chat_id) == "-1004230590253"
+            and str(thread_id or "") == "2"
+        )
+
+        if target_is_lifeboat_target:
+            from gateway.lifeboat_status import format_lifeboat_technical_status
+
+            delivery_content = format_lifeboat_technical_status(
+                content,
+                technical_detail=bool(job.get("technical_detail", False)),
+            ) or content
+        elif wrap_response:
+            task_name = job.get("name", job["id"])
+            job_id = job.get("id", "")
+            delivery_content = (
+                f"Cronjob Response: {task_name}\n"
+                f"(job_id: {job_id})\n"
+                f"-------------\n\n"
+                f"{content}\n\n"
+                f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+            )
+        else:
+            delivery_content = content
 
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}
