@@ -110,6 +110,10 @@ def proactive_delivery_problems(
         if not _is_lifeboat_job(job) or not job.get("enabled"):
             continue
         deliver = str(job.get("deliver") or "")
+        # "local" and an empty target mean the job messages nobody. Only a job
+        # that actually sends somewhere can send somewhere wrong.
+        if deliver in ("", "local"):
+            continue
         if deliver != topic:
             problems.append(
                 f"{job.get('name')!r} delivers to {deliver!r} rather than the Life-Boat topic"

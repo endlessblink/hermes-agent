@@ -207,3 +207,24 @@ def test_another_subsystems_job_aimed_here_is_not_a_residency_problem() -> None:
              "deliver": TOPIC}]
 
     assert job_residency_problems(jobs, store="base", topic=TOPIC) == ()
+
+
+def test_a_write_only_job_is_not_a_delivery_problem() -> None:
+    """'local' means it messages nobody, which is a legitimate choice for a
+    rollup that only writes to the vault."""
+    jobs = [_proactive("סיכום חודשי — Life-Boat", deliver="local")]
+
+    assert proactive_delivery_problems(jobs, topic=TOPIC) == ()
+
+
+def test_an_empty_destination_is_not_a_delivery_problem() -> None:
+    jobs = [_proactive("סיכום שנתי — Life-Boat", deliver="")]
+
+    assert proactive_delivery_problems(jobs, topic=TOPIC) == ()
+
+
+def test_a_job_messaging_the_wrong_platform_target_is_still_reported() -> None:
+    """Messaging somewhere is the case the rule exists for."""
+    jobs = [_proactive("סיכום שבועי — Life-Boat", deliver="telegram")]
+
+    assert proactive_delivery_problems(jobs, topic=TOPIC)
