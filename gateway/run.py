@@ -13002,6 +13002,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # turn (for example after compression), so a gate that runs only
             # inside _run_agent_inner can miss a real Life-Boat message.
             try:
+                # A newer user turn may have arrived while this one finished.
+                # Nothing this run produced is an answer to the live message.
+                if self._delivery_superseded(session_key or _quick_key, run_generation):
+                    _intentional_silence = True
+
                 from gateway.lifeboat_followups import is_lifeboat_source
                 from gateway.lifeboat_contracts import contract_violations
                 from gateway.lifeboat_modes import load_mode_state
@@ -17500,6 +17505,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 reason,
             )
         return generation
+
+    def _delivery_superseded(self, session_key: str, generation: "int | None") -> bool:
+        """Return True when this run must not deliver: a newer turn owns the session.
+
+        This is the last checkpoint before text reaches the user.  The earlier
+        in-run checks can all pass and still leave a window between the final
+        one and delivery, which is exactly where a stale answer escaped.
+
+        Fails open. A path that never claimed a generation, or a call without a
+        session, delivers as before; the guard only ever stops a run it can
+        positively identify as superseded.
+        """
+        if generation is None or not session_key:
+            return False
+        if self._is_session_run_current(session_key, int(generation)):
+            return False
+        logger.info(
+            "delivery cancellation receipt: session=%s generation=%s "
+            "reason=superseded_before_delivery message_content=redacted",
+            session_key,
+            generation,
+        )
+        return True
 
     def _is_session_run_current(self, session_key: str, generation: int) -> bool:
         """Return True when ``generation`` is still current for ``session_key``."""
