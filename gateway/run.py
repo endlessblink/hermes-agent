@@ -13014,6 +13014,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
                 if is_lifeboat_source(source) and response and not _intentional_silence:
                     _lifeboat_before = str(response)
+                    _lifeboat_user_text = str(message_text or "")
                     _lifeboat_home = self._resolve_profile_home_for_source(source)
                     _lifeboat_key = session_key or _quick_key
                     _lifeboat_mode = load_mode_state(_lifeboat_home, _lifeboat_key).mode
@@ -13036,6 +13037,41 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             len(_lifeboat_before),
                         )
                     else:
+                        # Independent pre-send review (TASK-10). A rejected
+                        # draft goes back to the model with the reason named;
+                        # the gate never writes a replacement of its own.
+                        try:
+                            from gateway.lifeboat_rewrite import resolve_reply
+
+                            def _lifeboat_rewrite(messages):
+                                from agent.auxiliary_client import call_llm
+
+                                completion = call_llm(
+                                    task="title_generation",
+                                    messages=messages,
+                                    max_tokens=600,
+                                    temperature=0.4,
+                                    timeout=20,
+                                )
+                                return completion.choices[0].message.content or ""
+
+                            _lifeboat_delivered, _review_outcome = resolve_reply(
+                                _lifeboat_user_text,
+                                _lifeboat_delivered,
+                                rewrite=_lifeboat_rewrite,
+                            )
+                            if _review_outcome != "accepted":
+                                logger.info(
+                                    "Life-Boat pre-send review outcome=%s mode=%s",
+                                    _review_outcome,
+                                    _lifeboat_mode,
+                                )
+                        except Exception:
+                            logger.error(
+                                "Life-Boat pre-send review failed; delivering the model draft",
+                                exc_info=True,
+                            )
+
                         response = _lifeboat_delivered
                         if _lifeboat_issues:
                             logger.info(

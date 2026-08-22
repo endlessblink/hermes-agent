@@ -38,6 +38,14 @@ REQUIRED_SYMBOLS: dict[str, tuple[str, ...]] = {
         "load_mode_state",
         "save_mode_state",
     ),
+    "gateway.lifeboat_rewrite": (
+        "resolve_reply",
+        "review_verdict",
+        "build_rewrite_messages",
+    ),
+    "gateway.lifeboat_reviewer": (
+        "review_lifeboat_response_with_timeout",
+    ),
     "gateway.lifeboat_reentry": (
         "is_contextless_reentry",
     ),
