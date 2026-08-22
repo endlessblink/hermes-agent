@@ -133,7 +133,11 @@ def main() -> int:
         job for job in cron_state.get("jobs", [])
         if isinstance(job, dict) and job.get("name") == "lifeboat-morning-check-in"
     ]
-    from gateway.lifeboat_morning import morning_job_problems, resolve_morning_policy
+    from gateway.lifeboat_morning import (
+        morning_job_problems,
+        proactive_delivery_problems,
+        resolve_morning_policy,
+    )
 
     morning_policy = resolve_morning_policy()
     morning_job = morning_jobs[0] if morning_jobs else None
@@ -142,6 +146,16 @@ def main() -> int:
         morning_policy,
         topic="telegram:-1004230590253:2",
     ):
+        print(f"FAIL {problem}")
+        return 1
+
+    # Every Life-Boat proactive job, in every store, must reach the Life-Boat
+    # topic. A bare platform target resolves to the home channel, which on this
+    # install belongs to another assistant.
+    base_cron = Path("/home/endlessblink/.hermes/cron/jobs.json")
+    base_state = json.loads(base_cron.read_text(encoding="utf-8")) if base_cron.is_file() else {}
+    all_jobs = list(cron_state.get("jobs", [])) + list(base_state.get("jobs", []))
+    for problem in proactive_delivery_problems(all_jobs, topic="telegram:-1004230590253:2"):
         print(f"FAIL {problem}")
         return 1
 

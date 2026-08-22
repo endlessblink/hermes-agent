@@ -78,3 +78,40 @@ def morning_job_problems(
         )
 
     return tuple(problems)
+
+
+#: Names that mark a scheduled job as Life-Boat proactive contact. Matched
+#: loosely because these jobs are user-created and named in two languages.
+_LIFEBOAT_JOB_MARKERS = ("lifeboat", "life-boat", "לייף בוט", "עיבוד רגשי", "ראיות יומי")
+
+
+def _is_lifeboat_job(job: Mapping[str, Any]) -> bool:
+    name = str(job.get("name") or "").casefold()
+    return any(marker.casefold() in name for marker in _LIFEBOAT_JOB_MARKERS)
+
+
+def proactive_delivery_problems(
+    jobs: Any,
+    *,
+    topic: str,
+) -> tuple[str, ...]:
+    """Return every enabled Life-Boat job that would deliver somewhere else.
+
+    Cadence is the user's preference. The destination is not: these messages
+    are personal, and a bare platform target resolves to the home channel,
+    which on this install is a different topic belonging to another assistant.
+    Sending an invitation to process something emotional into the wrong topic
+    is a boundary violation, so it is always reported.
+    """
+    problems: list[str] = []
+    for job in jobs or ():
+        if not isinstance(job, Mapping):
+            continue
+        if not _is_lifeboat_job(job) or not job.get("enabled"):
+            continue
+        deliver = str(job.get("deliver") or "")
+        if deliver != topic:
+            problems.append(
+                f"{job.get('name')!r} delivers to {deliver!r} rather than the Life-Boat topic"
+            )
+    return tuple(problems)

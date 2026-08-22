@@ -103,3 +103,59 @@ def test_delivery_to_the_wrong_topic_is_always_reported() -> None:
     )
 
     assert any("topic" in problem for problem in problems)
+
+
+# --- Proactive contact must reach the Life-Boat topic, never another ---------
+
+from gateway.lifeboat_morning import proactive_delivery_problems  # noqa: E402
+
+
+PA_TOPIC = "telegram:-1004230590253:695"
+
+
+def _proactive(name, deliver=TOPIC, enabled=True):
+    return {"name": name, "enabled": enabled, "deliver": deliver}
+
+
+def test_a_lifeboat_job_delivering_to_its_own_topic_is_fine() -> None:
+    jobs = [_proactive("lifeboat-morning-check-in")]
+
+    assert proactive_delivery_problems(jobs, topic=TOPIC) == ()
+
+
+def test_a_lifeboat_job_delivering_elsewhere_is_reported() -> None:
+    """Found live: an emotional-processing invitation aimed at the assistant topic."""
+    jobs = [_proactive("הזמנה אקראית לעיבוד רגשי", deliver=PA_TOPIC)]
+
+    problems = proactive_delivery_problems(jobs, topic=TOPIC)
+
+    assert problems
+    assert "הזמנה אקראית לעיבוד רגשי" in problems[0]
+
+
+def test_a_bare_platform_target_is_reported() -> None:
+    """'telegram' resolves to the home channel, which is a different topic."""
+    jobs = [_proactive("סיכום ראיות יומי — Life-Boat", deliver="telegram")]
+
+    assert proactive_delivery_problems(jobs, topic=TOPIC)
+
+
+def test_a_disabled_job_is_not_reported() -> None:
+    jobs = [_proactive("lifeboat-spontaneous-check-in", deliver=PA_TOPIC, enabled=False)]
+
+    assert proactive_delivery_problems(jobs, topic=TOPIC) == ()
+
+
+def test_jobs_unrelated_to_lifeboat_are_left_alone() -> None:
+    jobs = [_proactive("daily-freelance-lead-prep", deliver="local")]
+
+    assert proactive_delivery_problems(jobs, topic=TOPIC) == ()
+
+
+def test_every_misrouted_job_is_named() -> None:
+    jobs = [
+        _proactive("lifeboat-morning-check-in", deliver=PA_TOPIC),
+        _proactive("סיכום ראיות יומי — Life-Boat", deliver="telegram"),
+    ]
+
+    assert len(proactive_delivery_problems(jobs, topic=TOPIC)) == 2
