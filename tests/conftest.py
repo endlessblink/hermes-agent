@@ -373,6 +373,21 @@ def _hermetic_environment(tmp_path, monkeypatch):
             str(fake_hermes_home / "logs" / "turn-watchdog.jsonl"),
         )
 
+    # hermes_state resolves DEFAULT_DB_PATH at import time, and test modules
+    # import it during collection, before this per-test HERMES_HOME exists.
+    # Left alone, SessionDB() with no explicit path opens the developer's live
+    # state.db: tests then read real conversations, which both leaks personal
+    # data into unit tests and makes results depend on whatever sessions happen
+    # to exist locally.
+    state_module = sys.modules.get("hermes_state")
+    if state_module is not None:
+        monkeypatch.setattr(
+            state_module,
+            "DEFAULT_DB_PATH",
+            fake_hermes_home / "state.db",
+            raising=False,
+        )
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")
