@@ -46,7 +46,16 @@ _COMMANDS = {
 _EXPLICIT_RE = (
     (WORK, re.compile(r"(?:מצב עבודה|נעבור לעבודה|בוא נעבוד|switch to work|work mode)", re.I)),
     (TIME, re.compile(r"(?:מצב תכנון|נתכנן|בוא נתכנן|planning mode|time mode)", re.I)),
-    (SUPPORT, re.compile(r"(?:מצב תמיכה|בוא נדבר|support mode|let's talk)", re.I)),
+    # A lane switch: stop the technical track. Deliberately not a topic
+    # selection -- see BUG-21. Resuming queued work says so in its own words
+    # ("נמשיך מאיפה שעצרנו") and is left to the ordinary inference path.
+    (SUPPORT, re.compile(
+        r"(?:מצב תמיכה|בוא נדבר|support mode|let's talk"
+        r"|(?:ל?חזור|לעבור|נעבור|נחזור)\s+(?:חזרה\s+)?ל(?:אפיק\s+ה)?רגשי"
+        r"|back to (?:the )?emotional(?: track| lane)?"
+        r"|יש (?:לי )?דברים חדשים)",
+        re.I,
+    )),
     (PAUSED, re.compile(r"(?:עצור לרגע|תפסיק|נעצור להיום|pause for now|stop for today)", re.I)),
 )
 

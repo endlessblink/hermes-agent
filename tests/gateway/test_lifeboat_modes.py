@@ -159,3 +159,57 @@ def test_every_mode_is_reachable_and_serialisable() -> None:
     for mode in (SUPPORT, TIME, WORK, CRISIS, PAUSED):
         state = ModeState(mode=mode, candidate=None, candidate_streak=0)
         assert ModeState.from_dict(state.to_dict()).mode == mode
+
+
+# --- BUG-21: a lane switch is not topic selection --------------------------
+
+def _in_work_mode():
+    return run(["יש באג בקוד", "צריך להריץ טסטים"])
+
+
+@pytest.mark.parametrize(
+    "phrasing",
+    [
+        "לחזור לאפיק הרגשי",
+        "אפשר לעבור חזרה לרגשי",
+        "בוא נחזור לרגשי",
+        "נעבור לאפיק הרגשי",
+        "back to the emotional track",
+    ],
+)
+def test_asking_for_the_emotional_lane_leaves_work_mode(phrasing: str) -> None:
+    state = _in_work_mode()
+    assert state.mode == WORK
+
+    state, reason = advance_mode(state, phrasing)
+
+    assert state.mode == SUPPORT
+    assert reason == "explicit"
+
+
+def test_new_material_stops_the_technical_lane() -> None:
+    """'יש דברים חדשים' must not be read as resuming the queued topic."""
+    state = _in_work_mode()
+
+    state, reason = advance_mode(state, "יש דברים חדשים")
+
+    assert state.mode == SUPPORT
+    assert reason == "explicit"
+
+
+def test_a_lane_switch_is_not_a_crisis_or_a_topic() -> None:
+    state, _ = advance_mode(_in_work_mode(), "לחזור לאפיק הרגשי")
+
+    assert state.mode == SUPPORT
+    assert state.candidate is None
+    assert state.candidate_streak == 0
+
+
+def test_an_explicit_resume_is_not_a_lane_switch() -> None:
+    """Resuming names the queued work; it must not be swallowed as a lane change."""
+    state = _in_work_mode()
+
+    state, reason = advance_mode(state, "נמשיך מאיפה שעצרנו")
+
+    assert state.mode == WORK
+    assert reason != "explicit"
