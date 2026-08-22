@@ -38,7 +38,21 @@ def main() -> int:
         Path("cron/jobs.py"),
         Path("cron/scheduler.py"),
     )
-    for relative in relative_files:
+    # Discover Life-Boat modules on both sides rather than trusting the list
+    # above. A module present in only one tree is the most dangerous kind of
+    # drift: it never shows up as a content mismatch, because there is nothing
+    # to compare it against.
+    source_found = {p.name for p in (source_root / "gateway").glob("lifeboat_*.py")}
+    installed_found = {p.name for p in (installed_root / "gateway").glob("lifeboat_*.py")}
+    for name in sorted(installed_found - source_found):
+        print(f"FAIL installed-only Life-Boat module absent from the tree: gateway/{name}")
+        return 1
+    for name in sorted(source_found - installed_found):
+        print(f"FAIL Life-Boat module in the tree was never installed: gateway/{name}")
+        return 1
+    discovered = tuple(Path("gateway") / name for name in sorted(source_found))
+
+    for relative in tuple(relative_files) + discovered:
         source = source_root / relative
         installed = installed_root / relative
         if not installed.is_file() or _sha256(source) != _sha256(installed):
