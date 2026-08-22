@@ -757,8 +757,15 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
     Compute the next run time for a schedule.
 
     Returns ISO timestamp string, or None if no more runs.
+
+    ``last_run_at`` is an ISO string. A datetime is accepted too: passing one
+    used to return None, which reads as "no more runs" and silently retired a
+    recurring job that still had slots ahead of it.
     """
     now = _hermes_now()
+
+    if isinstance(last_run_at, datetime):
+        last_run_at = last_run_at.isoformat()
 
     if not isinstance(schedule, dict):
         return None
@@ -1892,7 +1899,7 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
             }
             kind = job.get("schedule", {}).get("kind")
             if kind in {"cron", "interval", "random_weekly"}:
-                nxt = compute_next_run(job["schedule"], now.isoformat())
+                nxt = compute_next_run(job["schedule"], now)
                 if nxt:
                     job["next_run_at"] = nxt
             save_jobs(jobs)

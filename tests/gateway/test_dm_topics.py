@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import PlatformConfig
+from tests.gateway.telegram_mock import attach_telegram_errors
 
 
 def _ensure_telegram_mock():
@@ -34,10 +35,17 @@ def _ensure_telegram_mock():
     constants_mod.ChatType.CHANNEL = "channel"
     constants_mod.ChatType.PRIVATE = "private"
 
+    # The adapter is reimported below and binds these at import time, so the
+    # replacement module needs the real hierarchy rather than MagicMock
+    # placeholders; otherwise a timeout stops being a network error for the
+    # rest of the session.
+    attach_telegram_errors(telegram_mod)
+
     sys.modules["telegram"] = telegram_mod
     sys.modules["telegram.ext"] = telegram_mod.ext
     sys.modules["telegram.constants"] = constants_mod
     sys.modules["telegram.request"] = telegram_mod.request
+    sys.modules["telegram.error"] = telegram_mod.error
 
     # Force reimport so the adapter picks up the mock ChatType.
     sys.modules.pop("plugins.platforms.telegram.adapter", None)

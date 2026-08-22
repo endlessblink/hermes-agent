@@ -84,11 +84,21 @@ def _get_runtime_status_path() -> Path:
 
 def _get_lock_dir() -> Path:
     """Return the machine-local directory for token-scoped gateway locks."""
-    override = os.getenv("HERMES_GATEWAY_LOCK_DIR")
+    # These are resolved to absolute paths deliberately. A relative lock
+    # directory follows the working directory, so two gateways started from
+    # different places would take different locks and both believe they hold
+    # it. An empty variable is treated as unset: os.getenv returns "" for a
+    # variable that is set but blank, and the default would never apply.
+    override = (os.getenv("HERMES_GATEWAY_LOCK_DIR") or "").strip()
     if override:
-        return Path(override)
-    state_home = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    return state_home / "hermes" / _LOCKS_DIRNAME
+        return Path(override).expanduser().resolve()
+    state_home_env = (os.getenv("XDG_STATE_HOME") or "").strip()
+    state_home = (
+        Path(state_home_env).expanduser()
+        if state_home_env
+        else Path.home() / ".local" / "state"
+    )
+    return (state_home / "hermes" / _LOCKS_DIRNAME).resolve()
 
 
 def _utc_now_iso() -> str:
