@@ -167,68 +167,6 @@ def lifeboat_response_issues(response: str, user_text: str = "") -> tuple[str, .
     return tuple(issues)
 
 
-def _lifeboat_open_door(user_text: str) -> str:
-    signals = classify_lifeboat_signals(user_text)
-    if signals.possible_crisis:
-        return "אתה בטוח שאתה בטוח עכשיו, או שיש סכנה שתפעל על זה?"
-    if signals.thought_loop:
-        return "מה הלופ הזה מנסה לפתור או למנוע כרגע?"
-    if signals.self_criticism:
-        return "איזה סטנדרט או פחד יושב מתחת למשפט הזה על עצמך?"
-    if signals.depressive_thoughts:
-        return "מה הכי כבד או הכי נוכח אצלך עכשיו?"
-    if select_lifeboat_turn_policy(user_text).mode == "act-or-clarify":
-        return "רוצה שנחשוב על צעד אחד קטן, או שעדיף להישאר רגע עם מה שזה מעורר?"
-    return "מה הכי חי אצלך עכשיו, אם בכלל?"
-
-
-def ensure_lifeboat_open_response(response: str, user_text: str = "") -> str:
-    """Bound a failed draft without inventing a summary or a support menu."""
-    text = " ".join(str(response or "").split()).strip()
-    issues = lifeboat_response_issues(text, user_text)
-    if not issues:
-        return text
-    policy = select_lifeboat_turn_policy(user_text)
-    if policy.mode == "user-led-close":
-        return text[: policy.max_chars].rstrip()
-    sentences = [part.strip() for part in _SENTENCE_RE.findall(text) if part.strip()]
-    usable_sentences = [
-        _LIST_MARKER_RE.sub(" ", part, count=1).strip()
-        for part in sentences
-        if not _CLOSURE_RE.search(part)
-        and not re.fullmatch(r"(?:[-•*]|\d+[.)])", part.strip())
-    ]
-    base = " ".join(usable_sentences[: max(1, policy.max_sentences - 1)]).strip()
-    if not base:
-        base = "אני איתך בזה לרגע."
-    door = _lifeboat_open_door(user_text)
-    budget = max(120, policy.max_chars - len(door) - 2)
-    return f"{base[:budget].rstrip()}\n\n{door}"
-
-
-def repair_repeated_lifeboat_response(response: str, user_text: str = "") -> str:
-    """Replace a repeated non-safety draft with a brief accountable opening."""
-    policy = select_lifeboat_turn_policy(user_text)
-    if policy.mode == "user-led-close" or classify_lifeboat_signals(user_text).possible_crisis:
-        return response
-    if _HEBREW_RE.search(user_text):
-        return "שמתי לב שאני חוזר על עצמי, אז לא אוסיף עוד פרשנות. מה השתנה מאז, אם בכלל?"
-    return "I notice I am repeating myself, so I will not add another interpretation. What has changed since then, if anything?"
-
-
-def finalize_lifeboat_response(
-    profile_home: Path,
-    session_key: str,
-    response: str,
-    user_text: str = "",
-) -> str:
-    """Apply the complete bounded-response contract for one Life-Boat turn."""
-    checked = ensure_lifeboat_open_response(response, user_text)
-    if record_lifeboat_response_fingerprint(profile_home, session_key, checked):
-        return repair_repeated_lifeboat_response(checked, user_text)
-    return checked
-
-
 def _now(value: datetime | None = None) -> datetime:
     result = value or datetime.now(timezone.utc)
     return result if result.tzinfo else result.replace(tzinfo=timezone.utc)

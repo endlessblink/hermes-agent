@@ -29,6 +29,11 @@ def main() -> int:
         Path("gateway/lifeboat_followups.py"),
         Path("gateway/lifeboat_psychology.py"),
         Path("gateway/lifeboat_evaluation.py"),
+        Path("gateway/lifeboat_surface.py"),
+        Path("gateway/lifeboat_modes.py"),
+        Path("gateway/lifeboat_contracts.py"),
+        Path("gateway/lifeboat_handoff.py"),
+        Path("gateway/lifeboat_status.py"),
         Path("gateway/session_context.py"),
         Path("cron/jobs.py"),
         Path("cron/scheduler.py"),
@@ -47,7 +52,6 @@ def main() -> int:
         "agent.lifeboat_mode = is_lifeboat_source(source)",
         "goal continuation: suppressed for Life-Boat source",
         "arm_lifeboat_prompts(",
-        "finalize_lifeboat_response",
         "_streaming_enabled = False",
         "user_text=event.text or \"\"",
         "with use_cron_store(profile_home):",
@@ -104,7 +108,6 @@ def main() -> int:
         "proactive_followups_enabled",
         "stale queues created before the opt-in boundary",
         "record_lifeboat_response_fingerprint",
-        "repair_repeated_lifeboat_response",
     ):
         if marker not in coaching_text:
             print(f"FAIL Life-Boat coaching contract missing {marker!r}")

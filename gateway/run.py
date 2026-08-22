@@ -6014,6 +6014,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as _onb_err:
             logger.debug("Failed to apply busy-input onboarding hint: %s", _onb_err)
 
+        # Queue/interrupt/steer acks are engine plumbing.  Dropped into a
+        # support conversation they read as the bot talking over the user, so
+        # the Life-Boat surface decides whether they are allowed out at all.
+        try:
+            from gateway.lifeboat_followups import is_lifeboat_source
+            from gateway.lifeboat_surface import should_suppress_notice
+
+            if is_lifeboat_source(event.source):
+                from gateway.lifeboat_modes import load_mode_state
+
+                _ack_mode = load_mode_state(
+                    self._resolve_profile_home_for_source(event.source),
+                    self._session_key_for_source(event.source),
+                ).mode
+                if should_suppress_notice(message, mode=_ack_mode):
+                    logger.info(
+                        "Life-Boat surface suppressed a busy-ack notice (mode=%s)",
+                        _ack_mode,
+                    )
+                    return True
+        except Exception:
+            logger.debug("Life-Boat notice gate failed", exc_info=True)
+
         reply_anchor = self._reply_anchor_for_event(event)
         thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
         try:
@@ -9988,6 +10011,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event.channel_prompt = "\n\n".join(
                         part for part in (event.channel_prompt or "", _coaching_guidance) if part
                     )
+                # Decide what kind of conversation this turn is before the
+                # agent runs, so the reply is judged against the right contract
+                # and plumbing notices are gated accordingly.
+                from gateway.lifeboat_modes import advance_mode, load_mode_state, save_mode_state
+
+                _lb_before_state = load_mode_state(_lifeboat_profile_home, _quick_key)
+                _lb_after_state, _lb_reason = advance_mode(_lb_before_state, event.text)
+                if _lb_after_state != _lb_before_state:
+                    save_mode_state(_lifeboat_profile_home, _quick_key, _lb_after_state)
+                if _lb_after_state.mode != _lb_before_state.mode:
+                    logger.info(
+                        "Life-Boat mode %s -> %s (%s)",
+                        _lb_before_state.mode,
+                        _lb_after_state.mode,
+                        _lb_reason,
+                    )
         except Exception:
             logger.debug("Life-Boat follow-up cancellation failed", exc_info=True)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
@@ -12947,31 +12986,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # turn (for example after compression), so a gate that runs only
             # inside _run_agent_inner can miss a real Life-Boat message.
             try:
-                from gateway.lifeboat_followups import (
-                    finalize_lifeboat_response,
-                    is_lifeboat_source,
-                    lifeboat_response_issues,
-                )
+                from gateway.lifeboat_followups import is_lifeboat_source
+                from gateway.lifeboat_contracts import contract_violations
+                from gateway.lifeboat_modes import load_mode_state
+                from gateway.lifeboat_surface import finalize_outbound
+
                 if is_lifeboat_source(source) and response and not _intentional_silence:
                     _lifeboat_before = str(response)
-                    _lifeboat_user_text = str(message_text or "")
-                    _lifeboat_issues = lifeboat_response_issues(
+                    _lifeboat_home = self._resolve_profile_home_for_source(source)
+                    _lifeboat_key = session_key or _quick_key
+                    _lifeboat_mode = load_mode_state(_lifeboat_home, _lifeboat_key).mode
+                    _lifeboat_issues = contract_violations(_lifeboat_before, _lifeboat_mode)
+                    # The gate suppresses; it never rewrites.  Generating
+                    # replacement prose here is what produced the same Hebrew
+                    # sentence turn after turn.
+                    _lifeboat_delivered = finalize_outbound(
+                        _lifeboat_home,
+                        _lifeboat_key,
                         _lifeboat_before,
-                        _lifeboat_user_text,
+                        mode=_lifeboat_mode,
                     )
-                    response = finalize_lifeboat_response(
-                        self._resolve_profile_home_for_source(source),
-                        session_key or _quick_key,
-                        _lifeboat_before,
-                        _lifeboat_user_text,
-                    )
-                    if response != _lifeboat_before:
+                    if _lifeboat_delivered is None:
+                        _intentional_silence = True
                         logger.info(
-                            "Life-Boat delivery gate repaired draft issues=%s chars=%s->%s",
-                            ",".join(_lifeboat_issues),
+                            "Life-Boat gate suppressed a reply mode=%s chars=%s",
+                            _lifeboat_mode,
                             len(_lifeboat_before),
-                            len(response),
                         )
+                    else:
+                        response = _lifeboat_delivered
+                        if _lifeboat_issues:
+                            logger.info(
+                                "Life-Boat draft broke its contract mode=%s issues=%s chars=%s",
+                                _lifeboat_mode,
+                                ",".join(_lifeboat_issues),
+                                len(_lifeboat_before),
+                            )
             except Exception:
                 logger.warning("Life-Boat delivery gate failed", exc_info=True)
 
@@ -19400,6 +19450,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _redact_gateway_user_facing_secrets(str(message or ""))[:160],
                 )
                 return
+            # Compression/queue chatter is engine plumbing.  It belongs in a
+            # hands-on working session, not in the middle of a support
+            # conversation, so the Life-Boat surface gets the final say.
+            try:
+                from gateway.lifeboat_followups import is_lifeboat_source
+                from gateway.lifeboat_surface import should_suppress_notice
+
+                if is_lifeboat_source(source):
+                    from gateway.lifeboat_modes import load_mode_state
+
+                    _status_mode = load_mode_state(
+                        self._resolve_profile_home_for_source(source),
+                        self._session_key_for_source(source),
+                    ).mode
+                    if should_suppress_notice(prepared_message, mode=_status_mode):
+                        logger.info(
+                            "Life-Boat surface suppressed a %s status notice (mode=%s)",
+                            event_type,
+                            _status_mode,
+                        )
+                        return
+            except Exception:
+                logger.debug("Life-Boat status gate failed", exc_info=True)
             _fut = safe_schedule_threadsafe(
                 _send_or_update_status_coro(_status_adapter, _status_chat_id, event_type, prepared_message, _status_thread_metadata),
                 _loop_for_step,
