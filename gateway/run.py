@@ -7076,7 +7076,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # receive a full agent response on gateway restart just
             # because it has a resume-pending marker (issue #23778).
             try:
-                if not self._is_user_authorized(source):
+                if not self._is_user_authorized_in_profile_scope(source):
                     logger.warning(
                         "Skipping auto-resume for %s: session owner is no "
                         "longer authorized under the current allowlist",
@@ -17541,6 +17541,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 reason,
             )
         return generation
+
+    def _is_user_authorized_in_profile_scope(self, source) -> bool:
+        """Authorize a session owner with the routed profile's credentials loaded.
+
+        The underlying check reads a platform allowlist. Under multiplexing that
+        read refuses outside a profile scope rather than risk returning another
+        profile's value, so calling it unscoped raises and the caller treats a
+        healthy session as unauthorized. Scoping it is what the per-turn path
+        already does; the startup resume simply never did.
+        """
+        profile_home = None
+        try:
+            profile_home = self._resolve_profile_home_for_source(source)
+        except Exception:
+            profile_home = None
+
+        if not profile_home:
+            # Nothing to scope to. Not a reason to refuse a resume.
+            return self._is_user_authorized(source)
+
+        with _profile_runtime_scope(Path(profile_home)):
+            return self._is_user_authorized(source)
 
     def _delivery_superseded(self, session_key: str, generation: "int | None") -> bool:
         """Return True when this run must not deliver: a newer turn owns the session.
