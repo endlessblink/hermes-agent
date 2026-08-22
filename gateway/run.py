@@ -13021,6 +13021,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _lifeboat_key,
                         _lifeboat_before,
                         mode=_lifeboat_mode,
+                        user_text=str(message_text or ""),
                     )
                     if _lifeboat_delivered is None:
                         _intentional_silence = True

@@ -129,6 +129,19 @@ def finalize_outbound(
         return None
     if should_suppress_notice(text, mode=mode):
         return None
+    try:
+        from gateway.lifeboat_reentry import is_contextless_reentry
+
+        if is_contextless_reentry(text, user_text=user_text):
+            logger.info(
+                "Life-Boat output suppressed receipt reason=contextless_reentry "
+                "message_content=redacted chars=%d",
+                len(text),
+            )
+            return None
+    except Exception:
+        logger.error("Life-Boat re-entry check failed", exc_info=True)
+
     canonical = _canonical_generic_text(text)
     if canonical in _BANNED_REENTRY_CANONICAL:
         logger.info(

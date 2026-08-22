@@ -38,6 +38,9 @@ REQUIRED_SYMBOLS: dict[str, tuple[str, ...]] = {
         "load_mode_state",
         "save_mode_state",
     ),
+    "gateway.lifeboat_reentry": (
+        "is_contextless_reentry",
+    ),
     "gateway.lifeboat_contracts": (
         "contract_for",
         "contract_violations",
