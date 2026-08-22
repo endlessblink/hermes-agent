@@ -17519,6 +17519,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         if generation is None or not session_key:
             return False
+        # A session the generation map has never seen is not evidence of
+        # supersession, it is evidence that this path never claimed a token.
+        generations = self.__dict__.get("_session_run_generation") or {}
+        if session_key not in generations:
+            return False
         if self._is_session_run_current(session_key, int(generation)):
             return False
         logger.info(

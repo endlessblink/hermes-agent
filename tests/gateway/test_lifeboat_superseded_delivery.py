@@ -119,3 +119,22 @@ def test_the_receipt_names_the_session_and_generation(caplog) -> None:
 
     assert SESSION in caplog.text
     assert str(generation) in caplog.text
+
+
+def test_a_session_never_registered_is_not_treated_as_superseded() -> None:
+    """Fail open: a run the generation map has never seen is not evidence of
+    supersession. Treating an unknown session as stale silently blanked
+    ordinary replies in paths that never claim a generation token."""
+    runner = _make_runner()
+
+    assert runner._delivery_superseded(SESSION, 1) is False
+    assert runner._delivery_superseded(SESSION, 7) is False
+
+
+def test_a_known_session_still_supersedes_correctly() -> None:
+    """Failing open for unknown sessions must not weaken the real guard."""
+    runner = _make_runner()
+    stale = runner._begin_session_run_generation(SESSION)
+    runner._begin_session_run_generation(SESSION)
+
+    assert runner._delivery_superseded(SESSION, stale) is True
