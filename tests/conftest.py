@@ -388,6 +388,24 @@ def _hermetic_environment(tmp_path, monkeypatch):
             raising=False,
         )
 
+    # cron.jobs freezes its directory at import time for the same reason and
+    # with the same consequence: fixture jobs were written into the live cron
+    # store, and the running gateway schedules whatever is in that file, so
+    # tests were creating jobs that executed on the user's machine.
+    cron_module = sys.modules.get("cron.jobs")
+    if cron_module is not None:
+        fake_cron_dir = fake_hermes_home / "cron"
+        fake_cron_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(cron_module, "HERMES_DIR", fake_hermes_home, raising=False)
+        monkeypatch.setattr(cron_module, "CRON_DIR", fake_cron_dir, raising=False)
+        monkeypatch.setattr(cron_module, "JOBS_FILE", fake_cron_dir / "jobs.json", raising=False)
+        for attr, name in (
+            ("TICKER_HEARTBEAT_FILE", "ticker_heartbeat"),
+            ("TICKER_LAST_OK_FILE", "ticker_last_ok"),
+        ):
+            if hasattr(cron_module, attr):
+                monkeypatch.setattr(cron_module, attr, fake_cron_dir / name, raising=False)
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")
