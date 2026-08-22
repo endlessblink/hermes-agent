@@ -17,6 +17,7 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from tests.gateway.telegram_mock import attach_telegram_errors
 
 
 def _ensure_telegram_mock():
@@ -29,8 +30,9 @@ def _ensure_telegram_mock():
     telegram_mod.constants.ChatType.SUPERGROUP = "supergroup"
     telegram_mod.constants.ChatType.CHANNEL = "channel"
     telegram_mod.constants.ChatType.PRIVATE = "private"
-    telegram_mod.error.NetworkError = type("NetworkError", (OSError,), {})
-    telegram_mod.error.TimedOut = type("TimedOut", (OSError,), {})
+    # One shared hierarchy: these classes are captured by production
+    # modules at import time, so every file must mean the same object.
+    attach_telegram_errors(telegram_mod)
     for name in ("telegram", "telegram.ext", "telegram.constants", "telegram.request"):
         sys.modules.setdefault(name, telegram_mod)
     sys.modules.setdefault("telegram.error", telegram_mod.error)

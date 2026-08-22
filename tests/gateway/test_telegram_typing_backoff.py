@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from tests.gateway.telegram_mock import attach_telegram_errors
 
 _repo = str(Path(__file__).resolve().parents[2])
 if _repo not in sys.path:
@@ -24,10 +25,9 @@ def _ensure_telegram_mock():
     mod.constants.ChatType.GROUP = "group"
     mod.constants.ChatType.SUPERGROUP = "supergroup"
     mod.constants.ChatType.CHANNEL = "channel"
-    mod.error.NetworkError = type("NetworkError", (OSError,), {})
-    mod.error.TimedOut = type("TimedOut", (OSError,), {})
-    mod.error.RetryAfter = type("RetryAfter", (Exception,), {"__init__": lambda self, retry_after=1: setattr(self, "retry_after", retry_after)})
-    mod.error.BadRequest = type("BadRequest", (Exception,), {})
+    # One shared hierarchy: these classes are captured by production
+    # modules at import time, so every file must mean the same object.
+    attach_telegram_errors(mod)
 
     for name in ("telegram", "telegram.ext", "telegram.constants", "telegram.request"):
         sys.modules.setdefault(name, mod)

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import PlatformConfig
+from tests.gateway.telegram_mock import attach_telegram_errors
 
 
 def _ensure_telegram_mock():
@@ -23,9 +24,9 @@ def _ensure_telegram_mock():
     # Provide real exception classes so ``except (NetworkError, ...)`` in
     # connect() doesn't blow up with "catching classes that do not inherit
     # from BaseException" when another xdist worker pollutes sys.modules.
-    telegram_mod.error.NetworkError = type("NetworkError", (OSError,), {})
-    telegram_mod.error.TimedOut = type("TimedOut", (OSError,), {})
-    telegram_mod.error.BadRequest = type("BadRequest", (Exception,), {})
+    # One shared hierarchy: these classes are captured by production
+    # modules at import time, so every file must mean the same object.
+    attach_telegram_errors(telegram_mod)
 
     for name in ("telegram", "telegram.ext", "telegram.constants", "telegram.request"):
         sys.modules.setdefault(name, telegram_mod)
