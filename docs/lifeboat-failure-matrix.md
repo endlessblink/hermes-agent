@@ -38,3 +38,21 @@ helped -- is not decidable by these tests. They pin deterministic invariants:
 what must never be delivered, what must never be silently dropped, what must
 always be recognised. Multi-turn judgement still needs a human reading real
 transcripts.
+
+## The accepted baseline and rolling back
+
+`scripts/lifeboat_baseline.py` freezes the eight files that decide what reaches
+the topic, taken from the installed runtime with a sha256 each. Reverting a
+commit does not undo a bad install — the installed tree is a separate copy, and
+the gap between the two is what let a gate sit installed with no caller — so
+the baseline is content, not a revision.
+
+    lifeboat_baseline.py verify              is the runtime what we accepted?
+    lifeboat_baseline.py restore --dry-run   what would rolling back change?
+    lifeboat_baseline.py restore             put the accepted bytes back
+    lifeboat_baseline.py freeze --label ...  accept what is running now
+
+Restoring never restarts the gateway; that stays deliberate.
+`tests/gateway/test_lifeboat_baseline.py` exercises freeze, drift, restore and
+dry-run against a temporary tree, so the rollback is tested rather than
+promised.
