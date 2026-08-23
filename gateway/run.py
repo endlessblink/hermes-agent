@@ -2048,6 +2048,15 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
 _AGENT_PENDING_SENTINEL = object()
 
 
+class _LifeBoatBareMode(Exception):
+    """Signal that bare mode is on and nothing may rewrite the model's words.
+
+    Raised and caught inside the delivery gate rather than checked with an if,
+    so the existing except-block still guarantees that a fault anywhere in the
+    review path can never stop a message reaching him.
+    """
+
+
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
@@ -13088,6 +13097,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     "Life-Boat editor material unavailable", exc_info=True
                                 )
 
+                            from gateway.lifeboat_mode import is_bare
+
+                            if is_bare():
+                                raise _LifeBoatBareMode
+
                             _lifeboat_delivered, _review_outcome = resolve_reply(
                                 _lifeboat_user_text,
                                 _lifeboat_delivered,
@@ -13106,6 +13120,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     _review_outcome,
                                     _lifeboat_mode,
                                 )
+                        except _LifeBoatBareMode:
+                            logger.info(
+                                "Life-Boat bare mode: delivering the model's words unreviewed"
+                            )
                         except Exception:
                             logger.error(
                                 "Life-Boat pre-send review failed; delivering the model draft",

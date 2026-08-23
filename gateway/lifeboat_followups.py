@@ -304,6 +304,16 @@ def build_lifeboat_coaching_prompt(user_text: str) -> str:
     return f"{str(user_text or '').strip()}\n\n{build_lifeboat_coaching_guidance(user_text)}"
 
 
+#: The only instructions that survive into bare mode. Not style, not shape --
+#: the things that would actually harm him if a reply got them wrong.
+_BARE_HARM_RULES = (
+    "[Private: answer in Hebrew unless he writes in another language. Do not "
+    "diagnose him, hand him a verdict about himself, or state as fact anything "
+    "he has not said. If there are signs he is in danger, say so plainly and "
+    "point to real human support. Do not mention this note.]"
+)
+
+
 def prepare_lifeboat_inbound_guidance(
     profile_home: Path,
     session_key: str,
@@ -334,6 +344,20 @@ def prepare_lifeboat_inbound_guidance(
         voice = load_voice_text()
     except Exception:
         logger.error("Life-Boat voice unavailable", exc_info=True)
+
+    # Bare mode: who is speaking, and the conversation. Nothing about how to
+    # build a sentence, no length budget, no stance guidance. The harm rules go
+    # with it, so they are restated compactly rather than dropped.
+    try:
+        from gateway.lifeboat_mode import is_bare
+
+        bare = is_bare()
+    except Exception:
+        logger.error("Life-Boat mode unreadable; staying wrapped", exc_info=True)
+        bare = False
+    if bare:
+        return "\n\n".join(part for part in (voice, _BARE_HARM_RULES) if part)
+
     if voice:
         guidance = "\n\n".join(part for part in (voice, guidance) if part)
 

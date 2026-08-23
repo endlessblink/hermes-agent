@@ -49,6 +49,8 @@ class Situation:
     transcript: str | None = None
     expect_material: bool | None = None
     notes: str = ""
+    #: Run this situation with the wrapper removed.
+    bare: bool = False
 
 
 @dataclass
@@ -135,6 +137,23 @@ def _situations() -> list[Situation]:
         Situation("a debrief request", "בוא נעשה דיבריף", transcript=fresh),
         Situation("distress", "אני מרגיש שאני מאכזב את כולם", transcript=fresh),
         Situation("a request to stop", "בוא נעצור כאן", transcript=fresh),
+        # Bare mode has to be checked too: he can switch it on with one word,
+        # and a mode nobody checks is a mode that breaks quietly.
+        Situation(
+            "bare mode, fresh conversation",
+            "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה",
+            transcript=fresh,
+            expect_material=False,
+            bare=True,
+            notes="no per-turn bundle at all; identity and harm rules only",
+        ),
+        Situation(
+            "bare mode, distress",
+            "אני מרגיש שאני מאכזב את כולם",
+            transcript=fresh,
+            expect_material=False,
+            bare=True,
+        ),
         Situation("a long multi-thread message",
                   "אני רוצה לעבד את מה שדיברנו עליו אתמול וגם את זה שהגשתי מועמדות "
                   "והיה שקט מאז ואיך שאני שוב הופך את זה לגזר דין על עצמי",
@@ -144,7 +163,22 @@ def _situations() -> list[Situation]:
 
 def _bundle(situation: Situation, home: Path) -> str:
     from gateway.lifeboat_followups import prepare_lifeboat_inbound_guidance
-    from gateway import lifeboat_turn_context
+    from gateway import lifeboat_mode, lifeboat_turn_context
+
+    original_mode = lifeboat_mode.MODE_FILE
+    mode_file = home / "lifeboat-mode"
+    mode_file.parent.mkdir(parents=True, exist_ok=True)
+    mode_file.write_text("bare" if situation.bare else "wrapped", encoding="utf-8")
+    lifeboat_mode.MODE_FILE = mode_file
+
+    try:
+        return _assemble(situation, home, lifeboat_turn_context)
+    finally:
+        lifeboat_mode.MODE_FILE = original_mode
+
+
+def _assemble(situation: Situation, home: Path, lifeboat_turn_context) -> str:
+    from gateway.lifeboat_followups import prepare_lifeboat_inbound_guidance
 
     if situation.transcript is None:
         return prepare_lifeboat_inbound_guidance(home, "preflight", situation.user_text)
@@ -196,6 +230,14 @@ def check(situation: Situation, bundle: str) -> Result:
         )
     if situation.expect_material is False and has_material:
         result.failures.append("material appeared where there should be none")
+
+    if situation.bare:
+        for order in ("sentences.", "characters and", "signal guidance"):
+            if order in bundle:
+                result.failures.append(f"bare mode still carries the wrapper: {order!r}")
+        for keep in ("Do not diagnose him", "real human support"):
+            if keep not in bundle:
+                result.failures.append(f"bare mode dropped a harm rule: {keep!r}")
 
     if len(bundle) > 8000:
         result.failures.append(f"the bundle has grown to {len(bundle)} characters")

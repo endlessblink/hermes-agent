@@ -254,6 +254,11 @@ def main(argv: list[str] | None = None) -> int:
     # wrapper's effect from the reasoning budget's.
     arms = (
         ("no-change", None),
+        # The cell the first run left empty. Its transcript showed the
+        # comprehension failure fixed only in the arm with room to think, which
+        # points at the reasoning budget rather than the wrapper -- so the
+        # wrapper kept, with thinking added, is the combination to test.
+        ("no-change-thinking", None),
         ("stripped", None),
         ("stripped-thinking", None),
     )
