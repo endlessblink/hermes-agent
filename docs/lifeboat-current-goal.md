@@ -119,3 +119,28 @@ because that needs live calls on his account. `scripts/lifeboat_sandbox_replay.p
 Open and worth doing: `agent.reasoning_effort` is `low` in `~/.hermes/config.yaml`.
 That is global, it makes every reply fast and shallow, and it is a config lever
 rather than another prohibition. Untested.
+
+### Verified by reading, not by tests
+
+Live replay, three arms, one conversation each (reading, not measurement — one
+sample per arm):
+
+- **editor at medium** — best, and decisively so on the correction turn. Asked
+  "לא, זה לא בדיוק מה שאמרתי", it named its own actual error and offered the
+  corrected read for confirmation. The draft it replaced asked *him* to describe
+  it instead.
+- **editor at low** — ignored the correction entirely and drifted to "was the
+  period good overall?". Low is not a usable setting for this seat.
+- **no editor** — the old rewrite path produced the worst line of the run:
+  "סליחה, הבנתי אותך לא נכון. תמשיך/י במילים שלך" — apology, handback, and a
+  gendered slash form.
+
+Reading the transcripts is also what caught the material contamination (see the
+commit "stop feeding it his work as if it were his life"). No test would have:
+every one of those lines was a legal string in a legal field.
+
+After the fix, the same arm re-run produced no invented facts across four turns.
+
+Still open: the editor sometimes reads the *conversation* rather than his life
+(turn 4: "נשמע שה״אולי״ שלך אומר..."), which is honest but thin. And one sample
+per arm ranks nothing — eight per arm is the bar before the ranking is trusted.
