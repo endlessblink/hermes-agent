@@ -155,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, help="write the transcripts here")
     parser.add_argument("--depth", type=int, default=0, help="synthetic filler exchanges first")
     parser.add_argument("--main-effort", default="medium")
+    parser.add_argument("--arms", default="", help="comma-separated subset of arm names")
     args = parser.parse_args(argv)
 
     replay = _load_replay()
@@ -164,6 +165,12 @@ def main(argv: list[str] | None = None) -> int:
         ("both-medium", _make_editor("medium")),
         ("editor-low", _make_editor("low")),
     )
+
+    if args.arms:
+        wanted = {name.strip() for name in args.arms.split(",") if name.strip()}
+        arms = tuple(arm for arm in arms if arm[0] in wanted)
+        if not arms:
+            raise SystemExit(f"no arm matched {sorted(wanted)}")
 
     before = {
         "memory_db": replay._memory_fingerprint(),

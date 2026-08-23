@@ -48,6 +48,44 @@ _ABOUT_THE_ASSISTANT_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Things he says *to* the assistant about the assistant: instructions on how
+#: to talk to him, corrections of its conduct, requests about the conversation
+#: itself. These are not events in his life, and the 2026-08-23 replay proved
+#: what happens when they are treated as such: "השניים האחרונים הרבה יותר
+#: טובים" -- his praise of two bot replies -- was handed over as material and
+#: came back to him as "the last two days were much better than the ones
+#: before". A confident false read of his week, assembled from a code review.
+#:
+#: The keyword list for work talk above could never have caught that line, and
+#: lengthening it is the wrong move for the same reason it is wrong everywhere
+#: else in this system. The rule here is structural instead: a sentence whose
+#: subject is the assistant is not evidence about him.
+_ADDRESSED_TO_THE_ASSISTANT_RE = re.compile(
+    r"(?:^|\s)(?:"
+    # Hebrew imperatives and requests aimed at the assistant.
+    r"בבקשה\s+ת|תשמור|תדאג|תזכור|תפסיק|תתחיל|תמשיך|תראיין|תשאל|תדבר|דבר\s+אליי|"
+    r"תענה|תגיב|תסביר|תכתוב|תשנה|תוסיף|בוא\s+נתחיל|בוא\s+ננסה|אני\s+מעדיף\s+ש|"
+    r"אני\s+רוצה\s+ש(?:את[הי])?|"
+    # Comments on how the assistant is behaving.
+    r"אתה\s+(?:לא|שוב|כל\s+פעם|תמיד)|אתה\s+מ[א-ת]+\s+(?:אותי|לי|עליי)|"
+    r"מה\s+שלמדת|מה\s+שאמרתי\s+לך|"
+    # English, which in this thread is always him giving the system direction.
+    r"\byou\s+(?:should|need\s+to|must|keep|always|never)\b|"
+    r"\bi\s+want\s+(?:you|this|it)\b|\btell\s+me\s+about\s+yourself\b|"
+    r"\bimplement\b|\bexposed?\s+to\b|\borchestrator\b|\bagents?\b|\bprompt\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_addressed_to_the_assistant(text: str | None) -> bool:
+    """True when the sentence is about the assistant rather than about him."""
+    value = " ".join(str(text or "").split())
+    if not value:
+        return False
+    return bool(_ADDRESSED_TO_THE_ASSISTANT_RE.search(value))
+
+
 #: A short command or acknowledgement carries nothing to open from either.
 _MIN_SUBSTANTIVE_CHARS = 12
 
@@ -57,7 +95,11 @@ def is_operational(text: str | None) -> bool:
     value = " ".join(str(text or "").split())
     if not value:
         return False
-    return bool(_OPERATIONAL_RE.search(value) or _ABOUT_THE_ASSISTANT_RE.search(value))
+    return bool(
+        _OPERATIONAL_RE.search(value)
+        or _ABOUT_THE_ASSISTANT_RE.search(value)
+        or _ADDRESSED_TO_THE_ASSISTANT_RE.search(value)
+    )
 
 
 def _is_substantive(text: str) -> bool:

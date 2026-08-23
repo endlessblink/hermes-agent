@@ -50,6 +50,30 @@ _INJECTED_NOTE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The same fault in a second disguise. Six copies of an engine block --
+#: "# Suggestion discipline / Local time: ... / Suggestions voiced today: 0/2"
+#: -- sit in the transcript under "### User", indistinguishable from something
+#: he typed, and were being handed to the turn as his recent words.
+#:
+#: The bracket guard above could not see them because they are not bracketed.
+#: The rule that does see them is provenance, not vocabulary: he types messages
+#: into Telegram, and a message that opens with a markdown heading or carries an
+#: engine's own bookkeeping was assembled by this system, not by him.
+_ENGINE_BLOCK_RE = re.compile(
+    r"^#{1,6}\s"
+    r"|^(?:Local time|Suggestion discipline|Suggestions voiced|Session|Context)\s*:"
+    r"|Suggestions voiced today",
+    re.IGNORECASE,
+)
+
+
+def is_engine_block(text: str | None) -> bool:
+    """True when this "user turn" was written by the system, not by him."""
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return bool(_INJECTED_NOTE_RE.match(value) or _ENGINE_BLOCK_RE.search(value))
+
 
 def _clean(text: str) -> str:
     value = _REPLY_QUOTE.sub("", str(text or "")).strip()
@@ -57,11 +81,25 @@ def _clean(text: str) -> str:
     return " ".join(value.split())[:MAX_LINE_CHARS]
 
 
-#: Everything before the topics were split still sits in the shared log. Moving
-#: those months could not be done safely -- the topics are not separable there
-#: -- but reading them is: a wrongly-included line is a stray sentence, not a
-#: corrupted record, and the operational filter drops the bug and deploy talk.
-LEGACY_DIR = VAULT / "_System" / "Hermes Turn Logs" / "default"
+#: Everything before the topics were split sits in the shared log, and reading
+#: it was judged safe on the grounds that a filter would drop the bug and deploy
+#: talk. A live replay on 2026-08-23 showed what it actually delivered, layer
+#: after layer: praise of two bot replies read back as two good days, an
+#: instruction about Telegram agents, six copies of an engine bookkeeping block
+#: filed as his words, and under those, a debugging session -- "we have problems
+#: on top of problems", "what did we get wrong in development".
+#:
+#: Two filters were added and each one only revealed the next layer. That is the
+#: treadmill this whole subsystem keeps climbing, and the reason it never
+#: converges is structural: that log is his general-purpose thread, where he
+#: works. There is no vocabulary that separates a man's life from his work when
+#: both were typed into the same box.
+#:
+#: So it is no longer read. The support thread has its own log now, and until it
+#: fills, the honest answer is that the bot does not have the recent picture --
+#: which it is told to say plainly rather than paper over with a broad question.
+#: An empty hand is not the failure here. A confident false read of his week is.
+LEGACY_DIR = None
 
 
 def recent_user_turns(
@@ -78,12 +116,12 @@ def recent_user_turns(
     root = transcript_dir if transcript_dir is not None else TRANSCRIPT_DIR
     legacy = legacy_dir if legacy_dir is not None else LEGACY_DIR
     collected: list[tuple[str, str]] = []
-    for source in (legacy, root):
+    for source in (source for source in (legacy, root) if source is not None):
         try:
             for path in sorted(source.glob("*.md"))[-7:]:
                 text = path.read_text(encoding="utf-8")
                 for stamp, said in _USER_BLOCK.findall(text):
-                    if _INJECTED_NOTE_RE.match(str(said or "").strip()):
+                    if is_engine_block(said):
                         continue
                     line = _clean(said)
                     if line and not is_operational(line):
