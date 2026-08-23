@@ -285,13 +285,19 @@ def main(argv: list[str] | None = None) -> int:
             session_key = f"ab-{arm_name}-{int(time.time())}"
             history = replay._filler_history(args.depth)
             transcript: list[dict[str, str]] = []
+            _agent = None
 
             for index, user_text in enumerate(turns, start=1):
                 ephemeral = _ephemeral_prompt(
                     channel_prompt, sandbox, session_key, user_text,
                     identity=arm_name if arm_name in IDENTITIES else "",
                 )
-                agent = AIAgent(
+                # One agent per arm, not one per turn. The live gateway keeps a
+                # single agent for a session, and rebuilding it every turn gave
+                # each turn a fresh session id -- which is both unfaithful and
+                # what made the Codex endpoint reject the second request of
+                # every conversation, so the rig could never get past turn one.
+                agent = _agent or AIAgent(
                     model=model,
                     ephemeral_system_prompt=ephemeral,
                     enabled_toolsets=["skills"],
@@ -300,9 +306,16 @@ def main(argv: list[str] | None = None) -> int:
                     platform="telegram",
                     chat_id=replay.LIFEBOAT_CHAT_ID,
                     thread_id=replay.LIFEBOAT_THREAD_ID,
-                    session_id=f"{session_key}-{index}",
+                    session_id=session_key,
                     **runtime_kwargs,
                 )
+                _agent = agent
+                # The identity and per-turn guidance change every turn, so the
+                # reused agent has to be told the new bundle rather than keep
+                # the one it was built with.
+                for attr in ("ephemeral_system_prompt", "_ephemeral_system_prompt"):
+                    if hasattr(agent, attr):
+                        setattr(agent, attr, ephemeral)
                 result = agent.run_conversation(user_text, conversation_history=list(history)) or {}
                 draft = str(result.get("final_response") or result.get("response") or "").strip()
                 if not draft:

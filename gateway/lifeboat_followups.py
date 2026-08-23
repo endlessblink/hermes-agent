@@ -307,6 +307,20 @@ def prepare_lifeboat_inbound_guidance(
     else:
         guidance = build_lifeboat_coaching_guidance(user_text, trajectory)
 
+    # Who is speaking, stated before the rules and again at the end. Once at the
+    # top of a long bundle is what decays, and it is also outvoted by the
+    # coaching document further down -- which is why the bot sounded like a
+    # clinician no matter how many rules were added.
+    voice = ""
+    try:
+        from gateway.lifeboat_voice import load_voice_text
+
+        voice = load_voice_text()
+    except Exception:
+        logger.error("Life-Boat voice unavailable", exc_info=True)
+    if voice:
+        guidance = "\n\n".join(part for part in (voice, guidance) if part)
+
     # Guidance used to be entirely rules and no material, so the bot could not
     # be specific about his week even when he asked it to debrief his week.
     try:

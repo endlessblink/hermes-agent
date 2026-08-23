@@ -103,7 +103,20 @@ def build_editor_messages(
     reason: str = "",
 ) -> list[dict[str, str]]:
     """Build the request that hands one draft to the editing agent."""
-    blocks = [f"His message:\n{str(user_text or '').strip() or '(empty)'}"]
+    blocks: list[str] = []
+    try:
+        from gateway.lifeboat_voice import load_voice_text
+
+        voice = load_voice_text()
+    except Exception:
+        voice = ""
+    if voice:
+        blocks.append(
+            "The reply you return is spoken by this person. Match them, and do "
+            "not normalise the draft into a more careful register than theirs:\n"
+            + voice
+        )
+    blocks.append(f"His message:\n{str(user_text or '').strip() or '(empty)'}")
     if material and material.strip():
         blocks.append(
             "HISTORICAL MATERIAL — user-originated but not necessarily about this "

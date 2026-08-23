@@ -119,10 +119,26 @@ def review_verdict(
 
 
 def build_rewrite_messages(user_text: str, draft: str, reason: str) -> list[dict[str, str]]:
-    """Build the request that sends a rejected draft back to the model."""
+    """Build the request that sends a rejected draft back to the model.
+
+    This is the third writer in the chain, and it was the one left speaking as
+    nobody. The turn guidance and the editor were both given an identity; this
+    path was not, so a rejected draft came back in the careful register of a
+    generic support assistant no matter who the bot was supposed to be -- and
+    on a rejected draft, this is the voice that reaches him.
+    """
     guidance = _REASON_GUIDANCE.get(reason, "The draft did not meet the reply contract.")
+    system = _REWRITE_SYSTEM
+    try:
+        from gateway.lifeboat_voice import load_voice_text
+
+        voice = load_voice_text()
+    except Exception:
+        voice = ""
+    if voice:
+        system = f"{voice}\n\n{system}"
     return [
-        {"role": "system", "content": _REWRITE_SYSTEM},
+        {"role": "system", "content": system},
         {
             "role": "user",
             "content": (
