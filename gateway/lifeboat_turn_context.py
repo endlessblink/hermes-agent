@@ -185,15 +185,18 @@ def build_turn_context(
     if turns:
         said = "\n".join(f"- {stamp[:10]}: {line}" for stamp, line in turns)
         parts.append(
-            "WHAT HE HAS SAID RECENTLY (his words; use them to be specific, "
-            "never quote them back as proof of attentiveness):\n" + said
+            "HISTORICAL USER TURNS (explicit user words, but fragments from prior "
+            "threads; do not treat them as current or combine unrelated lines):\n"
+            + said
         )
 
     if not parts:
         return ""
     return (
-        "MATERIAL YOU ALREADY HAVE. Use it to arrive with a read rather than "
-        "asking him to supply the facts. If it is empty, say plainly that you "
-        "do not have the recent picture instead of asking a broad question.\n\n"
+        "MATERIAL YOU ALREADY HAVE. It is optional historical context, not a "
+        "current account. Use it only when the user's new message connects to "
+        "it; otherwise stay with the new message. If it is empty or unrelated, "
+        "say plainly that you do not have the recent picture instead of asking "
+        "a broad question.\n\n"
         + "\n\n".join(parts)
     )

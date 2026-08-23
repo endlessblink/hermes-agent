@@ -42,7 +42,9 @@ _REWRITE_SYSTEM = (
     "\n"
     "Keep the user's own words and specifics. Stay with what they actually "
     "raised. Keep any interpretation tentative. Do not summarise, do not close "
-    "the topic, and do not offer a menu of options. Reply only with the "
+    "the topic, and do not offer a menu of options. Do the work either by making "
+    "a modest hedged read or by choosing one concrete next step yourself; do not "
+    "hand the choice back to him. Reply only with the "
     "revised message -- no preamble, no explanation, no quotation marks."
 )
 
@@ -69,6 +71,18 @@ _REASON_GUIDANCE = {
     "reasked_supplied_relationship_evidence": "The draft asks again for something the user already supplied.",
     "epistemic_caution_erased_grounded_knowledge": "The draft treats what is genuinely known as unknowable.",
     "therapeutic_gibberish_in_repair": "The draft is abstract therapeutic language instead of plain speech.",
+    "interior_interrogation": (
+        "The draft asks him to report what went on inside him without offering "
+        "any guess of its own. His interior is what you are supposed to think "
+        "about. Say what you believe was going on in him, hedged so one word "
+        "from him can knock it down, and ask him to confirm that instead."
+    ),
+    "unsupported_temporal_anchor": (
+        "The draft names a time he did not mention. Use his own anchor, or none."
+    ),
+    "therapist_handoff": (
+        "The draft substitutes relational filler for a reply that does something."
+    ),
     "review_timeout": "The reviewer did not finish in time.",
     "review_error": "The reviewer failed.",
 }
@@ -83,9 +97,20 @@ class LifeBoatVerdict:
     receipt: str
 
 
-def review_verdict(user_text: str, response: str) -> LifeBoatVerdict:
+def review_verdict(
+    user_text: str,
+    response: str,
+    *,
+    material: str = "",
+    debrief_active: bool = False,
+) -> LifeBoatVerdict:
     """Review a draft and return only the judgement."""
-    result = review_lifeboat_response_with_timeout(user_text or "", response or "")
+    result = review_lifeboat_response_with_timeout(
+        user_text or "",
+        response or "",
+        evidence_text=material,
+        debrief_active=debrief_active,
+    )
     return LifeBoatVerdict(
         accepted=bool(result.accepted),
         reason=str(result.reason or ""),
@@ -144,8 +169,38 @@ def resolve_reply(
     if not text.strip():
         return text, "accepted"
 
-    verdict = review_verdict(user_text, text)
+    from gateway.lifeboat_debrief import (
+        DebriefState,
+        is_broad_debrief,
+        load_debrief_state,
+        save_debrief_state,
+    )
 
+    debrief_active = is_broad_debrief(user_text)
+    if profile_home is not None:
+        prior_state = load_debrief_state(profile_home, session_key)
+        debrief_active = debrief_active or prior_state.active
+        if debrief_active and not prior_state.active:
+            save_debrief_state(profile_home, session_key, DebriefState(active=True))
+
+    verdict = review_verdict(
+        user_text,
+        text,
+        material=material,
+        debrief_active=debrief_active,
+    )
+    unsafe_reason = ""
+    if verdict.accepted:
+        from gateway.lifeboat_editor import unsafe_draft_reason
+
+        unsafe_reason = unsafe_draft_reason(text, user_text)
+
+    # An accepted draft is already on the safe side of the contract. Do not
+    # invite a second model to make it more fluent: that is how a good draft
+    # became a therapist-like handback and how unsupported anchors entered a
+    # conversation. Editing is reserved for a draft with a concrete review
+    # failure; the original remains the fallback if the edit is unavailable or
+    # still fails review.
     if edit is not None:
         from gateway.lifeboat_editor import edit_reply
 
@@ -154,38 +209,38 @@ def resolve_reply(
             text,
             edit=edit,
             material=material,
-            reason="" if verdict.accepted else verdict.reason,
+            reason=unsafe_reason or verdict.reason,
         )
         if result.available and result.changed:
-            edited_verdict = review_verdict(user_text, result.text)
-            if edited_verdict.accepted:
+            edited_verdict = review_verdict(
+                user_text,
+                result.text,
+                material=material,
+                debrief_active=debrief_active,
+            )
+            from gateway.lifeboat_editor import unsafe_draft_reason
+            if edited_verdict.accepted and not unsafe_draft_reason(result.text, user_text):
                 logger.info(
                     "Life-Boat editor rewrote a draft draft_accepted=%s %s",
                     verdict.accepted,
                     edited_verdict.receipt,
                 )
                 return result.text, "edited"
-            # An edit that fails review is worth less than a draft that passed.
-            if verdict.accepted:
-                logger.info(
-                    "Life-Boat edit rejected reason=%s; keeping the draft",
-                    edited_verdict.reason,
-                )
-                return text, "draft_kept"
 
-    if verdict.accepted:
+    if verdict.accepted and not unsafe_reason:
         return text, "accepted"
 
-    logger.info("Life-Boat reviewer rejected a draft %s", verdict.receipt)
+    rewrite_reason = unsafe_reason or verdict.reason
+    logger.info("Life-Boat draft rejected reason=%s %s", rewrite_reason, verdict.receipt)
 
     revised = ""
     for _ in range(_MAX_REWRITES):
         try:
-            revised = str(rewrite(build_rewrite_messages(user_text, text, verdict.reason)) or "")
+            revised = str(rewrite(build_rewrite_messages(user_text, text, rewrite_reason)) or "")
         except Exception as exc:
             logger.warning(
                 "Life-Boat rewrite unavailable reason=%s error=%s message_content=redacted",
-                verdict.reason,
+                rewrite_reason,
                 type(exc).__name__,
             )
             return text, "rewrite_unavailable"
@@ -193,33 +248,53 @@ def resolve_reply(
         if not revised.strip():
             logger.warning(
                 "Life-Boat rewrite returned nothing reason=%s message_content=redacted",
-                verdict.reason,
+                rewrite_reason,
             )
             return text, "rewrite_unavailable"
 
-        second = review_verdict(user_text, revised)
-        if second.accepted:
+        second = review_verdict(
+            user_text,
+            revised,
+            material=material,
+            debrief_active=debrief_active,
+        )
+        from gateway.lifeboat_editor import unsafe_draft_reason
+        revised_unsafe_reason = unsafe_draft_reason(revised, user_text)
+        if second.accepted and not revised_unsafe_reason:
             logger.info("Life-Boat rewrite accepted %s", second.receipt)
             return revised, "rewritten"
 
+        if second.accepted and revised_unsafe_reason and edit is not None:
+            from gateway.lifeboat_editor import edit_reply
+
+            repaired = edit_reply(
+                user_text,
+                revised,
+                edit=edit,
+                material=material,
+                reason=revised_unsafe_reason,
+            )
+            if repaired.available and repaired.changed:
+                repaired_verdict = review_verdict(
+                    user_text,
+                    repaired.text,
+                    material=material,
+                    debrief_active=debrief_active,
+                )
+                if repaired_verdict.accepted and not unsafe_draft_reason(repaired.text, user_text):
+                    logger.info("Life-Boat editor repaired an unsafe rewrite %s", repaired_verdict.receipt)
+                    return repaired.text, "edited"
+
         logger.info(
             "Life-Boat rewrite_rejected first=%s second=%s message_content=redacted",
-            verdict.reason,
+            rewrite_reason,
             second.reason,
         )
         break
     else:
         return text, "rewrite_unavailable"
 
-    # Nothing survived review. Rather than deliver a third failed attempt, say
-    # so -- and only if that admission has not just been used.
-    from gateway.lifeboat_editor import NO_READ_TEXT, no_read_allowed, record_no_read
-
-    if no_read_allowed(profile_home, session_key, deliveries=deliveries):
-        record_no_read(profile_home, session_key, deliveries=deliveries)
-        logger.info("Life-Boat delivered the no-read admission instead of a failed draft")
-        return NO_READ_TEXT, "no_read"
-
-    # Used too recently. A repeated fixed sentence is the older, worse bug, so
-    # the model's own words go out instead.
-    return revised, "rewrite_rejected"
+    # The reviewer never authors a user-facing fallback. Preserve the model's
+    # original draft rather than emit a canned admission or a second draft that
+    # failed the same gate.
+    return text, "rewrite_rejected"

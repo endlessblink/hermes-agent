@@ -168,6 +168,8 @@ from gateway.lifeboat_debrief import (
     _SELF_CORRECTION_PREAMBLE_RE as _CORRECTION_PREAMBLE_RE,
     _STEERING_HANDBACK_RE as _MADE_HIM_CHOOSE_RE,
     _THERAPIST_REGISTER_RE as _CLINICAL_REGISTER_RE,
+    debrief_problems,
+    is_broad_debrief,
 )
 
 _QUESTION_RE = re.compile(r"[?？]")
@@ -192,39 +194,41 @@ def _context_anchor(user_text: str) -> str:
     return anchor[:160].rstrip() or "מה שהבאת לכאן"
 
 def _fallback(user_text: str, reason: str) -> LifeBoatReview:
-    response = f"אני נשאר עם הנקודה שכבר תיארת: «{_context_anchor(user_text)}». לא אוסיף שלב או מסקנה שלא נמצאים שם; אפשר להמשיך ממה שקרה בפועל — מה מתוך זה הכי חי עכשיו?"
-    return LifeBoatReview(response, False, reason, _receipt(reason, user_text, response))
+    return LifeBoatReview("", False, reason, _receipt(reason, user_text, ""))
 
 
 def _plain_reality_fallback(user_text: str, reason: str) -> LifeBoatReview:
-    if reason == "therapeutic_gibberish_in_repair":
-        response = "במילים פשוטות: כרגע חסרים לך ממנה סימנים של אכפתיות והערכה, וזה מה שכואב."
-    elif reason == "epistemic_caution_erased_grounded_knowledge":
-        response = "אין לי דרך לדעת מה האדם האחר מרגיש. כן יש בסיס לומר שהערך שלך כאדם אינו מצטמצם לתפקידים האלה, ושיש ביניכם היכרות וידע מצטברים."
-    else:
-        response = (
-            "הפחד שתיארת הוא פחד, לא עובדה על מה שהאדם האחר מרגיש. "
-            "מה שכן אפשר לומר הוא שהיום לא קיבלת מספיק סימנים של אכפתיות או הערכה; "
-            "זה חסר אמיתי, אבל הוא לא מוכיח שהערך שלך תלוי רק בתועלת שאתה מביא."
-        )
-    return LifeBoatReview(response, False, reason, _receipt(reason, user_text, response))
+    return LifeBoatReview("", False, reason, _receipt(reason, user_text, ""))
 
 
 def _reentry_fallback(user_text: str, reason: str) -> LifeBoatReview:
-    response = "אין לי כאן את החוט הרגשי המדויק שאליו התכוונת. אם תכתוב את האירוע, המחשבה או המתח הקונקרטי שתרצה להמשיך ממנו, אכנס אליו ישירות."
-    return LifeBoatReview(response, False, reason, _receipt(reason, user_text, response))
+    return LifeBoatReview("", False, reason, _receipt(reason, user_text, ""))
 
 def _safety_fallback(user_text: str, reason: str) -> LifeBoatReview:
-    response = "אני לוקח ברצינות את מה שכתבת. אם יש סכנה מיידית או חשש שתפגע בעצמך, פנה עכשיו לאדם קרוב או לשירותי החירום המקומיים; בישראל אפשר לפנות לער״ן 1201. האם אתה בסכנה מיידית כרגע?"
-    return LifeBoatReview(response, False, reason, _receipt(reason, user_text, response))
+    return LifeBoatReview("", False, reason, _receipt(reason, user_text, ""))
 
-def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
+def review_lifeboat_response(
+    user_text: str,
+    response: str,
+    *,
+    evidence_text: str = "",
+    debrief_active: bool = False,
+) -> LifeBoatReview:
     """Review one completed draft using signals plus structural invariants."""
     user = (user_text or "").strip()
     text = (response or "").strip()
     if not text:
         return LifeBoatReview(text, True, "accepted", _receipt("accepted", user, text))
     signals = classify_lifeboat_signals(user)
+    if debrief_active or is_broad_debrief(user):
+        shape_request = user if is_broad_debrief(user) else "debrief"
+        debrief_issues = debrief_problems(
+            text,
+            known_text=f"{user}\n{evidence_text}",
+            request=shape_request,
+        )
+        if debrief_issues:
+            return _fallback(user, debrief_issues[0])
     if _REENTRY_REQUEST_RE.search(user) and _GENERIC_REENTRY_RE.search(text):
         return _reentry_fallback(user, "contextless_reentry")
     if signals.possible_crisis and not _DIRECT_SUPPORT_RE.search(text):
@@ -285,12 +289,29 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
             return _fallback(user, "premature_closure")
     return LifeBoatReview(text, True, "accepted", _receipt("accepted", user, text))
 
-def review_lifeboat_response_with_timeout(user_text: str, response: str, *, timeout_seconds: float = 0.25, reviewer: Callable[[str, str], LifeBoatReview] = review_lifeboat_response) -> LifeBoatReview:
+def review_lifeboat_response_with_timeout(
+    user_text: str,
+    response: str,
+    *,
+    evidence_text: str = "",
+    debrief_active: bool = False,
+    timeout_seconds: float = 0.25,
+    reviewer: Callable[[str, str], LifeBoatReview] = review_lifeboat_response,
+) -> LifeBoatReview:
     """Run the review with a bounded wait; timeout and exceptions reject."""
     result_queue: queue.Queue[object] = queue.Queue(maxsize=1)
     def run_review() -> None:
         try:
-            result_queue.put((True, reviewer(user_text or "", response or "")))
+            if reviewer is review_lifeboat_response:
+                result = reviewer(
+                    user_text or "",
+                    response or "",
+                    evidence_text=evidence_text,
+                    debrief_active=debrief_active,
+                )
+            else:
+                result = reviewer(user_text or "", response or "")
+            result_queue.put((True, result))
         except Exception as exc:
             result_queue.put((False, exc))
     worker = threading.Thread(target=run_review, name="lifeboat-review", daemon=True)

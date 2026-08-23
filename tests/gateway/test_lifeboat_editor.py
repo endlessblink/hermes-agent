@@ -14,13 +14,9 @@ import json
 import pytest
 
 from gateway.lifeboat_editor import (
-    NO_READ_COOLDOWN,
-    NO_READ_TEXT,
     build_editor_messages,
     clean_editor_output,
     edit_reply,
-    no_read_allowed,
-    record_no_read,
 )
 from gateway.lifeboat_rewrite import resolve_reply
 
@@ -56,6 +52,103 @@ def test_the_editor_prompt_hands_over_no_hebrew_sentence_to_reuse() -> None:
     prompt_only = joined.replace(USER, "").replace(BLAND, "").replace(MATERIAL, "")
 
     assert not any("֐" <= ch <= "׿" for ch in prompt_only)
+
+
+def test_the_editor_brief_counts_a_chosen_concrete_step_as_progress() -> None:
+    joined = " ".join(m["content"] for m in build_editor_messages(USER, BLAND))
+
+    assert "one of two ways" in joined
+    assert "concrete next step that you choose" in joined
+    assert "make the choice concrete yourself" in joined
+    assert "must name the anchor it chose" in joined
+    assert "choose one and move" in joined
+    assert "all count as movement" in joined
+
+
+def test_the_editor_brief_asks_for_close_everyday_hebrew() -> None:
+    joined = " ".join(m["content"] for m in build_editor_messages(USER, BLAND))
+
+    assert "close, attentive person" in joined
+    assert "direct, warm, and ordinary" in joined
+
+
+def test_historical_material_is_not_treated_as_current_evidence() -> None:
+    joined = " ".join(
+        m["content"]
+        for m in build_editor_messages(USER, BLAND, material="- 2026-08-20: old fragment")
+    )
+
+    assert "HISTORICAL MATERIAL" in joined
+    assert "not necessarily about this turn" in joined
+    assert "do not combine isolated fragments" in joined
+
+
+def test_editor_does_not_introduce_an_unsupported_temporal_anchor() -> None:
+    result = edit_reply(
+        "כן",
+        "אני איתך. נתקדם צעד צעד.",
+        edit=lambda _messages: "נתחיל מאתמול בערב: מה קרה שם?",
+    )
+
+    assert result.text == "אני איתך. נתקדם צעד צעד."
+    assert result.available is True
+    assert result.changed is False
+
+
+def test_historical_temporal_word_does_not_license_a_current_anchor() -> None:
+    result = edit_reply(
+        "לא יודע",
+        "אני איתך. נתקדם צעד צעד.",
+        material="HISTORICAL USER TURNS: הבוקר היה עמוס",
+        edit=lambda _messages: "נתחיל מהבוקר: מה קרה אחרי שקמת?",
+    )
+
+    assert result.text == "אני איתך. נתקדם צעד צעד."
+    assert result.changed is False
+
+
+@pytest.mark.parametrize("anchor", ["היום האחרון", "הרגע האחרון", "מהבוקר", "עד הערב"])
+def test_relative_hebrew_time_anchor_requires_current_user_evidence(anchor: str) -> None:
+    result = edit_reply(
+        "לא יודע",
+        "אני איתך. נתקדם צעד צעד.",
+        edit=lambda _messages: f"נתחיל מ{anchor}: מה קרה שם?",
+    )
+
+    assert result.text == "אני איתך. נתקדם צעד צעד."
+    assert result.changed is False
+
+
+def test_unsupported_temporal_edit_gets_one_targeted_retry() -> None:
+    replies = iter([
+        "נתחיל מאתמול בערב: מה קרה שם?",
+        "נתחיל ממה שקורה עכשיו: מה הדבר הראשון שעולה לך?",
+    ])
+
+    result = edit_reply(
+        "לא יודע",
+        "נתחיל מאתמול: מה קרה?",
+        edit=lambda _messages: next(replies),
+    )
+
+    assert result.text == "נתחיל ממה שקורה עכשיו: מה הדבר הראשון שעולה לך?"
+    assert result.changed is True
+
+
+def test_therapist_handoff_edit_gets_rejected_and_retried() -> None:
+    replies = iter([
+        "אני כאן איתך, בקצב שלך.",
+        "נתחיל ממה שקורה עכשיו: מה הדבר הראשון שעולה לך?",
+    ])
+
+    result = edit_reply(
+        "אוקיי",
+        "מה הדבר הראשון שעולה לך מהימים האחרונים?",
+        edit=lambda _messages: next(replies),
+    )
+
+    assert result.text == "נתחיל ממה שקורה עכשיו: מה הדבר הראשון שעולה לך?"
+    assert result.changed is True
 
 
 def test_a_rejection_reason_is_passed_on_when_there_is_one() -> None:
@@ -95,8 +188,8 @@ def test_an_editor_that_returns_nothing_leaves_the_draft_alone() -> None:
 
 # --- the delivery decision -------------------------------------------------
 
-def test_a_bland_but_legal_draft_is_replaced_by_the_edit() -> None:
-    """The failure he reported: a reply that breaks no rule and says nothing."""
+def test_a_bland_but_legal_draft_can_be_improved_by_the_editor() -> None:
+    """The global editor may improve a bland draft when the result passes review."""
     delivered, outcome = resolve_reply(
         USER,
         BLAND,
@@ -118,10 +211,10 @@ def test_a_failed_edit_never_replaces_a_draft_that_passed() -> None:
     )
 
     assert delivered == WITH_A_READ
-    assert outcome == "draft_kept"
+    assert outcome == "accepted"
 
 
-def test_the_editor_runs_even_when_the_reviewer_accepted_the_draft() -> None:
+def test_the_editor_can_review_an_accepted_draft_for_global_quality() -> None:
     seen = []
 
     def watching(messages):
@@ -130,7 +223,7 @@ def test_the_editor_runs_even_when_the_reviewer_accepted_the_draft() -> None:
 
     resolve_reply(USER, BLAND, rewrite=lambda *a, **k: "unused", edit=watching)
 
-    assert len(seen) == 1
+    assert seen
 
 
 def test_a_rejected_draft_whose_edit_also_fails_falls_through_to_the_rewrite() -> None:
@@ -143,74 +236,6 @@ def test_a_rejected_draft_whose_edit_also_fails_falls_through_to_the_rewrite() -
 
     assert delivered == WITH_A_READ
     assert outcome == "rewritten"
-
-
-def test_when_nothing_survives_review_he_is_told_there_is_no_read() -> None:
-    delivered, outcome = resolve_reply(
-        USER,
-        CLOSING,
-        rewrite=lambda *a, **k: "תודה על השיתוף, נעצור כאן.",
-        edit=lambda _m: "תמשיך משם איך שזה יוצא.",
-    )
-
-    assert delivered == NO_READ_TEXT
-    assert outcome == "no_read"
-
-
-# --- the repetition guard --------------------------------------------------
-
-def test_the_admission_is_allowed_when_nothing_is_recorded(tmp_path) -> None:
-    assert no_read_allowed(tmp_path, "chat-1", deliveries=1) is True
-
-
-def test_the_admission_is_refused_again_straight_away(tmp_path) -> None:
-    record_no_read(tmp_path, "chat-1", deliveries=4)
-
-    assert no_read_allowed(tmp_path, "chat-1", deliveries=5) is False
-
-
-def test_the_admission_returns_after_the_cooldown(tmp_path) -> None:
-    record_no_read(tmp_path, "chat-1", deliveries=4)
-
-    assert no_read_allowed(tmp_path, "chat-1", deliveries=4 + NO_READ_COOLDOWN) is True
-
-
-def test_the_guard_is_per_session(tmp_path) -> None:
-    record_no_read(tmp_path, "chat-1", deliveries=4)
-
-    assert no_read_allowed(tmp_path, "chat-2", deliveries=5) is True
-
-
-def test_unreadable_state_does_not_block_the_admission(tmp_path) -> None:
-    (tmp_path / "state").mkdir()
-    (tmp_path / "state" / "lifeboat-noread-chat-1.json").write_text("{ not json", encoding="utf-8")
-
-    assert no_read_allowed(tmp_path, "chat-1", deliveries=1) is True
-
-
-def test_a_used_admission_is_recorded_where_the_guard_reads_it(tmp_path) -> None:
-    record_no_read(tmp_path, "chat-1", deliveries=7)
-    saved = json.loads((tmp_path / "state" / "lifeboat-noread-chat-1.json").read_text("utf-8"))
-
-    assert saved["deliveries_at_last_use"] == 7
-
-
-def test_the_model_speaks_rather_than_repeating_the_admission(tmp_path) -> None:
-    """The older, worse bug was one fixed sentence delivered again and again."""
-    record_no_read(tmp_path, "chat-1", deliveries=4)
-    failed_again = "תודה על השיתוף, נעצור כאן."
-
-    delivered, outcome = resolve_reply(
-        USER,
-        CLOSING,
-        rewrite=lambda *a, **k: failed_again,
-        profile_home=tmp_path,
-        session_key="chat-1",
-        deliveries=5,
-    )
-
-    assert delivered == failed_again
-    assert outcome == "rewrite_rejected"
 
 
 # --- the kill switch -------------------------------------------------------
@@ -231,6 +256,17 @@ def test_touching_the_flag_turns_the_editor_off(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(lifeboat_editor, "DISABLE_FLAG", flag)
 
     assert lifeboat_editor.editor_enabled() is False
+
+
+def test_runtime_receipt_identifies_the_loaded_editor() -> None:
+    from gateway.lifeboat_editor import runtime_receipt
+
+    receipt = runtime_receipt()
+
+    assert receipt["module"].endswith("gateway/lifeboat_editor.py")
+    assert len(receipt["sha256"]) == 64
+    assert isinstance(receipt["pid"], int)
+    assert receipt["editor_enabled"] is True
 
 
 # --- the delivery counter --------------------------------------------------

@@ -108,6 +108,21 @@ def test_an_accepted_draft_is_delivered_untouched() -> None:
     assert reason == "accepted"
 
 
+def test_an_accepted_but_temporally_unsupported_draft_is_repaired() -> None:
+    calls = []
+
+    delivered, reason = resolve_reply(
+        "אני רוצה לעשות דיבריף על הימים האחרונים.",
+        "נתחיל מאתמול בבוקר: מה קרה?",
+        rewrite=lambda *a, **k: "ניקח רגע אחד מהימים האחרונים: מה עולה?",
+        edit=lambda messages: calls.append(messages) or "ניקח רגע אחד מהימים האחרונים: מה עולה?",
+    )
+
+    assert calls
+    assert delivered == "ניקח רגע אחד מהימים האחרונים: מה עולה?"
+    assert reason == "edited"
+
+
 def test_a_rejected_draft_is_replaced_by_the_models_rewrite() -> None:
     delivered, reason = resolve_reply(
         LOOP_USER, CLOSING_REPLY, rewrite=lambda *a, **k: GOOD_REPLY
@@ -117,25 +132,15 @@ def test_a_rejected_draft_is_replaced_by_the_models_rewrite() -> None:
     assert reason == "rewritten"
 
 
-def test_a_rewrite_that_also_fails_review_is_not_delivered_as_a_third_attempt() -> None:
-    """Two failures in a row are not a reply; say there is no read instead.
-
-    This used to deliver the second failed draft, on the reasoning that the
-    model's own words beat invented prose. That reasoning held while the only
-    alternative was a stock coaching sentence. The admission is not one: it is
-    true, it is rate limited per session, and Noam chose it over receiving a
-    reply that had already failed twice.
-    """
-    from gateway.lifeboat_editor import NO_READ_TEXT
-
+def test_a_failed_rewrite_preserves_model_text_and_never_invents_fallback() -> None:
     second_draft = "מספיק להיום, סיימנו."
 
     delivered, reason = resolve_reply(
         LOOP_USER, CLOSING_REPLY, rewrite=lambda *a, **k: second_draft
     )
 
-    assert delivered == NO_READ_TEXT
-    assert reason == "no_read"
+    assert delivered == CLOSING_REPLY
+    assert reason == "rewrite_rejected"
 
 
 def test_an_unavailable_rewrite_falls_back_to_the_original_draft() -> None:

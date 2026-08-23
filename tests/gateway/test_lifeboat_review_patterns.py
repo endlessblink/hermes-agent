@@ -116,6 +116,43 @@ def test_plain_speech_about_the_same_thing_is_accepted() -> None:
     assert review_verdict(HURT, "מתי היא אמרה את זה?").accepted is True
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "מה היה האירוע הראשון בתקופה הזאת?",
+        "נתחיל מהאירוע האחרון מבין אלה שאתה רוצה לכלול בדיבריף. מה קרה בו?",
+        "איזה אירוע תרצה להביא קודם?",
+    ],
+)
+def test_broad_debrief_handback_is_rejected_across_paraphrases(reply: str) -> None:
+    user = "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה"
+
+    assert review_verdict(user, reply).accepted is False
+
+
+def test_broad_debrief_read_is_accepted() -> None:
+    user = "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה"
+    reply = "נשמע שאתה רוצה להסתכל על כמה אירועים מהתקופה האחרונה כמכלול, בלי לבחור אחד מראש. זה הכיוון?"
+
+    assert review_verdict(user, reply).accepted is True
+
+
+def test_debrief_shape_stays_active_after_a_bare_affirmation() -> None:
+    assert review_verdict(
+        "כן",
+        "מה היה הרגע הראשון שעלה לך כשחשבת על הימים האחרונים?",
+        debrief_active=True,
+    ).accepted is False
+
+
+def test_debrief_does_not_anchor_on_chat_meta() -> None:
+    assert review_verdict(
+        "כן",
+        "נתחיל מההודעה שכתבת עכשיו: מה היה הדבר האחרון שקרה לפני שהחלטת לכתוב לי?",
+        debrief_active=True,
+    ).accepted is False
+
+
 def test_announcing_its_own_method_is_rejected() -> None:
     reply = "אני אראיין אותך שאלה אחת בכל פעם. איפה זה עומד?"
 
@@ -125,6 +162,26 @@ def test_announcing_its_own_method_is_rejected() -> None:
 def test_making_him_pick_the_subject_is_rejected_everywhere() -> None:
     assert review_verdict(HURT, "במה תרצה להתחיל?").accepted is False
     assert review_verdict(HURT, "מה היה הדבר הראשון שהיה לך בראש?").accepted is False
+    assert review_verdict(HURT, "מאיזה רגע אתה רוצה להתחיל?").accepted is False
+    assert review_verdict(HURT, "איזו תחושה עולה לך ראשונה?").accepted is False
+    assert review_verdict(HURT, "מה היה הדבר הראשון מהימים האחרונים שעלה לך בראש?").accepted is False
+    assert review_verdict(HURT, "מה קרה ביום הראשון שאתה רוצה לכלול בדיבריף?").accepted is False
+    assert review_verdict(HURT, "מה היה האירוע המוקדם ביותר בתקופה הזאת, ומה קרה בו בפועל?").accepted is False
+
+
+def test_broad_debrief_rejects_unsourced_continuity() -> None:
+    request = "אני רוצה לעשות דיבריף על הימים האחרונים."
+
+    assert review_verdict(request, "פגשת את דנה אתמול. מה קרה?").accepted is False
+
+
+def test_broad_debrief_accepts_continuity_from_trusted_material() -> None:
+    request = "אני רוצה לעשות דיבריף על הימים האחרונים."
+    material = "HISTORICAL USER TURN: פגשת את דנה אתמול."
+
+    reply = "נשמע שהמפגש עם דנה הוא אחד הדברים שחשוב להבין בתקופה הזאת. זה הכיוון?"
+
+    assert review_verdict(request, reply, material=material).accepted is True
 
 
 def test_a_preamble_about_the_correction_is_rejected_everywhere() -> None:

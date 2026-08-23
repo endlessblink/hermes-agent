@@ -26,6 +26,12 @@ from gateway.lifeboat_debrief import (
 
 
 KNOWN = "היא אמרה לי שאני מעיק ואני לא מפסיק לחשוב על זה. גם לא ישנתי טוב."
+BROAD_REQUESTS = (
+    "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה",
+    "בוא נעבור על מה שקרה לי בזמן האחרון",
+    "אני רוצה להסתכל על כמה דברים שקרו בשבועות האחרונים",
+    "let's debrief the recent events",
+)
 
 
 # --- entering and leaving ---------------------------------------------------
@@ -253,6 +259,42 @@ def test_making_him_choose_the_subject_is_rejected(reply: str) -> None:
 )
 def test_a_question_that_names_its_own_subject_is_accepted(reply: str) -> None:
     assert debrief_problems(reply, known_text=KNOWN) == ()
+
+
+@pytest.mark.parametrize("request_text", BROAD_REQUESTS)
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "מה היה האירוע הראשון בתקופה הזאת?",
+        "נתחיל מהאירוע האחרון מבין אלה שאתה רוצה לכלול בדיבריף. מה קרה בו?",
+        "איזה אירוע תרצה להביא קודם?",
+        "What would you like to cover first from the recent period?",
+    ],
+)
+def test_broad_debrief_must_not_make_him_choose_or_supply_the_plan(reply: str, request_text: str) -> None:
+    problems = debrief_problems(reply, request=request_text)
+
+    assert "assistant_did_not_advance" in problems or "handed_back_the_steering" in problems
+
+
+@pytest.mark.parametrize("request_text", BROAD_REQUESTS)
+def test_broad_debrief_accepts_a_read_offered_for_correction(request_text: str) -> None:
+    reply = "נשמע שאתה רוצה להסתכל על כמה אירועים מהתקופה האחרונה כמכלול, בלי לבחור אחד מראש. זה הכיוון?"
+
+    assert debrief_problems(
+        reply,
+        request=request_text,
+    ) == ()
+
+
+@pytest.mark.parametrize("request_text", BROAD_REQUESTS)
+def test_broad_debrief_accepts_an_assistant_chosen_scope(request_text: str) -> None:
+    reply = "נתחיל באירוע האחרון בתקופה הזאת, ונישאר קודם עם מה שקרה בפועל. מה היה שם?"
+
+    assert debrief_problems(
+        reply,
+        request=request_text,
+    ) == ()
 
 
 # --- no preamble about the conversation itself ------------------------------

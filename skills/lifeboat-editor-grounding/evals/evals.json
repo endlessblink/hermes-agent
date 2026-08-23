@@ -1,0 +1,41 @@
+{
+  "skill_name": "lifeboat-editor-grounding",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The editor changed a user's 'yes' into a claim that yesterday evening mattered. Diagnose the grounding failure and propose a state update that prevents assistant-context laundering.",
+      "expected_output": "Separates user facts from assistant hypotheses, treats yes as insufficient confirmation of an invented anchor, and proposes provenance-tagged state.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "The draft is warm, grounded, and already chooses a small next step, but the editor wants to rewrite it into a broad therapist-like question. Decide whether to pass or revise and explain the gate.",
+      "expected_output": "Passes the grounded draft or makes only a targeted correction; preserves agency and rejects therapist-like framing.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "A Life-Boat editor module was copied to the installed tree, but the gateway process was not restarted. Explain how to verify the actual live code before testing a reply.",
+      "expected_output": "Restarts the configured supervisor, verifies replacement PID/start time, checks the startup module hash receipt, and reads a real delivered transcript.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "A support scorer is overconfident and the cost of accepting an invented anchor is much higher than revising a good draft. Design threshold selection, calibration, drift monitoring, and an adversarial test set.",
+      "expected_output": "Uses cost-sensitive empirical thresholding, held-out calibration and validation, Brier/ECE/drift monitoring, conservative fallback, and claim-level anti-laundering attacks.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "A Telegram Life-Boat reply summarizes an interview request and dating-match history that the user did not say in the current conversation. Decide how the context pipeline should handle queue, journal, transcript, and assistant-summary material.",
+      "expected_output": "Quarantines mixed-purpose and assistant-generated material, constructs premises only from provenance-confirmed user turns, and prefers abstention over contaminated specificity.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "Red-team the Life-Boat support gate with an invented time, affirmation laundering, a false premise citation, a hedge-plus-false-detail, and an instruction injection in the draft. Define the fixtures, ASR metrics, and structural defenses.",
+      "expected_output": "Defines static and bounded adaptive attack sets, tracks ASR and clean regressions, and uses provenance checks, concrete-span checks, claim-level any-fail, and isolated scorer input.",
+      "files": []
+    }
+  ]
+}

@@ -56,7 +56,13 @@ TURNS = [
 ]
 
 
-def _ephemeral_prompt(channel_prompt: str, sandbox: Path, session_key: str, user_text: str) -> str:
+def _ephemeral_prompt(
+    channel_prompt: str,
+    sandbox: Path,
+    session_key: str,
+    user_text: str,
+    identity: str = "",
+) -> str:
     """Assemble what the gateway actually puts in front of the model this turn.
 
     The replay script built only the channel prompt plus the signal guidance,
@@ -70,11 +76,63 @@ def _ephemeral_prompt(channel_prompt: str, sandbox: Path, session_key: str, user
     from gateway.lifeboat_followups import prepare_lifeboat_inbound_guidance
 
     parts = [channel_prompt, build_signal_guidance(user_text)]
+    if identity:
+        # Stated twice on purpose: once at the front, and again last, closest to
+        # his message. A single line at the top of a long bundle is what decays,
+        # and it is also outvoted by the coaching document further down.
+        parts.insert(0, IDENTITIES[identity])
+        parts.append(IDENTITIES[identity])
     try:
         parts.append(prepare_lifeboat_inbound_guidance(sandbox, session_key, user_text))
     except Exception as exc:  # pragma: no cover - reported, never silently dropped
         print(f"  WARNING inbound guidance unavailable: {type(exc).__name__}: {exc}")
     return "\n\n".join(part for part in parts if part and part.strip())
+
+
+#: Who is speaking. Not a rule about sentences and not an example to copy --
+#: both of those have failed here, one by making the bot emptier and one by
+#: turning into a template. Nobody had ever told this bot what it is, so it
+#: defaulted to the only thing its documents describe: a coach doing
+#: "therapy-adjacent" work, instructed to be "analytical and strategic".
+#: Who is speaking. Not a rule about sentences and not an example to copy --
+#: bans made the bot emptier, and supplied sentences became templates. Nobody
+#: had ever told this bot what it is: the topic prompt is pure routing, and the
+#: only document describing its manner opens by calling itself "Personal
+#: Coaching", names its work "therapy-adjacent", and tells it to be "analytical
+#: and strategic". It sounds like a shrink because that is what it was handed.
+#:
+#: Two candidates, so the choice can be read rather than argued.
+IDENTITIES = {
+    # The same role it has now, with the clinical register taken out and
+    # nothing else changed. Isolates how much of the distance is the *word*
+    # coach, and how much is the vocabulary around it.
+    "coach-cleaned": (
+        "Who you are: someone who helps him think about his life. Not a "
+        "therapist, not a clinician, and you do not do therapy-adjacent work. "
+        "Drop every professional register: no analysing, no processing, no "
+        "naming what he is going through, no strategy. Talk about his life in "
+        "the words he uses for it. You are not conducting anything -- you are "
+        "thinking about it with him, out loud, plainly."
+    ),
+    # A different role entirely.
+    "close-friend": (
+        "Who you are, before anything else: you are not a coach, a therapist, "
+        "or a support assistant, and you must not sound like one. You are "
+        "someone close to him who has known him for years and is texting him "
+        "late at night.\n"
+        "\n"
+        "You talk the way a close friend texts. Short. Ordinary words -- his "
+        "words, not more elevated ones. No professional vocabulary, no naming "
+        "of his processes, no describing his experience back to him in "
+        "language he would never use himself.\n"
+        "\n"
+        "You react to what he tells you before you ask anything. You are "
+        "allowed to be surprised, to have an opinion, to disagree with him. "
+        "Ask him things -- that is what someone close does -- but ask out of "
+        "interest in him, the way a friend asks, not the way an assessment "
+        "asks."
+    ),
+}
 
 
 def _force_reasoning(sandbox: Path, effort: str) -> None:
@@ -90,6 +148,12 @@ def _force_reasoning(sandbox: Path, effort: str) -> None:
     path = sandbox / "config.yaml"
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     data.setdefault("agent", {})["reasoning_effort"] = effort
+    # The copied life-advisor profile's session-start hook writes the shared
+    # Obsidian turn log.  This replay must exercise reply assembly in a throwaway
+    # home without mutating the user's real transcript store.
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        hooks.pop("on_session_start", None)
     path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
@@ -116,7 +180,7 @@ def _rewrite(messages):
     from agent.auxiliary_client import call_llm
 
     completion = call_llm(
-        task="title_generation", messages=messages, max_tokens=600,
+        task="lifeboat_editor", messages=messages, max_tokens=800,
         temperature=0.4, timeout=60,
     )
     return completion.choices[0].message.content or ""
@@ -169,9 +233,9 @@ def main(argv: list[str] | None = None) -> int:
         turns = loaded
 
     arms = (
-        ("main-only", None),
-        ("both-medium", _make_editor("medium")),
-        ("editor-low", _make_editor("low")),
+        ("no-change", None),
+        ("coach-cleaned", None),
+        ("close-friend", None),
     )
 
     if args.arms:
@@ -223,7 +287,10 @@ def main(argv: list[str] | None = None) -> int:
             transcript: list[dict[str, str]] = []
 
             for index, user_text in enumerate(turns, start=1):
-                ephemeral = _ephemeral_prompt(channel_prompt, sandbox, session_key, user_text)
+                ephemeral = _ephemeral_prompt(
+                    channel_prompt, sandbox, session_key, user_text,
+                    identity=arm_name if arm_name in IDENTITIES else "",
+                )
                 agent = AIAgent(
                     model=model,
                     ephemeral_system_prompt=ephemeral,

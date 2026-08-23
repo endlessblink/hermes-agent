@@ -98,10 +98,15 @@ _THERAPIST_REGISTER_RE = re.compile(
 #: אותי אלא מפיל עליי את האחריות".
 _STEERING_HANDBACK_RE = re.compile(
     r"(?:ה?דבר\s+הראשון\s+ש(?:היה|עולה|בא)"
+    r"|מה\s+היה\s+הדבר\s+הראשון(?:\s+[^?]{0,50})?"
     r"|מה\s+(?:היה\s+)?עולה\s+לך\s+ראשון"
     r"|ב?מה\s+(?:תרצה|היית\s+רוצה)\s+(?:להתחיל|לדבר|שנתחיל)"
     r"|מה\s+תרצה\s+ש"
     r"|(?:מ?איפה|ממה|במה)\s+(?:אתה\s+)?(?:רוצה|מעדיף|תרצה|היית\s+רוצה)?\s*(?:ש?נתחיל|להתחיל)"
+    r"|מאיזה\s+(?:רגע|יום|אירוע|מקום)\s+(?:אתה\s+)?(?:רוצה|מעדיף|תרצה|היית\s+רוצה)?\s*להתחיל"
+    r"|איזו?\s+(?:סצנה|תחושה|רגע|מחשבה|תמונה)\s+עולה\s+(?:לך\s+)?ראשונה"
+    r"|מה\s+קרה\s+ביום\s+הראשון\s+ש(?:אתה\s+)?רוצה\s+לכלול"
+    r"|מה\s+היה\s+(?:האירוע|הרגע)\s+המוקדם\s+ביותר(?:\s+[^?]{0,60})?"
     r"|לבחור\s+(?:מאיפה|במה|מה)"
     r"|מה\s+הכי\s+(?:חשוב|דחוף)\s+לך\s+(?:לדבר|להתחיל)"
     r"|\bwhat\s+would\s+you\s+like\s+to\s+(?:start|talk|begin)"
@@ -150,7 +155,30 @@ _TENTATIVE_READ_RE = re.compile(
 #: just an assertion with a softener in front.
 _INVITES_CORRECTION_RE = re.compile(
     r"(?:זה\s+מדויק|קרוב\?|טועה\?|נכון\?|או\s+שלא|תקן\s+אותי"
-    r"|\bis\s+that\s+right\b|\bam\s+i\s+wrong\b|\bclose\?)",
+    r"|זה\s+הכיוון|זה\s+הכיוון\s*\?|\bis\s+that\s+right\b|\bam\s+i\s+wrong\b|\bclose\?)",
+    re.IGNORECASE,
+)
+
+# A productive next step is chosen by the assistant, not delegated back as a
+# menu.  This deliberately describes the grammatical role (assistant commits
+# to a scope, then asks about that scope) rather than enumerating bad wording.
+_ASSISTANT_STEP_RE = re.compile(
+    r"(?:^|[.!?؟]\s*)(?:בוא(?:\s+נ)?|ניקח|נתחיל|נפתח|נעבור|"
+    r"אני\s+(?:לוקח|מתחיל|פותח|ממקד)|let's|we(?:'ll|\s+will)|"
+    r"i(?:'ll|\s+will)\s+(?:start|take|focus)\b)",
+    re.IGNORECASE,
+)
+_USER_SELECTION_RE = re.compile(
+    r"(?:שאתה\s+(?:רוצה|תרצה|מעדיף|תבחר)|מה\s+שתרצה|"
+    r"(?:you\s+)?want\s+to\s+(?:include|choose|start)|"
+    r"your\s+(?:choice|selection))",
+    re.IGNORECASE,
+)
+_CHAT_META_ANCHOR_RE = re.compile(
+    r"(?:ההודעה\s+שכתבת|החלטת\s+לכתוב|לפני\s+שכתבת|"
+    r"המשפט\s+האחרון\s+שנאמר|מה\s+נאמר\s+לפני\s+ההודעה|"
+    r"the\s+message\s+you\s+wrote|before\s+you\s+wrote|"
+    r"before\s+you\s+decided\s+to\s+write)",
     re.IGNORECASE,
 )
 
@@ -163,7 +191,9 @@ _BROAD_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _PERIOD_RE = re.compile(
-    r"(?:התקופה\s+האחרונה|הימים\s+האחרונים|השבוע|מהתקופה|recent|the\s+week)",
+    r"(?:התקופה\s+האחרונה|הימים\s+האחרונים|השבוע|מהתקופה|בזמן\s+האחרון|"
+    r"לאחרונה|בשבועות\s+האחרונים|recent(?:\s+(?:events|period))?|"
+    r"the\s+week|lately)",
     re.IGNORECASE,
 )
 
@@ -358,6 +388,19 @@ def debrief_problems(
     offered_as_a_read = bool(
         _TENTATIVE_READ_RE.search(text) and _INVITES_CORRECTION_RE.search(text)
     )
+    assistant_step = False
+    if is_broad_debrief(request) and not offered_as_a_read:
+        # A question can be perfectly grammatical while doing none of the
+        # thinking.  For a broad opening, require either a read offered for
+        # correction or a scope the assistant has actually chosen.  The latter
+        # must not be conditional on the user selecting the scope first.
+        assistant_step = (
+            bool(_ASSISTANT_STEP_RE.search(text))
+            and not bool(_USER_SELECTION_RE.search(text))
+            and not bool(_CHAT_META_ANCHOR_RE.search(text))
+        )
+        if not assistant_step:
+            issues.append("assistant_did_not_advance")
     for sentence in _SENTENCE_RE.findall(text):
         clean = sentence.strip()
         if not clean or _QUESTION_RE.search(clean):
@@ -366,7 +409,7 @@ def debrief_problems(
             # Hedged and open to correction: thinking, not asserting.
             continue
         specific = _content_tokens(clean)
-        if specific and not (specific & known):
+        if specific and not (specific & known) and not offered_as_a_read and not assistant_step:
             issues.append("unsourced_continuity")
             break
 

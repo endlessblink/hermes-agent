@@ -13051,7 +13051,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 from agent.auxiliary_client import call_llm
 
                                 completion = call_llm(
-                                    task="title_generation",
+                                    task="lifeboat_editor",
                                     messages=messages,
                                     max_tokens=600,
                                     temperature=0.4,
