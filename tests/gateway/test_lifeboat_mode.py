@@ -73,7 +73,7 @@ def test_bare_guidance_is_the_identity_and_the_harm_rules(tmp_path, monkeypatch)
         tmp_path, "bare-test", "היה לי יום קשה"
     )
 
-    assert "close friend" in guidance
+    assert "מכיר אותו שנים" in guidance
     # No shape orders, no length budget, no stance guidance.
     for absent in ("characters and", "sentences.", "signal guidance", "numbered breakdowns"):
         assert absent not in guidance

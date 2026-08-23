@@ -34,7 +34,7 @@ def test_switching_is_one_word(home) -> None:
     lifeboat_voice.ensure_voice_files()
     (home / "lifeboat-voice").write_text("friend\n", encoding="utf-8")
 
-    assert "close friend" in lifeboat_voice.load_voice_text()
+    assert "מכיר אותו שנים" in lifeboat_voice.load_voice_text()
 
 
 def test_switching_back_is_the_same_one_word(home) -> None:
@@ -42,8 +42,8 @@ def test_switching_back_is_the_same_one_word(home) -> None:
     (home / "lifeboat-voice").write_text("coach", encoding="utf-8")
 
     text = lifeboat_voice.load_voice_text()
-    assert "helps him think about his life" in text
-    assert "close friend" not in text
+    assert "לחשוב על החיים שלו" in text
+    assert "מכיר אותו שנים" not in text
 
 
 def test_turning_it_off_is_emptying_the_file(home) -> None:
@@ -85,7 +85,7 @@ def test_the_switch_is_case_and_whitespace_forgiving(home) -> None:
     lifeboat_voice.ensure_voice_files()
     (home / "lifeboat-voice").write_text("  FRIEND \n", encoding="utf-8")
 
-    assert "close friend" in lifeboat_voice.load_voice_text()
+    assert "מכיר אותו שנים" in lifeboat_voice.load_voice_text()
 
 
 def test_a_voice_file_is_shipped_for_each_name(home) -> None:
@@ -95,10 +95,17 @@ def test_a_voice_file_is_shipped_for_each_name(home) -> None:
         assert (home / "lifeboat-voices" / f"{name}.md").is_file()
 
 
-def test_no_voice_hands_the_model_a_hebrew_sentence_to_copy() -> None:
-    """Descriptions of who is speaking, never replies to deliver."""
+def test_no_voice_hands_the_model_a_reply_to_copy() -> None:
+    """Instructions in Hebrew are fine; a deliverable sentence is not.
+
+    The voices are written in Hebrew because English instructions could not
+    govern Hebrew register -- "left him with hard feelings" came back as
+    "נשאר איתך", the therapist idiom. So the old check (no Hebrew at all) is
+    replaced by the thing it was really protecting: no sentence in here may be
+    something the bot could send him as a reply.
+    """
     for text in lifeboat_voice.DEFAULT_VOICES.values():
-        assert not any("֐" <= ch <= "׿" for ch in text)
+        assert "?" not in text and "\u003f" not in text
 
 
 # --- every writer in the chain, not just the first ------------------------
@@ -117,7 +124,7 @@ def test_the_retry_path_speaks_as_the_chosen_person(home, monkeypatch) -> None:
 
     messages = lifeboat_rewrite.build_rewrite_messages("שלום", "טיוטה", "premature_closure")
 
-    assert "close friend" in messages[0]["content"]
+    assert "מכיר אותו שנים" in messages[0]["content"]
 
 
 def test_the_retry_path_is_unchanged_when_no_voice_is_chosen(home) -> None:
@@ -125,7 +132,7 @@ def test_the_retry_path_is_unchanged_when_no_voice_is_chosen(home) -> None:
 
     messages = lifeboat_rewrite.build_rewrite_messages("שלום", "טיוטה", "premature_closure")
 
-    assert "close friend" not in messages[0]["content"]
+    assert "מכיר אותו שנים" not in messages[0]["content"]
 
 
 # --- improving a voice he has not touched ---------------------------------
@@ -144,7 +151,7 @@ def test_an_untouched_voice_is_refreshed_when_the_default_improves(home) -> None
 
     lifeboat_voice.ensure_voice_files()
 
-    assert "What you are for" in path.read_text(encoding="utf-8")
+    assert "מה אתה מחפש" in path.read_text(encoding="utf-8")
 
 
 def test_a_voice_he_edited_is_still_never_touched(home) -> None:
