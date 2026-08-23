@@ -24,8 +24,8 @@ def test_classifies_current_turn_signals_without_diagnosis():
 def test_signal_guidance_is_stance_specific_and_does_not_echo_user_text():
     text = "I am a failure and the same thought keeps looping"
     guidance = build_signal_guidance(text)
-    assert "do not debate the thought" in guidance.lower()
-    assert "separate event, verdict, and action-demand" in guidance
+    assert "do not argue with the thought" in guidance.lower()
+    assert "generic reassurance" in guidance
     assert text not in guidance
 
 
@@ -70,7 +70,7 @@ def test_recent_low_energy_guidance_does_not_present_a_support_menu(tmp_path):
     trajectory = record_lifeboat_trajectory(tmp_path, "session", "אין לי כוח היום")
     guidance = build_signal_guidance("אני עדיין תקוע", trajectory)
 
-    assert "menu of support options" in guidance
+    assert "menu of options" in guidance
     assert "understanding, a tiny action, or simply company" not in guidance
 
 

@@ -257,33 +257,47 @@ def _sanitize_lifeboat_signal_text(text: str | None) -> str:
     return " ".join(value.split()).strip()
 
 
+# What is left after the deletion pass of 2026-08-24.
+#
+# This block had grown to a page: how to hold several threads at once, how to
+# end a reply, when an interpretation may be repeated, how to handle an
+# ambiguous non-response, how to sequence a personal decision. All of it told
+# the model how to build a sentence, and the result was a bot that sounded like
+# a form being filled in. Noam's verdict after a night of it: "it talks like a
+# shrink", "a person talking from far away", "this needs to be rooted out".
+#
+# Every fix attempted from inside that pile moved the failure somewhere else,
+# because the instructions conflict and the model resolves the conflict
+# differently each turn. So the pile is gone rather than tuned.
+#
+# What stays is only what prevents a reply that would actually hurt him, plus
+# the one instruction that is about him rather than about form. Who is speaking
+# is supplied separately, by the voice he chooses, and that is what should be
+# shaping the words.
 _CONVERSATION_CONTRACT = (
-    "Talk with the user; do not package what they said. Engage with what they actually "
-    "raised — when they raise several things at once, stay with more than one of them "
-    "instead of choosing a single angle and dropping the rest. Work in their own words "
-    "and their own specifics rather than therapeutic abstraction, Do not produce numbered "
-    "breakdowns, bulleted layers, framework labels such as \"the core here is\" or "
-    "\"so the conclusion is\", quoted maxims presented as the takeaway, or exercises, "
-    "homework and behavioural experiments unless they explicitly ask for practical "
-    "steps. Do not offer a menu of support options or an either/or question that "
-    "forces a choice between two readings of their experience; an open door is an "
-    "invitation to continue, not a pair of buttons. Do not close on a polished "
-    "summary line; leave the thread alive. If they "
-    "correct you, take the correction and continue from it rather than restating the "
-    "same point more elegantly. Do not repeat an interpretation you have already given "
-     "unless it moves somewhere new. For an ambiguous non-response, separate what is unknown "
-     "from what the user is blaming themselves for; silence is not evidence against them. "
-     "For a personal decision, distinguish a possible opener from genuine interest and finish "
-     "the user's own decomposition before offering advice."
+    "Understand what he actually said before you answer, including short or "
+    "elliptical sentences; if you are not sure what he meant, say so plainly "
+    "rather than answering a guess. Use his words. "
+    "Do not diagnose him, hand him a verdict about himself, teach him a lesson, "
+    "or give him exercises or homework unless he asks for practical steps. "
+    "Do not state as fact anything he has not said. "
+    "No numbered breakdowns, bulleted layers, framework labels, or maxims "
+    "offered as the takeaway. Do not offer a menu of options or an either/or "
+    "question that makes him pick between two readings of his own experience. "
+    "Do not narrate what you are doing, apologise for how you asked something, "
+    "or make him repeat himself. If he corrects you, take it and go on."
 )
 
+
+# Untouched by the deletion pass: he never asked for the daily-summary offer to
+# go, and removing a feature while cutting instructions is how a cleanup turns
+# into a second problem.
 _SUMMARY_CONSENT = (
     "If the conversation has genuinely gathered enough material, or the user seems to "
     "be wrapping up, you may offer a brief optional daily summary and ask permission "
     "before creating or saving it; never start it or prompt for it repeatedly on your "
     "own."
 )
-
 
 def _signal_cautions(
     signals: LifeBoatSignals,
@@ -303,14 +317,9 @@ def _signal_cautions(
             "and do not switch into productivity or self-improvement advice."
         )
     if signals.thought_loop or trajectory.recent_loop_turns:
-        cautions.append(
-            "Do not debate the thought. Thought-record work uses data; do not ask for "
-            "another sentence/deeper cause; advance next missing stage."
-        )
+        cautions.append("Do not argue with the thought.")
     if signals.self_criticism or trajectory.recent_self_criticism_turns:
-        cautions.append(
-            "Avoid generic reassurance; separate event, verdict, and action-demand."
-        )
+        cautions.append("Avoid generic reassurance.")
     return cautions
 
 
@@ -388,7 +397,12 @@ def select_lifeboat_turn_policy(text: str | None) -> LifeBoatTurnPolicy:
     if _ACTION_RE.search(value) or value.endswith(("?", "？")) and len(value) < 180:
         return LifeBoatTurnPolicy("act-or-clarify", 800, True, 5)
     if len(value) < 90:
-        return LifeBoatTurnPolicy("attune", 480, True, 3)
+        # Two sentences, not three. Three is room to stack -- a reaction, a
+        # restatement of what he just said, an interpretation, and a question,
+        # all in one message. He called that muddled and walking around the
+        # point, and he was right: someone texting a friend at 1am sends one
+        # thought, not a paragraph with a colon in it.
+        return LifeBoatTurnPolicy("attune", 260, True, 2)
     return LifeBoatTurnPolicy("explore", 720, True, 4)
 
 

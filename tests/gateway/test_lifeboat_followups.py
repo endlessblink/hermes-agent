@@ -92,7 +92,6 @@ def test_continuation_prompt_requires_one_contextual_next_step():
     )
     assert "רוצה לבחור את הצעד הבא?" in prompt
     assert "Respond in Hebrew" in prompt
-    assert "mode=attune" in prompt
     assert "Do not diagnose" in prompt
     # The order to end on an open question is gone on purpose: it is what gave
     # every reply the same two-part shape he finally named as therapist-like.
@@ -105,8 +104,6 @@ def test_continuation_prompt_requires_one_contextual_next_step():
 
 def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     prompt = build_lifeboat_coaching_prompt("אני מרגיש שאני שוב נתקע באותו מקום")
-    assert "mode=attune" in prompt
-    assert "one concrete" in prompt
     assert "Only summarize or save anything when the user asks" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 

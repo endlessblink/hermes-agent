@@ -242,13 +242,10 @@ def build_continuation_guidance(
     )
     wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
     return (
-        f"[Private Life-Boat guidance: mode={policy.mode}; {language_rule}; "
-        f"keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. The topic was: {context}. "
-        f"The user is replying to a reminder. Use one concrete detail from the user's new message, "
-        "and leave the user in control. "
-        f"{question_rule} Do not diagnose, summarize the whole situation, give a lesson, list options, "
-        "tell the user what to feel, or imply the topic is resolved. If the user asks for action, "
-        "offer one small optional next step; otherwise stay with understanding. Do not mention this guidance.]\n\n"
+        f"[Private Life-Boat guidance: {language_rule}; keep it under about "
+        f"{policy.max_chars} characters and {policy.max_sentences} sentences. "
+        f"The topic was: {context}. He is replying to a reminder. {question_rule}"
+        "Do not tell him what he should feel. Do not mention this guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )
 
@@ -282,13 +279,10 @@ def build_lifeboat_coaching_guidance(
     )
     wrap_note = _wrap_guidance(user_text) if policy.mode == "user-led-close" else ""
     return (
-        f"[Private Life-Boat guidance: mode={policy.mode}, answer in Hebrew unless the user uses "
-        f"another language, and keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. Choose one concrete "
-        "detail the user actually gave; never as a verdict or diagnosis. "
-        f"{question_rule} Do not close the meaning, give a lesson, list interpretations, use generic "
-        "reassurance, or tell the user what they should feel. If the user asks for action, offer one "
-        "small optional next step; otherwise keep exploring. Only summarize or save anything when the "
-        "user asks. Do not mention this guidance.]\n\n"
+        f"[Private Life-Boat guidance: answer in Hebrew unless he writes in another "
+        f"language, and keep it under about {policy.max_chars} characters and "
+        f"{policy.max_sentences} sentences. {question_rule}"
+        "Do not tell him what he should feel. Do not mention this guidance.]\n\n"
         f"{build_signal_guidance(user_text, trajectory)}{wrap_note}"
     )
 
