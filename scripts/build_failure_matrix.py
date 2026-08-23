@@ -83,6 +83,37 @@ was seen, the task that owns it, and a test that fails before the fix and
 passes after. A row without a regression behind it is a wish, and the generator
 refuses to write one.
 
+## Are the gates still reachable?
+
+The per-row regressions prove each gate is correct. They do not prove the
+gateway still calls it. `scripts/lifeboat_stress_matrix.py` drives every row
+through the delivery-time function that is supposed to stop it, and
+`tests/gateway/test_lifeboat_stress_matrix.py` runs it in the suite and fails
+if a row in this file has neither a stress case nor a named reason it cannot
+be driven here.
+
+Three rows cannot be driven by a pure function. LF-05 needs a live turn, and
+LF-12 and LF-13 are properties of the test harness itself. The harness prints
+those by name rather than passing quietly over them.
+
+## The accepted baseline and rolling back
+
+`scripts/lifeboat_baseline.py` freezes the eight files that decide what reaches
+the topic, taken from the installed runtime with a sha256 each. Reverting a
+commit does not undo a bad install -- the installed tree is a separate copy, and
+the gap between the two is what let a gate sit installed with no caller -- so
+the baseline is content, not a revision.
+
+    lifeboat_baseline.py verify              is the runtime what we accepted?
+    lifeboat_baseline.py restore --dry-run   what would rolling back change?
+    lifeboat_baseline.py restore             put the accepted bytes back
+    lifeboat_baseline.py freeze --label ...  accept what is running now
+
+Restoring never restarts the gateway; that stays deliberate.
+`tests/gateway/test_lifeboat_baseline.py` exercises freeze, drift, restore and
+dry-run against a temporary tree, so the rollback is tested rather than
+promised.
+
 ## What this does not cover
 
 Semantic quality across a whole conversation -- whether a reply genuinely
