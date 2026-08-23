@@ -32,16 +32,21 @@ test.
 1. **Adaptive back-off.** A subject not engaged with waits longer each time it
    could resurface; at a month it stops being offered but is never forgotten.
    Explicit dismissal drops it permanently.
-2. **The 41 review-log patterns.** Each one that can be stated deterministically
-   becomes a rule the pre-send reviewer enforces.
-3. **A correction affordance.** A lightweight way to mark a reply wrong that
+2. **A correction affordance.** A lightweight way to mark a reply wrong that
    feeds the back-off and the pattern note, so corrections teach instead of
    evaporating.
-4. **Stress testing.** The adversarial replay exists and passes 60 scenarios;
-   extend it to the failure-matrix cases and run it before each deploy.
-5. **Inbound coalescing.** Rapid consecutive messages should form one turn.
+3. **Blind A/B against the baseline.** The baseline is frozen and the rollback
+   is tested; comparing a candidate against it through an independent path is
+   the last piece of the release gate.
+4. **Inbound coalescing.** Rapid consecutive messages should form one turn.
    Written on the recovery branch, not salvaged: it touches modules main has
    moved past and needs redoing against current code.
+
+The review-log patterns and the stress matrix came off this list on
+2026-08-23. Twelve of the twenty-six patterns are now decided by a check that
+runs before delivery and fourteen carry a recorded reason no check can decide
+them; every failure-matrix row is driven through the gate that stops it, and
+the suite fails if a row loses its gate or a new pattern arrives unowned.
 
 ## Waiting on Noam, not on work
 
