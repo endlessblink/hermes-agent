@@ -317,7 +317,8 @@ def check(situation: Situation, bundle: str) -> Result:
         result.failures.append("material appeared where there should be none")
 
     # The voices are written in Hebrew now, so the markers are too.
-    marker = {"friend": "מכיר אותו שנים", "coach": "לחשוב על החיים שלו"}.get(
+    marker = {"friend": "known him for years",
+              "coach": "helps him think about his life"}.get(
         situation.voice or "friend"
     )
     if marker and marker not in bundle:

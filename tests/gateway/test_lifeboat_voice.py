@@ -34,7 +34,7 @@ def test_switching_is_one_word(home) -> None:
     lifeboat_voice.ensure_voice_files()
     (home / "lifeboat-voice").write_text("friend\n", encoding="utf-8")
 
-    assert "מכיר אותו שנים" in lifeboat_voice.load_voice_text()
+    assert "known him for years" in lifeboat_voice.load_voice_text()
 
 
 def test_switching_back_is_the_same_one_word(home) -> None:
@@ -42,8 +42,8 @@ def test_switching_back_is_the_same_one_word(home) -> None:
     (home / "lifeboat-voice").write_text("coach", encoding="utf-8")
 
     text = lifeboat_voice.load_voice_text()
-    assert "לחשוב על החיים שלו" in text
-    assert "מכיר אותו שנים" not in text
+    assert "helps him think about his life" in text
+    assert "known him for years" not in text
 
 
 def test_turning_it_off_is_emptying_the_file(home) -> None:
@@ -85,7 +85,7 @@ def test_the_switch_is_case_and_whitespace_forgiving(home) -> None:
     lifeboat_voice.ensure_voice_files()
     (home / "lifeboat-voice").write_text("  FRIEND \n", encoding="utf-8")
 
-    assert "מכיר אותו שנים" in lifeboat_voice.load_voice_text()
+    assert "known him for years" in lifeboat_voice.load_voice_text()
 
 
 def test_a_voice_file_is_shipped_for_each_name(home) -> None:
@@ -93,6 +93,36 @@ def test_a_voice_file_is_shipped_for_each_name(home) -> None:
 
     for name in lifeboat_voice.DEFAULT_VOICES:
         assert (home / "lifeboat-voices" / f"{name}.md").is_file()
+
+
+#: Hebrew that describes how to sound is safe. Hebrew that could be sent to him
+#: is not: hand the model a Hebrew sentence and it will deliver that sentence.
+def test_no_hebrew_in_a_voice_could_be_sent_as_a_message() -> None:
+    """The regression, named. On 2026-08-24 the voice said, in Hebrew, to ask
+    whether something significant happened, whether something caused hard
+    feelings, or whether something was stuck in a loop -- and the bot sent him
+    exactly that, as a question. His words: "I don't want hardcoding!!!"
+
+    Hebrew survives here only where it cannot be lifted: the register rules,
+    which are a list of things not to say.
+    """
+    for name, text in lifeboat_voice.DEFAULT_VOICES.items():
+        for line in text.splitlines():
+            if not any("֐" <= ch <= "׿" for ch in line):
+                continue
+            assert "?" not in line, f"{name}: a deliverable question: {line!r}"
+            # A Hebrew line is allowed only when it is telling the bot what not
+            # to say. Anything else is phrasing it can hand to him.
+            assert "אל תשתמש" in line or "לא ״" in line or "כתוב" in line, (
+                f"{name}: Hebrew that is not a register rule can be copied: {line!r}"
+            )
+
+
+def test_the_things_it_looks_for_are_not_written_in_hebrew() -> None:
+    """Content in Hebrew gets delivered; content in English must be reworded."""
+    for name, text in lifeboat_voice.DEFAULT_VOICES.items():
+        assert "significant" in text, f"{name}: what it looks for should be English"
+        assert "משמעותי" not in text, f"{name}: that phrasing will come back verbatim"
 
 
 def test_no_voice_hands_the_model_a_reply_to_copy() -> None:
@@ -124,7 +154,7 @@ def test_the_retry_path_speaks_as_the_chosen_person(home, monkeypatch) -> None:
 
     messages = lifeboat_rewrite.build_rewrite_messages("שלום", "טיוטה", "premature_closure")
 
-    assert "מכיר אותו שנים" in messages[0]["content"]
+    assert "known him for years" in messages[0]["content"]
 
 
 def test_the_retry_path_is_unchanged_when_no_voice_is_chosen(home) -> None:
@@ -132,7 +162,7 @@ def test_the_retry_path_is_unchanged_when_no_voice_is_chosen(home) -> None:
 
     messages = lifeboat_rewrite.build_rewrite_messages("שלום", "טיוטה", "premature_closure")
 
-    assert "מכיר אותו שנים" not in messages[0]["content"]
+    assert "known him for years" not in messages[0]["content"]
 
 
 # --- improving a voice he has not touched ---------------------------------
@@ -151,7 +181,7 @@ def test_an_untouched_voice_is_refreshed_when_the_default_improves(home) -> None
 
     lifeboat_voice.ensure_voice_files()
 
-    assert "מה אתה מחפש" in path.read_text(encoding="utf-8")
+    assert "What you are looking for" in path.read_text(encoding="utf-8")
 
 
 def test_a_voice_he_edited_is_still_never_touched(home) -> None:

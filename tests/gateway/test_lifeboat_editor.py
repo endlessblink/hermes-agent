@@ -46,12 +46,24 @@ def test_the_editor_is_told_plainly_when_there_is_no_material() -> None:
     assert "MATERIAL: none available" in joined
 
 
-def test_the_editor_prompt_hands_over_no_hebrew_sentence_to_reuse() -> None:
-    """A supplied example is the template returning through the back door."""
+def test_the_editor_prompt_hands_over_no_sentence_to_reuse() -> None:
+    """A supplied example is the template returning through the back door.
+
+    The check used to be "no Hebrew at all in the prompt". That stopped working
+    when the identity was rewritten in Hebrew -- which was done deliberately,
+    because English instructions could not govern Hebrew register. Hebrew
+    instructions are fine; a Hebrew sentence the bot could send him is not, so
+    the test now asserts the thing it was really protecting.
+    """
     joined = " ".join(m["content"] for m in build_editor_messages(USER, BLAND, material=MATERIAL))
     prompt_only = joined.replace(USER, "").replace(BLAND, "").replace(MATERIAL, "")
 
-    assert not any("֐" <= ch <= "׿" for ch in prompt_only)
+    hebrew_lines = [
+        line for line in prompt_only.splitlines()
+        if any("֐" <= ch <= "׿" for ch in line)
+    ]
+    for line in hebrew_lines:
+        assert "?" not in line, f"a deliverable question reached the prompt: {line!r}"
 
 
 def test_the_editor_brief_counts_a_chosen_concrete_step_as_progress() -> None:
