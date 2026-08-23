@@ -43,6 +43,16 @@ emotional.
       correction only moved the failure somewhere new. It now opens with how to
       lead a conversation, and the two harmful lines are gone.
 
+- [x] The bot's transcript is written where its readers look. Every check that
+      claimed to verify behaviour from the real conversation was reading a
+      folder the Telegram bot never wrote to — the hook that writes transcripts
+      was never given the chat or topic, so the routing that already existed
+      could not match.
+- [x] Life-Boat's scattered code brought under one roof. The
+      emotional-candidate-capture plugin's only source was untracked inside a
+      stale working copy while the plugin runs live; deleting that copy would
+      have destroyed it.
+
 ## Known hole
 
 - [ ] When a rejected reply is rewritten and the rewrite also fails, the model's
