@@ -199,6 +199,13 @@ def _offers_a_read(candidate: str) -> bool:
 def asks_him_to_narrate_his_interior(candidate: str) -> bool:
     """True when the reply asks what went on inside him and guesses nothing.
 
+    No longer enforced. It was added as a hard failure after one bad reply, and
+    then Noam said plainly: "I want it to ask me questions, just to feel like a
+    close person" -- and separately, "bans are not the solution". A gate that
+    blocks a whole class of question he wants is the mistake this project keeps
+    making. Kept as a description because the wording is still worth naming in
+    review; not used to reject anything.
+
     The same question is legitimate once the assistant has committed to a read:
     then it is checking its own thinking, not outsourcing it.
     """
@@ -247,8 +254,6 @@ def unsafe_draft_reason(candidate: str, user_text: str, material: str = "") -> s
         return "unsupported_temporal_anchor"
     if _has_therapist_handoff(candidate):
         return "therapist_handoff"
-    if asks_him_to_narrate_his_interior(candidate):
-        return "interior_interrogation"
     return ""
 
 

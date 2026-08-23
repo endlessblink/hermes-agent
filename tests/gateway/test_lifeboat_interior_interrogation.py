@@ -55,7 +55,6 @@ ABOUT_THE_WORLD = [
 @pytest.mark.parametrize("reply", INTERROGATIONS)
 def test_asking_him_to_report_his_interior_is_caught(reply: str) -> None:
     assert asks_him_to_narrate_his_interior(reply) is True
-    assert unsafe_draft_reason(reply, HIS_MESSAGE) == "interior_interrogation"
 
 
 @pytest.mark.parametrize("reply", READS_THEN_ASKS)
@@ -69,11 +68,16 @@ def test_questions_about_what_happened_stay_legal(reply: str) -> None:
     assert unsafe_draft_reason(reply, HIS_MESSAGE) == ""
 
 
-def test_the_exact_delivered_reply_would_now_be_revised() -> None:
-    """The regression, named so it cannot return quietly."""
+def test_the_interior_question_is_described_but_not_blocked() -> None:
+    """It is named for review, never rejected.
+
+    Enforcing it was a mistake: he wants the bot to ask him things. Blocking a
+    whole class of question is the move this project keeps repeating.
+    """
     delivered = (
         "קיבלת שני מספרים, ובכל זאת החלטת לא לפנות—מה קרה אצלך בין קבלת המספרים "
         "להחלטה הזאת?"
     )
 
-    assert unsafe_draft_reason(delivered, HIS_MESSAGE) == "interior_interrogation"
+    assert asks_him_to_narrate_his_interior(delivered) is True
+    assert unsafe_draft_reason(delivered, HIS_MESSAGE) == ""

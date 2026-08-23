@@ -158,6 +158,12 @@ def _read_journal(limit: int = 5):
         return []
 
 
+def _today() -> str:
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y-%m-%d")
+
+
 def build_turn_context(
     *,
     transcript_dir: Path | None = None,
@@ -167,6 +173,7 @@ def build_turn_context(
 ) -> str:
     """Assemble the material this turn may draw on, or an empty string."""
     parts: list[str] = []
+    today = _today()
     try:
         from gateway.lifeboat_context_sources import build_context_block
 
@@ -181,7 +188,17 @@ def build_turn_context(
     except Exception:
         logger.debug("Life-Boat written context unavailable", exc_info=True)
 
-    turns = recent_user_turns(transcript_dir, legacy_dir=legacy_dir)
+    # Today's turns are the conversation he is having right now; they already
+    # reach the model as conversation history. Handing them back a second time
+    # under a heading that calls them historical fragments and warns "do not
+    # treat them as current" tells the bot that what he said a minute ago is
+    # old, unrelated material -- which is a good way to make it circle back over
+    # ground he has already covered. Material means what it cannot see.
+    turns = tuple(
+        (stamp, line)
+        for stamp, line in recent_user_turns(transcript_dir, legacy_dir=legacy_dir)
+        if str(stamp)[:10] != today
+    )
     if turns:
         said = "\n".join(f"- {stamp[:10]}: {line}" for stamp, line in turns)
         parts.append(

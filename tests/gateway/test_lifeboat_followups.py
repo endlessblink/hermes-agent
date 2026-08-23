@@ -104,7 +104,8 @@ def test_continuation_prompt_requires_one_contextual_next_step():
 
 def test_ordinary_lifeboat_prompt_keeps_inquiry_open():
     prompt = build_lifeboat_coaching_prompt("אני מרגיש שאני שוב נתקע באותו מקום")
-    assert "Only summarize or save anything when the user asks" in prompt
+    # Same guarantee, now stated once in the signal guidance rather than twice.
+    assert "ask permission before creating or saving it" in prompt
     assert "אני מרגיש" not in build_lifeboat_coaching_guidance()
 
 
