@@ -126,3 +126,32 @@ def test_the_retry_path_is_unchanged_when_no_voice_is_chosen(home) -> None:
     messages = lifeboat_rewrite.build_rewrite_messages("שלום", "טיוטה", "premature_closure")
 
     assert "close friend" not in messages[0]["content"]
+
+
+# --- improving a voice he has not touched ---------------------------------
+
+def test_an_untouched_voice_is_refreshed_when_the_default_improves(home) -> None:
+    """Otherwise an improvement stays in the source and never reaches him.
+
+    The purpose paragraph was added to the shipped voices and did nothing,
+    because the files already existed and the writer refused to overwrite.
+    """
+    from gateway.lifeboat_voice import SUPERSEDED_DEFAULTS
+
+    lifeboat_voice.ensure_voice_files()
+    path = home / "lifeboat-voices" / "friend.md"
+    path.write_text(SUPERSEDED_DEFAULTS[0] + "\n", encoding="utf-8")
+
+    lifeboat_voice.ensure_voice_files()
+
+    assert "What you are for" in path.read_text(encoding="utf-8")
+
+
+def test_a_voice_he_edited_is_still_never_touched(home) -> None:
+    lifeboat_voice.ensure_voice_files()
+    path = home / "lifeboat-voices" / "friend.md"
+    path.write_text("You are Dana. You have known him since the army.", encoding="utf-8")
+
+    lifeboat_voice.ensure_voice_files()
+
+    assert path.read_text(encoding="utf-8") == "You are Dana. You have known him since the army."

@@ -51,6 +51,9 @@ class Situation:
     notes: str = ""
     #: Run this situation with the wrapper removed.
     bare: bool = False
+    #: Which voice is active, or "" for none. The identity now does most of the
+    #: work, and nothing was checking that it survives across situations.
+    voice: str = ""
 
 
 @dataclass
@@ -88,77 +91,150 @@ def _turn_log(entries: list[tuple[datetime, str]]) -> str:
     return "\n".join(blocks)
 
 
-def _situations() -> list[Situation]:
-    now = datetime.now()
+#: The things he actually writes, grouped by the kind of turn they are. Every
+#: line here is either taken from a real failure or written to match the shape
+#: of one. Twelve situations was not enough -- his words -- because the bundle
+#: is assembled from several moving parts and the faults live in the
+#: combinations, not in any single piece.
+_MESSAGES: dict[str, list[str]] = {
+    "opening a debrief": [
+        "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה",
+        "אני רוצה לעשות דיבריף על היומיים האחרונים",
+        "בוא נעשה דיבריף",
+        "אני רוצה אחד כללי, לא ביקשתי לחזור לזה ספציפית",
+    ],
+    "telling him something that happened": [
+        "אחרי הספידייט החלטתי לא לפנות לאף אחת למרות שנתנו לי שני מספרים",
+        "כמעט לא יצאתי מהבית השבוע",
+        "נפגשתי איתה אתמול והתבאסתי",
+        "הגשתי מועמדות למשהו והיה שקט מאז",
+    ],
+    "vague or stuck": [
+        "לא יודע",
+        "לא יודע, פשוט לא התחשק לי",
+        "לא יודע מאיפה להתחיל",
+        "אולי",
+    ],
+    "correcting the bot": [
+        "לא, זה לא בדיוק מה שאמרתי",
+        "מה ימשיך? לא היה כלום",
+        "זה לא מה שאמרתי",
+        "שוב אתה מפיל עליי את האחריות",
+    ],
+    "elliptical": [
+        "מה שאמרתי שביאס",
+        "כמו קודם",
+        "אותו דבר",
+    ],
+    "self-judgment": [
+        "אני מרגיש שאני מאכזב את כולם",
+        "אני שוב נתקע באותו מקום",
+        "אני כישלון בזה",
+    ],
+    "asking for something": [
+        "מה אתה חושב שכדאי לי לעשות?",
+        "תעזור לי לסדר את זה",
+        "אני צריך עצה",
+    ],
+    "wrapping up": [
+        "בוא נעצור כאן",
+        "מספיק להיום",
+        "אני הולך לישון",
+    ],
+    "long and multi-threaded": [
+        "אני רוצה לעבד את מה שדיברנו עליו אתמול וגם את זה שהגשתי מועמדות והיה שקט "
+        "מאז ואיך שאני שוב הופך את זה לגזר דין על עצמי, וגם הגיל, וגם שכולם סביבי זזים",
+    ],
+    "not in Hebrew": [
+        "I had a rough day",
+        "can we talk about yesterday",
+    ],
+}
+
+
+def _histories(now: datetime) -> dict[str, str]:
+    """The material states a turn can arrive in."""
     old = now - timedelta(hours=6)
+    older = now - timedelta(days=2)
     live = now - timedelta(minutes=3)
+    return {
+        "with older material": _turn_log(
+            [
+                (older, "אחרי הספידייט החלטתי לא לפנות לאף אחת"),
+                (old, "אף אחת מהן לא הלהיבה אותי"),
+                (old + timedelta(minutes=1), "כמעט לא יצאתי מהבית"),
+            ]
+        ),
+        "mid conversation": _turn_log(
+            [
+                (old, "אחרי הספידייט החלטתי לא לפנות לאף אחת"),
+                (live, "לא יודע"),
+                (live + timedelta(seconds=30), "מה שאמרתי שביאס"),
+            ]
+        ),
+        "only the live exchange": _turn_log([(live, "לא יודע")]),
+        "no history": "",
+    }
 
-    fresh = _turn_log(
-        [
-            (old, "אחרי הספידייט החלטתי לא לפנות לאף אחת"),
-            (old + timedelta(minutes=2), "אף אחת מהן לא הלהיבה אותי"),
-        ]
-    )
-    mid = fresh + _turn_log(
-        [(live, "לא יודע"), (live + timedelta(seconds=30), "מה שאמרתי שביאס")]
-    )
-    only_live = _turn_log([(live, "לא יודע")])
 
-    return [
-        Situation(
-            "fresh conversation, older turns exist",
-            "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה",
-            transcript=fresh,
-            expect_material=True,
-            notes="the regression that produced a blank question about work",
-        ),
-        Situation(
-            "mid conversation",
-            "לא יודע",
-            transcript=mid,
-            expect_material=True,
-            notes="older turns are material; the live exchange is not",
-        ),
-        Situation(
-            "nothing but the live exchange",
-            "לא יודע",
-            transcript=only_live,
-            expect_material=False,
-            notes="an empty hand is correct here, and must not crash",
-        ),
-        Situation(
-            "no history at all",
-            "היה לי יום קשה",
-            transcript="",
-            expect_material=False,
-        ),
-        Situation("a correction", "לא, זה לא מה שאמרתי", transcript=fresh),
-        Situation("an elliptical reply", "מה שאמרתי שביאס", transcript=fresh),
-        Situation("a debrief request", "בוא נעשה דיבריף", transcript=fresh),
-        Situation("distress", "אני מרגיש שאני מאכזב את כולם", transcript=fresh),
-        Situation("a request to stop", "בוא נעצור כאן", transcript=fresh),
-        # Bare mode has to be checked too: he can switch it on with one word,
-        # and a mode nobody checks is a mode that breaks quietly.
-        Situation(
-            "bare mode, fresh conversation",
-            "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה",
-            transcript=fresh,
-            expect_material=False,
-            bare=True,
-            notes="no per-turn bundle at all; identity and harm rules only",
-        ),
-        Situation(
-            "bare mode, distress",
-            "אני מרגיש שאני מאכזב את כולם",
-            transcript=fresh,
-            expect_material=False,
-            bare=True,
-        ),
-        Situation("a long multi-thread message",
-                  "אני רוצה לעבד את מה שדיברנו עליו אתמול וגם את זה שהגשתי מועמדות "
-                  "והיה שקט מאז ואיך שאני שוב הופך את זה לגזר דין על עצמי",
-                  transcript=fresh),
-    ]
+def _situations() -> list[Situation]:
+    """The full matrix: kinds of turn x material state x wrapper mode."""
+    now = datetime.now()
+    histories = _histories(now)
+    situations: list[Situation] = []
+
+    for kind, messages in _MESSAGES.items():
+        for index, message in enumerate(messages):
+            # Rotate the material state across the messages of each kind, so
+            # every kind is seen against more than one history without the
+            # matrix exploding.
+            state_name = list(histories)[index % len(histories)]
+            transcript = histories[state_name]
+            expect = None
+            if state_name == "with older material":
+                expect = True
+            elif state_name in ("no history", "only the live exchange"):
+                expect = False
+            situations.append(
+                Situation(
+                    f"{kind} / {state_name}",
+                    message,
+                    transcript=transcript,
+                    expect_material=expect,
+                )
+            )
+
+    # Bare mode over one message of every kind: he can switch it on with a
+    # single word, and a mode nobody checks is a mode that breaks quietly.
+    for kind, messages in _MESSAGES.items():
+        situations.append(
+            Situation(
+                f"bare / {kind}",
+                messages[0],
+                transcript=histories["with older material"],
+                expect_material=False,
+                bare=True,
+            )
+        )
+
+    # Who is speaking, across the kinds of turn where register has actually
+    # failed. A voice that reaches the bundle in one situation and not another
+    # is the fault that made the bot sound like a clinician while a friend
+    # identity sat in a file doing nothing.
+    for voice in ("friend", "coach", ""):
+        for kind in ("opening a debrief", "self-judgment", "correcting the bot",
+                     "elliptical", "vague or stuck"):
+            situations.append(
+                Situation(
+                    f"voice={voice or 'none'} / {kind}",
+                    _MESSAGES[kind][0],
+                    transcript=histories["with older material"],
+                    expect_material=True,
+                    voice=voice,
+                )
+            )
+
+    return situations
 
 
 def _bundle(situation: Situation, home: Path) -> str:
@@ -171,10 +247,19 @@ def _bundle(situation: Situation, home: Path) -> str:
     mode_file.write_text("bare" if situation.bare else "wrapped", encoding="utf-8")
     lifeboat_mode.MODE_FILE = mode_file
 
+    from gateway import lifeboat_voice
+
+    original_active, original_dir = lifeboat_voice.ACTIVE_FILE, lifeboat_voice.VOICE_DIR
+    lifeboat_voice.ACTIVE_FILE = home / "lifeboat-voice"
+    lifeboat_voice.VOICE_DIR = home / "lifeboat-voices"
+    lifeboat_voice.ensure_voice_files()
+    lifeboat_voice.ACTIVE_FILE.write_text(situation.voice or "friend", encoding="utf-8")
+
     try:
         return _assemble(situation, home, lifeboat_turn_context)
     finally:
         lifeboat_mode.MODE_FILE = original_mode
+        lifeboat_voice.ACTIVE_FILE, lifeboat_voice.VOICE_DIR = original_active, original_dir
 
 
 def _assemble(situation: Situation, home: Path, lifeboat_turn_context) -> str:
@@ -230,6 +315,12 @@ def check(situation: Situation, bundle: str) -> Result:
         )
     if situation.expect_material is False and has_material:
         result.failures.append("material appeared where there should be none")
+
+    marker = {"friend": "close friend", "coach": "helps him think about his life"}.get(
+        situation.voice or "friend"
+    )
+    if marker and marker not in bundle:
+        result.failures.append(f"the chosen voice never reached the bundle ({situation.voice or 'friend'})")
 
     if situation.bare:
         for order in ("sentences.", "characters and", "signal guidance"):
