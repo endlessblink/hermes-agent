@@ -117,16 +117,25 @@ def test_a_rejected_draft_is_replaced_by_the_models_rewrite() -> None:
     assert reason == "rewritten"
 
 
-def test_a_rewrite_that_also_fails_review_still_delivers_the_models_words() -> None:
-    """Never invent prose; deliver what the model said and record it."""
+def test_a_rewrite_that_also_fails_review_is_not_delivered_as_a_third_attempt() -> None:
+    """Two failures in a row are not a reply; say there is no read instead.
+
+    This used to deliver the second failed draft, on the reasoning that the
+    model's own words beat invented prose. That reasoning held while the only
+    alternative was a stock coaching sentence. The admission is not one: it is
+    true, it is rate limited per session, and Noam chose it over receiving a
+    reply that had already failed twice.
+    """
+    from gateway.lifeboat_editor import NO_READ_TEXT
+
     second_draft = "מספיק להיום, סיימנו."
 
     delivered, reason = resolve_reply(
         LOOP_USER, CLOSING_REPLY, rewrite=lambda *a, **k: second_draft
     )
 
-    assert delivered == second_draft
-    assert reason == "rewrite_rejected"
+    assert delivered == NO_READ_TEXT
+    assert reason == "no_read"
 
 
 def test_an_unavailable_rewrite_falls_back_to_the_original_draft() -> None:

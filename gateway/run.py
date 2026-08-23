@@ -13041,6 +13041,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # draft goes back to the model with the reason named;
                         # the gate never writes a replacement of its own.
                         try:
+                            from gateway.lifeboat_editor import (
+                                bump_delivery_count,
+                                editor_enabled,
+                            )
                             from gateway.lifeboat_rewrite import resolve_reply
 
                             def _lifeboat_rewrite(messages):
@@ -13055,10 +13059,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 )
                                 return completion.choices[0].message.content or ""
 
+                            def _lifeboat_edit(messages):
+                                from agent.auxiliary_client import call_llm
+
+                                # Its own auxiliary task so the model can be
+                                # changed in config without touching code.
+                                # Unset, it resolves to the main model -- this
+                                # is the writing seat, not a cheap side call.
+                                completion = call_llm(
+                                    task="lifeboat_editor",
+                                    messages=messages,
+                                    max_tokens=800,
+                                    temperature=0.6,
+                                    timeout=45,
+                                )
+                                return completion.choices[0].message.content or ""
+
+                            # The same material the turn was given on the way
+                            # in. Without it the editor is as blind as the
+                            # draft it is correcting, and blind produces bland.
+                            _lifeboat_material = ""
+                            try:
+                                from gateway.lifeboat_turn_context import build_turn_context
+
+                                _lifeboat_material = build_turn_context()
+                            except Exception:
+                                logger.debug(
+                                    "Life-Boat editor material unavailable", exc_info=True
+                                )
+
                             _lifeboat_delivered, _review_outcome = resolve_reply(
                                 _lifeboat_user_text,
                                 _lifeboat_delivered,
                                 rewrite=_lifeboat_rewrite,
+                                edit=_lifeboat_edit if editor_enabled() else None,
+                                material=_lifeboat_material,
+                                profile_home=_lifeboat_home,
+                                session_key=_lifeboat_key,
+                                deliveries=bump_delivery_count(
+                                    _lifeboat_home, _lifeboat_key
+                                ),
                             )
                             if _review_outcome != "accepted":
                                 logger.info(

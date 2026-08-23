@@ -1652,6 +1652,15 @@ DEFAULT_CONFIG = {
             "extra_body": {},
             "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
         },
+        "lifeboat_editor": {
+            "provider": "auto",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 45,
+            "extra_body": {},
+            "reasoning_effort": "",  # the editor writes the reply he reads; give it room to think
+        },
         "title_generation": {
             "provider": "auto",
             "model": "",

@@ -1,16 +1,23 @@
-"""Reject a bad Life-Boat draft, then ask the model for a better one.
+"""Decide which words the Life-Boat topic actually delivers.
 
 An independent reviewer already existed here but was never wired in, and when
 it rejected a reply it substituted a sentence of its own -- including a stock
 coaching question, the exact behaviour deleted under BUG-6. Its judgement is
-worth keeping. Its replacements are not: prose written by the gate is how the
+worth keeping. Its replacements were not: prose written by the gate is how the
 same sentence ended up in the conversation eight times in one afternoon.
 
-So the reviewer returns a verdict and nothing else. A rejected draft goes back
-to the model with the specific problem named, once. If that rewrite is
-unavailable, empty, or fails review in turn, the model's own words are
-delivered and the outcome is recorded. Never a sentence this module invented,
-and never silently.
+For a while the conclusion drawn from that was "never write anything", and it
+left the gate able to reject and unable to improve. Worse, the replies that
+failed him were never rejected at all -- a gentle question about his life in
+general breaks no rule and carries no thought about him. So an editing agent
+now runs on every draft (``gateway.lifeboat_editor``), with the material this
+turn assembled about him, and may rewrite freely.
+
+The protection is kept and moved rather than dropped. This module holds no
+sentence of any reply. An edit that fails review never replaces a draft that
+passed. And when nothing survives, the bot says plainly that it has no read --
+the one fixed sentence in the system, rate limited per session so it cannot
+become a repeated line. Nothing here is ever delivered silently.
 """
 
 from __future__ import annotations
@@ -108,22 +115,70 @@ def resolve_reply(
     draft: str,
     *,
     rewrite: Callable[[list[dict[str, str]]], str],
+    edit: Callable[[list[dict[str, str]]], str] | None = None,
+    material: str = "",
+    profile_home=None,
+    session_key: str = "",
+    deliveries: int = 1,
 ) -> tuple[str, str]:
-    """Return the text to deliver and why, after review and at most one rewrite.
+    """Return the text to deliver and why.
 
-    ``rewrite`` is injected so the decision is testable without a model: it
-    receives the request messages and returns the model's revised text.
+    The order matters and is the whole point of this module. The editor runs on
+    *every* draft, not only on one the reviewer rejected, because the replies
+    that actually failed him passed every rule: a gentle, well-formed question
+    about his life in general breaks nothing and says nothing. A gate that only
+    blocks cannot reach that reply, and each rule added to make it try pushed
+    the model further toward emptiness.
+
+    Two guards keep an editor from being worse than no editor. It never
+    replaces a draft that passed review with one that does not -- so the worst
+    case of editing a good reply is the good reply. And when nothing survives
+    review, the bot says plainly that it has no read rather than delivering a
+    third failed attempt; that admission is rate limited so it cannot become a
+    repeated line.
+
+    ``rewrite`` and ``edit`` are injected so every branch is testable without a
+    model call.
     """
     text = str(draft or "")
     if not text.strip():
         return text, "accepted"
 
     verdict = review_verdict(user_text, text)
+
+    if edit is not None:
+        from gateway.lifeboat_editor import edit_reply
+
+        result = edit_reply(
+            user_text,
+            text,
+            edit=edit,
+            material=material,
+            reason="" if verdict.accepted else verdict.reason,
+        )
+        if result.available and result.changed:
+            edited_verdict = review_verdict(user_text, result.text)
+            if edited_verdict.accepted:
+                logger.info(
+                    "Life-Boat editor rewrote a draft draft_accepted=%s %s",
+                    verdict.accepted,
+                    edited_verdict.receipt,
+                )
+                return result.text, "edited"
+            # An edit that fails review is worth less than a draft that passed.
+            if verdict.accepted:
+                logger.info(
+                    "Life-Boat edit rejected reason=%s; keeping the draft",
+                    edited_verdict.reason,
+                )
+                return text, "draft_kept"
+
     if verdict.accepted:
         return text, "accepted"
 
     logger.info("Life-Boat reviewer rejected a draft %s", verdict.receipt)
 
+    revised = ""
     for _ in range(_MAX_REWRITES):
         try:
             revised = str(rewrite(build_rewrite_messages(user_text, text, verdict.reason)) or "")
@@ -147,12 +202,24 @@ def resolve_reply(
             logger.info("Life-Boat rewrite accepted %s", second.receipt)
             return revised, "rewritten"
 
-        # The model was asked and answered. Its words go out, not ours.
         logger.info(
             "Life-Boat rewrite_rejected first=%s second=%s message_content=redacted",
             verdict.reason,
             second.reason,
         )
-        return revised, "rewrite_rejected"
+        break
+    else:
+        return text, "rewrite_unavailable"
 
-    return text, "rewrite_unavailable"
+    # Nothing survived review. Rather than deliver a third failed attempt, say
+    # so -- and only if that admission has not just been used.
+    from gateway.lifeboat_editor import NO_READ_TEXT, no_read_allowed, record_no_read
+
+    if no_read_allowed(profile_home, session_key, deliveries=deliveries):
+        record_no_read(profile_home, session_key, deliveries=deliveries)
+        logger.info("Life-Boat delivered the no-read admission instead of a failed draft")
+        return NO_READ_TEXT, "no_read"
+
+    # Used too recently. A repeated fixed sentence is the older, worse bug, so
+    # the model's own words go out instead.
+    return revised, "rewrite_rejected"

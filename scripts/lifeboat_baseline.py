@@ -37,6 +37,7 @@ GATE_FILES = (
     "gateway/lifeboat_surface.py",
     "gateway/lifeboat_reviewer.py",
     "gateway/lifeboat_rewrite.py",
+    "gateway/lifeboat_editor.py",
     "gateway/lifeboat_reentry.py",
     "gateway/lifeboat_contracts.py",
     "gateway/lifeboat_modes.py",

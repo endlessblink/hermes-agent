@@ -85,3 +85,37 @@ emotional.
 
 - Correcting the life areas map if the seeded list is wrong.
 - Whether the emotional side should ever see task data (today: never).
+
+## 2026-08-23 evening — the editing reviewer, built
+
+Noam asked three times for reviewer agents that can *edit* the reply, not only
+veto it. It now exists (`gateway/lifeboat_editor.py`), designed with him first:
+
+- It runs on **every** draft, not only rejected ones. That was the decisive
+  point: the replies he complained about broke no rule. "כשאתה מסתכל על התקופה
+  האחרונה בכללותה, איך אתה מרגיש שעברת אותה?" passes every gate and says
+  nothing, so a reviewer that can only reject could never have reached it.
+- It gets the material the turn already assembled about him
+  (`build_turn_context`), which the old rewrite path never did — the retry was
+  as blind as the draft, and blind produces bland.
+- Its brief is the shape agreed with him: one hedged read, then one question
+  that tests it. No example sentence appears in the prompt; a supplied sentence
+  is how a template returns.
+- **BUG-6 protection kept and moved, not dropped.** No reply text lives in this
+  code. An edit that fails review never replaces a draft that passed. When
+  nothing survives, the bot says plainly it has no read — one fixed sentence,
+  rate limited to once per six deliveries per session, so it cannot become the
+  eighth delivery of the same line.
+- Kill switch: `touch ~/.hermes/lifeboat-editor-off` disables it instantly, no
+  restart. Deleting the file re-enables.
+- Model: new `auxiliary.lifeboat_editor` task. Unset it resolves to the main
+  model (`gpt-5.6-sol`), deliberately — this is the writing seat.
+
+Not verified behaviourally. The plumbing is proven (560 tests, and the
+installed tree checked directly), but no real edited reply has been read,
+because that needs live calls on his account. `scripts/lifeboat_sandbox_replay.py
+--live` is the honest next step, and it is his to authorise.
+
+Open and worth doing: `agent.reasoning_effort` is `low` in `~/.hermes/config.yaml`.
+That is global, it makes every reply fast and shallow, and it is a config lever
+rather than another prohibition. Untested.

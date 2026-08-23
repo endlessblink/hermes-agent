@@ -43,6 +43,12 @@ REQUIRED_SYMBOLS: dict[str, tuple[str, ...]] = {
         "review_verdict",
         "build_rewrite_messages",
     ),
+    "gateway.lifeboat_editor": (
+        "bump_delivery_count",
+        "edit_reply",
+        "no_read_allowed",
+        "record_no_read",
+    ),
     "gateway.lifeboat_reviewer": (
         "review_lifeboat_response_with_timeout",
     ),

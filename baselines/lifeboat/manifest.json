@@ -1,14 +1,15 @@
 {
   "files": {
     "gateway/lifeboat_contracts.py": "c02c8751c698505637e38fdca2d87b0c9a7fe8af46df324ac0930bf96490b87d",
+    "gateway/lifeboat_editor.py": "6cab95eae092a35362816861dbec6690e94b34278b40ec8c1b822a1caa407990",
     "gateway/lifeboat_modes.py": "49483b4f9b14e311999cfe31d311129a631a419a1202e1c712f8e7a039545efd",
     "gateway/lifeboat_psychology.py": "1e6476acf62b04d72b3f4d6e216b4b7a8c6162d33779d771519acf2b405033d7",
     "gateway/lifeboat_reentry.py": "db0cfe30ada71384e7890f7d1f65f82dd9e7b55d7e9d2136ab378f6a9587dd9b",
     "gateway/lifeboat_reviewer.py": "825dad9d7f077ae14eeb0c0c3bfd605652a5042e22fd7148fa09361069c71ea7",
-    "gateway/lifeboat_rewrite.py": "d27dd0c8e03c08eb8093e91d1df8db04a6ca1e329cb39d69c2e29151ada0cc7a",
-    "gateway/lifeboat_runtime_check.py": "ea7b6bcbf6c43b3f9b93b94f91e67e1ebb61e81a111bbee6233f4ac5bba4e466",
+    "gateway/lifeboat_rewrite.py": "2212162a21cc94e6ccabec63330cdf2bbf88d198ec96e79c619faf41d1c58ef0",
+    "gateway/lifeboat_runtime_check.py": "265c1999e9eacd6e1798facefb4381514f73daf3a998de76c2d5e1eefb54d226",
     "gateway/lifeboat_surface.py": "3da6e7fe7a38c2f555776cc001a5dd07e001e4aff6663872f879e77a32c2539d"
   },
-  "label": "2026-08-23 evening: register/steering/preamble/menu rules + rewritten instructions",
+  "label": "editing reviewer landed",
   "root": "/home/endlessblink/.hermes/hermes-agent"
 }
