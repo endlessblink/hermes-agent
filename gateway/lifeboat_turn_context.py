@@ -107,6 +107,8 @@ def recent_user_turns(
     *,
     limit: int = MAX_TURNS,
     legacy_dir: Path | None = None,
+    exclude_live: bool = False,
+    now=None,
 ):
     """Return what he actually said recently, newest last.
 
@@ -122,6 +124,8 @@ def recent_user_turns(
                 text = path.read_text(encoding="utf-8")
                 for stamp, said in _USER_BLOCK.findall(text):
                     if is_engine_block(said):
+                        continue
+                    if exclude_live and _is_live_conversation(stamp, now=now):
                         continue
                     line = _clean(said)
                     if line and not is_operational(line):
@@ -158,14 +162,27 @@ def _read_journal(limit: int = 5):
         return []
 
 
-def _today() -> str:
-    from datetime import datetime
+#: How recent a turn has to be before it counts as the conversation in progress
+#: rather than as material. Long enough to cover a live exchange with pauses in
+#: it, short enough that a thread reopened later still arrives with his week.
+LIVE_CONVERSATION_MINUTES = 45
 
-    return datetime.now().strftime("%Y-%m-%d")
+
+def _is_live_conversation(stamp: str, *, now=None) -> bool:
+    """True when this turn is part of the exchange the model can already see."""
+    from datetime import datetime, timedelta
+
+    try:
+        when = datetime.fromisoformat(str(stamp)[:19])
+    except (TypeError, ValueError):
+        return False
+    current = now or datetime.now()
+    return (current - when) < timedelta(minutes=LIVE_CONVERSATION_MINUTES)
 
 
 def build_turn_context(
     *,
+    now=None,
     transcript_dir: Path | None = None,
     legacy_dir: Path | None = None,
     queue_text: str | None = None,
@@ -173,7 +190,6 @@ def build_turn_context(
 ) -> str:
     """Assemble the material this turn may draw on, or an empty string."""
     parts: list[str] = []
-    today = _today()
     try:
         from gateway.lifeboat_context_sources import build_context_block
 
@@ -188,16 +204,21 @@ def build_turn_context(
     except Exception:
         logger.debug("Life-Boat written context unavailable", exc_info=True)
 
-    # Today's turns are the conversation he is having right now; they already
-    # reach the model as conversation history. Handing them back a second time
-    # under a heading that calls them historical fragments and warns "do not
-    # treat them as current" tells the bot that what he said a minute ago is
-    # old, unrelated material -- which is a good way to make it circle back over
-    # ground he has already covered. Material means what it cannot see.
-    turns = tuple(
-        (stamp, line)
-        for stamp, line in recent_user_turns(transcript_dir, legacy_dir=legacy_dir)
-        if str(stamp)[:10] != today
+    # Material means what the model cannot already see. The turns of the
+    # conversation it is currently in reach it as history; repeating them here
+    # under a heading calling them old fragments from other threads is how it
+    # ended up circling back over ground he had just settled.
+    #
+    # The first attempt at this excluded everything from today, and that was the
+    # wrong axis. Opening a fresh thread an hour later, the bot had no material
+    # at all and did exactly what an empty hand produces: a blank question, with
+    # an invented subject attached ("what happened recently at work?"). Nothing
+    # about work had been said.
+    #
+    # So the cut is by recency, not by date. What he said in the last stretch is
+    # the live conversation; what he said before it is material.
+    turns = recent_user_turns(
+        transcript_dir, legacy_dir=legacy_dir, exclude_live=True, now=now
     )
     if turns:
         said = "\n".join(f"- {stamp[:10]}: {line}" for stamp, line in turns)

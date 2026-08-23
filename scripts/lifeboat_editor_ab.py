@@ -75,6 +75,14 @@ def _ephemeral_prompt(
     from gateway.lifeboat_psychology import build_signal_guidance
     from gateway.lifeboat_followups import prepare_lifeboat_inbound_guidance
 
+    if identity == "stripped":
+        # Routing only, plus who is speaking. No shape rules, no length cap, no
+        # per-turn guidance at all.
+        from gateway.lifeboat_voice import load_voice_text
+
+        voice = load_voice_text() or IDENTITIES["close-friend"]
+        return "\n\n".join(part for part in (channel_prompt, voice) if part and part.strip())
+
     parts = [channel_prompt, build_signal_guidance(user_text)]
     if identity:
         # Stated twice on purpose: once at the front, and again last, closest to
@@ -232,10 +240,22 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("--turns must be a JSON list of strings")
         turns = loaded
 
+    # The overnight question, in Noam's own words: "you are a better bot than it
+    # is -- you talked to me all night and I didn't feel like you degraded."
+    #
+    # It is the same class of model. The difference is the machinery wrapped
+    # around it: a page of rules about how to build a sentence, a two-sentence
+    # budget, and a reviewer and editor that rewrite the words afterwards. None
+    # of that sits between him and this conversation.
+    #
+    # So "stripped" removes the wrapper and keeps only what an ordinary
+    # assistant has -- who it is, and the conversation. Nothing rewrites its
+    # words. "stripped-thinking" is the same with room to think, to separate the
+    # wrapper's effect from the reasoning budget's.
     arms = (
         ("no-change", None),
-        ("coach-cleaned", None),
-        ("close-friend", None),
+        ("stripped", None),
+        ("stripped-thinking", None),
     )
 
     if args.arms:
@@ -283,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         for arm_name, editor in arms:
             print(f"\n{'=' * 70}\n== ARM: {arm_name}\n{'=' * 70}")
             session_key = f"ab-{arm_name}-{int(time.time())}"
+            _force_reasoning(sandbox, "high" if arm_name.endswith("thinking") else args.main_effort)
             history = replay._filler_history(args.depth)
             transcript: list[dict[str, str]] = []
             _agent = None
@@ -290,7 +311,8 @@ def main(argv: list[str] | None = None) -> int:
             for index, user_text in enumerate(turns, start=1):
                 ephemeral = _ephemeral_prompt(
                     channel_prompt, sandbox, session_key, user_text,
-                    identity=arm_name if arm_name in IDENTITIES else "",
+                    identity=("stripped" if arm_name.startswith("stripped")
+                              else (arm_name if arm_name in IDENTITIES else "")),
                 )
                 # One agent per arm, not one per turn. The live gateway keeps a
                 # single agent for a session, and rebuilding it every turn gave
@@ -321,7 +343,13 @@ def main(argv: list[str] | None = None) -> int:
                 if not draft:
                     draft = f"[no text returned; keys: {sorted(result)}]"
 
-                delivered, outcome = _deliver(sandbox, session_key, user_text, draft, editor)
+                if arm_name.startswith("stripped"):
+                    # Nothing rewrites its words. That is the point of the arm.
+                    delivered, outcome = draft, "raw"
+                else:
+                    delivered, outcome = _deliver(
+                        sandbox, session_key, user_text, draft, editor
+                    )
 
                 # The conversation continues on what he would actually have read.
                 history.append({"role": "user", "content": user_text})
