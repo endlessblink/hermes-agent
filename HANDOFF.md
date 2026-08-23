@@ -1,79 +1,134 @@
-# Dropoff — 2026-07-19 19:46 Sunday
+# Life-Boat handoff — 2026-08-23 21:03 Sunday
 
-```
-You are continuing work in hermes-agent (~/.hermes/hermes-agent, the LIVE install) on branch main.
+You are continuing work in hermes-agent (worktree `lifeboat-live`) on branch main.
 
 ## Current task & next step
-Design a reliable fix for blocking compaction pauses ("Summarizing thread", measured 112-235s,
-median ~217s, re-fires every ~10-30 min in the office-work profile) — next: finish the PLAN
-(user demanded deep research, NO ad-hoc changes), then implement task #35 after approval.
-A plan-mode session was interrupted mid-research; the plan file was never written
-(/home/endlessblink/.claude/plans/snuggly-baking-lecun.md is empty/absent).
 
-Research already gathered (reuse, don't redo):
-- Measured: compaction succeeds 8/8 since Jul-18 but blocks 2-4 min; residue after compaction
-  was ~92k of ~120k because protect_last_n kept giant tool results (now 10, was 20, all 9 configs).
-- Industry patterns (Claude Code/Codex/OpenCode/Amp — see gist.github.com/badlogic/cd2ef65b0697c4dbe2d13fbecb0a0a5f
-  and codex.danielvaughan.com compaction deep dives): (1) trim/offload BULKY TOOL RESULTS first
-  (microcompaction — cheap, no LLM); (2) keep summaries small + prompt-cache-friendly (delete
-  less, keep prefix stable); (3) offload big outputs to files with path references (near-lossless;
-  Hermes already has archived rows + FTS recall to lean on); (4) parallel/async compaction exists
-  in research, but tool-result trimming is the proven cheap win.
-- Candidate insertion point (verified): gateway _compress_session_history (tui_gateway/server.py
-  ~3590) + session.compress RPC (~9882) snapshots history WITHOUT holding history_lock during the
-  LLM call and has history_version conflict detection — i.e. a post-turn (after message.complete)
-  trigger at ~90% threshold can reuse it; pre-API compaction stays as backstop (task #35).
-- Machinery map COMPLETE — read docs/superpowers/specs/2026-07-19-compaction-nonblocking-map.md
-  (call graph, locks/invariants, the 217s anatomy, ready-made seams incl. partial_compress.py
-  and the turn_finalizer post-response background pattern). Do NOT re-explore.
+Life-Boat (Noam's Telegram support bot) still hands the conversational work back
+to him instead of trying to understand him — next: build reviewer agents that
+can **rewrite** a draft, not only veto it. Noam asked for this three times
+tonight and it was never built.
+
+## Read this first — the failure pattern of the last session
+
+Seven rounds of the same loop: Noam screenshots a bad reply, I diagnose a "root
+cause", add prohibitions, declare it fixed, and the next reply fails a new way.
+His words: *"I fear that you just digging the hole deeper, not really fixing
+anything, just convicing yourself that you do."* He is right.
+
+Two things follow, and they matter more than any code below:
+
+1. **Adding prohibitions makes it worse.** ~15 new blocked shapes now exist.
+   Bland is always legal, so each rule pushes the model toward emptier replies.
+   The bot ended the night asking "כשאתה מסתכל על התקופה האחרונה בכללותה, איך
+   אתה מרגיש שעברת אותה?" — content-free, and technically compliant with
+   everything.
+2. **Two theories were confirmed true and still did not help.** The
+   instructions did tell the bot to announce its method and acknowledge
+   corrections (fixed). The per-turn guidance did contain zero material about
+   his life (fixed). Neither changed his experience. Do not open the next
+   session by looking for a third root cause of the same kind.
+
+Noam's actual complaint, in his words: *"its that the bot is throwing
+responsiblility on me instead of trying to understand."* When it lacked
+material it asked blank questions; when it had material it declared conclusions
+at him. Both are failures of the same move — it never offers a read it holds
+lightly.
+
+## What he asked for and has not received
+
+> "I want more agents that will review and influecne the response — even the one
+> we have" / "if another agent will help then we should use it and enable it to
+> edit the responses"
+
+The existing pre-send reviewer (`gateway/lifeboat_reviewer.py` +
+`lifeboat_rewrite.py`) can only reject and re-ask the drafting model once. If
+the retry also fails review, **the model's words are delivered anyway** — see
+`resolve_reply`, the `rewrite_rejected` branch. So blocking never became
+solving. Noam has explicitly authorised editing, which overrides the earlier
+"never invent prose" decision (that decision was mine, made to stop canned
+sentences, and it is what left the reviewer toothless).
+
+Design constraint that must survive: the reason "never rewrite" existed is that
+generated replacement prose produced a hardcoded Hebrew sentence repeated across
+eight deliveries (BUG-6). An editing agent must not reintroduce templates.
+
+## The agreed shape of a good reply
+
+Decided with him this session, via AskUserQuestion — "one read, offered to be
+corrected":
+
+> ממה שכתבת קודם זה נשמע שהמשפט שלה נחת כמו הוכחה, לא כמו עלבון. זה מדויק?
+
+One hedged sentence of what the bot makes of it, then one question that tests
+exactly that. He corrects it in a word or lets it stand. Not a summary, not
+layers, not a framework — and not a blank question either.
+`gateway/lifeboat_debrief.py` already permits this shape (`_TENTATIVE_READ_RE` +
+`_INVITES_CORRECTION_RE` exempt it from the unsourced-claim rule).
 
 ## Files touched / in flight
-All committed & pushed (tip 699e8a703). No uncommitted changes. Key recent work:
-- tui_gateway/server.py (compression watchdog derives from aux budget), agent/auxiliary_client.py
-  (unconfigured providers 1h skip), agent/context_compressor.py (4k summary ceiling — DO NOT
-  change without fresh measurements, see memory no-blind-tuning), agent/prompt_builder.py
-  (skills-index cap; day-timeline + multi-choice + timeline guidance), apps/desktop/src/*
-  (folder menu+drag, PA button, profile restore, stale-clarify re-queue, queue toasts,
-  time column, day-timeline prompt support, description 1200).
-- Configs (outside git, all 9 = base + 8 profiles): reasoning_effort low, tool_search auto
-  (REVERTED from on — deferral cost LLM rounds), compression.threshold 0.35, protect_last_n 10.
-  Backups: *.bak-toolsearch-20260717, *.bak-compthresh-20260717.
+
+All committed, suite green (545 Life-Boat + turn-log tests):
+
+- `gateway/lifeboat_turn_context.py` — NEW. Feeds each turn his real material:
+  his own words from the transcript, journal, emotional queue. Drops operational
+  talk, engine notes, the bot's own replies, and duplicates.
+- `gateway/lifeboat_debrief.py` — NEW. Debrief shape + ~10 rejection rules.
+- `gateway/lifeboat_turn_log.py` — NEW. Which transcript a turn belongs to.
+- `gateway/lifeboat_followups.py` — `prepare_lifeboat_inbound_guidance` now
+  injects material + debrief guidance. This is the seam to build on.
+- `gateway/lifeboat_reviewer.py` — many new rules. Consider whether some should
+  be *removed* when the editor lands.
+- `agent/turn_finalizer.py` — post_llm_call hook now passes chat_id/thread_id.
+- `plugins/lifeboat-*` — salvaged, see gotchas.
+- `docs/lifeboat-current-goal.md` — living worklist, keep updating it.
+
+Uncommitted and unrelated to this work: `.gitignore` and several
+`scripts/verify_*.py` from earlier sessions.
 
 ## Key decisions & gotchas
-- MEMORY FILES ARE CURRENT — read MEMORY.md first: hermes-speed-lane (full state),
-  upstream-merge-postmortem-20260718 (mandatory next-merge checklist), no-blind-tuning
-  (NEVER retune constants without fresh measurements — user exploded over this),
-  merge-preserve-all-features.
-- SINGLE WRITER: another Claude/codex session edits this tree sometimes (it cherry-picked
-  77f77f1cf and switched branches mid-day). Check `git branch --show-current` + `git status`
-  before EVERY commit; commits once landed on a stray branch (fix/desktop-custom-time-picker,
-  since merged).
-- The app re-serializes config.yaml (YAML `on` becomes `true`) — match both spellings when editing.
-- Desktop changes need: `npm run pack --workspace apps/desktop` from REPO ROOT (root install only;
-  an apps/desktop-local node_modules breaks the build), then the USER must quit+reopen the app.
-  Backend/prompt changes need `systemctl --user restart hermes-gateway.service` + app relaunch.
-- Several "bugs" were stale-build artifacts — ALWAYS verify the running app/process start time
-  vs the asar/commit timestamp before debugging (ps lstart vs stat app.asar).
-- rtk wraps grep/ls and mangles output — use awk/sed or ctx_execute for parsing.
-- Pre-existing red tests (NOT ours): desktop-fs picker (2), approval-group clarify-card (1),
-  skills index isolation (7 with full suite), tui_gateway env-sensitive family (5-13 by env).
-  CI: footguns now green; js-autofix gated off the fork.
-- User rules: responses 1-4 plain sentences + Next steps (hook enforces); no live cloud LLM
-  calls for testing; superpowers skills on demand; investigate before ANY fix.
+
+- **The installed runtime is a separate tree.** `~/.hermes/hermes-agent/`. Code
+  changes must be copied there or they do nothing. `scripts/lifeboat_baseline.py
+  verify` checks drift; `restore` rolls back; both tested.
+- **Instructions live outside the repo**, in
+  `~/.hermes/profiles/life-advisor/skills/productivity/personal-coaching/SKILL.md`.
+  Backups exist (`*.bak-*`). This file drives behaviour more than any code and
+  went unread for two days. It is ~40 prohibitions and one short positive
+  section ("How to lead a conversation") added this session.
+- **The Telegram bot is NOT the `life-advisor` profile.** Noam corrected me on
+  this. It runs under `default`; `life-advisor` is his local CLI profile.
+  Reading direction is enforced one-way in `lifeboat_turn_log.py`: the local
+  profile may read the bot's transcript, never the reverse — because the local
+  profile is where he does bug/deploy work and that contaminated support turns
+  before.
+- **Turn logs**: the bot's turns now go to
+  `MAIN VULT/_System/Hermes Turn Logs/life-boat/`. Everything before tonight is
+  in `.../default/`, mixed with other topics and unsplittable — it is *read*
+  (filtered) but must not be moved.
+- **Flow State is down** (nothing on 127.0.0.1:5577). Its tools are enabled for
+  Telegram now but report unavailable. Noam wants an offline-capable service;
+  does not exist. Notion: not integrated at all, would be a build from zero.
+- **A "safe to delete" worktree held the only source of a live plugin.** Always
+  check untracked files before `git worktree remove`.
+- **Do not run live cloud LLM calls** on his account (global rule). You cannot
+  end-to-end test the bot yourself; verify by feeding real replies through
+  `review_verdict` / `debrief_problems` against the installed copy.
+- **Response style is hook-enforced**: final messages must be 1–4 plain
+  sentences then a "Next steps" list. No paths or code in user-facing text.
+- Use `AskUserQuestion` when you have questions — he asked for this explicitly.
 
 ## Env / run state
-Branch: main | Last commit: 699e8a703 feat(desktop+prompt): day-timeline + regression nets
-Running: hermes-gateway.service (restarted 16:10+ with all fixes), user's desktop app
-(restarts frequently — verify build stamp), FlowState app + local Supabase docker (healthy),
-hermes-live-watchdog.service, PA monitor timer (15-min, healthy).
-Open tasks: #32 verify speed settings live, #33 verify behavior rules, #34 verify cross-profile
-answers (SOUL rule added — session_search profile param, never raw sqlite), #35 post-reply
-compaction (THE next implementation, plan first).
-User-confirmed working: queue-while-busy, custom form answers, folder drag+menu, profile
-switching, PA button, Google calendar access.
 
-Start by: reading docs/superpowers/specs/2026-07-19-compaction-nonblocking-map.md, then
-write the plan for #35 (post-message.complete trigger at ~90% threshold reusing
-_compress_session_history, PLUS tool-result trimming/offload as the likely bigger win) and
-present it for approval before touching anything.
-```
+Branch: main | Last commit: 6a12702c6f — feat(lifeboat): give the turn material,
+and wire the debrief that was never connected
+Running: `systemctl --user hermes-gateway.service` (active). Restart after any
+change to the installed tree or the SKILL.md.
+Baseline frozen at tonight's state; `lifeboat_baseline.py verify` currently
+clean except where you change gate files.
+
+## Start by
+
+Reading `gateway/lifeboat_rewrite.py::resolve_reply` and designing the editing
+reviewer with Noam **before writing code** — present the design, get approval.
+Do not begin by adding another rejection rule.
