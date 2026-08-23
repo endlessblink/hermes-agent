@@ -129,6 +129,19 @@ class TestValidateAudioFile:
 
 class TestTranscribeLocal:
 
+    def test_low_confidence_segments_are_marked_without_transcript_logging(self):
+        from tools.transcription_tools import _transcription_quality_flags
+
+        segment = SimpleNamespace(
+            avg_logprob=-1.4,
+            no_speech_prob=0.1,
+            compression_ratio=1.2,
+        )
+        uncertain, metrics = _transcription_quality_flags([segment], "מילה", "he")
+
+        assert uncertain is True
+        assert metrics["min_avg_logprob"] == -1.4
+
     def test_successful_transcription(self, tmp_path):
         audio_file = tmp_path / "test.ogg"
         audio_file.write_bytes(b"fake audio")
@@ -151,6 +164,7 @@ class TestTranscribeLocal:
 
         assert result["success"] is True
         assert result["transcript"] == "Hello world"
+        assert "uncertain" in result
 
     def test_not_installed(self):
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", False):

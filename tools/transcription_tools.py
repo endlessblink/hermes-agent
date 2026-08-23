@@ -1132,6 +1132,35 @@ def _load_local_whisper_model(model_name: str):
         return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
+def _transcription_quality_flags(segments: list[object], transcript: str, language: str | None) -> tuple[bool, dict[str, float]]:
+    """Return privacy-safe uncertainty signals for a local transcription.
+
+    The transcript itself is intentionally not logged.  These coarse signals
+    keep a visibly unreliable clause from being treated as confirmed meaning
+    by the coaching prompt while leaving the transcript available for repair.
+    """
+    avg_logprobs = [float(getattr(s, "avg_logprob", 0.0)) for s in segments if getattr(s, "avg_logprob", None) is not None]
+    no_speech = [float(getattr(s, "no_speech_prob", 0.0)) for s in segments if getattr(s, "no_speech_prob", None) is not None]
+    compression = [float(getattr(s, "compression_ratio", 0.0)) for s in segments if getattr(s, "compression_ratio", None) is not None]
+    metrics = {
+        "min_avg_logprob": min(avg_logprobs) if avg_logprobs else 0.0,
+        "max_no_speech_prob": max(no_speech) if no_speech else 0.0,
+        "max_compression_ratio": max(compression) if compression else 0.0,
+    }
+    replacement_heavy = transcript.count("�") >= 2
+    repeated_fragment = bool(transcript.strip()) and len(set(transcript.split())) <= 2 and len(transcript.split()) >= 5
+    missing_forced_language = bool(language == "he" and transcript.strip() and not any("\u0590" <= c <= "\u05ff" for c in transcript))
+    uncertain = bool(
+        (metrics["min_avg_logprob"] and metrics["min_avg_logprob"] < -1.0)
+        or metrics["max_no_speech_prob"] > 0.6
+        or metrics["max_compression_ratio"] > 2.4
+        or replacement_heavy
+        or repeated_fragment
+        or missing_forced_language
+    )
+    return uncertain, metrics
+
+
 def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
     global _local_model, _local_model_name
@@ -1159,6 +1188,7 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
 
         try:
             segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
+            segments = list(segments)
             transcript = " ".join(segment.text.strip() for segment in segments)
         except Exception as exc:
             # CUDA runtime libs sometimes only fail at dlopen-on-first-use,
@@ -1179,14 +1209,25 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
             _local_model = WhisperModel(model_name, device="cpu", compute_type="int8")
             _local_model_name = model_name
             segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
+            segments = list(segments)
             transcript = " ".join(segment.text.strip() for segment in segments)
 
+        forced_language = transcribe_kwargs.get("language")
+        uncertain, quality = _transcription_quality_flags(segments, transcript, forced_language)
+
         logger.info(
-            "Transcribed %s via local whisper (%s, lang=%s, %.1fs audio)",
-            Path(file_path).name, model_name, info.language, info.duration,
+            "Transcribed %s via local whisper (%s, lang=%s, %.1fs audio, uncertain=%s, min_logprob=%.2f, max_no_speech=%.2f)",
+            Path(file_path).name, model_name, info.language, info.duration, uncertain,
+            quality["min_avg_logprob"], quality["max_no_speech_prob"],
         )
 
-        return {"success": True, "transcript": transcript, "provider": "local"}
+        return {
+            "success": True,
+            "transcript": transcript,
+            "provider": "local",
+            "uncertain": uncertain,
+            "quality": quality,
+        }
 
     except Exception as e:
         logger.error("Local transcription failed: %s", e, exc_info=True)
