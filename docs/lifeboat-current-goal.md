@@ -32,6 +32,24 @@ emotional.
 - [x] All five replies Noam flagged on 2026-08-23 are blocked in the live
       runtime, each for its own reason. Verified against the installed copy.
 
+- [x] A menu of readings of his own experience is rejected. Two alternatives
+      can be a real question; three or more is a form.
+- [x] The instructions themselves rewritten. This was the actual cause and it
+      went unexamined for two days: the file told the bot to announce that it
+      was about to interview him, and to acknowledge its mistakes — which is
+      precisely where "I'll interview you one question at a time" and every
+      "you're right, I spoke to you like a case manager" came from. It was 42
+      prohibitions with almost no picture of the thing itself, so each
+      correction only moved the failure somewhere new. It now opens with how to
+      lead a conversation, and the two harmful lines are gone.
+
+## Known hole
+
+- [ ] When a rejected reply is rewritten and the rewrite also fails, the model's
+      words are delivered anyway. The gate reports it and ships it. That is a
+      deliberate choice not to invent prose, but it means blocking is not
+      solving, and a bad shape can still arrive.
+
 ## In flight
 
 - [ ] Wire the debrief itself into the live conversation so it leads rather than

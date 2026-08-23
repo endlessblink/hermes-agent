@@ -131,3 +131,28 @@ def test_a_preamble_about_the_correction_is_rejected_everywhere() -> None:
     reply = "נכון. ביקשת שאוביל, ואני ביקשתי ממך לבחור. מתי היא אמרה את זה?"
 
     assert review_verdict(HURT, reply).accepted is False
+
+
+# --- a menu of readings of his own experience -------------------------------
+#
+# 2026-08-23 20:04, after he said nothing had appeared: "וכשראית שאין כלום —
+# לאן הראש הלך קודם: ל'באסה', 'שוב כלום', ל'אולי עוד מעט', או ישר ל'זה פשוט
+# לא יקרה לי'?" Four readings of his own experience, offered for him to pick
+# from. The old menu rule only caught "would you rather X or Y".
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "לאן הראש הלך קודם: ל„באסה”, „שוב כלום”, ל„אולי עוד מעט”, "
+        "או ישר ל„זה פשוט לא יקרה לי”?",
+        "זה יותר עצב, או תסכול, או פשוט עייפות?",
+        "was it sadness, or frustration, or just tiredness?",
+    ],
+)
+def test_offering_readings_of_his_experience_is_rejected(reply: str) -> None:
+    assert review_verdict(HURT, reply).accepted is False
+
+
+def test_one_alternative_is_not_a_menu() -> None:
+    """Two options is a real question; four is a form."""
+    assert review_verdict(HURT, "זה נחת כעלבון או כדאגה?").accepted is True
