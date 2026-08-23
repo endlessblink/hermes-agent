@@ -136,7 +136,7 @@ _DECISION_OFFLOAD_RE = re.compile(
 # P-005: asserting another person's inner state as established fact.
 _OTHERS_MIND_RE = re.compile(
     r"(?:(?:ברור ש|בטח|כנראה ש|מן הסתם)\s*(?:היא|הוא|הם)\s*(?:מרגיש|חושב|רוצה|מתכוון)"
-    r"|(?:היא|הוא)\s+(?:בטח|כנראה)\s+(?:מרגיש|חושב)"
+    r"|(?:היא|הוא)\s+(?:בטח|כנראה|באמת|אכן|בהחלט)\s+(?:מרגיש|חושב|רוצה|מתכוון)"
     r"|\b(?:she|he|they) (?:clearly|obviously|probably|must) (?:feels?|thinks?|wants?)\b)",
     re.IGNORECASE,
 )

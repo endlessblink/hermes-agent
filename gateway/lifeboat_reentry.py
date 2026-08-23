@@ -31,8 +31,8 @@ _MAX_REENTRY_CHARS = 130
 #: an unnamed inner state, and would read identically in any conversation.
 _GENERIC_OPENER_RE = re.compile(
     r"(?:"
-    r"מה\s+(?:הכי\s+)?(?:חי|נוכח|עולה|קורה)\s+(?:אצלך|בך|לך)"
-    r"|מה\s+(?:הכי\s+)?(?:חי|נוכח|עולה)\b"
+    r"מה\s+(?:\S{2,8}\s+)?(?:הכי\s+)?(?:חי|נוכח|עולה|קורה)\s+(?:אצלך|בך|לך)"
+    r"|מה\s+(?:\S{2,8}\s+)?(?:הכי\s+)?(?:חי|נוכח|עולה)\b"
     r"|איך\s+(?:זה|это)?\s*(?:יושב|נוחת|מרגיש|פוגש)\s*(?:איתך|אצלך|אותך)?"
     r"|מה\s+אתה\s+מרגיש\s+עכשיו"
     r"|what(?:'s| is)\s+(?:most\s+)?alive\s+for\s+you"
