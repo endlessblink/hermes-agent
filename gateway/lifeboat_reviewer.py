@@ -141,6 +141,16 @@ _OTHERS_MIND_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Clinical register and method narration. 2026-08-23, Noam on a live reply:
+#: "too much like a therapist and that causes distance between me and it". The
+#: register itself is the distance -- threads, holding space, what this
+#: activates in you, processing -- and so is announcing the procedure before
+#: asking. Someone who knows you does not brief you on their method.
+from gateway.lifeboat_debrief import (
+    _METHOD_NARRATION_RE as _CLINICAL_METHOD_RE,
+    _THERAPIST_REGISTER_RE as _CLINICAL_REGISTER_RE,
+)
+
 _QUESTION_RE = re.compile(r"[?？]")
 _TOKEN_RE = re.compile(r"[A-Za-zא-ת]{3,}")
 
@@ -212,6 +222,10 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
         return _plain_reality_fallback(user, "epistemic_caution_erased_grounded_knowledge")
     if _THERAPEUTIC_GIBBERISH_RE.search(text):
         return _plain_reality_fallback(user, "therapeutic_gibberish_in_repair")
+    if _CLINICAL_METHOD_RE.search(text):
+        return _fallback(user, "narrated_its_own_method")
+    if _CLINICAL_REGISTER_RE.search(text):
+        return _fallback(user, "clinical_register_created_distance")
     if _OTHERS_MIND_RE.search(text):
         return _plain_reality_fallback(user, "asserted_another_persons_inner_state")
     if _DECISION_OFFLOAD_RE.search(text):

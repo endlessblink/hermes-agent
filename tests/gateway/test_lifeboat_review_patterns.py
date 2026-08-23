@@ -91,3 +91,32 @@ def test_previously_enforced_patterns_still_hold() -> None:
 
 def test_an_ordinary_grounded_reply_is_unaffected() -> None:
     assert review_verdict(HURT, "מתי היא אמרה את זה?").accepted is True
+
+
+# --- clinical register creates distance -------------------------------------
+#
+# 2026-08-23, Noam on a live reply: "too much like a therapist and that causes
+# distance between me and it". Not debrief-specific — it applies to everything
+# it says.
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "החוט הפעיל שנשאר הוא זה. מה איתו?",
+        "אני אחזיק לך מקום לזה. מה עולה?",
+        "מה זה מפעיל אצלך?",
+        "בוא נעבד את זה יחד. מה מרגיש?",
+    ],
+)
+def test_therapist_register_is_rejected(reply: str) -> None:
+    assert review_verdict(HURT, reply).accepted is False
+
+
+def test_plain_speech_about_the_same_thing_is_accepted() -> None:
+    assert review_verdict(HURT, "מתי היא אמרה את זה?").accepted is True
+
+
+def test_announcing_its_own_method_is_rejected() -> None:
+    reply = "אני אראיין אותך שאלה אחת בכל פעם. איפה זה עומד?"
+
+    assert review_verdict(HURT, reply).accepted is False
