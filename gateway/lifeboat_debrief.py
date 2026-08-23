@@ -90,6 +90,38 @@ _THERAPIST_REGISTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Asking him to pick the subject. He asked to be interviewed; an interviewer
+#: chooses the thread. "מה היה הדבר הראשון שהיה לך בראש?" is the open dump
+#: wearing a question mark -- his words, 2026-08-23: "ועכשיו שוב אתה לא מראיין
+#: אותי אלא מפיל עליי את האחריות".
+_STEERING_HANDBACK_RE = re.compile(
+    r"(?:ה?דבר\s+הראשון\s+ש(?:היה|עולה|בא)"
+    r"|מה\s+(?:היה\s+)?עולה\s+לך\s+ראשון"
+    r"|ב?מה\s+(?:תרצה|היית\s+רוצה)\s+(?:להתחיל|לדבר|שנתחיל)"
+    r"|מה\s+תרצה\s+ש"
+    r"|(?:מ?איפה|ממה|במה)\s+(?:נתחיל|להתחיל|תרצה\s+להתחיל)"
+    r"|לבחור\s+(?:מאיפה|במה|מה)"
+    r"|מה\s+הכי\s+(?:חשוב|דחוף)\s+לך\s+(?:לדבר|להתחיל)"
+    r"|\bwhat\s+would\s+you\s+like\s+to\s+(?:start|talk|begin)"
+    r"|\bwhat(?:'s| is)\s+the\s+first\s+thing\s+that\s+comes"
+    r"|\bwhere\s+(?:should|do)\s+(?:we|you)\s+(?:want\s+to\s+)?start"
+    r"|\bwhat\s+do\s+you\s+want\s+to\s+talk\s+about)",
+    re.IGNORECASE,
+)
+
+#: Restating the correction before answering it. Every time Noam corrected the
+#: tone, the next reply opened with a paragraph agreeing and describing what it
+#: had done wrong. The fix for a bad turn is a good turn.
+_SELF_CORRECTION_PREAMBLE_RE = re.compile(
+    r"(?:^\s*(?:נכון|צודק|אתה\s+צודק)\s*[,.\u2014-]"
+    r"|ביקשת\s+ש.{0,40}?\s+ואני"
+    r"|אני\s+ביקשתי\s+ממך"
+    r"|דיברתי\s+אליך\s+כאילו"
+    r"|אז\s+אני\s+מתחיל\s+ספציפית"
+    r"|^\s*(?:you(?:'re| are)\s+right|right|fair(?:\s+enough)?)\s*[,.\u2014-])",
+    re.IGNORECASE,
+)
+
 _QUESTION_RE = re.compile(r"[?？]")
 _SENTENCE_RE = re.compile(r"[^.!?？\n]+[.!?？]?")
 
@@ -233,6 +265,10 @@ def debrief_problems(
     known = _content_tokens(known_text)
     issues: list[str] = []
 
+    if _STEERING_HANDBACK_RE.search(text):
+        issues.append("handed_back_the_steering")
+    if _SELF_CORRECTION_PREAMBLE_RE.search(text):
+        issues.append("self_correction_preamble")
     if _METHOD_NARRATION_RE.search(text):
         issues.append("method_narration")
     if _THERAPIST_REGISTER_RE.search(text):
@@ -287,6 +323,10 @@ def build_debrief_guidance(*, anchors: tuple[str, ...] = (), area: str | None = 
         "You may ask about ground you know nothing about, provided the question "
         "assumes nothing happened.",
         "Open at most one new area this debrief.",
+        "You choose the thread, not him. Never ask him what to start with, what "
+        "is most important, or what comes to mind first -- that is the dump again.",
+        "If he corrects you, do not agree, apologise, or describe what you did "
+        "wrong. Ask the better question instead.",
     ]
     if area:
         lines.append(f"AREA THAT HAS BEEN QUIET: {area}")

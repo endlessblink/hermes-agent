@@ -120,3 +120,14 @@ def test_announcing_its_own_method_is_rejected() -> None:
     reply = "אני אראיין אותך שאלה אחת בכל פעם. איפה זה עומד?"
 
     assert review_verdict(HURT, reply).accepted is False
+
+
+def test_making_him_pick_the_subject_is_rejected_everywhere() -> None:
+    assert review_verdict(HURT, "במה תרצה להתחיל?").accepted is False
+    assert review_verdict(HURT, "מה היה הדבר הראשון שהיה לך בראש?").accepted is False
+
+
+def test_a_preamble_about_the_correction_is_rejected_everywhere() -> None:
+    reply = "נכון. ביקשת שאוביל, ואני ביקשתי ממך לבחור. מתי היא אמרה את זה?"
+
+    assert review_verdict(HURT, reply).accepted is False

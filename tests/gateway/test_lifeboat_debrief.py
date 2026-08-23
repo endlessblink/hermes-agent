@@ -219,3 +219,64 @@ def test_asking_plainly_is_accepted() -> None:
 
 def test_an_ordinary_open_question_stays_accepted() -> None:
     assert debrief_problems("יש משהו בצד המשפחתי?", known_text=KNOWN) == ()
+
+
+# --- an interviewer picks the thread ----------------------------------------
+#
+# 2026-08-23 19:53, after being told to speak plainly, it asked "כשכתבת קודם
+# 'הרבה מחשבות, תחושות ודברים' — מה היה הדבר הראשון שהיה לך בראש?". Noam:
+# "ועכשיו שוב אתה לא מראיין אותי אלא מפיל עליי את האחריות". Making him select
+# what to talk about is the open dump wearing a question mark.
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "מה היה הדבר הראשון שהיה לך בראש?",
+        "במה תרצה להתחיל?",
+        "מה הכי חשוב לך לדבר עליו עכשיו?",
+        "איפה נתחיל?",
+        "what would you like to start with?",
+        "what's the first thing that comes to mind?",
+    ],
+)
+def test_making_him_choose_the_subject_is_rejected(reply: str) -> None:
+    assert "handed_back_the_steering" in debrief_problems(reply, known_text=KNOWN)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "אמרת שהיא קראה לך מעיק. איפה זה עומד עכשיו?",
+        "יש משהו בצד המשפחתי?",
+        "לא ישנת טוב. זה נמשך גם אתמול?",
+    ],
+)
+def test_a_question_that_names_its_own_subject_is_accepted(reply: str) -> None:
+    assert debrief_problems(reply, known_text=KNOWN) == ()
+
+
+# --- no preamble about the conversation itself ------------------------------
+#
+# 2026-08-23 19:54: "נכון. ביקשת שאוביל ראיון, ואני ביקשתי ממך לבחור מאיפה
+# להתחיל ולסדר בשבילי את החומר." then the actual question. Every correction
+# produced a paragraph restating the correction before answering it. Earlier
+# the same turn: "צודק, דיברתי אליך כאילו אני מנהל תיק ולא יושב איתך בשיחה."
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "נכון. ביקשת שאוביל ראיון, ואני ביקשתי ממך לבחור. מתי דיברתם?",
+        "צודק, דיברתי אליך כאילו אני מנהל תיק. מתי דיברתם?",
+        "אתה צודק. אז אני מתחיל ספציפית: מתי דיברתם?",
+        "You're right, I made you do the choosing. When did she say it?",
+    ],
+)
+def test_restating_the_correction_before_answering_is_rejected(reply: str) -> None:
+    assert "self_correction_preamble" in debrief_problems(reply, known_text=KNOWN)
+
+
+def test_simply_asking_after_a_correction_is_accepted() -> None:
+    """The fix for a bad turn is a good turn, not a paragraph about the bad one."""
+    assert debrief_problems(
+        "אמרת שהיא קראה לך מעיק. מתי היא אמרה את זה?", known_text=KNOWN
+    ) == ()

@@ -25,12 +25,17 @@ emotional.
       Noam edits it freely; the bot reads it as-is.
 - [x] Clinical register and method narration rejected before delivery — not
       only in debriefs, in everything it says.
+- [x] A question that hands the steering back is rejected. "What was the first
+      thing in your head?" is the open dump wearing a question mark.
+- [x] A preamble restating the correction it just received is rejected. The fix
+      for a bad turn is a good turn, not a paragraph about the bad one.
+- [x] All five replies Noam flagged on 2026-08-23 are blocked in the live
+      runtime, each for its own reason. Verified against the installed copy.
 
 ## In flight
 
-- [ ] Reject a question that hands the steering back. "What was the first thing
-      in your head?" is the open dump wearing a question mark.
-- [ ] Wire the debrief into the live conversation so it actually runs.
+- [ ] Wire the debrief itself into the live conversation so it leads rather than
+      only refusing bad turns.
 - [ ] Keep Flow State and Notion out of emotional conversation — referenced only
       when the subject is planning time or tasks.
 

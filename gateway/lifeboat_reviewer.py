@@ -148,6 +148,8 @@ _OTHERS_MIND_RE = re.compile(
 #: asking. Someone who knows you does not brief you on their method.
 from gateway.lifeboat_debrief import (
     _METHOD_NARRATION_RE as _CLINICAL_METHOD_RE,
+    _SELF_CORRECTION_PREAMBLE_RE as _CORRECTION_PREAMBLE_RE,
+    _STEERING_HANDBACK_RE as _MADE_HIM_CHOOSE_RE,
     _THERAPIST_REGISTER_RE as _CLINICAL_REGISTER_RE,
 )
 
@@ -222,6 +224,10 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
         return _plain_reality_fallback(user, "epistemic_caution_erased_grounded_knowledge")
     if _THERAPEUTIC_GIBBERISH_RE.search(text):
         return _plain_reality_fallback(user, "therapeutic_gibberish_in_repair")
+    if _MADE_HIM_CHOOSE_RE.search(text):
+        return _fallback(user, "made_him_choose_the_subject")
+    if _CORRECTION_PREAMBLE_RE.search(text):
+        return _fallback(user, "restated_the_correction_instead_of_answering")
     if _CLINICAL_METHOD_RE.search(text):
         return _fallback(user, "narrated_its_own_method")
     if _CLINICAL_REGISTER_RE.search(text):
