@@ -116,6 +116,32 @@ def _is_checklist(text: str) -> bool:
     """True when the reply enumerates his experience, on one line or many."""
     return len(_ENUMERATED_ITEM_RE.findall(text)) >= _MIN_ENUMERATED_ITEMS
 
+# P-023: the reply names the feeling and stops. Confirming a state without
+# opening anything leaves the person exactly where they were.
+_AFFECT_WORD_RE = re.compile(
+    r"(?:כבד|כואב|קשה|מציף|מוצף|עצוב|נורא|מבאס|"
+    r"\bheavy\b|\bpainful\b|\bhard\b|\boverwhelming\b)",
+    re.IGNORECASE,
+)
+
+# P-007: handing his decision to someone else.
+_DECISION_OFFLOAD_RE = re.compile(
+    r"(?:(?:תשאל|שאל|תתייעץ|התייעץ)\s+(?:אותה|אותו|את\s+\S+|עם\s+\S+)"
+    r"|תחליטו\s+יחד|שהיא\s+תחליט|שהוא\s+יחליט"
+    r"|\bask (?:her|him|them) (?:what|how|if)\b|\bdecide (?:together|with)\b"
+    r"|\bconsult (?:a|your)\b)",
+    re.IGNORECASE,
+)
+
+# P-005: asserting another person's inner state as established fact.
+_OTHERS_MIND_RE = re.compile(
+    r"(?:(?:ברור ש|בטח|כנראה ש|מן הסתם)\s*(?:היא|הוא|הם)\s*(?:מרגיש|חושב|רוצה|מתכוון)"
+    r"|(?:היא|הוא)\s+(?:בטח|כנראה)\s+(?:מרגיש|חושב)"
+    r"|\b(?:she|he|they) (?:clearly|obviously|probably|must) (?:feels?|thinks?|wants?)\b)",
+    re.IGNORECASE,
+)
+
+_QUESTION_RE = re.compile(r"[?？]")
 _TOKEN_RE = re.compile(r"[A-Za-zא-ת]{3,}")
 
 @dataclass(frozen=True)
@@ -186,6 +212,16 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
         return _plain_reality_fallback(user, "epistemic_caution_erased_grounded_knowledge")
     if _THERAPEUTIC_GIBBERISH_RE.search(text):
         return _plain_reality_fallback(user, "therapeutic_gibberish_in_repair")
+    if _OTHERS_MIND_RE.search(text):
+        return _plain_reality_fallback(user, "asserted_another_persons_inner_state")
+    if _DECISION_OFFLOAD_RE.search(text):
+        return _fallback(user, "handed_his_decision_to_someone_else")
+    if (
+        _AFFECT_WORD_RE.search(text)
+        and not _QUESTION_RE.search(text)
+        and len(" ".join(text.split())) < 140
+    ):
+        return _fallback(user, "mirrored_the_feeling_without_moving")
     if _CAPACITY_SURVEY_RE.search(text):
         return _fallback(user, "asked_him_to_rate_himself")
     if _SUPPORT_MENU_RE.search(text):
