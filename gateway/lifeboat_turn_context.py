@@ -182,6 +182,7 @@ def _is_live_conversation(stamp: str, *, now=None) -> bool:
 
 def build_turn_context(
     *,
+    about_a_period: bool = False,
     now=None,
     transcript_dir: Path | None = None,
     legacy_dir: Path | None = None,
@@ -230,11 +231,38 @@ def build_turn_context(
 
     if not parts:
         return ""
-    return (
-        "MATERIAL YOU ALREADY HAVE. It is optional historical context, not a "
-        "current account. Use it only when the user's new message connects to "
-        "it; otherwise stay with the new message. If it is empty or unrelated, "
-        "say plainly that you do not have the recent picture instead of asking "
-        "a broad question.\n\n"
-        + "\n\n".join(parts)
-    )
+
+    # Two different situations, and one heading was serving both badly.
+    #
+    # Normally this material is background: he says something new, and older
+    # fragments must not be dragged in to make a reply sound attentive. That is
+    # what the cautious wording is for, and it stays.
+    #
+    # But when he asks about a period -- "let's debrief the last two days" --
+    # the material is not background, it is the subject. On 2026-08-24 he asked
+    # exactly that, the bot held ten lines including the whole conversation
+    # about his speed dating, and opened with "what happened yesterday
+    # morning?". It was obeying the heading: his message did not name the speed
+    # date, so it stayed with the message and asked a cold question about a
+    # period it already knew something about.
+    #
+    # Guarding against invention had turned into ignoring what it actually
+    # knows. So the heading depends on what he asked for.
+    if about_a_period:
+        heading = (
+            "MATERIAL YOU ALREADY HAVE, AND HE HAS ASKED ABOUT THIS PERIOD. "
+            "This is the subject, not background: these are things he told you "
+            "himself, and starting somewhere else would be asking him to supply "
+            "what you already have. Begin from something in here. Do not "
+            "combine unrelated lines into a story, do not add anything that is "
+            "not here, and let him correct you."
+        )
+    else:
+        heading = (
+            "MATERIAL YOU ALREADY HAVE. It is optional historical context, not "
+            "a current account. Use it only when the user's new message "
+            "connects to it; otherwise stay with the new message. If it is "
+            "empty or unrelated, say plainly that you do not have the recent "
+            "picture instead of asking a broad question."
+        )
+    return heading + "\n\n" + "\n\n".join(parts)

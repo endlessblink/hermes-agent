@@ -118,3 +118,52 @@ def test_material_can_come_back_empty_without_erroring(tmp_path) -> None:
     )
 
     assert material == ""
+
+
+# --- when he asks about a period, the material is the subject --------------
+
+def test_a_debrief_request_makes_the_material_the_subject() -> None:
+    """He asked to debrief two days; it opened "what happened yesterday morning?"
+
+    It held ten lines including the whole conversation about his speed dating and
+    ignored all of it, because the heading told it to use material only when his
+    new message connects to it. His request named a period, not an event, so
+    nothing connected and it asked a cold question about days it already knew
+    something about. Guarding against invention had become ignoring what it knows.
+    """
+    from gateway.lifeboat_turn_context import build_turn_context
+
+    material = build_turn_context(
+        about_a_period=True,
+        transcript_dir=None,
+        queue_text="",
+        journal_entries=["אתמול הלכתי לספידייט"],
+    )
+
+    assert "HE HAS ASKED ABOUT THIS PERIOD" in material
+    assert "Begin from something in here" in material
+
+
+def test_an_ordinary_turn_keeps_the_material_as_background() -> None:
+    """Outside a period question, older fragments must not be dragged in."""
+    from gateway.lifeboat_turn_context import build_turn_context
+
+    material = build_turn_context(
+        transcript_dir=None, queue_text="", journal_entries=["אתמול הלכתי לספידייט"]
+    )
+
+    assert "optional historical context" in material
+    assert "HE HAS ASKED ABOUT THIS PERIOD" not in material
+
+
+def test_neither_heading_invites_invention() -> None:
+    from gateway.lifeboat_turn_context import build_turn_context
+
+    for about_a_period in (True, False):
+        material = build_turn_context(
+            about_a_period=about_a_period,
+            transcript_dir=None,
+            queue_text="",
+            journal_entries=["אתמול הלכתי לספידייט"],
+        )
+        assert "not here" in material or "not a current account" in material
