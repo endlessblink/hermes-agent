@@ -1,0 +1,8 @@
+name: lifeboat-emotional-candidate-capture
+version: 1.0.0
+description: "Explicit-only candidate capture for Life-Boat bully decomposition."
+author: Hermes
+hooks:
+  - pre_llm_call
+configuration:
+  queue_path: "Absolute path to the configured Life-Boat queue file; required, no default."

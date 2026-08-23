@@ -1,0 +1,7 @@
+name: lifeboat-response-reviewer
+version: "0.1.0"
+description: "Conditional fail-open review of high-risk life-advisor emotional coaching replies."
+author: "local"
+hooks:
+  - pre_llm_call
+  - transform_llm_output
