@@ -24,7 +24,9 @@ from gateway.lifeboat_behaviour import behaviour_problems, parse_turns  # noqa: 
 
 LOGS = pathlib.Path(
     "/media/endlessblink/data/app-data/sync/Dropbox/OBSIDIAN_SYNCED/MAIN VULT"
-    "/_System/Hermes Turn Logs/life-advisor"
+    "/_System/Hermes Turn Logs/life-boat"  # the bot's own transcript, not
+    # the local life-advisor profile's -- reading that one is why every
+    # "verified from the transcript" check was looking at the wrong file
 )
 
 

@@ -620,6 +620,11 @@ def finalize_turn(
                 conversation_history=list(messages),
                 model=agent.model,
                 platform=getattr(agent, "platform", None) or "",
+                # Without the chat and topic a writer cannot tell one
+                # conversation from another, which is how Life-Boat's turns
+                # ended up in a shared file marked only by a session id.
+                chat_id=str(getattr(agent, "_chat_id", "") or ""),
+                thread_id=str(getattr(agent, "_thread_id", "") or ""),
             )
         except Exception as exc:
             logger.warning("post_llm_call hook failed: %s", exc)
