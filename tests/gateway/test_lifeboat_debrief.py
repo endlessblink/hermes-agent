@@ -280,3 +280,75 @@ def test_simply_asking_after_a_correction_is_accepted() -> None:
     assert debrief_problems(
         "אמרת שהיא קראה לך מעיק. מתי היא אמרה את זה?", known_text=KNOWN
     ) == ()
+
+
+# --- 2026-08-23 20:46, the first debrief after the rewrite ------------------
+#
+# "כן. תתחיל מהאירוע הראשון כפי שהוא קרה—מי היה שם, מה קרה בפועל, ומה נשאר
+# איתך אחריו. מאיפה אתה רוצה להתחיל?" Noam: "this again drops all
+# responsibility on me". Two faults: it assigns him the narration with a
+# template to fill, then asks him where to start.
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "מאיפה אתה רוצה להתחיל?",
+        "ממה אתה מעדיף להתחיל?",
+        "במה אתה רוצה שנתחיל?",
+        "where do you want to start?",
+    ],
+)
+def test_asking_where_he_wants_to_start_is_rejected(reply: str) -> None:
+    assert "handed_back_the_steering" in debrief_problems(reply, known_text=KNOWN)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "תתחיל מהאירוע הראשון כפי שהוא קרה—מי היה שם, מה קרה בפועל, "
+        "ומה נשאר איתך אחריו. מה קרה?",
+        "ספר לי מההתחלה: מה קרה, מה הרגשת, ומה נשאר. נו?",
+        "start with the first event: who was there, what happened, "
+        "and what stayed with you. so?",
+    ],
+)
+def test_assigning_him_the_narration_with_a_template_is_rejected(reply: str) -> None:
+    assert "assigned_him_the_telling" in debrief_problems(reply, known_text=KNOWN)
+
+
+def test_asking_about_one_thing_is_still_accepted() -> None:
+    assert debrief_problems(
+        "אמרת שהיא קראה לך מעיק. מתי היא אמרה את זה?", known_text=KNOWN
+    ) == ()
+
+
+# --- it must be able to think out loud --------------------------------------
+#
+# Noam, 2026-08-23: "its that the bot is throwing responsiblility on me instead
+# of trying to understand". Every guard in place made a blank question the only
+# legal move. A read he can correct in one word is not a claim about his life;
+# it is the bot doing the work and showing it.
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "ממה שכתבת קודם זה נשמע שהמשפט שלה נחת כמו הוכחה, לא כמו עלבון. זה מדויק?",
+        "אולי מה שמכביד זה לא המשפט עצמו אלא מה שהוא אישר. קרוב?",
+        "נדמה לי שזה פגע בדיוק במקום שכבר היה פתוח. טועה?",
+        "it sounds like it landed as proof rather than as an insult. is that right?",
+    ],
+)
+def test_a_read_he_can_correct_is_allowed(reply: str) -> None:
+    assert debrief_problems(reply, known_text=KNOWN) == ()
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "הפגישה עם הבוס שלך הייתה קשה. איך זה נחת?",
+        "אתה נמנע מזה כבר שבועות. נכון?",
+    ],
+)
+def test_a_flat_assertion_is_still_rejected(reply: str) -> None:
+    """Stating it as settled fact is the old failure; hedging is the difference."""
+    assert "unsourced_continuity" in debrief_problems(reply, known_text=KNOWN)

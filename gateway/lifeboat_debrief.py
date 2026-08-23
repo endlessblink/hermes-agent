@@ -85,6 +85,8 @@ _THERAPIST_REGISTER_RE = re.compile(
     r"|מה\s+זה\s+מפעיל\s+אצלך|מה\s+(?:זה\s+)?מעורר\s+אצלך"
     r"|[לנתא]עבד\s+את\s+(?:זה|ה)|עיבוד\s+רגשי|להכיל\s+את"
     r"|להישאר\s+עם\s+(?:זה|התחושה)|מרחב\s+בטוח"
+    r"|מה\s+נשאר\s+(?:איתך|אתך)|מה\s+זה\s+עשה\s+לך|איפה\s+זה\s+יושב"
+    r"|\bwhat\s+stayed\s+with\s+you\b|\bwhere\s+does\s+(?:that|this)\s+sit\b"
     r"|\bhold(?:ing)?\s+space\b|\bprocess\s+this\b|\bsit\s+with\s+(?:that|this)\b"
     r"|\bwhat\s+(?:does\s+)?(?:that|this)\s+bring\s+up\s+for\s+you\b)",
     re.IGNORECASE,
@@ -99,12 +101,12 @@ _STEERING_HANDBACK_RE = re.compile(
     r"|מה\s+(?:היה\s+)?עולה\s+לך\s+ראשון"
     r"|ב?מה\s+(?:תרצה|היית\s+רוצה)\s+(?:להתחיל|לדבר|שנתחיל)"
     r"|מה\s+תרצה\s+ש"
-    r"|(?:מ?איפה|ממה|במה)\s+(?:נתחיל|להתחיל|תרצה\s+להתחיל)"
+    r"|(?:מ?איפה|ממה|במה)\s+(?:אתה\s+)?(?:רוצה|מעדיף|תרצה|היית\s+רוצה)?\s*(?:ש?נתחיל|להתחיל)"
     r"|לבחור\s+(?:מאיפה|במה|מה)"
     r"|מה\s+הכי\s+(?:חשוב|דחוף)\s+לך\s+(?:לדבר|להתחיל)"
     r"|\bwhat\s+would\s+you\s+like\s+to\s+(?:start|talk|begin)"
     r"|\bwhat(?:'s| is)\s+the\s+first\s+thing\s+that\s+comes"
-    r"|\bwhere\s+(?:should|do)\s+(?:we|you)\s+(?:want\s+to\s+)?start"
+    r"|\bwhere\s+(?:should|do)\s+(?:we|you)\s+(?:want\s+to\s+|prefer\s+to\s+)?start"
     r"|\bwhat\s+do\s+you\s+want\s+to\s+talk\s+about)",
     re.IGNORECASE,
 )
@@ -119,6 +121,36 @@ _SELF_CORRECTION_PREAMBLE_RE = re.compile(
     r"|דיברתי\s+אליך\s+כאילו"
     r"|אז\s+אני\s+מתחיל\s+ספציפית"
     r"|^\s*(?:you(?:'re| are)\s+right|right|fair(?:\s+enough)?)\s*[,.\u2014-])",
+    re.IGNORECASE,
+)
+
+#: Telling him to narrate, and handing him the headings to narrate under.
+#: 2026-08-23 20:46: "תתחיל מהאירוע הראשון כפי שהוא קרה—מי היה שם, מה קרה
+#: בפועל, ומה נשאר איתך אחריו." That is the open dump with homework attached.
+_ASSIGNS_THE_TELLING_RE = re.compile(
+    r"(?:(?:תתחיל|ספר\s+לי|תספר)\b[^?!\n]{0,120}?[:\u2014-][^?!\n]{0,140}?,"
+    r"[^?!\n]{0,140}?\b(?:ו?מה|ואיך)\b"
+    r"|\b(?:start\s+with|tell\s+me)\b[^?!\n]{0,120}?[:\u2014-][^?!\n]{0,140}?,"
+    r"[^?!\n]{0,140}?\band\s+what\b)",
+    re.IGNORECASE,
+)
+
+#: A read the bot is offering rather than asserting. Noam asked for exactly
+#: this: it should be working to understand him, not extracting material from
+#: him. Marked as fallible, it is not a claim about his life -- it is the bot
+#: doing the thinking and showing its work so he can correct it in one word.
+_TENTATIVE_READ_RE = re.compile(
+    r"(?:זה\s+נשמע\s+ש|נשמע\s+לי\s+ש|נדמה\s+לי\s+ש|אולי\s|יכול\s+להיות\s+ש"
+    r"|התחושה\s+שלי\s+ש|אם\s+אני\s+מבין\s+נכון"
+    r"|\bit\s+sounds\s+like\b|\bit\s+seems\b|\bmaybe\b|\bmy\s+read\s+is\b)",
+    re.IGNORECASE,
+)
+
+#: And it must actually be offered: a read with no invitation to correct it is
+#: just an assertion with a softener in front.
+_INVITES_CORRECTION_RE = re.compile(
+    r"(?:זה\s+מדויק|קרוב\?|טועה\?|נכון\?|או\s+שלא|תקן\s+אותי"
+    r"|\bis\s+that\s+right\b|\bam\s+i\s+wrong\b|\bclose\?)",
     re.IGNORECASE,
 )
 
@@ -265,6 +297,8 @@ def debrief_problems(
     known = _content_tokens(known_text)
     issues: list[str] = []
 
+    if _ASSIGNS_THE_TELLING_RE.search(text):
+        issues.append("assigned_him_the_telling")
     if _STEERING_HANDBACK_RE.search(text):
         issues.append("handed_back_the_steering")
     if _SELF_CORRECTION_PREAMBLE_RE.search(text):
@@ -288,9 +322,15 @@ def debrief_problems(
             issues.append("presupposed_event")
             break
 
+    offered_as_a_read = bool(
+        _TENTATIVE_READ_RE.search(text) and _INVITES_CORRECTION_RE.search(text)
+    )
     for sentence in _SENTENCE_RE.findall(text):
         clean = sentence.strip()
         if not clean or _QUESTION_RE.search(clean):
+            continue
+        if offered_as_a_read:
+            # Hedged and open to correction: thinking, not asserting.
             continue
         specific = _content_tokens(clean)
         if specific and not (specific & known):
