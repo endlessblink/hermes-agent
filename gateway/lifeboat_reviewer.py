@@ -90,6 +90,32 @@ _THERAPEUTIC_GIBBERISH_RE = re.compile(
     r"the\s+absence\s+of\s+messages\s+meets\s+the\s+wound|the\s+living\s+point)",
     re.IGNORECASE,
 )
+# Asking someone to rate themselves. A number is not a feeling, and being
+# asked for one turns a check-in into a form.
+_CAPACITY_SURVEY_RE = re.compile(
+    r"(?:סקאלה\s+של\s*\d|מ-?\s*\d+\s*(?:עד|ל)\s*\d+|"
+    r"איך\s+היית\s+מדרג|תדרג|לדרג\s+את\s+(?:המצב|האנרגיה|הבוקר|היום)|"
+    r"\bon a scale of\b|\bhow would you rate\b|\brate your\b)",
+    re.IGNORECASE,
+)
+
+# Offering a choice between ways of being supported. An open door is an
+# invitation to continue, not a pair of buttons.
+_SUPPORT_MENU_RE = re.compile(
+    r"(?:(?:רוצה|מעדיף|תעדיף|נעדיף)\b[^?]{0,80}\bאו\b[^?]{0,80}\?)"
+    r"|(?:would you (?:rather|prefer)[^?]{0,90}\bor\b[^?]{0,90}\?)",
+    re.IGNORECASE,
+)
+
+# Numbered or bulleted decomposition of someone's experience.
+_ENUMERATED_ITEM_RE = re.compile(r"(?:(?<=\s)|^)(?:\d+[.)]|[-•*])\s+\S")
+_MIN_ENUMERATED_ITEMS = 2
+
+
+def _is_checklist(text: str) -> bool:
+    """True when the reply enumerates his experience, on one line or many."""
+    return len(_ENUMERATED_ITEM_RE.findall(text)) >= _MIN_ENUMERATED_ITEMS
+
 _TOKEN_RE = re.compile(r"[A-Za-zא-ת]{3,}")
 
 @dataclass(frozen=True)
@@ -160,6 +186,12 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
         return _plain_reality_fallback(user, "epistemic_caution_erased_grounded_knowledge")
     if _THERAPEUTIC_GIBBERISH_RE.search(text):
         return _plain_reality_fallback(user, "therapeutic_gibberish_in_repair")
+    if _CAPACITY_SURVEY_RE.search(text):
+        return _fallback(user, "asked_him_to_rate_himself")
+    if _SUPPORT_MENU_RE.search(text):
+        return _fallback(user, "offered_a_menu_of_support_options")
+    if _is_checklist(text):
+        return _fallback(user, "decomposed_his_experience_into_a_list")
     if not signals.possible_crisis and _ORDINARY_SAFETY_RE.search(text) and (signals.depressive_thoughts or "ייאוש" in user or "hopeless" in user.lower()):
         return _fallback(user, "unsupported_safety_escalation")
     enough_material = len(_TOKEN_RE.findall(user)) >= 5

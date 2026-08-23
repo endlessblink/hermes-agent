@@ -15,7 +15,11 @@ from gateway.lifeboat_modes import CRISIS, PAUSED, SUPPORT, TIME, WORK
 
 
 _QUESTION_RE = re.compile(r"[?？]")
-_STRUCTURE_RE = re.compile(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+")
+#: Two or more enumerated items, wherever they sit. A list written on one line
+#: decomposes an experience exactly as much as one written on several, and the
+#: pre-send reviewer already treats it that way.
+_STRUCTURE_RE = re.compile(r"(?:(?<=\s)|^)(?:\d+[.)]|[-•*])\s+\S")
+_MIN_STRUCTURE_ITEMS = 2
 #: A status block labels its lines instead of bullets: "Done: ...", "חסום: ...".
 _LABELLED_LINE_RE = re.compile(r"^[^\n:]{1,24}:\s+\S", re.M)
 _MIN_LABELLED_LINES = 2
@@ -71,7 +75,7 @@ def contract_violations(response: str | None, mode: str = SUPPORT) -> tuple[str,
         issues.append("too_long")
 
     if not contract.allows_structure and (
-        _STRUCTURE_RE.search(f"\n{text}")
+        len(_STRUCTURE_RE.findall(text)) >= _MIN_STRUCTURE_ITEMS
         or len(_LABELLED_LINE_RE.findall(text)) >= _MIN_LABELLED_LINES
     ):
         issues.append("structure")
