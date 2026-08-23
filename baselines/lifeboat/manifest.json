@@ -10,6 +10,6 @@
     "gateway/lifeboat_runtime_check.py": "265c1999e9eacd6e1798facefb4381514f73daf3a998de76c2d5e1eefb54d226",
     "gateway/lifeboat_surface.py": "3da6e7fe7a38c2f555776cc001a5dd07e001e4aff6663872f879e77a32c2539d"
   },
-  "label": "editing reviewer landed",
+  "label": "material fixes + editor verified",
   "root": "/home/endlessblink/.hermes/hermes-agent"
 }

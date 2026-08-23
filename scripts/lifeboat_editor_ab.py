@@ -156,9 +156,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--depth", type=int, default=0, help="synthetic filler exchanges first")
     parser.add_argument("--main-effort", default="medium")
     parser.add_argument("--arms", default="", help="comma-separated subset of arm names")
+    parser.add_argument("--turns", type=Path, help="JSON list of user messages to use instead")
     args = parser.parse_args(argv)
 
     replay = _load_replay()
+
+    turns = TURNS
+    if args.turns:
+        loaded = json.loads(args.turns.read_text(encoding="utf-8"))
+        if not isinstance(loaded, list) or not all(isinstance(t, str) for t in loaded):
+            raise SystemExit("--turns must be a JSON list of strings")
+        turns = loaded
 
     arms = (
         ("main-only", None),
@@ -214,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             history = replay._filler_history(args.depth)
             transcript: list[dict[str, str]] = []
 
-            for index, user_text in enumerate(TURNS, start=1):
+            for index, user_text in enumerate(turns, start=1):
                 ephemeral = _ephemeral_prompt(channel_prompt, sandbox, session_key, user_text)
                 agent = AIAgent(
                     model=model,
