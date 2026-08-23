@@ -352,3 +352,49 @@ def test_a_read_he_can_correct_is_allowed(reply: str) -> None:
 def test_a_flat_assertion_is_still_rejected(reply: str) -> None:
     """Stating it as settled fact is the old failure; hedging is the difference."""
     assert "unsourced_continuity" in debrief_problems(reply, known_text=KNOWN)
+
+
+# --- the guidance actually reaches the turn ---------------------------------
+#
+# Built and never connected, twice over. 2026-08-23 20:54, asked to restart the
+# debrief, it re-entered one thread from the previous session instead of
+# opening the period he asked about.
+
+def test_a_broad_debrief_request_is_not_one_subject() -> None:
+    assert is_debrief_request("בוא נתחיל שוב את הדיבריף בבקשה") is True
+    assert is_debrief_request("אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה") is True
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "חוזרים לספיד-דייט ולמחשבה ש„לעולם לא תהיה הדדיות”. נתחיל משם?",
+        "נמשיך מאיפה שעצרנו עם ההודעה שלה. טוב?",
+    ],
+)
+def test_reopening_one_prior_thread_on_a_fresh_debrief_is_rejected(reply: str) -> None:
+    problems = debrief_problems(
+        reply, known_text=KNOWN, request="בוא נתחיל שוב את הדיבריף"
+    )
+
+    assert "narrowed_a_broad_debrief" in problems
+
+
+def test_a_narrow_request_may_go_straight_to_that_thread() -> None:
+    problems = debrief_problems(
+        "נשמע שזה עדיין פתוח מאז. זה מדויק?",
+        known_text=KNOWN,
+        request="בוא נדבר על מה שהיא אמרה",
+    )
+
+    assert problems == ()
+
+
+def test_the_gateway_injects_the_debrief_guidance(tmp_path) -> None:
+    from gateway.lifeboat_followups import prepare_lifeboat_inbound_guidance
+
+    guidance = prepare_lifeboat_inbound_guidance(
+        tmp_path, "sess", "בוא נתחיל שוב את הדיבריף בבקשה"
+    )
+
+    assert "DEBRIEF SHAPE" in guidance

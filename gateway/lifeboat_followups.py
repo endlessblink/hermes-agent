@@ -303,8 +303,41 @@ def prepare_lifeboat_inbound_guidance(
     trajectory = record_lifeboat_trajectory(profile_home, session_key, user_text)
     reminder_context = consume_followup_context(profile_home, session_key)
     if reminder_context:
-        return build_continuation_guidance(reminder_context, user_text, trajectory)
-    return build_lifeboat_coaching_guidance(user_text, trajectory)
+        guidance = build_continuation_guidance(reminder_context, user_text, trajectory)
+    else:
+        guidance = build_lifeboat_coaching_guidance(user_text, trajectory)
+
+    # Guidance used to be entirely rules and no material, so the bot could not
+    # be specific about his week even when he asked it to debrief his week.
+    try:
+        from gateway.lifeboat_turn_context import build_turn_context
+
+        material = build_turn_context()
+        if material:
+            guidance = "\n\n".join(part for part in (guidance, material) if part)
+    except Exception:
+        logger.error("Life-Boat turn context failed", exc_info=True)
+
+    # A debrief has a shape of its own, and until now the module that knew it
+    # was never connected to a turn -- so every debrief was the model
+    # improvising. Asked to restart one, it re-entered a single thread from the
+    # previous session instead of opening the period.
+    try:
+        from gateway.lifeboat_debrief import (
+            build_debrief_guidance,
+            is_broad_debrief,
+            is_debrief_request,
+        )
+
+        if is_debrief_request(user_text):
+            debrief = build_debrief_guidance(
+                anchors=(), area=None, broad=is_broad_debrief(user_text)
+            )
+            guidance = "\n\n".join(part for part in (guidance, debrief) if part)
+    except Exception:
+        logger.error("Life-Boat debrief guidance failed", exc_info=True)
+
+    return guidance
 
 
 def arm_followup(

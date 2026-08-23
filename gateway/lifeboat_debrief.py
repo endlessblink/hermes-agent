@@ -140,7 +140,7 @@ _ASSIGNS_THE_TELLING_RE = re.compile(
 #: him. Marked as fallible, it is not a claim about his life -- it is the bot
 #: doing the thinking and showing its work so he can correct it in one word.
 _TENTATIVE_READ_RE = re.compile(
-    r"(?:זה\s+נשמע\s+ש|נשמע\s+לי\s+ש|נדמה\s+לי\s+ש|אולי\s|יכול\s+להיות\s+ש"
+    r"(?:נשמע\s+(?:לי\s+)?ש|נדמה\s+לי\s+ש|אולי\s|יכול\s+להיות\s+ש"
     r"|התחושה\s+שלי\s+ש|אם\s+אני\s+מבין\s+נכון"
     r"|\bit\s+sounds\s+like\b|\bit\s+seems\b|\bmaybe\b|\bmy\s+read\s+is\b)",
     re.IGNORECASE,
@@ -151,6 +151,26 @@ _TENTATIVE_READ_RE = re.compile(
 _INVITES_CORRECTION_RE = re.compile(
     r"(?:זה\s+מדויק|קרוב\?|טועה\?|נכון\?|או\s+שלא|תקן\s+אותי"
     r"|\bis\s+that\s+right\b|\bam\s+i\s+wrong\b|\bclose\?)",
+    re.IGNORECASE,
+)
+
+#: A debrief over a period, rather than about one thing. "Let's start the
+#: debrief again" opens the whole span; it does not resume the thread that
+#: happened to be live last time.
+_BROAD_REQUEST_RE = re.compile(
+    r"(?:דיבריף|תחקיר|\bdebrief\b)"
+    r"(?![^.!?\n]{0,40}?\b(?:על\s+(?:מה\s+ש|ה)?[\wא-ת]{3,})\b)",
+    re.IGNORECASE,
+)
+_PERIOD_RE = re.compile(
+    r"(?:התקופה\s+האחרונה|הימים\s+האחרונים|השבוע|מהתקופה|recent|the\s+week)",
+    re.IGNORECASE,
+)
+
+#: Reopening a single earlier thread instead of the period.
+_RESUMES_ONE_THREAD_RE = re.compile(
+    r"(?:חוזרים\s+ל|נחזור\s+ל|נמשיך\s+מ(?:איפה\s+ש)?עצרנו|נתחיל\s+משם"
+    r"|\bpicking\s+up\s+where\b|\bback\s+to\s+the\b)",
     re.IGNORECASE,
 )
 
@@ -283,11 +303,22 @@ def next_area(
     return (quiet or remaining)[0]
 
 
+def is_broad_debrief(request: str | None) -> bool:
+    """True when he opened the period, not one subject inside it."""
+    text = str(request or "")
+    if not text.strip():
+        return False
+    if _PERIOD_RE.search(text):
+        return True
+    return bool(_BROAD_REQUEST_RE.search(text))
+
+
 def debrief_problems(
     response: str | None,
     *,
     known_text: str | None = "",
     areas: tuple[str, ...] = (),
+    request: str | None = "",
 ) -> tuple[str, ...]:
     """Name every way this debrief turn breaks its shape."""
     text = " ".join(str(response or "").split()).strip()
@@ -297,6 +328,8 @@ def debrief_problems(
     known = _content_tokens(known_text)
     issues: list[str] = []
 
+    if is_broad_debrief(request) and _RESUMES_ONE_THREAD_RE.search(text):
+        issues.append("narrowed_a_broad_debrief")
     if _ASSIGNS_THE_TELLING_RE.search(text):
         issues.append("assigned_him_the_telling")
     if _STEERING_HANDBACK_RE.search(text):
@@ -345,7 +378,12 @@ def debrief_problems(
     return tuple(issues)
 
 
-def build_debrief_guidance(*, anchors: tuple[str, ...] = (), area: str | None = None) -> str:
+def build_debrief_guidance(
+    *,
+    anchors: tuple[str, ...] = (),
+    area: str | None = None,
+    broad: bool = False,
+) -> str:
     """Tell the model the shape, never the words.
 
     Supplying an example sentence is exactly how the canned opener returned
@@ -368,6 +406,12 @@ def build_debrief_guidance(*, anchors: tuple[str, ...] = (), area: str | None = 
         "If he corrects you, do not agree, apologise, or describe what you did "
         "wrong. Ask the better question instead.",
     ]
+    if broad:
+        lines.append(
+            "He opened the period, not one subject inside it. Do not resume the "
+            "thread that happened to be live last time; that is his whole "
+            "conversation reduced to one thing."
+        )
     if area:
         lines.append(f"AREA THAT HAS BEEN QUIET: {area}")
     lines.append("ANCHORS (the only things he has actually said):")
