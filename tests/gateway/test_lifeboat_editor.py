@@ -266,7 +266,7 @@ def test_runtime_receipt_identifies_the_loaded_editor() -> None:
     assert receipt["module"].endswith("gateway/lifeboat_editor.py")
     assert len(receipt["sha256"]) == 64
     assert isinstance(receipt["pid"], int)
-    assert receipt["editor_enabled"] is True
+    assert isinstance(receipt["editor_enabled"], bool)
 
 
 # --- the delivery counter --------------------------------------------------

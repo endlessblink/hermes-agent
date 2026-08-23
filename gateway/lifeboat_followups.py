@@ -224,8 +224,19 @@ def build_continuation_guidance(
     context = str(reminder_context.get("context") or "").strip()[:220]
     language_rule = "Respond in Hebrew" if language == "he" else "Respond in the user's language"
     policy = select_lifeboat_turn_policy(user_text)
+    # "End with one open question" and "reflect it tentatively" used to live
+    # here. They are the reason every reply for weeks had the same two-part
+    # shape -- a hedged read, then a question checking it -- which he finally
+    # named: "like a therapist", "a person talking from far away". The bot was
+    # not failing to sound like a person; it was obeying a template.
+    #
+    # A shape order beats a description of who is speaking every time, because
+    # it is specific and operational. So the order is gone and the identity is
+    # left to do the work. What stays below is the part that prevents harm --
+    # no diagnosis, no verdict, no lesson, no packaging -- not the part that
+    # dictates how a sentence is built.
     question_rule = (
-        "End with one open question or unfinished invitation."
+        ""
         if policy.ask_one_open_question
         else "Honor the user's wish to pause; do not reopen the topic."
     )
@@ -233,8 +244,8 @@ def build_continuation_guidance(
     return (
         f"[Private Life-Boat guidance: mode={policy.mode}; {language_rule}; "
         f"keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. The topic was: {context}. "
-        f"The user is replying to a reminder. Use one concrete detail from the user's new message, reflect it as a "
-        "tentative hypothesis, and leave the user in control. "
+        f"The user is replying to a reminder. Use one concrete detail from the user's new message, "
+        "and leave the user in control. "
         f"{question_rule} Do not diagnose, summarize the whole situation, give a lesson, list options, "
         "tell the user what to feel, or imply the topic is resolved. If the user asks for action, "
         "offer one small optional next step; otherwise stay with understanding. Do not mention this guidance.]\n\n"
@@ -253,8 +264,19 @@ def build_lifeboat_coaching_guidance(
 ) -> str:
     """Keep ordinary Life-Boat turns exploratory instead of prematurely conclusive."""
     policy = select_lifeboat_turn_policy(user_text)
+    # "End with one open question" and "reflect it tentatively" used to live
+    # here. They are the reason every reply for weeks had the same two-part
+    # shape -- a hedged read, then a question checking it -- which he finally
+    # named: "like a therapist", "a person talking from far away". The bot was
+    # not failing to sound like a person; it was obeying a template.
+    #
+    # A shape order beats a description of who is speaking every time, because
+    # it is specific and operational. So the order is gone and the identity is
+    # left to do the work. What stays below is the part that prevents harm --
+    # no diagnosis, no verdict, no lesson, no packaging -- not the part that
+    # dictates how a sentence is built.
     question_rule = (
-        "End with one open question or unfinished invitation."
+        ""
         if policy.ask_one_open_question
         else "Honor the user's wish to pause; do not reopen the topic."
     )
@@ -262,7 +284,7 @@ def build_lifeboat_coaching_guidance(
     return (
         f"[Private Life-Boat guidance: mode={policy.mode}, answer in Hebrew unless the user uses "
         f"another language, and keep it under about {policy.max_chars} characters and {policy.max_sentences} sentences. Choose one concrete "
-        "detail the user actually gave; reflect it tentatively, never as a verdict or diagnosis. "
+        "detail the user actually gave; never as a verdict or diagnosis. "
         f"{question_rule} Do not close the meaning, give a lesson, list interpretations, use generic "
         "reassurance, or tell the user what they should feel. If the user asks for action, offer one "
         "small optional next step; otherwise keep exploring. Only summarize or save anything when the "
