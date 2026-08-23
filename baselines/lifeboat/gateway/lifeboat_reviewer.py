@@ -101,6 +101,23 @@ _CAPACITY_SURVEY_RE = re.compile(
 
 # Offering a choice between ways of being supported. An open door is an
 # invitation to continue, not a pair of buttons.
+#: Three or more readings of his own experience, offered for him to pick from.
+#: 2026-08-23 20:04: "לאן הראש הלך קודם: ל'באסה', 'שוב כלום', ל'אולי עוד מעט',
+#: או ישר ל'זה פשוט לא יקרה לי'?" Two alternatives is a real question. Four is
+#: a form, and answering it is work he did not ask for.
+#: Two shapes of the same fault: "X or Y or Z?", and the comma list that ends
+#: with one "או" -- which is how the live one was actually written.
+_INTERPRETATION_MENU_RE = re.compile(
+    r"(?:[^.!?\n]*\b(?:או|or)\b[^.!?\n]*\b(?:או|or)\b[^.!?\n]*[?？]"
+    r"|[^.!?\n]*,[^.!?\n]*,[^.!?\n]*\b(?:או|or)\b[^.!?\n]*[?？])",
+    re.IGNORECASE,
+)
+
+#: Or simply: three or more quoted fragments inside one question. Quoting his
+#: possible reactions back at him to choose between is the same form.
+_QUOTED_SPAN_RE = re.compile(r"[\u201e\u201c\u201d\u2018\u2019\"']([^\u201e\u201c\u201d\u2018\u2019\"'\n]{2,60})[\u201e\u201c\u201d\u2018\u2019\"']")
+_MIN_QUOTED_ALTERNATIVES = 3
+
 _SUPPORT_MENU_RE = re.compile(
     r"(?:(?:רוצה|מעדיף|תעדיף|נעדיף)\b[^?]{0,80}\bאו\b[^?]{0,80}\?)"
     r"|(?:would you (?:rather|prefer)[^?]{0,90}\bor\b[^?]{0,90}\?)",
@@ -139,6 +156,18 @@ _OTHERS_MIND_RE = re.compile(
     r"|(?:היא|הוא)\s+(?:בטח|כנראה|באמת|אכן|בהחלט)\s+(?:מרגיש|חושב|רוצה|מתכוון)"
     r"|\b(?:she|he|they) (?:clearly|obviously|probably|must) (?:feels?|thinks?|wants?)\b)",
     re.IGNORECASE,
+)
+
+#: Clinical register and method narration. 2026-08-23, Noam on a live reply:
+#: "too much like a therapist and that causes distance between me and it". The
+#: register itself is the distance -- threads, holding space, what this
+#: activates in you, processing -- and so is announcing the procedure before
+#: asking. Someone who knows you does not brief you on their method.
+from gateway.lifeboat_debrief import (
+    _METHOD_NARRATION_RE as _CLINICAL_METHOD_RE,
+    _SELF_CORRECTION_PREAMBLE_RE as _CORRECTION_PREAMBLE_RE,
+    _STEERING_HANDBACK_RE as _MADE_HIM_CHOOSE_RE,
+    _THERAPIST_REGISTER_RE as _CLINICAL_REGISTER_RE,
 )
 
 _QUESTION_RE = re.compile(r"[?？]")
@@ -212,6 +241,14 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
         return _plain_reality_fallback(user, "epistemic_caution_erased_grounded_knowledge")
     if _THERAPEUTIC_GIBBERISH_RE.search(text):
         return _plain_reality_fallback(user, "therapeutic_gibberish_in_repair")
+    if _MADE_HIM_CHOOSE_RE.search(text):
+        return _fallback(user, "made_him_choose_the_subject")
+    if _CORRECTION_PREAMBLE_RE.search(text):
+        return _fallback(user, "restated_the_correction_instead_of_answering")
+    if _CLINICAL_METHOD_RE.search(text):
+        return _fallback(user, "narrated_its_own_method")
+    if _CLINICAL_REGISTER_RE.search(text):
+        return _fallback(user, "clinical_register_created_distance")
     if _OTHERS_MIND_RE.search(text):
         return _plain_reality_fallback(user, "asserted_another_persons_inner_state")
     if _DECISION_OFFLOAD_RE.search(text):
@@ -224,6 +261,11 @@ def review_lifeboat_response(user_text: str, response: str) -> LifeBoatReview:
         return _fallback(user, "mirrored_the_feeling_without_moving")
     if _CAPACITY_SURVEY_RE.search(text):
         return _fallback(user, "asked_him_to_rate_himself")
+    if _INTERPRETATION_MENU_RE.search(text) or (
+        _QUESTION_RE.search(text)
+        and len(_QUOTED_SPAN_RE.findall(text)) >= _MIN_QUOTED_ALTERNATIVES
+    ):
+        return _fallback(user, "offered_a_menu_of_readings_of_his_experience")
     if _SUPPORT_MENU_RE.search(text):
         return _fallback(user, "offered_a_menu_of_support_options")
     if _is_checklist(text):
