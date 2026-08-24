@@ -242,8 +242,8 @@ def test_semantic_shadow_is_observational_only() -> None:
 
 
 @pytest.mark.parametrize("ack", ["בסדר", "👍"])
-@pytest.mark.parametrize("prior", ["מה קרה אחרי זה?", "👍"])
-def test_bare_ack_after_an_assistant_reply_must_be_repaired(ack: str, prior: str) -> None:
+@pytest.mark.parametrize("prior", ["מה קרה אחרי זה?", "👍", ""])
+def test_bare_ack_must_be_repaired(ack: str, prior: str) -> None:
     delivered, outcome = resolve_reply(
         "אוקיי",
         ack,
