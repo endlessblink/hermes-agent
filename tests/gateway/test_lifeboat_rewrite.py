@@ -270,3 +270,16 @@ def test_failed_editor_does_not_reemit_a_bare_ack_when_rewrite_can_repair() -> N
 
     assert delivered != "👍"
     assert outcome == "rewritten"
+
+
+def test_semantic_failure_rewrites_even_when_editor_seat_is_unavailable() -> None:
+    delivered, outcome = resolve_reply(
+        "אוקיי",
+        "בסדר",
+        rewrite=lambda *a, **k: "נמשיך עם מה שסיפרת: מה קרה אחרי שקיבלת את המספרים?",
+        edit=None,
+        semantic_enforce=True,
+    )
+
+    assert delivered != "בסדר"
+    assert outcome == "rewritten"

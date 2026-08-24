@@ -329,7 +329,7 @@ def resolve_reply(
                     return repaired, "rewritten"
         return text, "editor_rejected_fallback"
 
-    if verdict.accepted and not unsafe_reason:
+    if verdict.accepted and not unsafe_reason and not semantic_reason:
         return text, "accepted"
 
     rewrite_reason = semantic_reason or unsafe_reason or verdict.reason
