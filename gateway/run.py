@@ -12777,20 +12777,77 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # below; a /new or another lifecycle transition may move
             # session_entry.session_id while the old run is still unwinding.
             _run_start_session_id = session_entry.session_id
-            agent_result = await self._run_agent(
-                message=message_text,
-                context_prompt=context_prompt,
-                history=history,
-                source=source,
-                session_id=_run_start_session_id,
-                session_key=session_key,
-                run_generation=run_generation,
-                event_message_id=self._reply_anchor_for_event(event),
-                channel_prompt=event.channel_prompt,
-                moa_config=getattr(event, "_moa_config", None),
-                persist_user_message=persist_user_message,
-                persist_user_timestamp=persist_user_timestamp,
-            )
+            try:
+                agent_result = await asyncio.wait_for(
+                    self._run_agent(
+                        message=message_text,
+                        context_prompt=context_prompt,
+                        history=history,
+                        source=source,
+                        session_id=_run_start_session_id,
+                        session_key=session_key,
+                        run_generation=run_generation,
+                        event_message_id=self._reply_anchor_for_event(event),
+                        channel_prompt=event.channel_prompt,
+                        moa_config=getattr(event, "_moa_config", None),
+                        persist_user_message=persist_user_message,
+                        persist_user_timestamp=persist_user_timestamp,
+                    ),
+                    timeout=75.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Life-Boat main generation timed out; requesting bounded fallback"
+                )
+                fallback_text = ""
+                try:
+                    from agent.auxiliary_client import call_llm
+                    from gateway.lifeboat_voice import load_voice_text
+
+                    fallback_messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                f"{load_voice_text()}\n\n"
+                                "The primary turn timed out. Write one natural, "
+                                "short reply to the user's message using only "
+                                "that message. Do not invent context, do not "
+                                "repeat a bare acknowledgment, and do not ask "
+                                "the user to design the whole direction. Return "
+                                "only the reply."
+                            ),
+                        },
+                        {"role": "user", "content": str(message_text or "")},
+                    ]
+                    completion = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            call_llm,
+                            task="lifeboat_editor",
+                            messages=fallback_messages,
+                            max_tokens=220,
+                            temperature=0.4,
+                            timeout=12,
+                        ),
+                        timeout=15.0,
+                    )
+                    fallback_text = str(
+                        completion.choices[0].message.content or ""
+                    ).strip()
+                except Exception as fallback_error:
+                    logger.warning(
+                        "Life-Boat bounded fallback failed error=%s",
+                        type(fallback_error).__name__,
+                    )
+                if not fallback_text:
+                    raise
+                agent_result = {
+                    "final_response": fallback_text,
+                    "messages": [],
+                    "api_calls": 1,
+                    "failed": True,
+                    "error": "primary generation timed out; bounded fallback used",
+                    "fallback": True,
+                }
 
             # Stop persistent typing indicator now that the agent is done.
             # Slack AI status is scoped to a thread/workspace, so preserve the
