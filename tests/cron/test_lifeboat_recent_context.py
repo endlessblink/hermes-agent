@@ -55,3 +55,11 @@ def test_proactive_context_fails_closed_without_recent_provenance(monkeypatch):
     monkeypatch.setattr(scheduler.time, "time", lambda: now)
 
     assert scheduler._lifeboat_recent_context(_job(), db) == ""
+
+
+def test_proactive_guard_requires_relation_for_old_events(monkeypatch):
+    _patch_target(monkeypatch)
+    guard = scheduler._lifeboat_proactive_guard(_job())
+
+    assert "older event may be raised only when the current user words explicitly connect" in guard
+    assert "do not return [SILENT]" in guard

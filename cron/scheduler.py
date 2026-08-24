@@ -2399,6 +2399,34 @@ def _lifeboat_recent_context(job: dict, session_db) -> str:
         return ""
 
 
+def _lifeboat_proactive_guard(job: dict) -> str:
+    """Return the final, non-overridable boundary for Life-Boat cron replies."""
+    if _get_hermes_home().name != "life-advisor":
+        return ""
+    try:
+        targets = _resolve_delivery_targets(job)
+    except Exception:
+        return ""
+    if not any(
+        str(item.get("platform") or "").lower() == "telegram"
+        and str(item.get("thread_id") or "") == "2"
+        for item in targets
+    ):
+        return ""
+    return (
+        "[FINAL LIFE-BOAT PROACTIVE DELIVERY CONTRACT: This is a scheduled "
+        "check-in, not a historical-recall task. Produce one short, natural "
+        "message now; do not return [SILENT]. Use only the trusted recent user "
+        "words supplied above. An older event may be raised only when the "
+        "current user words explicitly connect to it (for example, asking to "
+        "talk about past work); otherwise do not name an old event, project, "
+        "person, feeling, or goal. If no trusted recent context exists, stay "
+        "present-focused and ordinary without inventing a topic. Do not recap "
+        "the bot's own questions and do not ask the user to design the whole "
+        "conversation.]"
+    )
+
+
 def _build_job_prompt(
     job: dict,
     prerun_script: Optional[tuple] = None,
@@ -2540,6 +2568,9 @@ def _build_job_prompt(
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
+        proactive_guard = _lifeboat_proactive_guard(job)
+        if proactive_guard:
+            prompt = f"{prompt}\n\n{proactive_guard}"
         return _scan_assembled_cron_prompt(
             prompt,
             job,
@@ -2621,6 +2652,9 @@ def _build_job_prompt(
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
+    proactive_guard = _lifeboat_proactive_guard(job)
+    if proactive_guard:
+        parts.extend(["", proactive_guard])
     return _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
 
 
