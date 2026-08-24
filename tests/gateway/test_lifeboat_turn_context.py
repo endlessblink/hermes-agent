@@ -58,6 +58,34 @@ def test_the_context_names_what_it_is(tmp_path: Path) -> None:
     assert "ספיד" in block
 
 
+def test_ordinary_disclosure_does_not_receive_stored_material(tmp_path: Path) -> None:
+    _write(tmp_path, "2026-08-23.md", _entry("2026-08-23T19:36", "היה ספיד־דייט"))
+
+    block = build_turn_context(
+        transcript_dir=tmp_path,
+        legacy_dir=tmp_path / "none",
+        request_text="היום בעבודה היה לי קשה להתרכז",
+        queue_text="",
+        journal_entries=[],
+    )
+
+    assert block == ""
+
+
+def test_explicit_checkin_request_can_receive_stored_material(tmp_path: Path) -> None:
+    _write(tmp_path, "2026-08-23.md", _entry("2026-08-23T19:36", "היה ספיד־דייט"))
+
+    block = build_turn_context(
+        transcript_dir=tmp_path,
+        legacy_dir=tmp_path / "none",
+        request_text="בוא נעשה סיכום של הימים האחרונים",
+        queue_text="",
+        journal_entries=[],
+    )
+
+    assert "ספיד" in block
+
+
 def test_an_empty_hand_is_admitted_not_papered_over(tmp_path: Path) -> None:
     assert build_turn_context(
         transcript_dir=tmp_path, legacy_dir=tmp_path / 'none',

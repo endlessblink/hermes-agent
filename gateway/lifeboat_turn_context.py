@@ -36,6 +36,17 @@ TRANSCRIPT_DIR = VAULT / "_System" / "Hermes Turn Logs" / "life-boat"
 MAX_TURNS = 12
 MAX_LINE_CHARS = 220
 
+# Stored material is useful for an explicit review/check-in request, but it is
+# contamination when silently attached to an ordinary disclosure. This detects
+# the request for context, not a reply shape or a particular user sentence.
+_CONTEXT_REQUEST_RE = re.compile(
+    r"(?:דיבריף|סיכום|סכם|בדיקת\s*(?:מצב|בוקר|ערב)|"
+    r"צ['׳]?ק[- ]?אין|check[- ]?in|checkup|morning\s+check|"
+    r"evening\s+summary|daily\s+summary|recent\s+days|last\s+few\s+days|"
+    r"הימים\s+האחרונים|התקופה\s+האחרונה)",
+    re.IGNORECASE,
+)
+
 _USER_BLOCK = re.compile(
     r"^## (\S+) — session `[^`]+` — platform `[^`]+`\s*\n+### User\s*\n+(.*?)\n+### Assistant",
     re.M | re.S,
@@ -191,6 +202,17 @@ def build_turn_context(
     journal_entries=None,
 ) -> str:
     """Assemble the material this turn may draw on, or an empty string."""
+    context_requested = bool(
+        about_a_period or _CONTEXT_REQUEST_RE.search(str(request_text or ""))
+    )
+    # In a normal turn the model already has the live conversation history.
+    # Re-injecting stored queue/journal/history here makes unrelated events look
+    # like the subject of the current message and is the source of false reads.
+    # Keep the no-request_text behavior for callers that explicitly ask this
+    # helper for a material bundle (and for its standalone tests).
+    if request_text and not context_requested:
+        return ""
+
     # A broad period request is not permission to pick the most vivid item in
     # an old log and make it the subject.  The live conversation history already
     # contains anything explicitly being discussed; unrelated vault material is
