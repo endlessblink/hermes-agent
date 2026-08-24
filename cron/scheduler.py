@@ -2445,6 +2445,7 @@ def _build_job_prompt(
     user_prompt = str(job.get("prompt") or "")
     prompt = user_prompt
     skills = job.get("skills")
+    proactive_guard = _lifeboat_proactive_guard(job)
     # True when runtime-collected DATA (script stdout, upstream-job output)
     # has been injected into the prompt. Data content legitimately quotes
     # command-shape strings (a triage feed ingesting a bug report that
@@ -2535,19 +2536,29 @@ def _build_job_prompt(
                 logger.warning("context_from: failed to read output for job %r: %s", source_job_id, e)
                 # silent skip — do not pollute the prompt with error messages
 
-    # Always prepend cron execution guidance so the agent knows how
-    # delivery works and can suppress delivery when appropriate.
-    cron_hint = (
-        "[IMPORTANT: You are running as a scheduled cron job. "
-        "DELIVERY: Your final response will be automatically delivered "
-        "to the user — do NOT use send_message or try to deliver "
-        "the output yourself. Just produce your report/output as your "
-        "final response and the system handles the rest. "
-        "SILENT: If there is genuinely nothing new to report, respond "
-        "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
-        "Never combine [SILENT] with content — either report your "
-        "findings normally, or say [SILENT] and nothing more.]\n\n"
-    )
+    # Always prepend cron execution guidance. Life-Boat proactive contact has
+    # a different delivery contract: it must produce a check-in, while other
+    # jobs may intentionally suppress an empty report.
+    if proactive_guard:
+        cron_hint = (
+            "[IMPORTANT: You are running as a scheduled Life-Boat check-in. "
+            "Your final response will be automatically delivered to the user. "
+            "Always produce one short natural message; never use [SILENT], "
+            "never summarize old material, and never invent a topic. The "
+            "delivery system handles sending it.]\n\n"
+        )
+    else:
+        cron_hint = (
+            "[IMPORTANT: You are running as a scheduled cron job. "
+            "DELIVERY: Your final response will be automatically delivered "
+            "to the user — do NOT use send_message or try to deliver "
+            "the output yourself. Just produce your report/output as your "
+            "final response and the system handles the rest. "
+            "SILENT: If there is genuinely nothing new to report, respond "
+            "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
+            "Never combine [SILENT] with content — either report your "
+            "findings normally, or say [SILENT] and nothing more.]\n\n"
+        )
     # Suggestion discipline (rejection rules, mood, daily cap) applies to
     # every proactive surface, including scheduled jobs — a briefing that
     # ignores the user's mood or rejected suggestion classes is the same
@@ -2568,7 +2579,6 @@ def _build_job_prompt(
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
-        proactive_guard = _lifeboat_proactive_guard(job)
         if proactive_guard:
             prompt = f"{prompt}\n\n{proactive_guard}"
         return _scan_assembled_cron_prompt(
@@ -2652,7 +2662,6 @@ def _build_job_prompt(
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
-    proactive_guard = _lifeboat_proactive_guard(job)
     if proactive_guard:
         parts.extend(["", proactive_guard])
     return _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
