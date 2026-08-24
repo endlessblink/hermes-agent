@@ -257,3 +257,16 @@ def test_bare_ack_must_be_repaired(ack: str, prior: str) -> None:
 
     assert delivered != ack
     assert outcome == "edited"
+
+
+def test_failed_editor_does_not_reemit_a_bare_ack_when_rewrite_can_repair() -> None:
+    delivered, outcome = resolve_reply(
+        "אוקיי",
+        "👍",
+        rewrite=lambda *a, **k: "נמשיך עם מה שסיפרת: מה קרה אחרי שקיבלת את המספרים?",
+        edit=lambda *a, **k: "👍",
+        semantic_enforce=True,
+    )
+
+    assert delivered != "👍"
+    assert outcome == "rewritten"

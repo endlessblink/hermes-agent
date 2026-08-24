@@ -306,6 +306,27 @@ def resolve_reply(
         # remains observable in the outcome; delivery stays responsive.
         # Never turn a nonempty answer into silence. The model's original text
         # is the last-resort answer; the failure remains visible in telemetry.
+        if semantic_reason == "not_a_concrete_continuation":
+            try:
+                repaired = str(
+                    rewrite(build_rewrite_messages(user_text, text, semantic_reason)) or ""
+                ).strip()
+            except Exception as exc:
+                logger.warning(
+                    "Life-Boat non-answer rewrite unavailable error=%s message_content=redacted",
+                    type(exc).__name__,
+                )
+                repaired = ""
+            if repaired:
+                repaired_verdict = review_verdict(
+                    user_text,
+                    repaired,
+                    material=material,
+                    debrief_active=debrief_active,
+                )
+                repaired_semantic = semantic_failure(repaired)
+                if repaired_verdict.accepted and not repaired_semantic:
+                    return repaired, "rewritten"
         return text, "editor_rejected_fallback"
 
     if verdict.accepted and not unsafe_reason:
