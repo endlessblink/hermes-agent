@@ -201,8 +201,8 @@ def test_failed_editor_repairs_do_not_fall_through_to_a_third_writer() -> None:
         edit=editor,
     )
 
-    assert delivered == ""
-    assert reason == "rewrite_rejected"
+    assert delivered == CLOSING_REPLY
+    assert reason == "editor_rejected_fallback"
     assert len(editor_calls) == 2
     assert rewrite_calls == []
 

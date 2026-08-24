@@ -260,7 +260,7 @@ def test_editor_can_repair_after_an_unsafe_first_attempt() -> None:
     assert len(attempts) == 2
 
 
-def test_a_rejected_draft_whose_edit_also_fails_is_not_sent_to_another_writer() -> None:
+def test_a_rejected_draft_whose_edit_also_fails_preserves_responsive_main_reply() -> None:
     delivered, outcome = resolve_reply(
         USER,
         CLOSING,
@@ -268,8 +268,8 @@ def test_a_rejected_draft_whose_edit_also_fails_is_not_sent_to_another_writer() 
         edit=lambda _m: "תודה על השיתוף, נעצור כאן.",
     )
 
-    assert delivered == ""
-    assert outcome == "rewrite_rejected"
+    assert delivered == CLOSING
+    assert outcome == "editor_rejected_fallback"
 
 
 # --- the kill switch -------------------------------------------------------

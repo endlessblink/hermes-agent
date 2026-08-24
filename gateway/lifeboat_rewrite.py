@@ -291,9 +291,12 @@ def resolve_reply(
             unsafe_reason = edited_unsafe
             semantic_reason = edited_semantic
 
-        # The editor path is the repair path. Do not fall through to a third
-        # writer after two failed editor attempts; only a passing candidate may
-        # cross the delivery boundary.
+        # If the independent semantic check still passes and no deterministic
+        # safety guard fired, preserve the main model's reply rather than make
+        # the bot disappear because a repair model missed twice. The reviewer
+        # remains observable in the outcome; delivery stays responsive.
+        if not semantic_reason and not unsafe_reason:
+            return text, "editor_rejected_fallback"
         return "", "rewrite_rejected"
 
     if verdict.accepted and not unsafe_reason:
@@ -344,6 +347,9 @@ def resolve_reply(
         if rewrite_round + 1 < _MAX_REWRITES:
             continue
 
-    # The reviewer never authors a user-facing fallback. The caller must not
-    # send the original or any rejected repair after this point.
+    # A failed rewrite must not make the bot silent when the original has no
+    # semantic or deterministic safety failure. Keep the main model's reply
+    # and expose the rejected-repair outcome for telemetry.
+    if not revised_semantic_reason and not revised_unsafe_reason:
+        return text, "rewrite_rejected_fallback"
     return "", "rewrite_rejected"
