@@ -2347,19 +2347,36 @@ def _lifeboat_recent_context(job: dict, session_db) -> str:
         )
         if not row or not row.get("id"):
             return ""
-        messages = session_db.get_messages(str(row["id"]), limit=12)
+        # Proactive contact must not mine an old session for a vivid subject.
+        # The previous implementation copied the last 12 messages regardless
+        # of age and included assistant replies, so a project discussed months
+        # ago could be delivered as if it were current. Only recent,
+        # user-authored, non-operational turns are trusted here.
+        from gateway.lifeboat_checkin_context import is_operational
+
+        now_ts = time.time()
+        max_age_seconds = 12 * 60 * 60
+        messages = session_db.get_messages(str(row["id"]), limit=24)
         turns = []
         for message in messages:
             role = str(message.get("role") or "").lower()
             content = str(message.get("content") or "").strip()
-            if role not in {"user", "assistant"} or not content:
+            if role != "user" or not content:
+                continue
+            try:
+                timestamp = float(message.get("timestamp"))
+            except (TypeError, ValueError):
+                continue
+            if timestamp <= 0 or now_ts - timestamp > max_age_seconds:
+                continue
+            if is_operational(content):
                 continue
             # Compaction rows contain stale instructions and historical task
             # snapshots; they are not conversational context and may steer a
             # fresh proactive turn away from the current thread.
             if "[CONTEXT COMPACTION" in content or "## Historical Task Snapshot" in content:
                 continue
-            turns.append(f"{role}: {content[:700]}")
+            turns.append(f"user: {content[:700]}")
         if not turns:
             return ""
         return (
