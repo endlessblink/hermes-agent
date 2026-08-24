@@ -356,10 +356,23 @@ def debrief_problems(
         return ("empty",)
 
     known = _content_tokens(known_text)
+    request_tokens = _content_tokens(request)
     issues: list[str] = []
 
     if is_broad_debrief(request) and _RESUMES_ONE_THREAD_RE.search(text):
         issues.append("narrowed_a_broad_debrief")
+    if is_broad_debrief(request) and request_tokens:
+        # A broad request opens a time range, not whichever named thread happens
+        # to be loudest in the retained transcript.  Keep the reviewer blind to
+        # stale topic names at this boundary: the assistant can choose a generic
+        # scope, or offer a read about the request itself, but it cannot turn an
+        # old evidence token that the user did not name now into the subject.
+        stale_tokens = {
+            token for token in known - request_tokens if len(token) >= 4
+        }
+        response_tokens = _content_tokens(text)
+        if stale_tokens & response_tokens:
+            issues.append("selected_stale_broad_debrief_topic")
     if _ASSIGNS_THE_TELLING_RE.search(text):
         issues.append("assigned_him_the_telling")
     if _STEERING_HANDBACK_RE.search(text):

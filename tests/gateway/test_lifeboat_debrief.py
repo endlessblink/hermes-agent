@@ -422,6 +422,19 @@ def test_reopening_one_prior_thread_on_a_fresh_debrief_is_rejected(reply: str) -
     assert "narrowed_a_broad_debrief" in problems
 
 
+def test_broad_debrief_does_not_assert_an_old_named_topic() -> None:
+    problems = debrief_problems(
+        "נראה לי שהשיבארי ומרי תפסו בתקופה הזאת יותר מדי מקום. זה מדויק או לא?",
+        known_text=(
+            "אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה. "
+            "אחרי השיבארי דיברתי עם מרי וקיבלתי שני מספרים."
+        ),
+        request="אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה",
+    )
+
+    assert "selected_stale_broad_debrief_topic" in problems
+
+
 def test_a_narrow_request_may_go_straight_to_that_thread() -> None:
     problems = debrief_problems(
         "נשמע שזה עדיין פתוח מאז. זה מדויק?",

@@ -5089,6 +5089,16 @@ class BasePlatformAdapter(ABC):
                         metadata=_final_thread_metadata,
                     )
                     _record_delivery(result)
+                    logger.info(
+                        "telegram_delivery_receipt platform=%s chat=%s thread=%s "
+                        "message_id=%s success=%s chars=%d",
+                        self.name,
+                        event.source.chat_id,
+                        getattr(event.source, "thread_id", None),
+                        getattr(result, "message_id", None),
+                        bool(getattr(result, "success", False)),
+                        len(text_content),
+                    )
 
                     # Schedule auto-deletion of system-notice replies.
                     # Detached so the handler returns immediately; errors
