@@ -272,6 +272,7 @@ def edit_reply(
     caller keeps the draft and the turn is delivered as it would have been.
     """
     original = str(draft or "").strip()
+    text = original
     for attempt in range(2):
         retry_reason = reason
         if attempt:

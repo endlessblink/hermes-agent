@@ -238,6 +238,28 @@ def test_the_editor_does_not_touch_an_accepted_draft() -> None:
     assert not seen
 
 
+def test_editor_can_repair_after_an_unsafe_first_attempt() -> None:
+    attempts = []
+
+    def editor(messages):
+        attempts.append(1)
+        return "נתחיל מאתמול בבוקר: מה קרה?" if len(attempts) == 1 else WITH_A_READ
+
+    from gateway.lifeboat_editor import edit_reply
+
+    result = edit_reply(
+        "אני רוצה לעשות דיבריף על הימים האחרונים.",
+        "ניקח את מה שסיפרת.",
+        edit=editor,
+        reason="unsupported_temporal_anchor",
+    )
+
+    assert result.available is True
+    assert result.changed is True
+    assert result.text == WITH_A_READ
+    assert len(attempts) == 2
+
+
 def test_a_rejected_draft_whose_edit_also_fails_is_not_sent_to_another_writer() -> None:
     delivered, outcome = resolve_reply(
         USER,
