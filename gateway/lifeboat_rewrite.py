@@ -295,9 +295,9 @@ def resolve_reply(
         # safety guard fired, preserve the main model's reply rather than make
         # the bot disappear because a repair model missed twice. The reviewer
         # remains observable in the outcome; delivery stays responsive.
-        if not semantic_reason and not unsafe_reason:
-            return text, "editor_rejected_fallback"
-        return "", "rewrite_rejected"
+        # Never turn a nonempty answer into silence. The model's original text
+        # is the last-resort answer; the failure remains visible in telemetry.
+        return text, "editor_rejected_fallback"
 
     if verdict.accepted and not unsafe_reason:
         return text, "accepted"
@@ -315,14 +315,14 @@ def resolve_reply(
                 rewrite_reason,
                 type(exc).__name__,
             )
-            return "", "rewrite_unavailable"
+            return text, "rewrite_unavailable"
 
         if not revised.strip():
             logger.warning(
                 "Life-Boat rewrite returned nothing reason=%s message_content=redacted",
                 rewrite_reason,
             )
-            return "", "rewrite_unavailable"
+            return text, "rewrite_unavailable"
 
         second = review_verdict(
             user_text,
@@ -350,6 +350,6 @@ def resolve_reply(
     # A failed rewrite must not make the bot silent when the original has no
     # semantic or deterministic safety failure. Keep the main model's reply
     # and expose the rejected-repair outcome for telemetry.
-    if not revised_semantic_reason and not revised_unsafe_reason:
-        return text, "rewrite_rejected_fallback"
-    return "", "rewrite_rejected"
+    # Never turn a nonempty answer into silence. A failed repair is a quality
+    # signal, not permission to drop the user's turn.
+    return text, "rewrite_rejected_fallback"

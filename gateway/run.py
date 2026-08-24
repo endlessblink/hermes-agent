@@ -13156,13 +13156,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                         except Exception:
                             logger.error(
-                                "Life-Boat pre-send review failed; suppressing unchecked draft",
+                                "Life-Boat pre-send review failed; preserving main draft",
                                 exc_info=True,
                             )
-                            _lifeboat_delivered = ""
-                            _intentional_silence = True
+                            _lifeboat_delivered = _lifeboat_before
 
-                        response = _lifeboat_delivered
+                        # A nonempty model response must never disappear because
+                        # a post-processing reviewer failed. The reviewer can
+                        # reject or annotate it, but Telegram still receives the
+                        # main answer unless the model itself returned nothing.
+                        response = _lifeboat_delivered or _lifeboat_before
                         if _lifeboat_issues:
                             logger.info(
                                 "Life-Boat draft broke its contract mode=%s issues=%s chars=%s",

@@ -139,8 +139,8 @@ def test_a_failed_rewrite_fails_closed_and_never_invents_fallback() -> None:
         LOOP_USER, CLOSING_REPLY, rewrite=lambda *a, **k: second_draft
     )
 
-    assert delivered == ""
-    assert reason == "rewrite_rejected"
+    assert delivered == CLOSING_REPLY
+    assert reason == "rewrite_rejected_fallback"
 
 
 def test_an_unavailable_rewrite_fails_closed() -> None:
@@ -149,14 +149,14 @@ def test_an_unavailable_rewrite_fails_closed() -> None:
 
     delivered, reason = resolve_reply(LOOP_USER, CLOSING_REPLY, rewrite=unavailable)
 
-    assert delivered == ""
+    assert delivered == CLOSING_REPLY
     assert reason == "rewrite_unavailable"
 
 
 def test_an_empty_rewrite_fails_closed() -> None:
     delivered, reason = resolve_reply(LOOP_USER, CLOSING_REPLY, rewrite=lambda *a, **k: "   ")
 
-    assert delivered == ""
+    assert delivered == CLOSING_REPLY
     assert reason == "rewrite_unavailable"
 
 
