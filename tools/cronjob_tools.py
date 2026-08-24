@@ -637,14 +637,23 @@ def _execute_job_now(job: Dict[str, Any]) -> Dict[str, Any]:
             return {"claimed": False, "success": False, "error": reason}
 
         # run_one_job records last_run_at/last_status via mark_job_run (which
-        # also clears the fire claim) and returns True iff it processed the job.
+        # also clears the fire claim).  Keep the pre-run marker so a logical
+        # delivery skip cannot inherit an old successful status below.
+        before_last_run_at = job.get("last_run_at")
         processed = run_one_job(job)
         refreshed = get_job(job_id) or {}
-        ok = refreshed.get("last_status") == "ok"
+        run_recorded = refreshed.get("last_run_at") != before_last_run_at
+        ok = run_recorded and refreshed.get("last_status") == "ok"
+        error = refreshed.get("last_error")
+        if processed and not run_recorded:
+            error = (
+                "No new run was recorded; the logical delivery was already "
+                "claimed or completed."
+            )
         return {
             "claimed": True,
             "success": bool(processed and ok),
-            "error": refreshed.get("last_error"),
+            "error": error,
         }
 
     except Exception as e:
