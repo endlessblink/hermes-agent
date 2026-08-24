@@ -33,7 +33,10 @@ logger = logging.getLogger(__name__)
 #: Bound repair work to two attempts total. Every attempt is re-reviewed before
 #: it can become the delivered reply.
 _MAX_REWRITES = 2
-_BARE_ACKS = frozenset({"כן", "אוקיי", "אוקי", "בסדר", "טוב", "sure", "ok", "okay", "yes"})
+_BARE_ACKS = frozenset({
+    "כן", "אוקיי", "אוקי", "בסדר", "טוב", "sure", "ok", "okay", "yes",
+    "👍", "👌", "✅", "🙏", "🙂", "🙌",
+})
 
 _REWRITE_SYSTEM = (
     "You are revising one reply in an ongoing Hebrew-language emotional support "
