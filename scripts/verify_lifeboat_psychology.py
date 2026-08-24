@@ -114,11 +114,10 @@ def main() -> int:
             print(f"FAIL brittle Life-Boat phrase repair remains: {forbidden!r}")
             return 1
     for marker in (
-        "mode=",
+        "policy.mode",
         "select_lifeboat_turn_policy",
-        "one concrete",
-        "tentatively",
-        "If the user asks for action",
+        "The topic was:",
+        "Do not tell him what he should feel",
         "proactive_followups_enabled",
         "stale queues created before the opt-in boundary",
         "record_lifeboat_response_fingerprint",
