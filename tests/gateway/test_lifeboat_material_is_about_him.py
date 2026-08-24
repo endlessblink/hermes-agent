@@ -144,6 +144,39 @@ def test_a_debrief_request_makes_the_material_the_subject() -> None:
     assert "Begin from something in here" in material
 
 
+def test_broad_debrief_does_not_select_an_unrelated_old_event() -> None:
+    """A period-wide request must not turn the loudest old topic into its subject."""
+    from gateway.lifeboat_turn_context import build_turn_context
+
+    material = build_turn_context(
+        about_a_period=True,
+        request_text="אני רוצה לעשות דיבריף על אירועים מהתקופה האחרונה",
+        transcript_dir=None,
+        queue_text="- id: old\n  status: active\n  added: 2026-08-20\n  topic: שיבארי\n  next_point: החלטה",
+        journal_entries=[],
+    )
+
+    assert "PERIOD-WIDE DEBRIEF" in material
+    assert "שיבארי" not in material
+    assert "old event" in material
+
+
+def test_specific_debrief_can_still_receive_material() -> None:
+    """The boundary is relevance, not a blanket loss of continuity."""
+    from gateway.lifeboat_turn_context import build_turn_context
+
+    material = build_turn_context(
+        about_a_period=True,
+        request_text="אני רוצה לעשות דיבריף על הספידייט",
+        transcript_dir=None,
+        queue_text="- id: date\n  status: active\n  added: 2026-08-20\n  topic: הספידייט\n  next_point: שני מספרים",
+        journal_entries=[],
+    )
+
+    assert "ספידייט" in material
+    assert "PERIOD-WIDE DEBRIEF" not in material
+
+
 def test_an_ordinary_turn_keeps_the_material_as_background() -> None:
     """Outside a period question, older fragments must not be dragged in."""
     from gateway.lifeboat_turn_context import build_turn_context

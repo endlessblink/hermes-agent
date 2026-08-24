@@ -183,6 +183,7 @@ def _is_live_conversation(stamp: str, *, now=None) -> bool:
 def build_turn_context(
     *,
     about_a_period: bool = False,
+    request_text: str = "",
     now=None,
     transcript_dir: Path | None = None,
     legacy_dir: Path | None = None,
@@ -190,6 +191,27 @@ def build_turn_context(
     journal_entries=None,
 ) -> str:
     """Assemble the material this turn may draw on, or an empty string."""
+    # A broad period request is not permission to pick the most vivid item in
+    # an old log and make it the subject.  The live conversation history already
+    # contains anything explicitly being discussed; unrelated vault material is
+    # a candidate store, not the user's chosen topic.  Keep this boundary here,
+    # where context enters the prompt, rather than trying to repair each wording
+    # the model might invent downstream.
+    if about_a_period and request_text:
+        try:
+            from gateway.lifeboat_debrief import is_broad_debrief
+
+            if is_broad_debrief(request_text):
+                return (
+                    "PERIOD-WIDE DEBRIEF: the user asked to review a stretch of time "
+                    "without naming one event. Do not select an old event, person, "
+                    "or motive from background material as the subject. Use only "
+                    "events already present in the live conversation, or choose a "
+                    "concrete starting scope without asking him to design the "
+                    "whole debrief."
+                )
+        except Exception:
+            logger.debug("Life-Boat debrief scope unavailable", exc_info=True)
     parts: list[str] = []
     try:
         from gateway.lifeboat_context_sources import build_context_block

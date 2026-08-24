@@ -370,7 +370,10 @@ def prepare_lifeboat_inbound_guidance(
         # material stops being background and becomes what he is asking about.
         from gateway.lifeboat_debrief import is_debrief_request
 
-        material = build_turn_context(about_a_period=is_debrief_request(user_text))
+        material = build_turn_context(
+            about_a_period=is_debrief_request(user_text),
+            request_text=user_text,
+        )
         if material:
             guidance = "\n\n".join(part for part in (guidance, material) if part)
     except Exception:
