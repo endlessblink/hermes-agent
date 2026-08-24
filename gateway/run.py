@@ -13031,14 +13031,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # The gate suppresses; it never rewrites.  Generating
                     # replacement prose here is what produced the same Hebrew
                     # sentence turn after turn.
-                        _lifeboat_delivered = finalize_outbound(
+                    _lifeboat_delivered = finalize_outbound(
                         _lifeboat_home,
                         _lifeboat_key,
                         _lifeboat_before,
-                            mode=_lifeboat_mode,
-                            user_text=str(message_text or ""),
-                            allow_duplicate=True,
-                        )
+                        mode=_lifeboat_mode,
+                        user_text=str(message_text or ""),
+                        allow_duplicate=True,
+                    )
                     if _lifeboat_delivered is None:
                         _intentional_silence = True
                         logger.info(
