@@ -242,7 +242,8 @@ def test_semantic_shadow_is_observational_only() -> None:
 
 
 @pytest.mark.parametrize("ack", ["בסדר", "👍"])
-def test_bare_ack_after_a_question_must_be_repaired(ack: str) -> None:
+@pytest.mark.parametrize("prior", ["מה קרה אחרי זה?", "👍"])
+def test_bare_ack_after_an_assistant_reply_must_be_repaired(ack: str, prior: str) -> None:
     delivered, outcome = resolve_reply(
         "אוקיי",
         ack,
@@ -250,7 +251,7 @@ def test_bare_ack_after_a_question_must_be_repaired(ack: str) -> None:
         edit=lambda *a, **k: "נמשיך עם מה שסיפרת קודם: מה קרה אחרי שקיבלת את המספרים?",
         semantic_enforce=True,
         recent_turns=[
-            {"id": "a1", "role": "assistant", "content": "מה קרה אחרי זה?"},
+            {"id": "a1", "role": "assistant", "content": prior},
         ],
     )
 

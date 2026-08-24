@@ -200,12 +200,12 @@ def resolve_reply(
     def semantic_failure(candidate: str) -> str:
         normalized_user = re.sub(r"[.!?؟]+$", "", str(user_text or "").strip()).casefold()
         normalized_candidate = re.sub(r"[.!?؟]+$", "", str(candidate or "").strip()).casefold()
-        prior_question = any(
+        prior_assistant_reply = any(
             str(turn.get("role") or "").casefold() == "assistant"
-            and str(turn.get("content") or "").strip().endswith(("?", "؟"))
+            and bool(str(turn.get("content") or "").strip())
             for turn in reversed(list(recent_turns))
         )
-        if normalized_user in _BARE_ACKS and normalized_candidate in _BARE_ACKS and prior_question:
+        if normalized_user in _BARE_ACKS and normalized_candidate in _BARE_ACKS and prior_assistant_reply:
             return "not_a_concrete_continuation"
         if semantic_checker is None:
             return ""
