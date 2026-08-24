@@ -185,3 +185,30 @@ def test_an_empty_draft_is_left_alone() -> None:
 
     assert delivered == ""
     assert reason == "accepted"
+
+
+def test_semantic_shadow_is_observational_only() -> None:
+    seen = []
+
+    def semantic_checker(messages):
+        seen.extend(messages)
+        return (
+            '{"pass":false,"repeated_request":true,"invented_user_goal":false,'
+            '"responsibility_handoff":false,"concrete_continuation":false,'
+            '"evidence_turn_ids":["u1"],"reason":"repeat"}'
+        )
+
+    draft = "נמשיך ממה שסיפרת."
+    delivered, outcome = resolve_reply(
+        "כן",
+        draft,
+        rewrite=lambda *a, **k: "unused",
+        semantic_checker=semantic_checker,
+        recent_turns=[{"id": "u1", "role": "user", "content": "כבר סיפרתי"}],
+        trusted_state="u1: explicit user evidence",
+    )
+
+    assert delivered == draft
+    assert outcome == "accepted"
+    assert len(seen) == 2
+    assert "u1: explicit user evidence" in seen[1]["content"]

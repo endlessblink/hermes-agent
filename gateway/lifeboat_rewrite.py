@@ -161,6 +161,9 @@ def resolve_reply(
     profile_home=None,
     session_key: str = "",
     deliveries: int = 1,
+    semantic_checker: Callable[[list[dict[str, str]]], str] | None = None,
+    recent_turns: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
+    trusted_state: str = "",
 ) -> tuple[str, str]:
     """Return the text to deliver and why.
 
@@ -184,6 +187,31 @@ def resolve_reply(
     text = str(draft or "")
     if not text.strip():
         return text, "accepted"
+
+    if semantic_checker is not None:
+        from gateway.lifeboat_semantic_gate import run_semantic_shadow
+
+        shadow = run_semantic_shadow(
+            semantic_checker,
+            user_text,
+            text,
+            recent_turns=recent_turns,
+            trusted_state=trusted_state or material,
+        )
+        if shadow.verdict is None:
+            logger.warning(
+                "Life-Boat semantic shadow failed error=%s delivery_decision=unchanged",
+                shadow.error or "unknown",
+            )
+        else:
+            semantic_verdict = shadow.verdict
+            logger.info(
+                "Life-Boat semantic shadow pass=%s failures=%s evidence_turn_ids=%s "
+                "delivery_decision=unchanged",
+                semantic_verdict.passed,
+                ",".join(semantic_verdict.failures) or "none",
+                ",".join(semantic_verdict.evidence_turn_ids) or "none",
+            )
 
     from gateway.lifeboat_debrief import (
         DebriefState,
