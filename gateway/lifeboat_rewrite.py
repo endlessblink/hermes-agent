@@ -90,7 +90,9 @@ _REASON_GUIDANCE = {
     "review_error": "The reviewer failed.",
     "repeated_request": "The draft asks again for information already present in the recent conversation.",
     "invented_user_goal": "The draft assigns the user a goal or topic they did not state.",
-    "responsibility_handoff": "The draft makes the user choose the direction instead of taking a reasonable next step.",
+    "unsupported_user_fact": "The draft asserts a user outcome that was not explicitly stated. Remove that outcome and continue from the evidence that is actually present.",
+    "premature_closure": "The draft summarizes or closes without leaving a concrete way to continue. Keep the thread open unless the user explicitly asked to stop.",
+    "responsibility_handoff": "The draft makes the user choose the direction instead of taking a reasonable next step. If one detail is unclear, do not stop at that uncertainty; continue from what is already known.",
     "not_a_concrete_continuation": "The draft does not continue the latest event with a useful next step.",
     "semantic_review_unavailable": "The semantic continuity check was unavailable; do not deliver an unchecked repair.",
 }

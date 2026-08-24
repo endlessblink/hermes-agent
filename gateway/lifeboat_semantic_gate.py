@@ -34,6 +34,8 @@ class SemanticVerdict:
     repeated_request: bool
     invented_user_goal: bool
     responsibility_handoff: bool
+    unsupported_user_fact: bool
+    premature_closure: bool
     concrete_continuation: bool
     evidence_turn_ids: tuple[str, ...] = ()
     reason: str = ""
@@ -48,6 +50,10 @@ class SemanticVerdict:
             failures.append("invented_user_goal")
         if self.responsibility_handoff:
             failures.append("responsibility_handoff")
+        if self.unsupported_user_fact:
+            failures.append("unsupported_user_fact")
+        if self.premature_closure:
+            failures.append("premature_closure")
         if not self.concrete_continuation:
             failures.append("not_a_concrete_continuation")
         return tuple(failures)
@@ -84,6 +90,8 @@ def parse_semantic_verdict(raw: str | Mapping[str, Any]) -> SemanticVerdict:
         "repeated_request",
         "invented_user_goal",
         "responsibility_handoff",
+        "unsupported_user_fact",
+        "premature_closure",
         "concrete_continuation",
     }
     missing = sorted(required - payload.keys())
@@ -95,6 +103,8 @@ def parse_semantic_verdict(raw: str | Mapping[str, Any]) -> SemanticVerdict:
         repeated_request=_bool(payload["repeated_request"], "repeated_request"),
         invented_user_goal=_bool(payload["invented_user_goal"], "invented_user_goal"),
         responsibility_handoff=_bool(payload["responsibility_handoff"], "responsibility_handoff"),
+        unsupported_user_fact=_bool(payload["unsupported_user_fact"], "unsupported_user_fact"),
+        premature_closure=_bool(payload["premature_closure"], "premature_closure"),
         concrete_continuation=_bool(payload["concrete_continuation"], "concrete_continuation"),
         evidence_turn_ids=_turn_ids(payload.get("evidence_turn_ids")),
         reason=str(payload.get("reason") or ""),
@@ -137,7 +147,17 @@ def build_semantic_messages(
         "A tentative read must be visibly offered as a guess, not stated as fact."
         " A reply that only acknowledges the user without adding a read, detail, or "
         "next step is not a concrete continuation, especially after the assistant "
-        "just asked a question."
+        "just asked a question. Any concrete claim that the user completed, saved, "
+        "sent, met, decided, or experienced something must be explicitly supported "
+        "by a user turn; an assistant question, inference, or summary does not "
+        "confirm the outcome. If the draft asserts an unreported user outcome, set "
+        "unsupported_user_fact=true."
+        " A recap or summary is not an ending by itself: unless the user explicitly "
+        "asked to stop, it must leave a concrete way to continue or move to the next "
+        "relevant part of the conversation. If it closes without that, set "
+        "premature_closure=true. Do not end by merely pointing out that something is "
+        "unclear and asking the user to resolve it when the known event already gives "
+        "the assistant a reasonable next step; that is responsibility_handoff=true."
     )
     payload = (
         "CURRENT USER MESSAGE (trusted current input):\n"
@@ -150,7 +170,9 @@ def build_semantic_messages(
         f"{draft or '(empty)'}\n\n"
         "Return exactly this JSON shape with boolean values:\n"
         '{"pass":true,"repeated_request":false,"invented_user_goal":false,'
-        '"responsibility_handoff":false,"concrete_continuation":true,'
+        '"responsibility_handoff":false,"unsupported_user_fact":false,'
+        '"premature_closure":false,'
+        '"concrete_continuation":true,'
         '"evidence_turn_ids":[],"reason":"short audit reason"}'
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": payload}]

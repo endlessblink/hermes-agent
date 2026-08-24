@@ -20,6 +20,8 @@ def verdict(**overrides: object) -> dict[str, object]:
         "repeated_request": False,
         "invented_user_goal": False,
         "responsibility_handoff": False,
+        "unsupported_user_fact": False,
+        "premature_closure": False,
         "concrete_continuation": True,
         "evidence_turn_ids": ["u3"],
         "reason": "continues the latest event",
@@ -39,6 +41,18 @@ def test_parser_keeps_independent_failure_flags() -> None:
         "responsibility_handoff",
     )
     assert parsed.evidence_turn_ids == ("u3",)
+
+
+def test_parser_rejects_unconfirmed_outcome_and_premature_summary() -> None:
+    parsed = parse_semantic_verdict(verdict(
+        **{
+            "pass": False,
+            "unsupported_user_fact": True,
+            "premature_closure": True,
+        }
+    ))
+
+    assert parsed.failures == ("unsupported_user_fact", "premature_closure")
 
 
 def test_parser_rejects_incomplete_or_non_boolean_output() -> None:
@@ -68,6 +82,9 @@ def test_messages_label_assistant_history_as_non_evidence() -> None:
     assert "SUPPORT_SCORE" not in joined
     assert "A user action is not evidence of the user's reason" in joined
     assert "tentative read must be visibly offered as a guess" in joined
+    assert "premature_closure=true" in joined
+    assert "assistant question, inference, or summary does not confirm the outcome" in joined
+    assert "known event already gives the assistant a reasonable next step" in joined
 
 
 def test_shadow_checker_never_changes_delivery_and_records_valid_result() -> None:
@@ -111,6 +128,8 @@ def test_semantic_pass_must_agree_with_failure_flags() -> None:
                 "repeated_request": False,
                 "invented_user_goal": False,
                 "responsibility_handoff": False,
+                "unsupported_user_fact": False,
+                "premature_closure": False,
                 "concrete_continuation": True,
             }
         )

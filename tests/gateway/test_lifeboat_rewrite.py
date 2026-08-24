@@ -221,7 +221,8 @@ def test_semantic_shadow_is_observational_only() -> None:
         seen.extend(messages)
         return (
             '{"pass":false,"repeated_request":true,"invented_user_goal":false,'
-            '"responsibility_handoff":false,"concrete_continuation":false,'
+            '"responsibility_handoff":false,"unsupported_user_fact":false,'
+            '"premature_closure":false,"concrete_continuation":false,'
             '"evidence_turn_ids":["u1"],"reason":"repeat"}'
         )
 
