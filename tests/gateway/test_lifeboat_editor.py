@@ -238,7 +238,7 @@ def test_the_editor_does_not_touch_an_accepted_draft() -> None:
     assert not seen
 
 
-def test_a_rejected_draft_whose_edit_also_fails_falls_through_to_the_rewrite() -> None:
+def test_a_rejected_draft_whose_edit_also_fails_is_not_sent_to_another_writer() -> None:
     delivered, outcome = resolve_reply(
         USER,
         CLOSING,
@@ -246,8 +246,8 @@ def test_a_rejected_draft_whose_edit_also_fails_falls_through_to_the_rewrite() -
         edit=lambda _m: "תודה על השיתוף, נעצור כאן.",
     )
 
-    assert delivered == WITH_A_READ
-    assert outcome == "rewritten"
+    assert delivered == ""
+    assert outcome == "rewrite_rejected"
 
 
 # --- the kill switch -------------------------------------------------------

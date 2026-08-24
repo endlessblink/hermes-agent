@@ -9,6 +9,7 @@ from gateway.lifeboat_semantic_gate import (
     build_semantic_messages,
     parse_semantic_verdict,
     run_semantic_shadow,
+    semantic_gate_enabled,
     semantic_shadow_enabled,
 )
 
@@ -91,3 +92,10 @@ def test_shadow_is_opt_in_by_flag_file(tmp_path, monkeypatch) -> None:
     assert semantic_shadow_enabled() is False
     (tmp_path / "lifeboat-semantic-shadow").touch()
     assert semantic_shadow_enabled() is True
+
+
+def test_gate_has_a_separate_opt_in_flag(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert semantic_gate_enabled() is False
+    (tmp_path / "lifeboat-semantic-gate").touch()
+    assert semantic_gate_enabled() is True

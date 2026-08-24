@@ -20,6 +20,12 @@ def semantic_shadow_enabled() -> bool:
     return (home / "lifeboat-semantic-shadow").is_file()
 
 
+def semantic_gate_enabled() -> bool:
+    """Return whether semantic verdicts are allowed to block delivery."""
+    home = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    return (home / "lifeboat-semantic-gate").is_file()
+
+
 @dataclass(frozen=True)
 class SemanticVerdict:
     """Auditable semantic judgement; flags are independent, not an enum."""

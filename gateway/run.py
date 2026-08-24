@@ -13098,10 +13098,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 )
 
                             _lifeboat_semantic_checker = None
+                            _lifeboat_semantic_enforce = False
                             try:
-                                from gateway.lifeboat_semantic_gate import semantic_shadow_enabled
+                                from gateway.lifeboat_semantic_gate import (
+                                    semantic_gate_enabled,
+                                    semantic_shadow_enabled,
+                                )
 
-                                if semantic_shadow_enabled():
+                                if semantic_shadow_enabled() or semantic_gate_enabled():
+                                    _lifeboat_semantic_enforce = semantic_gate_enabled()
                                     def _lifeboat_semantic_checker(messages):
                                         from agent.auxiliary_client import call_llm
 
@@ -13135,6 +13140,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     _lifeboat_home, _lifeboat_key
                                 ),
                                 semantic_checker=_lifeboat_semantic_checker,
+                                semantic_enforce=_lifeboat_semantic_enforce,
                                 recent_turns=list(history[-12:]),
                                 trusted_state=_lifeboat_material,
                             )
@@ -13150,9 +13156,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             )
                         except Exception:
                             logger.error(
-                                "Life-Boat pre-send review failed; delivering the model draft",
+                                "Life-Boat pre-send review failed; suppressing unchecked draft",
                                 exc_info=True,
                             )
+                            _lifeboat_delivered = ""
+                            _intentional_silence = True
 
                         response = _lifeboat_delivered
                         if _lifeboat_issues:

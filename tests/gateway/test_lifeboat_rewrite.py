@@ -132,31 +132,31 @@ def test_a_rejected_draft_is_replaced_by_the_models_rewrite() -> None:
     assert reason == "rewritten"
 
 
-def test_a_failed_rewrite_preserves_model_text_and_never_invents_fallback() -> None:
+def test_a_failed_rewrite_fails_closed_and_never_invents_fallback() -> None:
     second_draft = "מספיק להיום, סיימנו."
 
     delivered, reason = resolve_reply(
         LOOP_USER, CLOSING_REPLY, rewrite=lambda *a, **k: second_draft
     )
 
-    assert delivered == CLOSING_REPLY
+    assert delivered == ""
     assert reason == "rewrite_rejected"
 
 
-def test_an_unavailable_rewrite_falls_back_to_the_original_draft() -> None:
+def test_an_unavailable_rewrite_fails_closed() -> None:
     def unavailable(*args, **kwargs):
         raise RuntimeError("no auxiliary provider configured")
 
     delivered, reason = resolve_reply(LOOP_USER, CLOSING_REPLY, rewrite=unavailable)
 
-    assert delivered == CLOSING_REPLY
+    assert delivered == ""
     assert reason == "rewrite_unavailable"
 
 
-def test_an_empty_rewrite_falls_back_to_the_original_draft() -> None:
+def test_an_empty_rewrite_fails_closed() -> None:
     delivered, reason = resolve_reply(LOOP_USER, CLOSING_REPLY, rewrite=lambda *a, **k: "   ")
 
-    assert delivered == CLOSING_REPLY
+    assert delivered == ""
     assert reason == "rewrite_unavailable"
 
 
@@ -168,16 +168,43 @@ def test_a_rejected_draft_is_never_delivered_silently(caplog) -> None:
     assert CLOSING_REPLY not in caplog.text
 
 
-def test_only_one_rewrite_is_ever_attempted() -> None:
+def test_at_most_two_rewrites_are_attempted_and_second_can_pass() -> None:
     calls = []
 
     def counting(*args, **kwargs):
         calls.append(1)
+        return "מספיק להיום, סיימנו." if len(calls) == 1 else GOOD_REPLY
+
+    delivered, reason = resolve_reply(LOOP_USER, CLOSING_REPLY, rewrite=counting)
+
+    assert len(calls) == 2
+    assert delivered == GOOD_REPLY
+    assert reason == "rewritten"
+
+
+def test_failed_editor_repairs_do_not_fall_through_to_a_third_writer() -> None:
+    editor_calls = []
+    rewrite_calls = []
+
+    def editor(messages):
+        editor_calls.append(1)
         return "מספיק להיום, סיימנו."
 
-    resolve_reply(LOOP_USER, CLOSING_REPLY, rewrite=counting)
+    def rewrite(messages):
+        rewrite_calls.append(1)
+        return GOOD_REPLY
 
-    assert len(calls) == 1
+    delivered, reason = resolve_reply(
+        LOOP_USER,
+        CLOSING_REPLY,
+        rewrite=rewrite,
+        edit=editor,
+    )
+
+    assert delivered == ""
+    assert reason == "rewrite_rejected"
+    assert len(editor_calls) == 2
+    assert rewrite_calls == []
 
 
 def test_an_empty_draft_is_left_alone() -> None:
