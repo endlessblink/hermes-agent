@@ -2386,13 +2386,34 @@ def _lifeboat_recent_context(job: dict, session_db) -> str:
             turns.append(f"user: {content[:700]}")
         if not turns:
             return ""
+        # The latest user turn is the active subject. Older user turns are
+        # historical candidates, not a menu of topics. Keep one only when the
+        # latest turn explicitly points backward and shares a concrete subject
+        # word with that older turn; a generic period request must not pull in
+        # the most vivid project from months ago.
+        latest = turns[-1]
+        latest_words = set(re.findall(r"[\w\u0590-\u05ff]+", latest.casefold()))
+        bridge_words = {
+            "past", "previous", "earlier", "old", "former", "history", "again",
+            "קודם", "קודמת", "קודמים", "עבר", "בעבר", "ישן", "ישנה", "שוב",
+            "ההוא", "ההיא", "הקודם", "הקודמת", "אותו", "אותה",
+        }
+        has_bridge = bool(latest_words & bridge_words)
+        related = [latest]
+        if has_bridge:
+            for candidate in turns[:-1]:
+                candidate_words = set(re.findall(r"[\w\u0590-\u05ff]+", candidate.casefold()))
+                overlap = latest_words & candidate_words
+                if overlap - bridge_words:
+                    related.insert(0, candidate)
+        turns = related[-8:]
         return (
             "## Recent Life-Boat thread context (transient, not memory)\n"
             "Use this only to stay continuous with the user's actual recent thread. "
             "Do not quote it, expose old private details, or claim that an old feeling "
             "is still present. Refer to it only when it genuinely helps, and leave the "
             "user free to correct or change direction.\n\n"
-            + "\n".join(turns[-8:])
+            + "\n".join(turns)
         )
     except Exception:
         logger.debug("Life-Boat proactive context lookup failed", exc_info=True)

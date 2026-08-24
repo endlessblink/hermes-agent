@@ -57,6 +57,35 @@ def test_proactive_context_fails_closed_without_recent_provenance(monkeypatch):
     assert scheduler._lifeboat_recent_context(_job(), db) == ""
 
 
+def test_generic_period_request_does_not_pull_an_unrelated_recent_project(monkeypatch):
+    _patch_target(monkeypatch)
+    now = 1_000_000.0
+    db = _SessionDB([
+        {"role": "user", "platform_message_id": "old-1", "timestamp": now - 60, "content": "הווידאו של Too Much"},
+        {"role": "user", "platform_message_id": "new-1", "timestamp": now - 30, "content": "אני רוצה לעשות דיבריף על השבוע האחרון"},
+    ])
+    monkeypatch.setattr(scheduler.time, "time", lambda: now)
+
+    context = scheduler._lifeboat_recent_context(_job(), db)
+
+    assert "השבוע האחרון" in context
+    assert "Too Much" not in context
+
+
+def test_explicit_past_reference_can_bridge_to_a_shared_subject(monkeypatch):
+    _patch_target(monkeypatch)
+    now = 1_000_000.0
+    db = _SessionDB([
+        {"role": "user", "platform_message_id": "old-1", "timestamp": now - 60, "content": "הווידאו של Too Much נשאר לי בראש"},
+        {"role": "user", "platform_message_id": "new-1", "timestamp": now - 30, "content": "בוא נדבר שוב על הווידאו של Too Much"},
+    ])
+    monkeypatch.setattr(scheduler.time, "time", lambda: now)
+
+    context = scheduler._lifeboat_recent_context(_job(), db)
+
+    assert context.count("Too Much") >= 2
+
+
 def test_proactive_guard_requires_relation_for_old_events(monkeypatch):
     _patch_target(monkeypatch)
     guard = scheduler._lifeboat_proactive_guard(_job())
