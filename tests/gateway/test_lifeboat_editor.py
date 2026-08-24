@@ -200,8 +200,8 @@ def test_an_editor_that_returns_nothing_leaves_the_draft_alone() -> None:
 
 # --- the delivery decision -------------------------------------------------
 
-def test_a_bland_but_legal_draft_can_be_improved_by_the_editor() -> None:
-    """The global editor may improve a bland draft when the result passes review."""
+def test_a_bland_but_legal_draft_is_preserved_without_a_review_failure() -> None:
+    """A passing draft must not be replaced by an unmeasured second writer."""
     delivered, outcome = resolve_reply(
         USER,
         BLAND,
@@ -210,8 +210,8 @@ def test_a_bland_but_legal_draft_can_be_improved_by_the_editor() -> None:
         material=MATERIAL,
     )
 
-    assert delivered == WITH_A_READ
-    assert outcome == "edited"
+    assert delivered == BLAND
+    assert outcome == "accepted"
 
 
 def test_a_failed_edit_never_replaces_a_draft_that_passed() -> None:
@@ -226,7 +226,7 @@ def test_a_failed_edit_never_replaces_a_draft_that_passed() -> None:
     assert outcome == "accepted"
 
 
-def test_the_editor_can_review_an_accepted_draft_for_global_quality() -> None:
+def test_the_editor_does_not_touch_an_accepted_draft() -> None:
     seen = []
 
     def watching(messages):
@@ -235,7 +235,7 @@ def test_the_editor_can_review_an_accepted_draft_for_global_quality() -> None:
 
     resolve_reply(USER, BLAND, rewrite=lambda *a, **k: "unused", edit=watching)
 
-    assert seen
+    assert not seen
 
 
 def test_a_rejected_draft_whose_edit_also_fails_falls_through_to_the_rewrite() -> None:

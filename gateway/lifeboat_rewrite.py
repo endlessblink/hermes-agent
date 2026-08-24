@@ -242,10 +242,11 @@ def resolve_reply(
     # An accepted draft is already on the safe side of the contract. Do not
     # invite a second model to make it more fluent: that is how a good draft
     # became a therapist-like handback and how unsupported anchors entered a
-    # conversation. Editing is reserved for a draft with a concrete review
-    # failure; the original remains the fallback if the edit is unavailable or
-    # still fails review.
-    if edit is not None:
+    # conversation. Editing is reserved for a concrete review failure or a
+    # deterministic unsafe-draft finding; the original remains the fallback if
+    # the edit is unavailable or still fails review.
+    should_edit = edit is not None and (not verdict.accepted or bool(unsafe_reason))
+    if should_edit:
         from gateway.lifeboat_editor import edit_reply
 
         result = edit_reply(
