@@ -13081,7 +13081,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     messages=messages,
                                     max_tokens=800,
                                     temperature=0.6,
-                                            timeout=18,
+                                            timeout=10,
                                 )
                                 return completion.choices[0].message.content or ""
 
@@ -13118,7 +13118,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             messages=messages,
                                             max_tokens=500,
                                             temperature=0.0,
-                                            timeout=8,
+                                            timeout=5,
                                         )
                                         return completion.choices[0].message.content or ""
                             except Exception:
