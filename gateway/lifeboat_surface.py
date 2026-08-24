@@ -118,6 +118,7 @@ def finalize_outbound(
     *,
     mode: str = "support",
     user_text: str = "",
+    allow_duplicate: bool = False,
 ) -> str | None:
     """Return the text to deliver, or ``None`` to send nothing at all.
 
@@ -166,10 +167,15 @@ def finalize_outbound(
             len(text),
         )
         text = cleaned
-    if record_lifeboat_response_fingerprint(profile_home, session_key, text):
+    if record_lifeboat_response_fingerprint(profile_home, session_key, text) and not allow_duplicate:
         logger.info(
             "Life-Boat output suppressed receipt reason=recent_duplicate message_content=redacted chars=%d",
             len(text),
         )
         return None
+    if allow_duplicate:
+        logger.info(
+            "Life-Boat duplicate check recorded without suppression message_content=redacted chars=%d",
+            len(text),
+        )
     return text

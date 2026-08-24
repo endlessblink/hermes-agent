@@ -13031,13 +13031,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # The gate suppresses; it never rewrites.  Generating
                     # replacement prose here is what produced the same Hebrew
                     # sentence turn after turn.
-                    _lifeboat_delivered = finalize_outbound(
+                        _lifeboat_delivered = finalize_outbound(
                         _lifeboat_home,
                         _lifeboat_key,
                         _lifeboat_before,
-                        mode=_lifeboat_mode,
-                        user_text=str(message_text or ""),
-                    )
+                            mode=_lifeboat_mode,
+                            user_text=str(message_text or ""),
+                            allow_duplicate=True,
+                        )
                     if _lifeboat_delivered is None:
                         _intentional_silence = True
                         logger.info(
@@ -13128,21 +13129,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             if is_bare():
                                 raise _LifeBoatBareMode
 
-                            _lifeboat_delivered, _review_outcome = resolve_reply(
+                            # Reviewer calls are synchronous because the
+                            # auxiliary client is synchronous.  Keep them off
+                            # the gateway event loop and bound the whole chain:
+                            # a slow editor must never leave Telegram showing a
+                            # processing notice forever.  On timeout the main
+                            # draft remains the nonempty answer.
+                            _review_args = (
                                 _lifeboat_user_text,
                                 _lifeboat_delivered,
-                                rewrite=_lifeboat_rewrite,
-                                edit=_lifeboat_edit if editor_enabled() else None,
-                                material=_lifeboat_material,
-                                profile_home=_lifeboat_home,
-                                session_key=_lifeboat_key,
-                                deliveries=bump_delivery_count(
+                            )
+                            _review_kwargs = {
+                                "rewrite": _lifeboat_rewrite,
+                                "edit": _lifeboat_edit if editor_enabled() else None,
+                                "material": _lifeboat_material,
+                                "profile_home": _lifeboat_home,
+                                "session_key": _lifeboat_key,
+                                "deliveries": bump_delivery_count(
                                     _lifeboat_home, _lifeboat_key
                                 ),
-                                semantic_checker=_lifeboat_semantic_checker,
-                                semantic_enforce=_lifeboat_semantic_enforce,
-                                recent_turns=list(history[-12:]),
-                                trusted_state=_lifeboat_material,
+                                "semantic_checker": _lifeboat_semantic_checker,
+                                "semantic_enforce": _lifeboat_semantic_enforce,
+                                "recent_turns": list(history[-12:]),
+                                "trusted_state": _lifeboat_material,
+                            }
+                            _lifeboat_delivered, _review_outcome = await asyncio.wait_for(
+                                asyncio.to_thread(resolve_reply, *_review_args, **_review_kwargs),
+                                timeout=60.0,
                             )
                             if _review_outcome != "accepted":
                                 logger.info(
@@ -13154,6 +13167,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             logger.info(
                                 "Life-Boat bare mode: delivering the model's words unreviewed"
                             )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Life-Boat pre-send review timed out; preserving main draft"
+                            )
+                            _lifeboat_delivered = _lifeboat_before
                         except Exception:
                             logger.error(
                                 "Life-Boat pre-send review failed; preserving main draft",

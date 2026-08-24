@@ -61,6 +61,17 @@ def test_exact_repeat_is_suppressed(tmp_path) -> None:
     assert finalize_outbound(tmp_path, "session-a", COACHING_REPLY) is None
 
 
+def test_new_turn_can_reach_reviewer_even_when_reply_repeats(tmp_path) -> None:
+    finalize_outbound(tmp_path, "session-a", COACHING_REPLY)
+
+    assert finalize_outbound(
+        tmp_path,
+        "session-a",
+        COACHING_REPLY,
+        allow_duplicate=True,
+    ) == COACHING_REPLY
+
+
 def test_repeat_in_a_different_session_is_delivered(tmp_path) -> None:
     finalize_outbound(tmp_path, "session-a", COACHING_REPLY)
 
