@@ -303,6 +303,7 @@ def test_runtime_receipt_identifies_the_loaded_editor() -> None:
     assert len(receipt["sha256"]) == 64
     assert isinstance(receipt["pid"], int)
     assert isinstance(receipt["editor_enabled"], bool)
+    assert receipt["wrapper_mode"] in {"bare", "wrapped", "unavailable"}
 
 
 # --- the delivery counter --------------------------------------------------

@@ -370,10 +370,17 @@ def runtime_receipt() -> dict[str, object]:
         module_sha256 = hashlib.sha256(module_path.read_bytes()).hexdigest()
     except OSError:
         module_sha256 = "unavailable"
+    try:
+        from gateway.lifeboat_mode import current_mode
+
+        wrapper_mode = current_mode()
+    except Exception:
+        wrapper_mode = "unavailable"
     return {
         "module": str(module_path),
         "sha256": module_sha256,
         "editor_enabled": editor_enabled(),
+        "wrapper_mode": wrapper_mode,
         "pid": os.getpid(),
     }
 
