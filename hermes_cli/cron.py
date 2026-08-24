@@ -310,6 +310,11 @@ def cron_create(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", False) or None,
+        user_authorized_delivery=(
+            {"scope": "scheduled-contact", "destination": args.authorize_delivery}
+            if getattr(args, "authorize_delivery", None)
+            else None
+        ),
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -361,7 +366,7 @@ def cron_edit(args):
             if skill not in final_skills:
                 final_skills.append(skill)
 
-    result = _cron_api(
+    update_kwargs = dict(
         action="update",
         job_id=args.job_id,
         schedule=getattr(args, "schedule", None),
@@ -374,6 +379,18 @@ def cron_edit(args):
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", None),
     )
+    if getattr(args, "authorize_delivery", None):
+        update_kwargs["user_authorized_delivery"] = {
+            "scope": "scheduled-contact",
+            "destination": args.authorize_delivery,
+        }
+    elif getattr(args, "clear_authorization", False):
+        update_kwargs["user_authorized_delivery"] = None
+    if getattr(args, "clear_fire_claim", False):
+        update_kwargs["clear_fire_claim"] = True
+    if getattr(args, "clear_delivery_claim", False):
+        update_kwargs["clear_delivery_claim"] = True
+    result = _cron_api(**update_kwargs)
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1

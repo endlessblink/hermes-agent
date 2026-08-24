@@ -70,6 +70,29 @@ def test_cron_edit_no_agent_tristate():
     assert parser.parse_args(["cron", "edit", "j"]).no_agent is None
 
 
+def test_cron_edit_supports_destination_scoped_delivery_authorization():
+    parser = _build()
+    ns = parser.parse_args([
+        "cron", "edit", "j", "--authorize-delivery", "telegram:-1004230590253:2"
+    ])
+    assert ns.authorize_delivery == "telegram:-1004230590253:2"
+    assert ns.clear_authorization is False
+    assert ns.clear_fire_claim is False
+    assert ns.clear_delivery_claim is False
+
+
+def test_cron_edit_supports_recovering_a_wedged_fire_claim():
+    parser = _build()
+    ns = parser.parse_args(["cron", "edit", "j", "--clear-fire-claim"])
+    assert ns.clear_fire_claim is True
+
+
+def test_cron_edit_supports_recovering_a_missing_delivery():
+    parser = _build()
+    ns = parser.parse_args(["cron", "edit", "j", "--clear-delivery-claim"])
+    assert ns.clear_delivery_claim is True
+
+
 def test_cron_dispatch_func_is_injected_handler():
     parser = _build()
     ns = parser.parse_args(["cron", "list"])

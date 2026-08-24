@@ -1568,6 +1568,11 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": next_run_at,
+            # A gateway restart or interrupted manual run can leave a fresh
+            # fire claim behind. Resuming is an explicit recovery action and
+            # must make the job runnable immediately instead of waiting for the
+            # claim TTL to expire.
+            "fire_claim": None,
         },
     )
 

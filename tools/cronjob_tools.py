@@ -677,6 +677,9 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    user_authorized_delivery: Optional[Dict[str, Any]] = None,
+    clear_fire_claim: bool = False,
+    clear_delivery_claim: bool = False,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -750,6 +753,7 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
                 attach_to_session=attach_to_session,
+                user_authorized_delivery=user_authorized_delivery,
             )
             _notify_provider_jobs_changed_safe()
             _create_message = f"Cron job '{job['name']}' created."
@@ -923,6 +927,13 @@ def cronjob(
                 updates["enabled_toolsets"] = enabled_toolsets or None
             if attach_to_session is not None:
                 updates["attach_to_session"] = bool(attach_to_session)
+            if user_authorized_delivery is not None:
+                updates["user_authorized_delivery"] = user_authorized_delivery
+            if clear_fire_claim:
+                updates["fire_claim"] = None
+            if clear_delivery_claim:
+                updates["delivery_claim"] = None
+                updates["last_delivery_run_id"] = None
             if workdir is not None:
                 # Empty string clears the field (restores old behaviour);
                 # otherwise pass raw — update_job() validates / normalizes.
@@ -1016,6 +1027,23 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             "deliver": {
                 "type": "string",
                 "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), 'all' (fan out to every connected home channel), or platform:chat_id:thread_id for a specific destination. Combine with comma: 'origin,all' delivers to the origin plus every other connected channel. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+15551234567', 'all'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting. 'all' resolves at fire time, so a job created before a channel was wired up will pick it up automatically once connected."
+            },
+            "user_authorized_delivery": {
+                "type": "object",
+                "description": "Explicit destination-scoped consent for scheduled contact. Use {\"scope\": \"scheduled-contact\", \"destination\": \"telegram:-1004230590253:2\"}; required before an autonomous job may message that Life-Boat topic.",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["scheduled-contact"]},
+                    "destination": {"type": "string"},
+                },
+                "required": ["scope", "destination"],
+            },
+            "clear_fire_claim": {
+                "type": "boolean",
+                "description": "For action=update, clear a stale scheduler fire claim after an interrupted or wedged run.",
+            },
+            "clear_delivery_claim": {
+                "type": "boolean",
+                "description": "For action=update, clear a stale delivery claim and recorded run ID after a run was recorded without a verified message.",
             },
             "skills": {
                 "type": "array",

@@ -70,6 +70,11 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         "--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
+    cron_create.add_argument(
+        "--authorize-delivery",
+        metavar="DESTINATION",
+        help="Explicitly authorize scheduled contact to this exact destination",
+    )
 
     # cron edit
     cron_edit = cron_subparsers.add_parser(
@@ -133,6 +138,26 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument(
         "--workdir",
         help="Absolute path for the job to run from (injects AGENTS.md etc. and sets terminal cwd). Pass empty string to clear.",
+    )
+    cron_edit.add_argument(
+        "--authorize-delivery",
+        metavar="DESTINATION",
+        help="Explicitly authorize scheduled contact to this exact destination",
+    )
+    cron_edit.add_argument(
+        "--clear-authorization",
+        action="store_true",
+        help="Remove the job's scheduled-contact authorization",
+    )
+    cron_edit.add_argument(
+        "--clear-fire-claim",
+        action="store_true",
+        help="Recover a job wedged by an interrupted scheduler run",
+    )
+    cron_edit.add_argument(
+        "--clear-delivery-claim",
+        action="store_true",
+        help="Recover a job whose last delivery was recorded without a new message",
     )
 
     # lifecycle actions

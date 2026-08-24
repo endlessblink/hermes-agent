@@ -20,6 +20,7 @@ from cron.jobs import (
     mark_job_run,
     advance_next_run,
     claim_dispatch,
+    claim_job_for_fire,
     heartbeat_run_claim,
     get_due_jobs,
     save_job_output,
@@ -444,6 +445,17 @@ class TestPauseResumeJob:
         assert resumed["state"] == "scheduled"
         assert resumed["paused_at"] is None
         assert resumed["paused_reason"] is None
+
+    def test_resume_clears_a_stale_fire_claim(self, tmp_cron_dir):
+        job = create_job(prompt="Recover me", schedule="every 1h")
+        assert claim_job_for_fire(job["id"]) is True
+
+        pause_job(job["id"], reason="recover stale run")
+        resumed = resume_job(job["id"])
+
+        assert resumed is not None
+        assert resumed.get("fire_claim") is None
+        assert claim_job_for_fire(job["id"]) is True
 
     def test_resume_rejects_past_oneshot(self, tmp_cron_dir, monkeypatch):
         """Resuming a paused one-shot whose time is now in the past must raise
