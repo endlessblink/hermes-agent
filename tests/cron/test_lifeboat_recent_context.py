@@ -31,9 +31,9 @@ def test_proactive_context_uses_recent_user_words_only(monkeypatch):
     _patch_target(monkeypatch)
     now = 1_000_000.0
     db = _SessionDB([
-        {"role": "user", "timestamp": now - 90_000, "content": "הווידאו ל Too Much"},
+        {"role": "user", "platform_message_id": "old-1", "timestamp": now - 90_000, "content": "הווידאו ל Too Much"},
         {"role": "assistant", "timestamp": now - 60, "content": "בוא נחשוב על הדימוי"},
-        {"role": "user", "timestamp": now - 60, "content": "היום הרגשתי יותר קל"},
+        {"role": "user", "platform_message_id": "new-1", "timestamp": now - 60, "content": "היום הרגשתי יותר קל"},
     ])
     monkeypatch.setattr(scheduler.time, "time", lambda: now)
 
@@ -49,8 +49,8 @@ def test_proactive_context_fails_closed_without_recent_provenance(monkeypatch):
     _patch_target(monkeypatch)
     now = 1_000_000.0
     db = _SessionDB([
-        {"role": "user", "content": "אין חותמת זמן"},
-        {"role": "user", "timestamp": now - 90_000, "content": "אירוע ישן"},
+        {"role": "user", "platform_message_id": "missing-time", "content": "אין חותמת זמן"},
+        {"role": "user", "platform_message_id": "old-1", "timestamp": now - 90_000, "content": "אירוע ישן"},
     ])
     monkeypatch.setattr(scheduler.time, "time", lambda: now)
 

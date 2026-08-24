@@ -2363,6 +2363,13 @@ def _lifeboat_recent_context(job: dict, session_db) -> str:
             content = str(message.get("content") or "").strip()
             if role != "user" or not content:
                 continue
+            # A proactive bridge may use only a message tied to the real
+            # platform event. Imported/session-rebuilt text can look like a
+            # user turn while lacking this provenance marker.
+            if not str(
+                message.get("platform_message_id") or message.get("message_id") or ""
+            ).strip():
+                continue
             try:
                 timestamp = float(message.get("timestamp"))
             except (TypeError, ValueError):
