@@ -71,8 +71,10 @@ def test_the_editor_brief_counts_a_chosen_concrete_step_as_progress() -> None:
 
     assert "one of two ways" in joined
     assert "concrete next step that you choose" in joined
-    assert "make the choice concrete yourself" in joined
-    assert "must name the anchor it chose" in joined
+    assert "make the choice concrete from what he actually wrote" in joined
+    assert "Use a time or place only when he supplied it" in joined
+    assert "anchor to the words or event he just gave you" in joined
+    assert "yesterday evening" not in joined
     assert "choose one and move" in joined
     assert "all count as movement" in joined
 

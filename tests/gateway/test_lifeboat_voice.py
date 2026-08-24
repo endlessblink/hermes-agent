@@ -118,11 +118,12 @@ def test_no_hebrew_in_a_voice_could_be_sent_as_a_message() -> None:
             )
 
 
-def test_the_things_it_looks_for_are_not_written_in_hebrew() -> None:
-    """Content in Hebrew gets delivered; content in English must be reworded."""
+def test_the_voice_does_not_turn_openings_into_a_canned_checklist() -> None:
+    """The shared identity guides attention without supplying a reply shape."""
     for name, text in lifeboat_voice.DEFAULT_VOICES.items():
-        assert "significant" in text, f"{name}: what it looks for should be English"
-        assert "משמעותי" not in text, f"{name}: that phrasing will come back verbatim"
+        assert "stock opening" in text, f"{name}: missing anti-template guidance"
+        assert "ask about all three in one sentence" not in text, f"{name}: checklist survived"
+        assert "משמעותי" not in text, f"{name}: canned category survived"
 
 
 def test_no_voice_hands_the_model_a_reply_to_copy() -> None:
@@ -181,7 +182,9 @@ def test_an_untouched_voice_is_refreshed_when_the_default_improves(home) -> None
 
     lifeboat_voice.ensure_voice_files()
 
-    assert "What you are looking for" in path.read_text(encoding="utf-8")
+    refreshed = path.read_text(encoding="utf-8")
+    assert "stock opening" in refreshed
+    assert "ask about all three in one sentence" not in refreshed
 
 
 def test_a_voice_he_edited_is_still_never_touched(home) -> None:

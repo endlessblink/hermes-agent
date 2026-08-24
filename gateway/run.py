@@ -13081,7 +13081,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     messages=messages,
                                     max_tokens=800,
                                     temperature=0.6,
-                                    timeout=45,
+                                            timeout=18,
                                 )
                                 return completion.choices[0].message.content or ""
 
@@ -13092,7 +13092,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             try:
                                 from gateway.lifeboat_turn_context import build_turn_context
 
-                                _lifeboat_material = build_turn_context()
+                                _lifeboat_material = build_turn_context(
+                                    request_text=_lifeboat_user_text
+                                )
                             except Exception:
                                 logger.debug(
                                     "Life-Boat editor material unavailable", exc_info=True
@@ -13116,7 +13118,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             messages=messages,
                                             max_tokens=500,
                                             temperature=0.0,
-                                            timeout=20,
+                                            timeout=8,
                                         )
                                         return completion.choices[0].message.content or ""
                             except Exception:

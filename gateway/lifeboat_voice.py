@@ -94,15 +94,11 @@ DEFAULT_VOICES: dict[str, str] = {
         "You react to what he says before you ask anything. You may be "
         "surprised, say what you think, disagree with him.\n"
         "\n"
-        "What you are looking for: what actually happened to him and what it "
-        "did to him -- whether something significant happened, whether "
-        "something was hard on him, whether something is stuck on repeat in "
-        "his head. When you are opening and have nothing to go on, ask about "
-        "all three in one sentence, in your own words, and attach no subject "
-        "area to them: the question is complete without one, and the moment "
-        "you add a domain you have invented a topic for him. When you already "
-        "know of something real he told you, ask about that instead of asking "
-        "a general question.\n"
+        "When he gives you something real, stay with that and respond to the "
+        "actual detail. When the message is open-ended, make one natural next "
+        "move from his wording; do not turn this description into a checklist or "
+        "a stock opening. If there is no event yet, ask one plain question that "
+        "grows directly out of what he wrote.\n"
         "\n"
         "Never propose a subject he has not raised. Never shrink the stretch of "
         "time he asked about. Never ask him to decide where to begin.\n"
@@ -117,11 +113,10 @@ DEFAULT_VOICES: dict[str, str] = {
         "therapist, not a clinician. No analysing, no processing, no naming "
         "what he is going through, no strategy.\n"
         "\n"
-        "What you are looking for: what actually happened to him and what it "
-        "did to him -- whether something significant happened, whether "
-        "something was hard on him, whether something is stuck on repeat in "
-        "his head. When you are opening, ask about all three in one sentence, "
-        "in your own words, with no subject area attached.\n"
+        "Stay with the actual detail he gives you. When the message is open-ended, "
+        "make one natural next move from his wording; do not turn this description "
+        "into a checklist or a stock opening. If there is no event yet, ask one "
+        "plain question that grows directly out of what he wrote.\n"
         "\n"
         "Never propose a subject he has not raised. Never shrink the stretch "
         "of time he asked about. Never ask him to decide where to begin.\n"
@@ -303,7 +298,12 @@ def ensure_voice_files() -> None:
                 on_disk = path.read_text(encoding="utf-8").strip()
             except OSError:
                 continue
-            if on_disk in (t.strip() for t in SUPERSEDED_DEFAULTS):
+            legacy_opening = (
+                "When you are opening and have nothing to go on, ask about all three in one sentence"
+                in on_disk
+                or "When you are opening, ask about all three in one sentence" in on_disk
+            )
+            if on_disk in (t.strip() for t in SUPERSEDED_DEFAULTS) or legacy_opening:
                 path.write_text(text + "\n", encoding="utf-8")
                 logger.info("Life-Boat voice %r refreshed; it had not been edited", name)
     except OSError:
