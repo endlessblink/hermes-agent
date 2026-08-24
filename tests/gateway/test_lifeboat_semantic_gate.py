@@ -99,3 +99,16 @@ def test_gate_has_a_separate_opt_in_flag(tmp_path, monkeypatch) -> None:
     assert semantic_gate_enabled() is False
     (tmp_path / "lifeboat-semantic-gate").touch()
     assert semantic_gate_enabled() is True
+
+
+def test_semantic_pass_must_agree_with_failure_flags() -> None:
+    with pytest.raises(ValueError, match="must agree"):
+        parse_semantic_verdict(
+            {
+                "pass": False,
+                "repeated_request": False,
+                "invented_user_goal": False,
+                "responsibility_handoff": False,
+                "concrete_continuation": True,
+            }
+        )

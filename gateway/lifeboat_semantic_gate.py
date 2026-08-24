@@ -90,7 +90,7 @@ def parse_semantic_verdict(raw: str | Mapping[str, Any]) -> SemanticVerdict:
     if missing:
         raise ValueError(f"semantic checker missing fields: {', '.join(missing)}")
 
-    return SemanticVerdict(
+    verdict = SemanticVerdict(
         passed=_bool(payload["pass"], "pass"),
         repeated_request=_bool(payload["repeated_request"], "repeated_request"),
         invented_user_goal=_bool(payload["invented_user_goal"], "invented_user_goal"),
@@ -99,6 +99,9 @@ def parse_semantic_verdict(raw: str | Mapping[str, Any]) -> SemanticVerdict:
         evidence_turn_ids=_turn_ids(payload.get("evidence_turn_ids")),
         reason=str(payload.get("reason") or ""),
     )
+    if verdict.passed != (not verdict.failures):
+        raise ValueError("semantic checker pass must agree with its failure flags")
+    return verdict
 
 
 def _turn_block(turns: Iterable[Mapping[str, Any]]) -> str:
