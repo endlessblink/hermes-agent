@@ -13097,6 +13097,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     "Life-Boat editor material unavailable", exc_info=True
                                 )
 
+                            _lifeboat_semantic_checker = None
+                            try:
+                                from gateway.lifeboat_semantic_gate import semantic_shadow_enabled
+
+                                if semantic_shadow_enabled():
+                                    def _lifeboat_semantic_checker(messages):
+                                        from agent.auxiliary_client import call_llm
+
+                                        completion = call_llm(
+                                            task="lifeboat_semantic_checker",
+                                            messages=messages,
+                                            max_tokens=500,
+                                            temperature=0.0,
+                                            timeout=20,
+                                        )
+                                        return completion.choices[0].message.content or ""
+                            except Exception:
+                                logger.debug(
+                                    "Life-Boat semantic shadow unavailable", exc_info=True
+                                )
+
                             from gateway.lifeboat_mode import is_bare
 
                             if is_bare():
@@ -13113,6 +13134,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 deliveries=bump_delivery_count(
                                     _lifeboat_home, _lifeboat_key
                                 ),
+                                semantic_checker=_lifeboat_semantic_checker,
+                                recent_turns=list(history[-12:]),
+                                trusted_state=_lifeboat_material,
                             )
                             if _review_outcome != "accepted":
                                 logger.info(

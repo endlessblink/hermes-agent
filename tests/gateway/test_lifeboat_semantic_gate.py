@@ -9,6 +9,7 @@ from gateway.lifeboat_semantic_gate import (
     build_semantic_messages,
     parse_semantic_verdict,
     run_semantic_shadow,
+    semantic_shadow_enabled,
 )
 
 
@@ -83,3 +84,10 @@ def test_shadow_checker_contains_only_error_on_malformed_response() -> None:
 
     assert result.verdict is None
     assert result.error == "ValueError"
+
+
+def test_shadow_is_opt_in_by_flag_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert semantic_shadow_enabled() is False
+    (tmp_path / "lifeboat-semantic-shadow").touch()
+    assert semantic_shadow_enabled() is True

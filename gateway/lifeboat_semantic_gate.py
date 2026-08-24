@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
+
+
+def semantic_shadow_enabled() -> bool:
+    """Return whether the opt-in, observational checker is enabled."""
+    home = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    return (home / "lifeboat-semantic-shadow").is_file()
 
 
 @dataclass(frozen=True)
