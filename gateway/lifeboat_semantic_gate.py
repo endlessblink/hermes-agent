@@ -130,7 +130,11 @@ def build_semantic_messages(
         "A question is allowed when it seeks genuinely missing information and "
         "follows the latest event. A concrete continuation may be either a "
         "tentative interpretation offered for correction or a next step chosen "
-        "by the assistant. Do not require the user to choose the whole direction."
+        "by the assistant. Do not require the user to choose the whole direction. "
+        "A user action is not evidence of the user's reason, preference, motive, or "
+        "goal. If the draft turns an unstated reason into a fact, mark "
+        "invented_user_goal=true; a question about what happened next is safer. "
+        "A tentative read must be visibly offered as a guess, not stated as fact."
     )
     payload = (
         "CURRENT USER MESSAGE (trusted current input):\n"

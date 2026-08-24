@@ -66,6 +66,8 @@ def test_messages_label_assistant_history_as_non_evidence() -> None:
     assert "קיבלתי שני מספרים" in joined
     assert "אולי תפנה לאחת מהן" in joined
     assert "SUPPORT_SCORE" not in joined
+    assert "A user action is not evidence of the user's reason" in joined
+    assert "tentative read must be visibly offered as a guess" in joined
 
 
 def test_shadow_checker_never_changes_delivery_and_records_valid_result() -> None:
