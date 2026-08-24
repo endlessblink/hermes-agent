@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import re
 from typing import Callable
 
 from gateway.lifeboat_reviewer import review_lifeboat_response_with_timeout
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 #: Bound repair work to two attempts total. Every attempt is re-reviewed before
 #: it can become the delivered reply.
 _MAX_REWRITES = 2
+_BARE_ACKS = frozenset({"כן", "אוקיי", "אוקי", "בסדר", "טוב", "sure", "ok", "okay", "yes"})
 
 _REWRITE_SYSTEM = (
     "You are revising one reply in an ongoing Hebrew-language emotional support "
@@ -193,6 +195,15 @@ def resolve_reply(
         return text, "accepted"
 
     def semantic_failure(candidate: str) -> str:
+        normalized_user = re.sub(r"[.!?؟]+$", "", str(user_text or "").strip()).casefold()
+        normalized_candidate = re.sub(r"[.!?؟]+$", "", str(candidate or "").strip()).casefold()
+        prior_question = any(
+            str(turn.get("role") or "").casefold() == "assistant"
+            and str(turn.get("content") or "").strip().endswith(("?", "؟"))
+            for turn in reversed(list(recent_turns))
+        )
+        if normalized_user in _BARE_ACKS and normalized_candidate in _BARE_ACKS and prior_question:
+            return "not_a_concrete_continuation"
         if semantic_checker is None:
             return ""
         from gateway.lifeboat_semantic_gate import run_semantic_shadow

@@ -135,6 +135,9 @@ def build_semantic_messages(
         "goal. If the draft turns an unstated reason into a fact, mark "
         "invented_user_goal=true; a question about what happened next is safer. "
         "A tentative read must be visibly offered as a guess, not stated as fact."
+        " A reply that only acknowledges the user without adding a read, detail, or "
+        "next step is not a concrete continuation, especially after the assistant "
+        "just asked a question."
     )
     payload = (
         "CURRENT USER MESSAGE (trusted current input):\n"

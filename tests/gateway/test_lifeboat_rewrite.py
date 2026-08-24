@@ -239,3 +239,19 @@ def test_semantic_shadow_is_observational_only() -> None:
     assert outcome == "accepted"
     assert len(seen) == 2
     assert "u1: explicit user evidence" in seen[1]["content"]
+
+
+def test_bare_ack_after_a_question_must_be_repaired() -> None:
+    delivered, outcome = resolve_reply(
+        "אוקיי",
+        "בסדר",
+        rewrite=lambda *a, **k: "נמשיך עם מה שסיפרת קודם: מה קרה אחרי שקיבלת את המספרים?",
+        edit=lambda *a, **k: "נמשיך עם מה שסיפרת קודם: מה קרה אחרי שקיבלת את המספרים?",
+        semantic_enforce=True,
+        recent_turns=[
+            {"id": "a1", "role": "assistant", "content": "מה קרה אחרי זה?"},
+        ],
+    )
+
+    assert delivered != "בסדר"
+    assert outcome == "edited"
