@@ -133,6 +133,38 @@ def test_codex_turn_persists_each_message_exactly_once():
         shutil.rmtree(tmp)
 
 
+def test_agent_owned_flush_persists_inbound_platform_provenance():
+    """The early agent flush must retain the Telegram message id."""
+    tmp = tempfile.mkdtemp(prefix="platform_provenance_")
+    try:
+        db = SessionDB(Path(tmp) / "state.db")
+        sid = "sess-provenance"
+        db.create_session(session_id=sid, source="telegram", model="codex")
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            session_db=db,
+            session_id=sid,
+        )
+        agent._session_db_created = True
+        agent._persist_user_message_idx = 0
+        agent._persist_user_platform_message_id = "telegram-123"
+        messages = [{"role": "user", "content": "fresh context"}]
+
+        agent._flush_messages_to_session_db(messages)
+
+        rows = db.get_messages(sid, include_inactive=True)
+        assert rows[0]["platform_message_id"] == "telegram-123"
+        assert db.has_platform_message_id(sid, "telegram-123")
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp)
+
+
 class TestGatewayPersistedResolution:
     """The gateway default must preserve standard-runtime skip-db behaviour."""
 

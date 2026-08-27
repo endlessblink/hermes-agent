@@ -69,6 +69,15 @@ _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _GATEWAY_PROXY_SSE_BUFFER_MAX_CHARS = 16 * 1024 * 1024
+# Auxiliary review is a quality layer, not a reason to leave a Telegram turn
+# spinning.  The main model has already produced a nonempty reply by this
+# point; if the reviewer cannot finish promptly, deliver that reply and record
+# the review timeout.
+# The editor uses the configured reasoning model and gets one repair attempt.
+# Twenty seconds cut that attempt off mid-generation in live Telegram; keep a
+# finite bound, but leave enough room for the model to return a usable edit.
+_LIFEBOAT_REVIEW_TIMEOUT_SECS = 45.0
+_LIFEBOAT_MAIN_GENERATION_TIMEOUT_SECS = 180.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 _CHOICE_OPTION_RE = re.compile(
     r"^\s*(?:[•*-]\s+|(?:\d+|[\u05d0-\u05ea])[.)]\s+)(.+?)\s*$"
@@ -12714,6 +12723,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if message_text is None:
             return
 
+        # A long-lived Telegram topic may contain unrelated older material.
+        # A broad debrief opens a fresh conversational scope; later turns stay
+        # inside it until the user explicitly raises an older subject. This is
+        # a history boundary, not a phrase-specific response rule.
+        try:
+            from gateway.lifeboat_followups import is_lifeboat_source
+            from gateway.lifeboat_turn_context import isolate_debrief_history
+
+            if is_lifeboat_source(source):
+                _isolated_history = isolate_debrief_history(history, message_text)
+                if len(_isolated_history) != len(history):
+                    history = _isolated_history
+                    self._evict_cached_agent(session_key)
+                    logger.info(
+                        "Life-Boat history scope reset at debrief boundary session=%s retained=%d",
+                        session_key,
+                        len(history),
+                    )
+        except Exception:
+            logger.debug("Life-Boat history boundary unavailable", exc_info=True)
+
         # Capture the platform event time as message metadata and keep the
         # persisted transcript clean (strip any leading timestamp prefix).
         # This runs regardless of the toggle so storage stays clean and the
@@ -12787,13 +12817,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         session_id=_run_start_session_id,
                         session_key=session_key,
                         run_generation=run_generation,
-                        event_message_id=self._reply_anchor_for_event(event),
+                        # Preserve the inbound platform id for the agent-owned
+                        # persistence flush; reply anchoring is intentionally
+                        # separate and may be absent in forum topics.
+                        event_message_id=getattr(event, "message_id", None),
                         channel_prompt=event.channel_prompt,
                         moa_config=getattr(event, "_moa_config", None),
                         persist_user_message=persist_user_message,
                         persist_user_timestamp=persist_user_timestamp,
                     ),
-                    timeout=75.0,
+                    timeout=(
+                        _LIFEBOAT_MAIN_GENERATION_TIMEOUT_SECS
+                        if is_lifeboat_source(source)
+                        else 75.0
+                    ),
                 )
             except asyncio.TimeoutError:
                 logger.warning(
@@ -13076,11 +13113,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 from gateway.lifeboat_followups import is_lifeboat_source
                 from gateway.lifeboat_contracts import contract_violations
                 from gateway.lifeboat_modes import load_mode_state
-                from gateway.lifeboat_surface import finalize_outbound
+                from gateway.lifeboat_surface import (
+                    finalize_outbound,
+                    is_user_voice_echo,
+                )
 
                 if is_lifeboat_source(source) and response and not _intentional_silence:
                     _lifeboat_before = str(response)
                     _lifeboat_user_text = str(message_text or "")
+                    _lifeboat_role_echo = is_user_voice_echo(
+                        _lifeboat_before,
+                        user_text=_lifeboat_user_text,
+                    )
                     _lifeboat_home = self._resolve_profile_home_for_source(source)
                     _lifeboat_key = session_key or _quick_key
                     _lifeboat_mode = load_mode_state(_lifeboat_home, _lifeboat_key).mode
@@ -13097,12 +13141,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         allow_duplicate=True,
                     )
                     if _lifeboat_delivered is None:
-                        _intentional_silence = True
-                        logger.info(
-                            "Life-Boat gate suppressed a reply mode=%s chars=%s",
-                            _lifeboat_mode,
-                            len(_lifeboat_before),
-                        )
+                        if _lifeboat_role_echo:
+                            # Keep the rejected text available to the repair
+                            # chain, but never let the generic suppression path
+                            # turn a role leak into a successful silent turn.
+                            # resolve_reply marks it as assistant_role_echo and
+                            # must produce a new assistant-authored candidate.
+                            _lifeboat_delivered = _lifeboat_before
+                            logger.warning(
+                                "Life-Boat role echo sent to bounded repair chain"
+                            )
+                        else:
+                            _intentional_silence = True
+                            logger.info(
+                                "Life-Boat gate suppressed a reply mode=%s chars=%s",
+                                _lifeboat_mode,
+                                len(_lifeboat_before),
+                            )
                     else:
                         # Independent pre-send review (TASK-10). A rejected
                         # draft goes back to the model with the reason named;
@@ -13138,7 +13193,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     messages=messages,
                                     max_tokens=800,
                                     temperature=0.6,
-                                            timeout=10,
+                                            timeout=30,
                                 )
                                 return completion.choices[0].message.content or ""
 
@@ -13165,17 +13220,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     semantic_shadow_enabled,
                                 )
 
-                                if semantic_shadow_enabled() or semantic_gate_enabled():
+                                _lifeboat_config = _load_gateway_config()
+                                _semantic_task_config = cfg_get(
+                                    _lifeboat_config,
+                                    "auxiliary",
+                                    "lifeboat_semantic_checker",
+                                    default={},
+                                )
+                                _semantic_model_configured = isinstance(
+                                    _semantic_task_config, dict
+                                ) and any(
+                                    str(_semantic_task_config.get(key) or "").strip()
+                                    for key in ("provider", "model", "base_url", "api_key")
+                                )
+
+                                if (
+                                    _semantic_model_configured
+                                    and (semantic_shadow_enabled() or semantic_gate_enabled())
+                                ):
                                     _lifeboat_semantic_enforce = semantic_gate_enabled()
                                     def _lifeboat_semantic_checker(messages):
                                         from agent.auxiliary_client import call_llm
 
                                         completion = call_llm(
                                             task="lifeboat_semantic_checker",
+                                            model="gpt-5.4-mini",
                                             messages=messages,
                                             max_tokens=500,
                                             temperature=0.0,
                                             timeout=5,
+                                            reasoning_config={"effort": "low"},
                                         )
                                         return completion.choices[0].message.content or ""
                             except Exception:
@@ -13214,7 +13288,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             }
                             _lifeboat_delivered, _review_outcome = await asyncio.wait_for(
                                 asyncio.to_thread(resolve_reply, *_review_args, **_review_kwargs),
-                                timeout=60.0,
+                                timeout=_LIFEBOAT_REVIEW_TIMEOUT_SECS,
                             )
                             if _review_outcome != "accepted":
                                 logger.info(
@@ -13242,7 +13316,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         # a post-processing reviewer failed. The reviewer can
                         # reject or annotate it, but Telegram still receives the
                         # main answer unless the model itself returned nothing.
-                        response = _lifeboat_delivered or _lifeboat_before
+                        if _lifeboat_role_echo:
+                            response = _lifeboat_delivered or ""
+                            if not response:
+                                _intentional_silence = True
+                                logger.error(
+                                    "Life-Boat role echo had no safe repair; refusing user-voice delivery"
+                                )
+                        else:
+                            response = _lifeboat_delivered or _lifeboat_before
                         if _lifeboat_issues:
                             logger.info(
                                 "Life-Boat draft broke its contract mode=%s issues=%s chars=%s",
@@ -20235,6 +20317,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # this only changes the API-call suffix and leaves the stable
             # session system prompt and transcript untouched.
             agent.ephemeral_system_prompt = combined_ephemeral or None
+            # Carry the real inbound platform id into the agent-owned persistence
+            # flush.  Proactive context requires provenance and the agent flushes
+            # before the gateway's later transcript append path can annotate it.
+            agent._persist_user_platform_message_id = event_message_id
 
             # Refresh on every turn because a cached agent can outlive route
             # configuration changes. Only the Telegram credential explicitly
