@@ -31,7 +31,8 @@ describe('background completion notifications', () => {
 
   it('restores an in-app bubble that opens the completed background chat', () => {
     const openSession = vi.fn()
-    const stream = renderMessageStream(ACTIVE_SID, { openSession })
+    const states = new Map([[BACKGROUND_SID, { ...createClientSessionState(), storedSessionId: 'stored-background-chat' }]])
+    const stream = renderMessageStream(ACTIVE_SID, { openSession, states })
 
     act(() => stream.handleEvent(complete(BACKGROUND_SID)))
 
@@ -39,7 +40,7 @@ describe('background completion notifications', () => {
     expect(notification).toMatchObject({ id: `gateway-complete:${BACKGROUND_SID}`, kind: 'success', message: 'Background reply' })
 
     notification.action?.onClick()
-    expect(openSession).toHaveBeenCalledWith(BACKGROUND_SID)
+    expect(openSession).toHaveBeenCalledWith('stored-background-chat')
   })
 
   it('does not duplicate the visible chat when a runtime id is reminted for its stored session', () => {

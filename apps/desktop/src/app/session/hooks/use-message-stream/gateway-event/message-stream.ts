@@ -368,9 +368,10 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     const completionIsVisible = isActiveEvent && focusedRuntimeId === sessionId
 
     if (!completionIsVisible && !completionBelongsToVisibleAlias) {
+      const completionTargetSessionId = completedState?.storedSessionId || sessionId
       notify({
         action: openSession
-          ? { label: translateNow('notifications.openChat'), onClick: () => openSession(sessionId) }
+          ? { label: translateNow('notifications.openChat'), onClick: () => openSession(completionTargetSessionId) }
           : undefined,
         id: `gateway-complete:${sessionId}`,
         kind: 'success',
