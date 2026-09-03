@@ -31,5 +31,5 @@ test('prints resolved runtime for an existing Linux-style state layout', () => {
   const parsed = JSON.parse(stdout)
   assert.equal(parsed.HERMES_HOME, hermesHome)
   assert.equal(parsed.HERMES_DESKTOP_USER_DATA_DIR, userData)
-  assert.match(parsed.HERMES_DESKTOP_HERMES_ROOT, /hermes-port-rtl$/)
+  assert.equal(parsed.HERMES_DESKTOP_HERMES_ROOT, path.resolve(DESKTOP_ROOT, '..', '..'))
 })
