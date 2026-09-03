@@ -77,7 +77,9 @@ npm run dev:fake-boot   # exercise the startup overlay with deterministic delays
 
 `npm run dev:existing-state` is the safe recovery path when you need this
 checkout to open against the current local Hermes home and Desktop userData
-without touching the managed install.
+without touching the managed install. It launches the built renderer instead of
+the Vite dev server so the packaged-app localStorage/sessionStorage remains
+visible in this checkout.
 
 ### Building installers
 

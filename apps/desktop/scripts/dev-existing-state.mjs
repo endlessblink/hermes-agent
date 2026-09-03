@@ -18,6 +18,10 @@ Launch Hermes Desktop from this checkout against the existing local Hermes data:
   - HERMES_HOME                -> current local Hermes home
   - HERMES_DESKTOP_USER_DATA_DIR -> current desktop userData
 
+This launcher uses the built desktop renderer, not the Vite dev server, so
+Electron reuses the same packaged-style renderer storage boundary as the
+installed app.
+
 Options:
   --print-env   print the resolved environment and exit
   -h, --help    show this help`)
@@ -65,6 +69,7 @@ function resolvedRuntime() {
     HERMES_DESKTOP_HERMES_ROOT: REPO_ROOT,
     HERMES_HOME: hermesHome,
     HERMES_DESKTOP_USER_DATA_DIR: userDataDir,
+    HERMES_DESKTOP_RECOVERY_MODE: 'existing-state',
   }
 }
 
@@ -94,9 +99,12 @@ async function main() {
   console.log(`[dev-existing-state] source: ${runtime.HERMES_DESKTOP_HERMES_ROOT}`)
   console.log(`[dev-existing-state] HERMES_HOME: ${runtime.HERMES_HOME}`)
   console.log(`[dev-existing-state] userData: ${runtime.HERMES_DESKTOP_USER_DATA_DIR}`)
+  console.log(
+    '[dev-existing-state] Using the built renderer path so packaged-app local storage stays visible in this checkout.'
+  )
   console.log('[dev-existing-state] Close other Hermes windows first if you hit the single-instance lock.')
 
-  const child = spawn('npm', ['run', 'dev'], {
+  const child = spawn('npm', ['run', 'start'], {
     cwd: DESKTOP_ROOT,
     env: {
       ...process.env,
