@@ -43,6 +43,7 @@ interface MessageStreamOptions {
     storedSessionId?: string | null,
     runtimeSessionId?: string | null
   ) => Promise<void>
+  openSession?: (sessionId: string) => void
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   refreshSessions: () => Promise<void>
@@ -71,6 +72,7 @@ export function useMessageStream({
   activeGatewayProfile = 'default',
   activeSessionIdRef,
   hydrateFromStoredSession,
+  openSession,
   queryClient,
   refreshHermesConfig,
   refreshSessions,
@@ -871,6 +873,7 @@ export function useMessageStream({
     flushQueuedDeltas,
     finalizeInterimAssistantMessage,
     hydrateFromStoredSession,
+    openSession,
     queryClient,
     refreshHermesConfig,
     scheduleSessionsRefresh,

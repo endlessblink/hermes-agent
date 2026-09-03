@@ -29,6 +29,7 @@ export interface GatewayEventDeps {
     storedSessionId?: string | null,
     runtimeSessionId?: string | null
   ) => Promise<void>
+  openSession?: (sessionId: string) => void
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   scheduleSessionsRefresh: () => void

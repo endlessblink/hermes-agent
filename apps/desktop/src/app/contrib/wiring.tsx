@@ -449,6 +449,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     activeGatewayProfile,
     activeSessionIdRef,
     hydrateFromStoredSession,
+    openSession: sessionId => openSession(sessionId, navigate),
     queryClient,
     refreshHermesConfig,
     refreshSessions,

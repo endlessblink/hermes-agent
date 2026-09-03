@@ -256,6 +256,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       deps.hydrateFromStoredSession,
       deps.lastCwdInfoSessionRef,
       deps.nativeSubagentSessionsRef,
+      deps.openSession,
       deps.queryClient,
       scheduleConfigRefresh,
       deps.scheduleSessionsRefresh,

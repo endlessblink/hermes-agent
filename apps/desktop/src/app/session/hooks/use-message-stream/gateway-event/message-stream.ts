@@ -78,6 +78,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     finalizeInterimAssistantMessage,
     flushQueuedDeltas,
     nativeSubagentSessionsRef,
+    openSession,
     sessionStateByRuntimeIdRef,
     updateSessionState
   } = deps
