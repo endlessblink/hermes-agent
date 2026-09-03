@@ -13,7 +13,7 @@ import { notify } from '@/store/notifications'
 import { flashPetActivity, markPetUnread, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
 import { providerWaitText, setSessionProviderWait } from '@/store/provider-wait'
-import { setCurrentUsage, setTurnStartedAt } from '@/store/session'
+import { $selectedStoredSessionId, setCurrentUsage, setTurnStartedAt } from '@/store/session'
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
 
@@ -69,6 +69,7 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
   const { deps, event, payload, sessionId, isActiveEvent, occurredAt } = ctx
 
   const {
+    activeSessionIdRef,
     appendAssistantDelta,
     appendReasoningDelta,
     compactedTurnRef,
@@ -350,6 +351,33 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
 
     completeAssistantMessage(sessionId, finalText, payload?.response_previewed, failure, occurredAt)
 
+    const activeRuntimeId = activeSessionIdRef.current
+    const completedState = sessionStateByRuntimeIdRef.current.get(sessionId)
+    const activeState = activeRuntimeId ? sessionStateByRuntimeIdRef.current.get(activeRuntimeId) : undefined
+
+    const selectedStoredSessionId = $selectedStoredSessionId.get()
+    const completionBelongsToVisibleAlias =
+      Boolean(activeRuntimeId) &&
+      activeRuntimeId !== sessionId &&
+      Boolean(completedState?.storedSessionId) &&
+      activeState?.storedSessionId === completedState?.storedSessionId &&
+      selectedStoredSessionId === completedState?.storedSessionId
+    const completionIsVisible =
+      isActiveEvent &&
+      selectedStoredSessionId !== null &&
+      (selectedStoredSessionId === sessionId || selectedStoredSessionId === completedState?.storedSessionId)
+
+    if (!completionIsVisible && !completionBelongsToVisibleAlias) {
+      notify({
+        action: openSession
+          ? { label: translateNow('notifications.openChat'), onClick: () => openSession(sessionId) }
+          : undefined,
+        id: `gateway-complete:${sessionId}`,
+        kind: 'success',
+        message: finalText || translateNow('notifications.native.turnDoneBody'),
+        title: translateNow('notifications.native.turnDoneTitle')
+      })
+    }
     // Structured billing wall forwarded by the gateway (out of credits /
     // payment required) — cache it + raise a billing-specific toast.
     if (payload?.billing) {

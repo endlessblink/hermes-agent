@@ -17,6 +17,8 @@ export interface MessageStreamHarnessOptions extends Partial<Parameters<typeof u
 export interface MessageStreamHarness {
   /** Feed a gateway event into the mounted hook. */
   handleEvent: (event: RpcEvent) => void
+  /** Change the selected runtime session without remounting the stream. */
+  setActiveSessionId: (sessionId: string | null) => void
   /** Push streaming assistant text, bypassing the event envelope. For the specs
    *  about flush scheduling rather than about a particular event. */
   appendDelta: (sessionId: string, delta: string) => void
@@ -49,6 +51,7 @@ export function renderMessageStream(
 ): MessageStreamHarness {
   let dispatch: ((event: RpcEvent) => void) | null = null
   let appendDelta: ((sessionId: string, delta: string) => void) | null = null
+  let setActiveSessionId: ((sessionId: string | null) => void) | null = null
   let latest: ClientSessionState | null = null
 
   function Harness() {
@@ -76,6 +79,9 @@ export function renderMessageStream(
     useEffect(() => {
       dispatch = stream.handleGatewayEvent
       appendDelta = stream.appendAssistantDelta
+      setActiveSessionId = nextSessionId => {
+        activeSessionIdRef.current = nextSessionId
+      }
     }, [stream.appendAssistantDelta, stream.handleGatewayEvent])
 
     return null
@@ -92,6 +98,12 @@ export function renderMessageStream(
       }
 
       dispatch(event)
+    },
+    setActiveSessionId: nextSessionId => {
+      if (!setActiveSessionId) {
+        throw new Error('renderMessageStream: the hook never mounted')
+      }
+      setActiveSessionId(nextSessionId)
     },
     appendDelta: (id, delta) => {
       if (!appendDelta) {
