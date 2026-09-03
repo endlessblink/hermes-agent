@@ -131,6 +131,7 @@ export const en: Translations = {
     more: count => `${count} more ${count === 1 ? 'notification' : 'notifications'}`,
     clearAll: 'Clear all',
     dismiss: 'Dismiss notification',
+    openChat: 'Open chat',
     details: 'Details',
     copyDetail: 'Copy detail',
     copyDetailFailed: 'Could not copy notification detail',

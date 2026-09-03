@@ -173,6 +173,7 @@ export interface Translations {
     more: (count: number) => string
     clearAll: string
     dismiss: string
+    openChat: string
     details: string
     copyDetail: string
     copyDetailFailed: string
