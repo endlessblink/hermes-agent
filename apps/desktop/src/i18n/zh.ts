@@ -128,6 +128,7 @@ export const zh: Translations = {
     more: count => `另外 ${count} 条通知`,
     clearAll: '全部清除',
     dismiss: '关闭通知',
+    openChat: '打开聊天',
     details: '详情',
     copyDetail: '复制详情',
     copyDetailFailed: '无法复制通知详情',

@@ -128,6 +128,7 @@ export const zhHant = defineLocale({
     more: count => `另外 ${count} 則通知`,
     clearAll: '全部清除',
     dismiss: '關閉通知',
+    openChat: '開啟聊天',
     details: '詳細資訊',
     copyDetail: '複製詳情',
     copyDetailFailed: '無法複製通知詳情',

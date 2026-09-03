@@ -139,6 +139,7 @@ export const ar = defineLocale({
     more: count => `${count} إشعار إضافي`,
     clearAll: 'مسح الكل',
     dismiss: 'إغلاق الإشعار',
+    openChat: 'فتح الدردشة',
     details: 'التفاصيل',
     copyDetail: 'نسخ التفاصيل',
     copyDetailFailed: 'تعذر نسخ تفاصيل الإشعار',
