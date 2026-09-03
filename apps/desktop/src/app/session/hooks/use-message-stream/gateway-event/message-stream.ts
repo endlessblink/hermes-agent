@@ -14,6 +14,7 @@ import { flashPetActivity, markPetUnread, setPetActivity } from '@/store/pet'
 import { clearAllPrompts } from '@/store/prompts'
 import { providerWaitText, setSessionProviderWait } from '@/store/provider-wait'
 import { $selectedStoredSessionId, setCurrentUsage, setTurnStartedAt } from '@/store/session'
+import { $focusedRuntimeId } from '@/store/session-states'
 import { pruneFinishedSessionSubagents } from '@/store/subagents'
 import { clearActiveSessionTodos } from '@/store/todos'
 
@@ -356,16 +357,14 @@ export function handleMessageStreamEvent(ctx: GatewayEventContext): boolean {
     const activeState = activeRuntimeId ? sessionStateByRuntimeIdRef.current.get(activeRuntimeId) : undefined
 
     const selectedStoredSessionId = $selectedStoredSessionId.get()
+    const focusedRuntimeId = $focusedRuntimeId.get()
     const completionBelongsToVisibleAlias =
       Boolean(activeRuntimeId) &&
       activeRuntimeId !== sessionId &&
       Boolean(completedState?.storedSessionId) &&
       activeState?.storedSessionId === completedState?.storedSessionId &&
       selectedStoredSessionId === completedState?.storedSessionId
-    const completionIsVisible =
-      isActiveEvent &&
-      selectedStoredSessionId !== null &&
-      (selectedStoredSessionId === sessionId || selectedStoredSessionId === completedState?.storedSessionId)
+    const completionIsVisible = isActiveEvent && focusedRuntimeId === sessionId
 
     if (!completionIsVisible && !completionBelongsToVisibleAlias) {
       notify({

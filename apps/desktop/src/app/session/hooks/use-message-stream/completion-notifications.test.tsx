@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $notifications, clearNotifications } from '@/store/notifications'
-import { $selectedStoredSessionId } from '@/store/session'
+import { $activeSessionId, $selectedStoredSessionId } from '@/store/session'
 
 import { renderMessageStream } from './test-harness'
 
@@ -17,12 +17,14 @@ function complete(sessionId: string, text = 'Background reply') {
 describe('background completion notifications', () => {
   beforeEach(() => {
     clearNotifications()
+    $activeSessionId.set(ACTIVE_SID)
     $selectedStoredSessionId.set(null)
   })
 
   afterEach(() => {
     cleanup()
     clearNotifications()
+    $activeSessionId.set(null)
     $selectedStoredSessionId.set(null)
     vi.restoreAllMocks()
   })
@@ -72,6 +74,8 @@ describe('background completion notifications', () => {
 
   it('notifies when a fresh draft replaces the completed runtime chat', () => {
     const stream = renderMessageStream(ACTIVE_SID)
+
+    $activeSessionId.set('fresh-draft-runtime')
 
     act(() => stream.handleEvent(complete(ACTIVE_SID, 'Finished after opening a fresh draft')))
 
