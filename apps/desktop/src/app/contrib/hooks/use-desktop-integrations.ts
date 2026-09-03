@@ -97,6 +97,22 @@ export function useDesktopIntegrations({
     window.hermesDesktop?.setPreviewShortcutActive?.(true)
   }, [])
 
+  // Keep the next desktop launch pinned to the profile this window actually
+  // settled on. Source/profile restore, route resume, and other non-explicit
+  // re-homes can legitimately move the live workspace without going through
+  // switchProfile(), so relying only on the explicit profile-set action leaves
+  // active-profile.json stale or missing and the next cold start can appear to
+  // "lose" chats by reopening another profile's scope.
+  useEffect(() => {
+    if (!profileReady || isHudWindow() || isBrowserWindow()) {
+      return
+    }
+
+    void window.hermesDesktop?.profile
+      ?.remember?.(activeProfile)
+      .catch(() => undefined)
+  }, [activeProfile, profileReady])
+
   const restoredRef = useRef(false)
 
   // Wait until boot has adopted the primary profile, then restore that profile's

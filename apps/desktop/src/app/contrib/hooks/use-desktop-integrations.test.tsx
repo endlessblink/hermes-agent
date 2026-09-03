@@ -55,6 +55,7 @@ describe('useDesktopIntegrations', () => {
     // reach real Electron IPC. The established desktop-test pattern assigns a
     // plain object to window.hermesDesktop rather than using vi.spyOn.
     desktopWindow.hermesDesktop = {
+      profile: { remember: vi.fn().mockResolvedValue({ profile: 'default' }) },
       setPreviewShortcutActive: vi.fn(),
       onOpenUpdatesRequested: vi.fn(),
       onFocusSession: vi.fn(),
@@ -132,6 +133,18 @@ describe('useDesktopIntegrations', () => {
   }
 
   describe('profile-ready gate', () => {
+    it('remembers the settled active profile for the next launch', () => {
+      render({ activeProfile: 'bina-meatzevet', profileReady: true })
+
+      expect(desktopWindow.hermesDesktop?.profile?.remember).toHaveBeenCalledWith('bina-meatzevet')
+    })
+
+    it('does not remember before profileReady is true', () => {
+      render({ activeProfile: 'bina-meatzevet', profileReady: false })
+
+      expect(desktopWindow.hermesDesktop?.profile?.remember).not.toHaveBeenCalled()
+    })
+
     it('does NOT restore before profileReady is true', () => {
       // Set remembered state, but profileReady=false.
       window.localStorage.setItem('hermes.desktop.lastRoute.profile.default', '/remembered-session')
